@@ -99,24 +99,3 @@ compactions. Its baseline is updated only with an explicit audit reason; see
   [`docs/luau-extensions.md`](luau-extensions.md). The lower-level source
   modules are `bundle`, `bundle_runtime`, `capability`, `async_runtime`, and
   `tool_handler` in `tea-luau`.
-
-## Runebench integration evidence
-
-Runebench is an embedding, not part of the transport-free core. Its hard
-cutover uses the Rust host, pinned default profile, explicit OpenRouter
-adapter, capability-scoped Rust `rs-agent` MCP client, and LuauJIT policy.
-
-On 2026-08-14, the credential-injected `tasks/woodcutting-xp-5m` acceptance completed
-cleanly with `completed=1`, `errored=0`, peak **228 XP/min**, **88,750 XP**,
-and Woodcutting level **64**. The Rust MCP client loaded its API documentation
-and the Luau policy loaded all five declared `rs-agent` tools. The trajectory
-had 17 balanced tool starts/ends and one terminal `agent_end`; the only failed
-tool result was the expected `Operation aborted` when the host's 390-second
-deadline cancelled a still-running game loop. The host owns that structured
-deadline, leaving cleanup margin before Harbor's 420-second task limit;
-foreground shell, provider, and MCP children are cancellation-aware while
-intentionally detached world workers are not reaped by the agent host.
-
-Re-run this acceptance after changing the Runebench host, profile binding,
-world policy, or process-cancellation boundary. It is not a substitute for the
-deterministic core fixture suite.

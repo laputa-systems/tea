@@ -112,19 +112,3 @@ optional Luau policy plane, and final comparative coding evaluation are complete
 The durable evidence and revalidation requirements live in
 [verification.md](verification.md). Future host/application policy expansion
 requires a new explicit contract; it does not change this scope implicitly.
-
-## Exact new-ledger entry template
-
-Copy this block when adding a row to any Milestone 0 ledger. Keep the status vocabulary exact.
-
-```text
-ID: FIX-<domain>-<number>
-Status: supported | rejected | investigating
-Code target: crates/<crate>/<path>:<line>
-Observable behavior: <one sentence; include ordering or settlement>
-Boundary rationale: <why this boundary is correct>
-Fixture: crates/tea-core/fixtures/declarative/<scenario>.json
-Expected evidence: <canonical field or assertion>
-Normalization: none | timestamp | generated-id | duration (explain)
-Open question / exit criterion: <required only for investigating>
-```

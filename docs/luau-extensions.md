@@ -126,8 +126,8 @@ The Rust embedding must construct `LuaToolHandler` with matching
 rejects a yielded capability other than the declared one. The capability
 implementation must validate `method` and parsed JSON itself; a shared
 capability should additionally bind it to the outer model-visible tool name.
-Runebench demonstrates that pattern with an MCP manifest scoped to exact
-server/method/target triples.
+MCP capability manifests can scope that binding to exact server, method, and
+target triples.
 
 On success, return either a string or a result table containing `content` and
 optional `details_json`, `is_error`, and `terminate`. `details_json` must be

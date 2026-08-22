@@ -15,7 +15,7 @@
 //!   "agent": ["events", "tools", "stop"],
 //!   "world": [
 //!     "fs.read",
-//!     {"mcp": {"server": "runebench", "operation": "call", "target": "execute_code"}}
+//!     {"mcp": {"server": "fixture-world", "operation": "call", "target": "execute_code"}}
 //!   ],
 //!   "trace": ["emit"]
 //! }
@@ -47,7 +47,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn world_mcp(target: Option<&str>) -> CapabilityOperation {
-        WorldOperation::mcp("runebench", McpOperation::Call, target)
+        WorldOperation::mcp("fixture-world", McpOperation::Call, target)
             .expect("test MCP permission")
             .into()
     }
@@ -75,7 +75,7 @@ mod tests {
         let encoded = manifest.to_json_string().expect("manifest encodes");
         assert_eq!(
             encoded,
-            r#"{"abi_version":1,"agent":["stop"],"world":["fs.read","exec",{"mcp":{"operation":"call","server":"runebench","target":"execute_code"}}]}"#
+            r#"{"abi_version":1,"agent":["stop"],"world":["fs.read","exec",{"mcp":{"operation":"call","server":"fixture-world","target":"execute_code"}}]}"#
         );
         assert_eq!(
             CapabilityManifest::parse_json(&encoded).expect("manifest decodes"),
@@ -108,7 +108,7 @@ mod tests {
     #[test]
     fn mcp_permissions_are_server_and_target_scoped() {
         let manifest = CapabilityManifest::parse_json(
-            r#"{"abi_version":1,"world":[{"mcp":{"server":"runebench","operation":"call","target":"execute_code"}}]}"#,
+            r#"{"abi_version":1,"world":[{"mcp":{"server":"fixture-world","operation":"call","target":"execute_code"}}]}"#,
         )
         .expect("valid MCP manifest");
 
@@ -145,7 +145,7 @@ mod tests {
         for input in [
             r#"{"abi_version":1,"filesystem":["read"]}"#,
             r#"{"abi_version":1,"world":["network"]}"#,
-            r#"{"abi_version":1,"world":[{"mcp":{"server":"runebench","operation":"call","unexpected":true}}]}"#,
+            r#"{"abi_version":1,"world":[{"mcp":{"server":"fixture-world","operation":"call","unexpected":true}}]}"#,
             r#"{"abi_version":1,"world":[{"mcp":{"server":"","operation":"call"}}]}"#,
         ] {
             assert!(

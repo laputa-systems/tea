@@ -69,8 +69,8 @@ downstream optional layers.
 - [Conversation compaction](compaction.md) — transactional lifecycle, policy,
   request-layout evidence, trace/privacy boundary, historical rationale, and
   provider-free verification.
-- [Quality evaluation](quality-evaluation.md) — deterministic trace checks,
-  three pinned Express tasks, fixture artifacts, and resource diagnostics.
+- [Quality evaluation](../evals/README.md) — deterministic core checks,
+  resource diagnostics, and the explicit provider-opt-in coding tier.
 - [Tracing](trace.md) — optional trajectory observer boundary.
 - [Terminal host](tui.md) — `tea` ownership boundaries, interaction
   contract, and post-V0 direction.

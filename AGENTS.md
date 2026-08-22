@@ -14,8 +14,8 @@ Start with [docs/overview.md](docs/overview.md). The main routes are:
 - [Tracing](docs/trace.md) and [Luau extensions](docs/luau-extensions.md) for
   optional observability and policy layers.
 - [Terminal host](docs/tui.md) for the repository-owned `tea` TUI.
-- [Quality evaluation](docs/quality-evaluation.md) and
-  [verification](docs/verification.md) for compatibility and quality evidence.
+- [Quality evaluation](evals/README.md) and [verification](docs/verification.md)
+  for compatibility and quality evidence.
 - [fixture format](crates/tea-core/fixtures/fixture-format.md) and
   [fixture guide](crates/tea-core/fixtures/README.md)
   for fixture-based compatibility work.
@@ -32,4 +32,3 @@ Start with [docs/overview.md](docs/overview.md). The main routes are:
   the root cause and retain the test.
 - Start with focused evidence, then broaden checks.
 - Keep core executor- and provider-agnostic.
-

@@ -7,10 +7,10 @@ compaction policy, and reduced command set. `fx` is evidence, not code to port.
 ## Reference and evidence boundary
 
 The pinned reference checkout is `/Users/josh/d/fx` at commit
-`83a059c643cfe911db470a7c6c1dbc8fdb61de8a`. The planned target is fx's default
-dark **minimal** presentation mode. The checked-in evidence has two sources: an
-existing read-only-tools Render Lab replay in `legacy` mode at 167×46, and fresh
-direct PTY captures in `minimal` mode at 80×24 and 120×40.
+`83a059c643cfe911db470a7c6c1dbc8fdb61de8a`. The reference surface is fx's
+default dark **minimal** presentation mode. The checked-in evidence has two
+sources: an existing read-only-tools Render Lab replay in `legacy` mode at
+167×46, and direct PTY captures in `minimal` mode at 80×24 and 120×40.
 
 The source test is `fx/tests/e2e/tui-render-replay.test.ts`,
 “replays read-only tools capture without layout validation failures”. Its
@@ -22,9 +22,8 @@ Render Lab's own README defines its default oracle as byte replay plus
 terminal-owned text/grid state. It does not prove pixel-perfect colors, font
 shaping, ligatures, or cursor paint. The tea fixtures therefore record text/grid
 geometry and cursor coordinates where the replay frame JSON provides them, while
-foreground, background, and attributes remain explicitly unavailable. A future
-stream-derived or virtual-terminal style capture must replace that status before
-the style fields become parity claims.
+foreground, background, and attributes remain explicitly unavailable. Tea does
+not claim parity for style fields without source evidence.
 
 ## Captured cases
 
@@ -59,23 +58,6 @@ The checker expands compact cell runs, treats unlisted cells as blanks, and
 rejects overlap/out-of-bounds coordinates. `fx` cases may not silently claim
 style capture; tea-owned cases can record the `Grid<Cell>` styles that the
 renderer deterministically assigns.
-
-## Planned capture matrix
-
-The following remains planned and must not be described as captured until each
-state has its manifest entry, exact input/replay provenance, and normalized
-fixture:
-
-| Dimensions | Planned states |
-| --- | --- |
-| 120×40, 80×24 | typed and multiline composer; submitted prompt; streaming assistant; active/completed tool; queue; model picker; session picker; cost; scroll/detail viewer; resize; cancellation; provider failure; exit |
-| 40×10 | startup; empty, typed, and multiline composer; submitted prompt; streaming assistant; active/completed tool; queue; slash menu; help; model picker; session picker; cost; scroll/detail viewer; resize; cancellation; provider failure; exit |
-| 0×0, 1×1, 2×2 where supported | tiny-terminal row-priority and cursor-safe behavior |
-
-Resize cases must contain consecutive before/after frames so stale-cell
-blanking is observable. Tea identity, command names, provider/model labels, and
-accounting may substitute their semantic equivalents only when the manifest names
-the substitution; geometry and interaction affordances remain reference-backed.
 
 ## Verification rule
 
