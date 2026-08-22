@@ -17,7 +17,8 @@ use crate::state::{AgentMessage, MessageId, StopReason, ToolCallId};
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 use tea_trace::{
-    EndReason, EpisodeEnd, EpisodeHeader, IsolatedSink, Tool, TraceEvent, TraceSink, Turn,
+    Compaction, CompactionStage, EndReason, EpisodeEnd, EpisodeHeader, IsolatedSink, Tool,
+    TraceEvent, TraceSink, Turn,
 };
 
 /// An awaited core observer that records a compact linear trace episode.
@@ -35,6 +36,7 @@ struct TraceState<S> {
     sink: IsolatedSink<S>,
     current_turn: Option<PendingTurn>,
     pending_tools: BTreeMap<ToolCallId, Tool>,
+    last_committed_compaction: Option<String>,
     end_reason: EndReason,
     error: Option<String>,
 }
@@ -55,6 +57,7 @@ impl<S: TraceSink> TraceObserver<S> {
                 sink: IsolatedSink::new(sink),
                 current_turn: None,
                 pending_tools: BTreeMap::new(),
+                last_committed_compaction: None,
                 end_reason: EndReason::Completed,
                 error: None,
             }),
@@ -95,6 +98,28 @@ impl<S: TraceSink> TraceObserver<S> {
     fn record(&self, event: &AgentEvent) {
         let mut state = self.state.lock().expect("trace observer mutex poisoned");
         match &event.kind {
+            AgentEventKind::CompactionLifecycle { record } => {
+                let (compaction, committed) = trace_compaction(record);
+                if committed {
+                    state.last_committed_compaction = Some(compaction.compaction_id.clone());
+                }
+                state.sink.append(TraceEvent::from(compaction));
+            }
+            AgentEventKind::ProviderRequestObserved {
+                turn_id,
+                observation,
+            } => {
+                if let Some(compaction_id) = state.last_committed_compaction.take() {
+                    let mut compaction = Compaction::new(
+                        compaction_id,
+                        CompactionStage::PostCompactionRequestObserved,
+                    );
+                    compaction.post_compaction_turn_index = Some(trace_turn_index(turn_id.0));
+                    compaction.serialized_request_bytes = observation.serialized_request_bytes;
+                    compaction.cache_domain_fingerprint = observation.cache_domain_fingerprint;
+                    state.sink.append(TraceEvent::from(compaction));
+                }
+            }
             AgentEventKind::CompactionStart { .. }
             | AgentEventKind::CompactionResult { .. }
             | AgentEventKind::CompactionEnd { .. } => {
@@ -116,6 +141,7 @@ impl<S: TraceSink> TraceObserver<S> {
             AgentEventKind::AgentStart => {
                 state.current_turn = None;
                 state.pending_tools.clear();
+                state.last_committed_compaction = None;
                 state.end_reason = EndReason::Completed;
                 state.error = None;
                 state.sink.append(TraceEvent::from(EpisodeHeader::new(
@@ -212,6 +238,170 @@ impl<S: TraceSink> TraceObserver<S> {
     }
 }
 
+/// Translates a core lifecycle record into the additive V1 trace record.
+///
+/// Keep this projection deliberately content-free: the core record has no raw
+/// checkpoint, prompt, request body, arguments, or tool-result content, and
+/// this adapter only copies scalar facts from it.
+fn trace_compaction(record: &crate::compaction::CompactionLifecycleRecord) -> (Compaction, bool) {
+    use crate::compaction::CompactionLifecycleRecord;
+
+    match record {
+        CompactionLifecycleRecord::Started { operation } => {
+            let mut trace = Compaction::new(operation.id.to_string(), CompactionStage::Started);
+            trace.trigger = Some(compaction_trigger_name(operation.trigger).into());
+            trace.reason = Some(compaction_reason_name(operation.reason).into());
+            trace.phase = Some(compaction_phase_name(operation.phase).into());
+            trace.strategy_id = Some(operation.strategy.id.clone());
+            trace.strategy_schema_version = Some(operation.strategy.schema_version);
+            trace.request_layout =
+                Some(compaction_layout_name(operation.strategy.request_layout).into());
+            trace.prompt_fingerprint = operation.strategy.prompt_fingerprint;
+            trace.source_history_revision = Some(operation.source_history_revision);
+            trace.attempt = Some(operation.attempt);
+            trace.automatic_ordinal = operation.automatic_ordinal;
+            trace.overflow_retry_ordinal = operation.overflow_retry_ordinal;
+            trace.retry_provider_request = Some(operation.retry_provider_request);
+            (trace, false)
+        }
+        CompactionLifecycleRecord::SourceSelected { id, source } => {
+            let mut trace = Compaction::new(id.to_string(), CompactionStage::SourceSelected);
+            trace.source_message_count = Some(source.canonical_message_count);
+            trace.source_message_bytes = Some(source.canonical_message_bytes);
+            trace.retained_message_count = Some(source.retained_message_ids.len());
+            trace.retained_suffix_bytes = Some(source.retained_suffix_bytes);
+            trace.tool_result_bytes = Some(source.tool_result_bytes);
+            (trace, false)
+        }
+        CompactionLifecycleRecord::RequestPrepared { id, request } => {
+            let mut trace = Compaction::new(id.to_string(), CompactionStage::RequestPrepared);
+            trace.request_layout = Some(compaction_layout_name(request.layout).into());
+            trace.compactor_context_bytes = request.provider_context_bytes;
+            trace.compactor_tool_count = request.tool_count;
+            trace.tools_execution_prohibited = Some(request.tools_execution_prohibited);
+            trace.source_is_active_context_prefix = request.source_is_active_context_prefix;
+            (trace, false)
+        }
+        CompactionLifecycleRecord::ProviderUsageObserved {
+            id,
+            usage,
+            request_observation,
+            request,
+        } => {
+            let mut trace = Compaction::new(id.to_string(), CompactionStage::ProviderUsageObserved);
+            if let Some(usage) = usage {
+                trace.provider_input_tokens = usage.input_tokens;
+                trace.provider_output_tokens = usage.output_tokens;
+                trace.provider_cache_read_tokens = usage.cache_read_tokens;
+                trace.provider_cache_write_tokens = usage.cache_write_tokens;
+            }
+            if let Some(observation) = request_observation {
+                trace.serialized_request_bytes = observation.serialized_request_bytes;
+                trace.cache_domain_fingerprint = observation.cache_domain_fingerprint;
+            }
+            if let Some(request) = request {
+                trace.request_layout = Some(compaction_layout_name(request.layout).into());
+                trace.source_is_active_context_prefix = request.source_is_active_context_prefix;
+            }
+            (trace, false)
+        }
+        CompactionLifecycleRecord::ReplacementProposed { id, proposal } => {
+            let mut trace = Compaction::new(id.to_string(), CompactionStage::ReplacementProposed);
+            trace.replacement_message_count = Some(proposal.replacement_message_count);
+            trace.replacement_bytes = Some(proposal.replacement_bytes);
+            trace.estimated_context_tokens_after = proposal.estimated_context_tokens_after;
+            trace.headroom_tokens = proposal.headroom_tokens;
+            trace.structural_validation_passed = Some(proposal.structural_validation_passed);
+            trace.retained_suffix_exact = Some(proposal.retained_suffix_exact);
+            trace.source_generation_matches = Some(proposal.source_generation_matches);
+            (trace, false)
+        }
+        CompactionLifecycleRecord::Terminal { id, outcome } => {
+            let mut trace = Compaction::new(id.to_string(), CompactionStage::Terminal);
+            trace.terminal_outcome = Some(compaction_terminal_outcome_name(outcome).into());
+            let committed = matches!(
+                outcome,
+                crate::compaction::CompactionTerminalOutcome::Committed
+            );
+            (trace, committed)
+        }
+    }
+}
+
+fn compaction_trigger_name(trigger: crate::compaction::CompactionTrigger) -> &'static str {
+    match trigger {
+        crate::compaction::CompactionTrigger::Manual => "manual",
+        crate::compaction::CompactionTrigger::Automatic => "automatic",
+    }
+}
+
+fn compaction_reason_name(reason: crate::compaction::CompactionReason) -> &'static str {
+    match reason {
+        crate::compaction::CompactionReason::UserRequest => "user_request",
+        crate::compaction::CompactionReason::Threshold => "threshold",
+        crate::compaction::CompactionReason::ProviderOverflow => "provider_overflow",
+    }
+}
+
+fn compaction_phase_name(phase: crate::compaction::CompactionPhase) -> &'static str {
+    match phase {
+        crate::compaction::CompactionPhase::Standalone => "standalone",
+        crate::compaction::CompactionPhase::BeforeModelRequest => "before_model_request",
+        crate::compaction::CompactionPhase::BetweenModelCalls => "between_model_calls",
+    }
+}
+
+fn compaction_layout_name(layout: crate::compaction::CompactionRequestLayout) -> &'static str {
+    match layout {
+        crate::compaction::CompactionRequestLayout::ExactReplay => "exact_replay",
+        crate::compaction::CompactionRequestLayout::StandaloneFallback => "standalone_fallback",
+        crate::compaction::CompactionRequestLayout::IncrementalCheckpointUpdate => {
+            "incremental_checkpoint_update"
+        }
+        crate::compaction::CompactionRequestLayout::Unobserved => "unobserved",
+    }
+}
+
+fn compaction_terminal_outcome_name(
+    outcome: &crate::compaction::CompactionTerminalOutcome,
+) -> &'static str {
+    use crate::compaction::{CompactionRejection, CompactionTerminalOutcome};
+
+    match outcome {
+        CompactionTerminalOutcome::Committed => "committed",
+        CompactionTerminalOutcome::Rejected(CompactionRejection::StaleSourceGeneration) => {
+            "rejected_stale_source_generation"
+        }
+        CompactionTerminalOutcome::Rejected(CompactionRejection::RetainedSuffixMismatch) => {
+            "rejected_retained_suffix_mismatch"
+        }
+        CompactionTerminalOutcome::Rejected(CompactionRejection::InvalidStructure) => {
+            "rejected_invalid_structure"
+        }
+        CompactionTerminalOutcome::Rejected(CompactionRejection::EmptyCheckpoint) => {
+            "rejected_empty_checkpoint"
+        }
+        CompactionTerminalOutcome::Rejected(CompactionRejection::UnexpectedToolCall) => {
+            "rejected_unexpected_tool_call"
+        }
+        CompactionTerminalOutcome::Rejected(CompactionRejection::NonShrinkingReplacement) => {
+            "rejected_non_shrinking_replacement"
+        }
+        CompactionTerminalOutcome::Rejected(CompactionRejection::InsufficientHeadroom) => {
+            "rejected_insufficient_headroom"
+        }
+        CompactionTerminalOutcome::Rejected(CompactionRejection::PolicyCapReached) => {
+            "rejected_policy_cap_reached"
+        }
+        CompactionTerminalOutcome::Rejected(CompactionRejection::Cancelled) => "rejected_cancelled",
+        CompactionTerminalOutcome::Rejected(CompactionRejection::TimedOut) => "rejected_timed_out",
+        CompactionTerminalOutcome::Failed => "failed",
+        CompactionTerminalOutcome::Cancelled => "cancelled",
+        CompactionTerminalOutcome::TimedOut => "timed_out",
+        CompactionTerminalOutcome::Unavailable => "unavailable",
+    }
+}
+
 fn record_message(turn: &mut Option<PendingTurn>, message: &AgentMessage) {
     let Some(turn) = turn.as_mut() else {
         return;
@@ -269,7 +459,12 @@ impl<S: TraceSink> std::fmt::Debug for TraceObserver<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::compaction::{
+        CompactionId, CompactionLifecycleRecord, CompactionOperation, CompactionPhase,
+        CompactionReason, CompactionStrategy, CompactionTerminalOutcome, CompactionTrigger,
+    };
     use crate::event::AgentEvent;
+    use crate::scheduler::AdapterRequestObservation;
     use crate::state::{AgentToolCall, MessageId, RunId, TurnId};
     use crate::tool::{AgentToolResult, ToolUpdate};
 
@@ -384,6 +579,90 @@ mod tests {
             };
             assert_eq!(turn.input, "hello");
             assert_eq!(turn.output.as_deref(), Some("world"));
+        });
+    }
+
+    #[test]
+    fn compaction_trace_records_are_content_free_and_join_the_next_request() {
+        let observer = TraceObserver::new("episode-compact", Vec::<TraceEvent>::new());
+        let id = CompactionId {
+            run_id: RunId(1),
+            ordinal: 1,
+        };
+        observe(&observer, AgentEventKind::AgentStart);
+        observe(
+            &observer,
+            AgentEventKind::CompactionLifecycle {
+                record: CompactionLifecycleRecord::Started {
+                    operation: CompactionOperation {
+                        id,
+                        trigger: CompactionTrigger::Automatic,
+                        reason: CompactionReason::Threshold,
+                        phase: CompactionPhase::BeforeModelRequest,
+                        strategy: CompactionStrategy::cache_replay_summary_v0(42),
+                        source_history_revision: 9,
+                        attempt: 1,
+                        automatic_ordinal: Some(1),
+                        overflow_retry_ordinal: None,
+                        retry_provider_request: false,
+                    },
+                },
+            },
+        );
+        observe(
+            &observer,
+            AgentEventKind::CompactionLifecycle {
+                record: CompactionLifecycleRecord::Terminal {
+                    id,
+                    outcome: CompactionTerminalOutcome::Committed,
+                },
+            },
+        );
+        observe(&observer, AgentEventKind::TurnStart { turn_id: TurnId(2) });
+        observe(
+            &observer,
+            AgentEventKind::ProviderRequestObserved {
+                turn_id: TurnId(2),
+                observation: AdapterRequestObservation {
+                    serialized_request_bytes: Some(321),
+                    cache_domain_fingerprint: Some(123),
+                    ..AdapterRequestObservation::default()
+                },
+            },
+        );
+        observe(
+            &observer,
+            AgentEventKind::AgentEnd {
+                messages: Vec::new(),
+            },
+        );
+
+        observer.with_sink(|events| {
+            let compactions: Vec<_> = events
+                .iter()
+                .filter_map(|event| match event {
+                    TraceEvent::Compaction(compaction) => Some(compaction),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(compactions.len(), 3);
+            assert!(compactions
+                .iter()
+                .all(|record| record.compaction_id == id.to_string()));
+            assert_eq!(
+                compactions[0].strategy_id.as_deref(),
+                Some("cache_replay_summary_v0")
+            );
+            assert_eq!(
+                compactions[1].terminal_outcome.as_deref(),
+                Some("committed")
+            );
+            assert_eq!(
+                compactions[2].stage,
+                CompactionStage::PostCompactionRequestObserved
+            );
+            assert_eq!(compactions[2].post_compaction_turn_index, Some(1));
+            assert_eq!(compactions[2].serialized_request_bytes, Some(321));
         });
     }
 

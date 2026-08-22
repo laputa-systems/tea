@@ -91,6 +91,11 @@ pub struct AgentState {
     pub last_error: Option<String>,
     /// Retained provider-reported model accounting.
     pub accounting: ModelAccountingSnapshot,
+    /// Monotonic generation of canonical conversation history.
+    ///
+    /// A compactor owns only a snapshot. Its replacement may commit only if
+    /// this generation still names the source it summarized.
+    pub history_revision: u64,
     next_message_id: u64,
 }
 
@@ -108,6 +113,7 @@ impl Default for AgentState {
             pending_tool_calls: BTreeSet::new(),
             last_error: None,
             accounting: ModelAccountingSnapshot::default(),
+            history_revision: 0,
             next_message_id: 1,
         }
     }
@@ -134,6 +140,29 @@ impl AgentState {
             .unwrap_or(1);
         self.next_message_id = self.next_message_id.max(next_id);
         self.messages = messages;
+        self.history_revision = self.history_revision.saturating_add(1);
+    }
+
+    /// Append one canonical message and advance the source generation.
+    pub(crate) fn append_message(&mut self, message: AgentMessage) {
+        self.messages.push(message);
+        self.history_revision = self.history_revision.saturating_add(1);
+    }
+
+    /// Replace the most recent canonical message and advance the source generation.
+    pub(crate) fn replace_last_message(&mut self, message: AgentMessage) {
+        if let Some(last) = self.messages.last_mut() {
+            *last = message;
+            self.history_revision = self.history_revision.saturating_add(1);
+        }
+    }
+
+    /// Remove a transient suffix and advance the source generation when it changed.
+    pub(crate) fn truncate_messages(&mut self, length: usize) {
+        if length < self.messages.len() {
+            self.messages.truncate(length);
+            self.history_revision = self.history_revision.saturating_add(1);
+        }
     }
 
     /// Produce an owned inspection snapshot.
@@ -150,6 +179,7 @@ impl AgentState {
             pending_tool_calls: self.pending_tool_calls.clone(),
             last_error: self.last_error.clone(),
             accounting: self.accounting.clone(),
+            history_revision: self.history_revision,
         }
     }
 }
@@ -187,6 +217,8 @@ pub struct AgentSnapshot {
     pub last_error: Option<String>,
     /// Retained per-turn and aggregate provider-reported model accounting.
     pub accounting: ModelAccountingSnapshot,
+    /// Monotonic canonical-history generation.
+    pub history_revision: u64,
 }
 
 /// Mutable state retained by one run handle.

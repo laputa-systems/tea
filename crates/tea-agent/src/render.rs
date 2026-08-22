@@ -7,12 +7,12 @@
 use crate::app::{AppState, NoticeSeverity, ToolProjection, ToolState, TranscriptEntry, UiSurface};
 #[cfg(test)]
 use crate::composer::Composer;
+#[cfg(test)]
+use crate::grid::Color;
 use crate::grid::{Cell, Grid, Style};
 use crate::ui::frame_layout;
 use crate::ui::theme::{Role, Theme};
 use crate::ui::visual_layout::VisualLayout;
-#[cfg(test)]
-use crate::grid::Color;
 use hi_lite::{Highlighter, Kind, Language};
 use tea_core::provider::ProviderRegistry;
 

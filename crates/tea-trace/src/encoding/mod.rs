@@ -7,7 +7,7 @@
 //! inspection and streaming pipelines. CBOR is a compact, self-delimiting
 //! sequence of the same records for machine-oriented archives.
 
-use crate::event::{EndReason, TraceEvent};
+use crate::event::{CompactionStage, EndReason, TraceEvent};
 use crate::sink::TraceSink;
 use std::io::{self, Write};
 
@@ -104,7 +104,30 @@ fn event_type(event: &TraceEvent) -> &'static str {
         TraceEvent::EpisodeHeader(_) => "episode_header",
         TraceEvent::Turn(_) => "turn",
         TraceEvent::Tool(_) => "tool",
+        TraceEvent::Compaction(_) => "compaction",
         TraceEvent::EpisodeEnd(_) => "episode_end",
+    }
+}
+
+fn event_schema_version(event: &TraceEvent) -> u16 {
+    match event {
+        TraceEvent::Compaction(_) => crate::event::COMPACTION_TRACE_SCHEMA_VERSION,
+        TraceEvent::EpisodeHeader(_)
+        | TraceEvent::Turn(_)
+        | TraceEvent::Tool(_)
+        | TraceEvent::EpisodeEnd(_) => crate::event::TRACE_SCHEMA_VERSION,
+    }
+}
+
+fn compaction_stage_name(stage: CompactionStage) -> &'static str {
+    match stage {
+        CompactionStage::Started => "started",
+        CompactionStage::SourceSelected => "source_selected",
+        CompactionStage::RequestPrepared => "request_prepared",
+        CompactionStage::ProviderUsageObserved => "provider_usage_observed",
+        CompactionStage::ReplacementProposed => "replacement_proposed",
+        CompactionStage::Terminal => "terminal",
+        CompactionStage::PostCompactionRequestObserved => "post_compaction_request_observed",
     }
 }
 
@@ -120,7 +143,7 @@ fn end_reason_name(reason: &EndReason) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{EpisodeHeader, TraceEvent, Turn};
+    use crate::{Compaction, CompactionStage, EpisodeHeader, TraceEvent, Turn};
 
     #[test]
     fn json_lines_is_one_stable_escaped_object_per_record() {
@@ -159,5 +182,22 @@ mod tests {
                 .windows("episode_header".len())
                 .any(|window| window == b"episode_header")
         );
+    }
+
+    #[test]
+    fn compaction_is_an_additive_v1_content_free_record() {
+        let mut record = Compaction::new("run-7:compact-1", CompactionStage::Terminal);
+        record.strategy_id = Some("cache_replay_summary_v0".into());
+        record.terminal_outcome = Some("committed".into());
+        record.serialized_request_bytes = Some(321);
+        let mut sink = JsonLinesSink::new(Vec::new());
+        sink.append(TraceEvent::from(record))
+            .expect("in-memory write succeeds");
+        let text = String::from_utf8(sink.into_inner()).expect("JSON is UTF-8");
+        assert!(text.contains(r#""schema_version":1,"type":"compaction""#));
+        assert!(text.contains(r#""compaction_id":"run-7:compact-1""#));
+        assert!(text.contains(r#""serialized_request_bytes":321"#));
+        assert!(!text.contains("checkpoint"));
+        assert!(!text.contains("prompt"));
     }
 }

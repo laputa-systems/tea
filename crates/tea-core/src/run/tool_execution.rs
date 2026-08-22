@@ -625,7 +625,7 @@ impl RunHandle {
                 is_error: result.is_error,
                 failure: result.failure,
             };
-            state.messages.push(message.clone());
+            state.append_message(message.clone());
             message
         };
         self.emit(

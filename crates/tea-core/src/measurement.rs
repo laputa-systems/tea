@@ -6,8 +6,22 @@
 //! as a cacheability proxy and pair it with `Usage::cache_read_tokens` when a provider reports
 //! real cache accounting.
 
-use crate::scheduler::ModelRequest;
+use crate::scheduler::{AdapterRequestObservation, ModelRequest};
 use tea_protocol::JsonValue;
+
+/// The source of cache accounting attached to a request observation.
+///
+/// A matching byte prefix is useful diagnostic evidence, but it never proves
+/// that a provider read from a prompt cache. Only provider usage can do that.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CacheAccountingStatus {
+    /// The provider supplied cache-read or cache-write token accounting.
+    ProviderReported,
+    /// Tea measured a comparable request prefix but has no provider accounting.
+    PrefixProxy,
+    /// Neither provider accounting nor a meaningful predecessor comparison exists.
+    Unavailable,
+}
 
 /// Byte-oriented comparison of one request with its predecessor.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -32,12 +46,48 @@ pub struct PromptCacheMeasurement {
     pub common_context_prefix_ratio_millionths: u32,
     /// Stable fingerprint of the current converted provider context.
     pub context_fingerprint: u64,
+    /// Fingerprint of the current system prompt.
+    pub system_prompt_fingerprint: u64,
+    /// Fingerprint of the ordered complete tool definitions.
+    pub tool_definition_fingerprint: u64,
+    /// Fingerprint of tool names in their exposed order.
+    pub tool_order_fingerprint: u64,
+    /// Fingerprint of the selected model identity.
+    pub model_fingerprint: u64,
+    /// Fingerprint of the provider-neutral reasoning configuration.
+    pub thinking_fingerprint: u64,
+    /// Whether the current context is an exact extension of its predecessor.
+    pub exact_context_extension: bool,
+    /// Whether the only context change is an append to the predecessor.
+    ///
+    /// This is a request-layout proxy, not evidence that a provider cache was used.
+    pub append_only_context: bool,
+    /// Optional byte count of the exact adapter-serialized request.
+    pub adapter_serialized_request_bytes: Option<usize>,
+    /// Optional adapter-defined cache-domain fingerprint.
+    pub adapter_cache_domain_fingerprint: Option<u64>,
+    /// Component names whose normalized fingerprints changed from the predecessor.
+    pub changed_cache_domain_components: Vec<String>,
 }
 
 /// Compare a request with an optional immediately preceding request.
 pub fn measure_prompt_cacheability(
     previous: Option<&ModelRequest>,
     current: &ModelRequest,
+) -> PromptCacheMeasurement {
+    measure_request_layout(previous, current, None, None)
+}
+
+/// Compare the exact core request and optional observations produced by the adapter that sent it.
+///
+/// The caller supplies observations captured from the same preparation/send path. This function
+/// is pure and intentionally cannot invoke hooks, project context, rebuild tools, or serialize a
+/// second request.
+pub fn measure_request_layout(
+    previous: Option<&ModelRequest>,
+    current: &ModelRequest,
+    previous_adapter: Option<&AdapterRequestObservation>,
+    current_adapter: Option<&AdapterRequestObservation>,
 ) -> PromptCacheMeasurement {
     let current_tools = tool_definition_bytes(current);
     let current_domain = cache_domain_fingerprint(current, &current_tools);
@@ -57,6 +107,34 @@ pub fn measure_prompt_cacheability(
         ((common_context_prefix_bytes as u128 * 1_000_000) / previous_context_bytes as u128)
             .min(u32::MAX as u128) as u32
     };
+    let exact_context_extension = previous
+        .is_some_and(|request| same_domain && common_context_prefix_bytes == request.context.len());
+    let mut changed_cache_domain_components = Vec::new();
+    if let Some(previous) = previous {
+        let previous_tools = tool_definition_bytes(previous);
+        if stable_fingerprint(previous.system_prompt.as_bytes())
+            != stable_fingerprint(current.system_prompt.as_bytes())
+        {
+            changed_cache_domain_components.push("system_prompt".into());
+        }
+        if stable_fingerprint(&previous_tools) != stable_fingerprint(&current_tools) {
+            changed_cache_domain_components.push("tool_definitions".into());
+        }
+        if tool_order_fingerprint(previous) != tool_order_fingerprint(current) {
+            changed_cache_domain_components.push("tool_order".into());
+        }
+        if model_fingerprint(previous) != model_fingerprint(current) {
+            changed_cache_domain_components.push("model".into());
+        }
+        if thinking_fingerprint(previous) != thinking_fingerprint(current) {
+            changed_cache_domain_components.push("thinking".into());
+        }
+        compare_adapter_components(
+            previous_adapter,
+            current_adapter,
+            &mut changed_cache_domain_components,
+        );
+    }
     PromptCacheMeasurement {
         cache_domain_fingerprint: current_domain,
         cache_domain_changed: previous.is_some() && !same_domain,
@@ -71,6 +149,18 @@ pub fn measure_prompt_cacheability(
         common_context_prefix_bytes,
         common_context_prefix_ratio_millionths,
         context_fingerprint: stable_fingerprint(current.context.as_bytes()),
+        system_prompt_fingerprint: stable_fingerprint(current.system_prompt.as_bytes()),
+        tool_definition_fingerprint: stable_fingerprint(&current_tools),
+        tool_order_fingerprint: tool_order_fingerprint(current),
+        model_fingerprint: model_fingerprint(current),
+        thinking_fingerprint: thinking_fingerprint(current),
+        exact_context_extension,
+        append_only_context: exact_context_extension,
+        adapter_serialized_request_bytes: current_adapter
+            .and_then(|observation| observation.serialized_request_bytes),
+        adapter_cache_domain_fingerprint: current_adapter
+            .and_then(|observation| observation.cache_domain_fingerprint),
+        changed_cache_domain_components,
     }
 }
 
@@ -98,6 +188,58 @@ fn cache_domain_fingerprint(request: &ModelRequest, tools: &[u8]) -> u64 {
     bytes.push(0);
     bytes.extend_from_slice(format!("{:?}", request.thinking_level).as_bytes());
     stable_fingerprint(&bytes)
+}
+
+fn tool_order_fingerprint(request: &ModelRequest) -> u64 {
+    let mut bytes = Vec::new();
+    for tool in &request.tools {
+        bytes.extend_from_slice(tool.name.as_bytes());
+        bytes.push(0);
+    }
+    stable_fingerprint(&bytes)
+}
+
+fn model_fingerprint(request: &ModelRequest) -> u64 {
+    let mut bytes = Vec::new();
+    if let Some(model) = &request.model {
+        bytes.extend_from_slice(model.provider.as_bytes());
+        bytes.push(0);
+        bytes.extend_from_slice(model.model.as_bytes());
+        bytes.push(0);
+        if let Some(revision) = &model.revision {
+            bytes.extend_from_slice(revision.as_bytes());
+        }
+    }
+    stable_fingerprint(&bytes)
+}
+
+fn thinking_fingerprint(request: &ModelRequest) -> u64 {
+    stable_fingerprint(format!("{:?}", request.thinking_level).as_bytes())
+}
+
+fn compare_adapter_components(
+    previous: Option<&AdapterRequestObservation>,
+    current: Option<&AdapterRequestObservation>,
+    changed: &mut Vec<String>,
+) {
+    let (Some(previous), Some(current)) = (previous, current) else {
+        return;
+    };
+    if previous.cache_domain_fingerprint != current.cache_domain_fingerprint {
+        changed.push("adapter_cache_domain".into());
+    }
+    for name in previous
+        .cache_domain_components
+        .keys()
+        .chain(current.cache_domain_components.keys())
+    {
+        if previous.cache_domain_components.get(name) != current.cache_domain_components.get(name) {
+            let label = format!("adapter.{name}");
+            if !changed.contains(&label) {
+                changed.push(label);
+            }
+        }
+    }
 }
 
 fn tool_definition_bytes(request: &ModelRequest) -> Vec<u8> {

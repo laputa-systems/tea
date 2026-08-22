@@ -43,8 +43,13 @@ pub use agent::{
 };
 pub use compaction::{
     AutomaticCompactionPolicy, AutomaticCompactionReason, AutomaticCompactionRequest,
-    CompactionContext, CompactionError, CompactionFuture, CompactionHandle, CompactionResult,
-    Compactor, ContextBudgetSource, OverflowRecovery, ProviderContext, COMPACTION_CONTEXT_VERSION,
+    CompactionContext, CompactionError, CompactionFuture, CompactionHandle, CompactionId,
+    CompactionImplementation, CompactionLifecycleRecord, CompactionOperation, CompactionPhase,
+    CompactionProposalObservation, CompactionReason, CompactionRejection, CompactionRequestLayout,
+    CompactionResult, CompactionSourceObservation, CompactionStrategy, CompactionTerminalOutcome,
+    CompactionTrigger, Compactor, CompactorRequestObservation, ContextBudgetSource,
+    OverflowRecovery, ProviderContext, CACHE_REPLAY_SUMMARY_V0, COMPACTION_CONTEXT_VERSION,
+    INCREMENTAL_CHECKPOINT_UPDATE_V1, STRUCTURED_CHECKPOINT_V1, TOOL_FREE_REPLAY_SUMMARY_V1,
 };
 pub use default_tools::{
     CodingOperations, DefaultCodingTools, LocalCodingOperations, WorkspaceRoot,
@@ -55,7 +60,10 @@ pub use event::{
     EventObserver, EventSequence, ObserverFuture, ProviderRequestSkipReason,
 };
 pub use hooks::AgentLoopTurnUpdate;
-pub use measurement::{measure_prompt_cacheability, PromptCacheMeasurement};
+pub use measurement::{
+    measure_prompt_cacheability, measure_request_layout, CacheAccountingStatus,
+    PromptCacheMeasurement,
+};
 pub use run::RunHandle;
 pub use state::{
     AgentMessage, AgentSnapshot, AgentToolCall, Message, MessageId, ModelAccountingSnapshot,

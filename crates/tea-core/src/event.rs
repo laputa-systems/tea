@@ -81,6 +81,21 @@ pub enum ProviderRequestSkipReason {
 #[allow(missing_docs)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AgentEventKind {
+    /// One append-only, content-free compaction lifecycle record.
+    CompactionLifecycle {
+        /// Record joined by its stable compaction identity.
+        record: crate::compaction::CompactionLifecycleRecord,
+    },
+    /// Content-safe adapter facts for the exact request used by a model turn.
+    ///
+    /// The observation is emitted from the provider stream, not by rebuilding
+    /// the request for telemetry. It does not assert a provider cache hit.
+    ProviderRequestObserved {
+        /// Model turn that owns the prepared request.
+        turn_id: TurnId,
+        /// Adapter boundary observation.
+        observation: crate::scheduler::AdapterRequestObservation,
+    },
     /// A manual compaction operation reserved an idle agent.
     CompactionStart {
         /// Messages held by the original retained context.

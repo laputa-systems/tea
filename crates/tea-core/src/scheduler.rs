@@ -65,9 +65,34 @@ pub struct ModelRequest {
     pub thinking_level: ThinkingLevel,
 }
 
+/// Content-safe request facts observed by a provider adapter.
+///
+/// The core deliberately does not know a provider's wire schema or cache-key
+/// rules. An adapter may nevertheless report the exact byte count it sent and
+/// fingerprints for cache-relevant envelope components. Component names are
+/// stable, provider-neutral labels selected by the adapter; values are
+/// diagnostic fingerprints, never raw headers, prompts, credentials, or
+/// provider-specific structs.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct AdapterRequestObservation {
+    /// Byte count of the exact serialized request supplied to transport.
+    pub serialized_request_bytes: Option<usize>,
+    /// Adapter-defined cache-domain fingerprint, when the adapter can expose one safely.
+    pub cache_domain_fingerprint: Option<u64>,
+    /// Fingerprints for individual cache-relevant envelope components.
+    pub cache_domain_components: BTreeMap<String, u64>,
+    /// Provider request identifier, if the provider exposes one without requiring a follow-up.
+    pub provider_request_id: Option<String>,
+}
+
 /// Provider events consumed by the run loop.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ModelStreamEvent {
+    /// Content-safe facts about the exact request sent by the adapter.
+    ///
+    /// Adapters emit this at most once and before a terminal event. It is an
+    /// observation, not a cache-hit claim and not a second preparation path.
+    RequestObservation(AdapterRequestObservation),
     /// Incremental assistant text.
     TextDelta(String),
     /// A complete assistant tool call.

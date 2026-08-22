@@ -132,6 +132,7 @@ let policy = AutomaticCompactionPolicy {
     enabled: true,
     context_budget: ContextBudgetSource::ContextWindow(NonZeroU64::new(128_000).unwrap()),
     reserved_tokens: 8_000,
+    minimum_headroom_tokens: 8_000,
     recent_tokens: 16_000,
     overflow_recovery: OverflowRecovery::CompactAndRetry,
     max_compactions_per_run: 4,

@@ -9,6 +9,7 @@ import sys
 
 from .coding_cases import CodingCaseError
 from .coding_runner import CodingRunError, prepare_cache, run_coding_cases
+from .compaction import CompactionQualityError, run_compaction_quality
 from .suite import AdapterError, ContractError, inspect_environment, run_fast, run_rust_allocation_probe
 
 
@@ -18,6 +19,14 @@ def parser() -> argparse.ArgumentParser:
     fast = sub.add_parser("fast", help="run provider-free strict core fixtures")
     fast.add_argument("--case", action="append", default=[], help="run one named enabled core case (repeatable)")
     fast.add_argument("--out", type=Path, help="persist self-contained artifacts in this directory")
+    compaction = sub.add_parser("compaction", help="run the provider-free compaction contract matrix")
+    compaction.add_argument("--out", type=Path, required=True, help="write one content-free report per scenario")
+    compaction.add_argument(
+        "--update-baseline",
+        action="store_true",
+        help="replace the checked-in contract baseline; requires --reason",
+    )
+    compaction.add_argument("--reason", help="required audit reason for --update-baseline")
     sub.add_parser("inspect-environment", help="print the explicit core-evaluation surfaces")
     resources = sub.add_parser("resources", help="measure Rust allocations and peak RSS with Rustybench")
     resources.add_argument("--out", type=Path, help="write the JSON resource artifact to this file")
@@ -60,6 +69,20 @@ def main(argv: list[str] | None = None) -> int:
                 print("failed: " + ", ".join(summary["strict_failures"]))
             if args.out:
                 print(f"artifacts: {args.out}")
+            return status
+        if args.command == "compaction":
+            status, summary = run_compaction_quality(
+                out=args.out,
+                update_baseline=args.update_baseline,
+                reason=args.reason,
+            )
+            print(
+                f"quality compaction: {summary['passed']}/{summary['scenario_count']} scenarios passed; "
+                f"continuation episodes: {summary['continuation_fixtures']['passed']}/"
+                f"{summary['continuation_fixtures']['case_count']}; "
+                f"offline baseline contract: {summary['baseline']['matched_contract']}"
+            )
+            print(f"artifacts: {args.out}")
             return status
         if args.command == "resources":
             result = run_rust_allocation_probe(args.out)
@@ -112,6 +135,9 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     except (CodingRunError, CodingCaseError) as error:
         print(f"quality coding error: {error}", file=sys.stderr)
+        return 2
+    except CompactionQualityError as error:
+        print(f"quality compaction error: {error}", file=sys.stderr)
         return 2
     return 2
 

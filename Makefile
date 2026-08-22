@@ -1,4 +1,4 @@
-.PHONY: lint test test-linux tui tui-headless tui-smoke local-install local-model local-server local quality-fast quality-resources
+.PHONY: lint test test-linux tui tui-headless tui-smoke local-install local-model local quality-fast quality-resources quality-compaction
 
 lint:
 	cargo fmt --all
@@ -8,9 +8,9 @@ lint:
 # fixture or no model request at all; neither reaches a real provider. The
 # normalized UI fixture check is included so visual contract data is covered.
 test:
-	cargo +nightly-2026-07-24 test --workspace --locked
+	rustup run nightly-2026-07-24 cargo test --workspace --locked
 	PYTHONDONTWRITEBYTECODE=1 python3 crates/tea-agent/fixtures/fx-ui/check.py
-	cargo +nightly-2026-07-24 test -p tea-agent --features pty-harness --test pty_streaming --locked
+	rustup run nightly-2026-07-24 cargo test -p tea-agent --features pty-harness --test pty_streaming --locked
 
 # Build and run the deterministic suite inside Linux AArch64. Docker's
 # platform selection also makes this usable from an x86_64 or Apple host.
@@ -99,3 +99,6 @@ quality-fast:
 
 quality-resources:
 	PYTHONDONTWRITEBYTECODE=1 python3 -m evals.quality resources
+
+quality-compaction:
+	PYTHONDONTWRITEBYTECODE=1 python3 -m evals.quality compaction --out /tmp/tea-compaction-quality

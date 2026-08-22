@@ -438,7 +438,9 @@ impl AppState {
                     self.status = UiStatus::Idle;
                 }
             }
-            AgentEventKind::TurnStart { .. } => {}
+            AgentEventKind::CompactionLifecycle { .. }
+            | AgentEventKind::ProviderRequestObserved { .. }
+            | AgentEventKind::TurnStart { .. } => {}
         }
     }
 

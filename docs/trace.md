@@ -43,3 +43,13 @@ Both accept an already-open caller-owned `Write`; neither opens a path or
 chooses a destination. The JSON and CBOR record maps carry the same
 `schema_version` and `type` fields, so an archive format change is a deliberate
 trace-contract change rather than an implicit sink behavior change.
+
+Compaction adds an additive V1 `compaction` record. Existing
+`episode_header`, `turn`, `tool`, and `episode_end` records remain V0, so an
+archive reader that already understands V0 retains its prior behavior and can
+ignore the new type discriminator. A compaction record contains only lifecycle
+IDs, stages, strategy metadata, sizes, fingerprints, usage, and classified
+outcomes. It deliberately cannot carry a checkpoint, prompt, raw provider
+request, tool arguments, or tool result. See
+[`docs/compaction.md`](compaction.md) for the lifecycle and
+[`docs/compaction-metrics.md`](compaction-metrics.md) for evidence levels.

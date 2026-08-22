@@ -417,7 +417,9 @@ fn assert_lifecycle_balance(events: &[tea_core::event::AgentEvent]) {
             | AgentEventKind::AutomaticCompactionEnd { .. }
             | AgentEventKind::ContextEstimate { .. }
             | AgentEventKind::ProviderRequestSkipped { .. }
-            | AgentEventKind::ToolFailureObserved { .. } => {}
+            | AgentEventKind::ToolFailureObserved { .. }
+            | AgentEventKind::CompactionLifecycle { .. }
+            | AgentEventKind::ProviderRequestObserved { .. } => {}
         }
     }
     assert_eq!(agent_starts, 1);

@@ -391,7 +391,7 @@ impl App {
     }
 }
 
-fn automatic_compaction_policy(context_window: NonZeroU64) -> AutomaticCompactionPolicy {
+pub(super) fn automatic_compaction_policy(context_window: NonZeroU64) -> AutomaticCompactionPolicy {
     let capacity = context_window.get();
     // Reserve room for the summary request and keep a bounded intact suffix. Large
     // OpenRouter windows use fixed practical bounds; smaller windows retain proportional room.
@@ -399,6 +399,7 @@ fn automatic_compaction_policy(context_window: NonZeroU64) -> AutomaticCompactio
         enabled: true,
         context_budget: ContextBudgetSource::ContextWindow(context_window),
         reserved_tokens: (capacity / 4).min(16_384),
+        minimum_headroom_tokens: (capacity / 4).min(16_384),
         recent_tokens: (capacity / 2).min(20_000),
         overflow_recovery: OverflowRecovery::CompactAndRetry,
         max_compactions_per_run: 4,

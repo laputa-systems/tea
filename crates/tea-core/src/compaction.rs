@@ -24,6 +24,348 @@ use std::sync::{Arc, Mutex};
 /// Version of the context shape supplied to [`Compactor`].
 pub const COMPACTION_CONTEXT_VERSION: u32 = 1;
 
+/// Stable identifier for the checked-in, current model-facing compaction layout.
+///
+/// The TUI's provider-backed compactor implements this strategy. Experimental
+/// layouts must select their own identifier instead of changing this prompt
+/// and request construction in place.
+pub const CACHE_REPLAY_SUMMARY_V0: &str = "cache_replay_summary_v0";
+
+/// Stable identifier for the tool-free exact-replay compatibility experiment.
+///
+/// Some hosted models accept ordinary tool-enabled turns but reject a summary
+/// request carrying those same definitions. This candidate changes only the
+/// tool-envelope dimension; it is never selected by the baseline strategy.
+pub const TOOL_FREE_REPLAY_SUMMARY_V1: &str = "tool_free_replay_summary_v1";
+
+/// Reserved identifier for a held-out standalone structured-checkpoint candidate.
+pub const STRUCTURED_CHECKPOINT_V1: &str = "structured_checkpoint_v1";
+
+/// Reserved identifier for a held-out incremental checkpoint-update candidate.
+pub const INCREMENTAL_CHECKPOINT_UPDATE_V1: &str = "incremental_checkpoint_update_v1";
+
+/// Stable identity of one compaction attempt within a run.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Hash)]
+pub struct CompactionId {
+    /// Run that owns the attempt.
+    pub run_id: crate::state::RunId,
+    /// Zero for an idle manual operation, otherwise its one-based automatic ordinal.
+    pub ordinal: u32,
+}
+
+impl fmt::Display for CompactionId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}:compact-{}", self.run_id, self.ordinal)
+    }
+}
+
+/// Why a compaction attempt exists.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CompactionTrigger {
+    /// An idle caller explicitly requested maintenance.
+    Manual,
+    /// The in-run automatic policy claimed context pressure.
+    Automatic,
+}
+
+/// Concrete trigger condition recorded independently from [`CompactionTrigger`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CompactionReason {
+    /// A caller explicitly requested compaction.
+    UserRequest,
+    /// The host-provided threshold was crossed.
+    Threshold,
+    /// A provider explicitly rejected a request for context overflow.
+    ProviderOverflow,
+}
+
+/// Location of the replacement in tea's agent loop.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CompactionPhase {
+    /// An idle/manual operation outside a model turn.
+    Standalone,
+    /// The next ordinary request has not yet been constructed.
+    BeforeModelRequest,
+    /// A failed provider continuation is about to be retried.
+    BetweenModelCalls,
+}
+
+/// How a compactor produced a checkpoint.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CompactionImplementation {
+    /// A caller owns the algorithm; the core only validates and commits it.
+    CallerSupplied,
+    /// A deterministic provider-free fixture compactor.
+    DeterministicFixture,
+    /// A provider stream generated the checkpoint.
+    ProviderSummarization,
+}
+
+/// Model-visible request layout selected by a compactor.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CompactionRequestLayout {
+    /// The selected provider context was preserved and one instruction appended.
+    ExactReplay,
+    /// A self-contained summary request was constructed without a reusable prefix.
+    StandaloneFallback,
+    /// A previous structured checkpoint and only new discarded history were supplied.
+    IncrementalCheckpointUpdate,
+    /// The core could not observe a caller-owned compactor's request layout.
+    Unobserved,
+}
+
+/// Versioned descriptor for a concrete compaction strategy.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CompactionStrategy {
+    /// Stable strategy identifier.
+    pub id: String,
+    /// Version of the strategy's checkpoint and request-layout contract.
+    pub schema_version: u32,
+    /// Implementation class without provider-specific types.
+    pub implementation: CompactionImplementation,
+    /// Request layout selected by this strategy when the core can observe it.
+    pub request_layout: CompactionRequestLayout,
+    /// Optional fingerprint of the model-facing instruction template.
+    pub prompt_fingerprint: Option<u64>,
+}
+
+impl CompactionStrategy {
+    /// Descriptor for an opaque caller-supplied compactor.
+    pub fn caller_supplied() -> Self {
+        Self {
+            id: "caller_supplied_v1".into(),
+            schema_version: 1,
+            implementation: CompactionImplementation::CallerSupplied,
+            request_layout: CompactionRequestLayout::Unobserved,
+            prompt_fingerprint: None,
+        }
+    }
+
+    /// Descriptor for the provider-backed baseline preserved by `tea-agent`.
+    pub fn cache_replay_summary_v0(prompt_fingerprint: u64) -> Self {
+        Self {
+            id: CACHE_REPLAY_SUMMARY_V0.into(),
+            schema_version: 0,
+            implementation: CompactionImplementation::ProviderSummarization,
+            request_layout: CompactionRequestLayout::ExactReplay,
+            prompt_fingerprint: Some(prompt_fingerprint),
+        }
+    }
+
+    /// Descriptor for the tool-free exact-replay compatibility candidate.
+    ///
+    /// It retains the selected provider context and appends the same single
+    /// instruction as the baseline, but deliberately omits tools from the
+    /// compaction request. Adapter observations expose this domain difference;
+    /// a matching context prefix is not treated as a cache hit.
+    pub fn tool_free_replay_summary_v1(prompt_fingerprint: u64) -> Self {
+        Self {
+            id: TOOL_FREE_REPLAY_SUMMARY_V1.into(),
+            schema_version: 1,
+            implementation: CompactionImplementation::ProviderSummarization,
+            request_layout: CompactionRequestLayout::ExactReplay,
+            prompt_fingerprint: Some(prompt_fingerprint),
+        }
+    }
+
+    /// Descriptor for a held-out standalone structured-checkpoint candidate.
+    ///
+    /// Constructing this descriptor never selects it as a default. A host must
+    /// explicitly bind an implementation and supply reviewed provider evidence.
+    pub fn structured_checkpoint_v1(prompt_fingerprint: u64) -> Self {
+        Self {
+            id: STRUCTURED_CHECKPOINT_V1.into(),
+            schema_version: 1,
+            implementation: CompactionImplementation::ProviderSummarization,
+            request_layout: CompactionRequestLayout::StandaloneFallback,
+            prompt_fingerprint: Some(prompt_fingerprint),
+        }
+    }
+
+    /// Descriptor for a held-out incremental checkpoint-update candidate.
+    ///
+    /// A future implementation must preserve its checkpoint marker/schema and
+    /// validate its retained suffix before it can be bound by a host.
+    pub fn incremental_checkpoint_update_v1(prompt_fingerprint: u64) -> Self {
+        Self {
+            id: INCREMENTAL_CHECKPOINT_UPDATE_V1.into(),
+            schema_version: 1,
+            implementation: CompactionImplementation::ProviderSummarization,
+            request_layout: CompactionRequestLayout::IncrementalCheckpointUpdate,
+            prompt_fingerprint: Some(prompt_fingerprint),
+        }
+    }
+}
+
+/// Immutable identity and policy state for one attempted compaction.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CompactionOperation {
+    /// Stable join key used by every lifecycle record for this attempt.
+    pub id: CompactionId,
+    /// Manual or automatic ownership boundary.
+    pub trigger: CompactionTrigger,
+    /// Specific policy or provider condition that requested compaction.
+    pub reason: CompactionReason,
+    /// Agent-loop position of the replacement.
+    pub phase: CompactionPhase,
+    /// Versioned compactor descriptor.
+    pub strategy: CompactionStrategy,
+    /// Canonical history generation captured for the source.
+    pub source_history_revision: u64,
+    /// One-based attempt count for this operation kind in its run.
+    pub attempt: u32,
+    /// One-based automatic compaction count, when this is automatic.
+    pub automatic_ordinal: Option<u32>,
+    /// One-based overflow-retry count, when this retries a rejected request.
+    pub overflow_retry_ordinal: Option<u32>,
+    /// Whether a successful commit resumes a previously interrupted provider request.
+    pub retry_provider_request: bool,
+}
+
+/// Content-free source metadata for a compaction attempt.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CompactionSourceObservation {
+    /// Canonical messages visible when the source was selected.
+    pub canonical_message_count: usize,
+    /// Approximate byte size of those canonical messages.
+    pub canonical_message_bytes: usize,
+    /// IDs in the selected source prefix, in canonical order.
+    pub source_message_ids: Vec<MessageId>,
+    /// IDs in the exact retained suffix, in canonical order.
+    pub retained_message_ids: Vec<MessageId>,
+    /// IDs from an explicitly summarized split turn prefix.
+    pub split_turn_prefix_ids: Vec<MessageId>,
+    /// Byte size of the retained suffix.
+    pub retained_suffix_bytes: usize,
+    /// Byte size of tool-result content in the selected canonical history.
+    pub tool_result_bytes: usize,
+}
+
+/// Content-free facts about the request a compactor was given.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CompactorRequestObservation {
+    /// Selected model-facing layout.
+    pub layout: CompactionRequestLayout,
+    /// Byte size of the selected provider-visible context, when one existed.
+    pub provider_context_bytes: Option<usize>,
+    /// Ordered prompt-facing tool count, when one existed.
+    pub tool_count: Option<usize>,
+    /// Whether tools remain defined while execution is prohibited by the compactor.
+    pub tools_execution_prohibited: bool,
+    /// Whether the selected source was an exact prefix of active provider context.
+    pub source_is_active_context_prefix: Option<bool>,
+}
+
+/// Content-free validation facts for a proposed replacement.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CompactionProposalObservation {
+    /// Number of canonical messages after replacement.
+    pub replacement_message_count: usize,
+    /// Approximate canonical replacement size.
+    pub replacement_bytes: usize,
+    /// Estimated canonical context tokens after replacement, when the policy owns a budget.
+    pub estimated_context_tokens_after: Option<u64>,
+    /// Budget minus the estimated replacement context, when the policy owns a budget.
+    pub headroom_tokens: Option<u64>,
+    /// Whether message/tool structure validated before commit.
+    pub structural_validation_passed: bool,
+    /// Whether the selected retained suffix exactly matches the proposal tail.
+    pub retained_suffix_exact: bool,
+    /// Whether the source generation still matches at proposal observation time.
+    pub source_generation_matches: bool,
+}
+
+/// Typed reason why a proposal was not allowed to commit.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CompactionRejection {
+    /// Canonical history changed after the snapshot.
+    StaleSourceGeneration,
+    /// The required exact recent suffix was not retained.
+    RetainedSuffixMismatch,
+    /// Tool-call/result or message-ID structure was invalid.
+    InvalidStructure,
+    /// The checkpoint had no non-whitespace content.
+    EmptyCheckpoint,
+    /// The proposed checkpoint included a tool call or tool-result message.
+    UnexpectedToolCall,
+    /// The replacement did not reduce the selected source.
+    NonShrinkingReplacement,
+    /// The replacement did not create the policy's minimum working headroom.
+    InsufficientHeadroom,
+    /// A policy cap disallowed another attempt.
+    PolicyCapReached,
+    /// Cancellation won before commit.
+    Cancelled,
+    /// A host-owned compactor deadline elapsed before commit.
+    TimedOut,
+}
+
+/// Terminal state for one lifecycle identity.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CompactionTerminalOutcome {
+    /// The validated replacement committed atomically.
+    Committed,
+    /// The proposal was intentionally rejected without mutation.
+    Rejected(CompactionRejection),
+    /// The compactor/provider failed before a proposal could commit.
+    Failed,
+    /// Cancellation won before commit.
+    Cancelled,
+    /// A host-owned deadline fired before commit.
+    TimedOut,
+    /// Policy required a compactor that the host did not configure.
+    Unavailable,
+}
+
+/// Append-only, content-free lifecycle record for compaction observability.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CompactionLifecycleRecord {
+    /// A compaction identity was allocated.
+    Started {
+        /// Immutable operation identity.
+        operation: CompactionOperation,
+    },
+    /// Canonical source and exact retained boundary were selected.
+    SourceSelected {
+        /// Lifecycle join key.
+        id: CompactionId,
+        /// Content-free source facts.
+        source: CompactionSourceObservation,
+    },
+    /// The compactor received its request boundary.
+    RequestPrepared {
+        /// Lifecycle join key.
+        id: CompactionId,
+        /// Content-free request facts.
+        request: CompactorRequestObservation,
+    },
+    /// The compactor provider supplied usage or exact serialized-request facts.
+    ProviderUsageObserved {
+        /// Lifecycle join key.
+        id: CompactionId,
+        /// Provider-reported usage, when available.
+        usage: Option<crate::state::Usage>,
+        /// Adapter-bound request observation, when available.
+        request_observation: Option<crate::scheduler::AdapterRequestObservation>,
+        /// Actual request layout reported by a concrete compactor.
+        request: Option<CompactorRequestObservation>,
+    },
+    /// A candidate replacement was validated before commit.
+    ReplacementProposed {
+        /// Lifecycle join key.
+        id: CompactionId,
+        /// Content-free proposal facts.
+        proposal: CompactionProposalObservation,
+    },
+    /// The attempt reached one explicit terminal state.
+    Terminal {
+        /// Lifecycle join key.
+        id: CompactionId,
+        /// Terminal outcome.
+        outcome: CompactionTerminalOutcome,
+    },
+}
+
 /// Why an automatic compaction transaction was requested.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AutomaticCompactionReason {
@@ -74,6 +416,11 @@ pub struct AutomaticCompactionPolicy {
     pub context_budget: ContextBudgetSource,
     /// Tokens reserved for the compactor request/output and not available to the next request.
     pub reserved_tokens: u64,
+    /// Minimum usable context remaining after an automatic replacement commits.
+    ///
+    /// This is a host policy value, not an inferred model limit. A proposal
+    /// that would leave less headroom is rejected even when it is smaller.
+    pub minimum_headroom_tokens: u64,
     /// Approximate number of recent transcript tokens selected as an intact retained suffix.
     pub recent_tokens: u64,
     /// Typed overflow recovery policy.
@@ -97,6 +444,7 @@ impl AutomaticCompactionPolicy {
             // invalid zero-capacity state.
             context_budget: ContextBudgetSource::ContextBudget(NonZeroU64::MIN),
             reserved_tokens: 0,
+            minimum_headroom_tokens: 0,
             recent_tokens: 0,
             overflow_recovery: OverflowRecovery::Disabled,
             max_compactions_per_run: 0,
@@ -111,6 +459,11 @@ impl AutomaticCompactionPolicy {
         }
         if self.reserved_tokens >= self.context_budget.tokens() {
             return Err("automatic compaction reserve must be smaller than the context budget");
+        }
+        if self.minimum_headroom_tokens >= self.context_budget.tokens() {
+            return Err(
+                "automatic compaction minimum headroom must be smaller than the context budget",
+            );
         }
         if self.max_compactions_per_run == 0 {
             return Err(
@@ -183,6 +536,10 @@ pub struct CompactionContext {
     pub model: Option<ModelDescriptor>,
     /// Canonical retained conversation.
     pub messages: Vec<AgentMessage>,
+    /// Canonical-history generation captured with `messages`.
+    ///
+    /// A proposal may commit only while the agent still has this generation.
+    pub source_history_revision: u64,
     /// Explicit host-only context retained beside the conversation.
     pub host_messages: Vec<crate::state::SerializedJson>,
     /// Provider-visible context built through the active projection and hook pipeline when the
@@ -220,6 +577,12 @@ pub struct CompactionResult {
     /// This stays attached to the compaction event because compaction is not a
     /// normal model turn. The core does not estimate, aggregate, or price it.
     pub usage: Option<crate::state::Usage>,
+    /// Content-safe observation emitted by the adapter that sent the compactor request.
+    pub request_observation: Option<crate::scheduler::AdapterRequestObservation>,
+    /// Actual request layout selected by a concrete compactor, when it can report one.
+    pub request_layout: Option<CompactionRequestLayout>,
+    /// Whether the concrete compactor verified an exact active-context prefix.
+    pub source_is_active_context_prefix: Option<bool>,
 }
 
 impl CompactionResult {
@@ -228,12 +591,35 @@ impl CompactionResult {
         Self {
             messages,
             usage: None,
+            request_observation: None,
+            request_layout: None,
+            source_is_active_context_prefix: None,
         }
     }
 
     /// Attach provider-reported compaction accounting without deriving a price.
     pub fn with_usage(mut self, usage: crate::state::Usage) -> Self {
         self.usage = Some(usage);
+        self
+    }
+
+    /// Attach the exact adapter-bound request observation for this compactor call.
+    pub fn with_request_observation(
+        mut self,
+        request_observation: crate::scheduler::AdapterRequestObservation,
+    ) -> Self {
+        self.request_observation = Some(request_observation);
+        self
+    }
+
+    /// Attach the actual request layout selected during compactor preparation.
+    pub fn with_request_layout(
+        mut self,
+        request_layout: CompactionRequestLayout,
+        source_is_active_context_prefix: Option<bool>,
+    ) -> Self {
+        self.request_layout = Some(request_layout);
+        self.source_is_active_context_prefix = source_is_active_context_prefix;
         self
     }
 }
@@ -251,12 +637,31 @@ pub enum CompactionError {
         /// Stable explanation of the rejected relationship or identifier.
         message: String,
     },
+    /// Canonical history changed after the compactor took its owned snapshot.
+    StaleSource {
+        /// Generation captured by the compactor.
+        expected_revision: u64,
+        /// Generation currently owned by the agent.
+        actual_revision: u64,
+    },
+    /// A host-owned compactor deadline elapsed before a proposal was available.
+    TimedOut {
+        /// Redacted timeout diagnostic supplied by the host boundary.
+        message: String,
+    },
 }
 
 impl CompactionError {
     /// Construct a caller-supplied failure without exposing a provider type.
     pub fn failed(message: impl Into<String>) -> Self {
         Self::Failed {
+            message: message.into(),
+        }
+    }
+
+    /// Construct an explicit host-owned compactor deadline result.
+    pub fn timed_out(message: impl Into<String>) -> Self {
+        Self::TimedOut {
             message: message.into(),
         }
     }
@@ -275,6 +680,14 @@ impl fmt::Display for CompactionError {
             Self::InvalidReplacement { message } => {
                 write!(formatter, "invalid compacted conversation: {message}")
             }
+            Self::StaleSource {
+                expected_revision,
+                actual_revision,
+            } => write!(
+                formatter,
+                "compaction source changed from generation {expected_revision} to {actual_revision}"
+            ),
+            Self::TimedOut { message } => write!(formatter, "compactor timed out: {message}"),
         }
     }
 }
@@ -291,6 +704,15 @@ pub type CompactionFuture<'a> =
 /// request. They receive cancellation and must not assume an executor owned
 /// by the core. There is no implicit summary prompt or provider fallback.
 pub trait Compactor: Send + Sync {
+    /// Return the immutable descriptor for this compactor's model-facing strategy.
+    ///
+    /// The default deliberately describes an opaque caller algorithm. Hosts
+    /// with a concrete prompt or deterministic fixture override it so traces
+    /// can distinguish strategy versions without introducing a registry.
+    fn strategy(&self) -> CompactionStrategy {
+        CompactionStrategy::caller_supplied()
+    }
+
     /// Produce a replacement for this owned context.
     fn compact<'a>(
         &'a self,
@@ -359,10 +781,27 @@ impl CompactionHandle {
             .ok_or(CoreError::InvalidTransition(
                 crate::error::StateTransitionError::new("compaction", "orphaned", "drive"),
             ))?;
-        let source_message_count = {
-            let state = agent.state.lock().expect("agent state mutex poisoned");
-            state.messages.len()
+        // Capture before notifying observers. A lifecycle observer may steer
+        // or otherwise change canonical state; the CAS commit below must then
+        // reject rather than silently replacing that newer history.
+        let context = snapshot_context(&agent);
+        let source_message_count = context.messages.len();
+        let operation = CompactionOperation {
+            id: CompactionId {
+                run_id: self.id(),
+                ordinal: 0,
+            },
+            trigger: CompactionTrigger::Manual,
+            reason: CompactionReason::UserRequest,
+            phase: CompactionPhase::Standalone,
+            strategy: self.compactor.strategy(),
+            source_history_revision: context.source_history_revision,
+            attempt: 1,
+            automatic_ordinal: None,
+            overflow_retry_ordinal: None,
+            retry_provider_request: false,
         };
+        let source = observe_source(&context.messages, &context.messages, &[], &[]);
 
         if let Err(error) = self
             .run
@@ -373,27 +812,155 @@ impl CompactionHandle {
                 },
             )
             .await
+            .map(|_| ())
+        {
+            return self.settle_emit_failure(error);
+        }
+        if let Err(error) = self
+            .run
+            .emit(
+                &agent,
+                AgentEventKind::CompactionLifecycle {
+                    record: CompactionLifecycleRecord::Started {
+                        operation: operation.clone(),
+                    },
+                },
+            )
+            .await
+        {
+            return self.settle_emit_failure(error);
+        }
+        if let Err(error) = self
+            .run
+            .emit(
+                &agent,
+                AgentEventKind::CompactionLifecycle {
+                    record: CompactionLifecycleRecord::SourceSelected {
+                        id: operation.id,
+                        source,
+                    },
+                },
+            )
+            .await
+        {
+            return self.settle_emit_failure(error);
+        }
+        if let Err(error) = self
+            .run
+            .emit(
+                &agent,
+                AgentEventKind::CompactionLifecycle {
+                    record: CompactionLifecycleRecord::RequestPrepared {
+                        id: operation.id,
+                        request: CompactorRequestObservation {
+                            layout: operation.strategy.request_layout,
+                            provider_context_bytes: None,
+                            tool_count: None,
+                            tools_execution_prohibited: true,
+                            source_is_active_context_prefix: None,
+                        },
+                    },
+                },
+            )
+            .await
         {
             return self.settle_emit_failure(error);
         }
         if self.run.cancellation.is_cancelled() {
+            let _ = self
+                .emit_lifecycle_terminal(&agent, operation.id, CompactionTerminalOutcome::Cancelled)
+                .await;
             return self.settle_cancelled(&agent).await;
         }
 
-        let context = snapshot_context(&agent);
+        let source_history_revision = context.source_history_revision;
         let replacement = match self
             .compactor
             .compact(context, self.run.cancellation.clone())
             .await
         {
             Ok(replacement) => replacement,
-            Err(error) => return self.settle_failure(&agent, error).await,
+            Err(error) => {
+                let outcome = if matches!(error, CompactionError::TimedOut { .. }) {
+                    CompactionTerminalOutcome::TimedOut
+                } else {
+                    CompactionTerminalOutcome::Failed
+                };
+                let _ = self
+                    .emit_lifecycle_terminal(&agent, operation.id, outcome)
+                    .await;
+                return self.settle_failure(&agent, error).await;
+            }
         };
         if self.run.cancellation.is_cancelled() {
+            let _ = self
+                .emit_lifecycle_terminal(&agent, operation.id, CompactionTerminalOutcome::Cancelled)
+                .await;
             return self.settle_cancelled(&agent).await;
         }
         if let Err(error) = validate_messages(&replacement.messages) {
+            let _ = self
+                .emit_lifecycle_terminal(
+                    &agent,
+                    operation.id,
+                    CompactionTerminalOutcome::Rejected(CompactionRejection::InvalidStructure),
+                )
+                .await;
             return self.settle_failure(&agent, error).await;
+        }
+
+        if let Err(error) = self
+            .run
+            .emit(
+                &agent,
+                AgentEventKind::CompactionLifecycle {
+                    record: CompactionLifecycleRecord::ProviderUsageObserved {
+                        id: operation.id,
+                        usage: replacement.usage.clone(),
+                        request_observation: replacement.request_observation.clone(),
+                        request: replacement.request_layout.map(|layout| {
+                            CompactorRequestObservation {
+                                layout,
+                                provider_context_bytes: None,
+                                tool_count: None,
+                                tools_execution_prohibited: true,
+                                source_is_active_context_prefix: replacement
+                                    .source_is_active_context_prefix,
+                            }
+                        }),
+                    },
+                },
+            )
+            .await
+        {
+            return self.settle_emit_failure(error);
+        }
+
+        if let Err(error) = self
+            .run
+            .emit(
+                &agent,
+                AgentEventKind::CompactionLifecycle {
+                    record: CompactionLifecycleRecord::ReplacementProposed {
+                        id: operation.id,
+                        proposal: CompactionProposalObservation {
+                            replacement_message_count: replacement.messages.len(),
+                            replacement_bytes: messages_bytes(&replacement.messages),
+                            estimated_context_tokens_after: None,
+                            headroom_tokens: None,
+                            structural_validation_passed: true,
+                            retained_suffix_exact: true,
+                            source_generation_matches: context_generation_matches(
+                                &agent,
+                                source_history_revision,
+                            ),
+                        },
+                    },
+                },
+            )
+            .await
+        {
+            return self.settle_emit_failure(error);
         }
 
         let retained_message_count = replacement.messages.len();
@@ -401,12 +968,40 @@ impl CompactionHandle {
             &agent,
             self.id(),
             &self.run.cancellation,
+            source_history_revision,
             replacement.messages,
         ) {
             return match error {
-                CoreError::Cancelled => self.settle_cancelled(&agent).await,
+                CoreError::Cancelled => {
+                    let _ = self
+                        .emit_lifecycle_terminal(
+                            &agent,
+                            operation.id,
+                            CompactionTerminalOutcome::Cancelled,
+                        )
+                        .await;
+                    self.settle_cancelled(&agent).await
+                }
+                CoreError::Compaction(error @ CompactionError::StaleSource { .. }) => {
+                    let _ = self
+                        .emit_lifecycle_terminal(
+                            &agent,
+                            operation.id,
+                            CompactionTerminalOutcome::Rejected(
+                                CompactionRejection::StaleSourceGeneration,
+                            ),
+                        )
+                        .await;
+                    self.settle_failure(&agent, error).await
+                }
                 error => self.settle_emit_failure(error),
             };
+        }
+        if let Err(error) = self
+            .emit_lifecycle_terminal(&agent, operation.id, CompactionTerminalOutcome::Committed)
+            .await
+        {
+            return self.settle_emit_failure(error);
         }
         if let Err(error) = self
             .run
@@ -436,6 +1031,23 @@ impl CompactionHandle {
             return self.settle_emit_failure(error);
         }
         self.run.succeed(StopReason::Stop)
+    }
+
+    async fn emit_lifecycle_terminal(
+        &self,
+        agent: &AgentInner,
+        id: CompactionId,
+        outcome: CompactionTerminalOutcome,
+    ) -> Result<(), CoreError> {
+        self.run
+            .emit(
+                agent,
+                AgentEventKind::CompactionLifecycle {
+                    record: CompactionLifecycleRecord::Terminal { id, outcome },
+                },
+            )
+            .await
+            .map(|_| ())
     }
 
     async fn settle_failure(
@@ -568,6 +1180,7 @@ pub(crate) fn snapshot_context(agent: &AgentInner) -> CompactionContext {
         system_prompt: state.system_prompt.clone(),
         model: state.model.clone(),
         messages: state.messages.clone(),
+        source_history_revision: state.history_revision,
         host_messages: state.host_messages.clone(),
         provider_context: None,
     }
@@ -577,6 +1190,7 @@ pub(crate) fn commit_replacement(
     agent: &AgentInner,
     run_id: crate::state::RunId,
     cancellation: &CancellationToken,
+    expected_history_revision: u64,
     replacement: Vec<AgentMessage>,
 ) -> Result<(), CoreError> {
     let mut state = agent.state.lock().expect("agent state mutex poisoned");
@@ -585,6 +1199,12 @@ pub(crate) fn commit_replacement(
     }
     if !matches!(state.phase, AgentPhase::Running(id) if id == run_id) {
         return Err(CoreError::Cancelled);
+    }
+    if state.history_revision != expected_history_revision {
+        return Err(CoreError::Compaction(CompactionError::StaleSource {
+            expected_revision: expected_history_revision,
+            actual_revision: state.history_revision,
+        }));
     }
     state.replace_messages(replacement);
     Ok(())
@@ -670,5 +1290,168 @@ fn message_id(message: &AgentMessage) -> MessageId {
         AgentMessage::User { id, .. }
         | AgentMessage::Assistant { id, .. }
         | AgentMessage::ToolResult { id, .. } => *id,
+    }
+}
+
+/// Construct privacy-safe source facts without retaining prompt or tool-result content.
+pub(crate) fn observe_source(
+    canonical: &[AgentMessage],
+    source: &[AgentMessage],
+    retained: &[AgentMessage],
+    split_turn_prefix: &[AgentMessage],
+) -> CompactionSourceObservation {
+    CompactionSourceObservation {
+        canonical_message_count: canonical.len(),
+        canonical_message_bytes: messages_bytes(canonical),
+        source_message_ids: source.iter().map(message_id).collect(),
+        retained_message_ids: retained.iter().map(message_id).collect(),
+        split_turn_prefix_ids: split_turn_prefix.iter().map(message_id).collect(),
+        retained_suffix_bytes: messages_bytes(retained),
+        tool_result_bytes: tool_result_bytes(source),
+    }
+}
+
+/// Approximate canonical message bytes without serializing through a provider projection.
+pub(crate) fn messages_bytes(messages: &[AgentMessage]) -> usize {
+    messages.iter().fold(0_usize, |total, message| {
+        let body = match message {
+            AgentMessage::User { content, .. } => content.len(),
+            AgentMessage::Assistant {
+                content,
+                tool_calls,
+                error_message,
+                ..
+            } => content
+                .len()
+                .saturating_add(error_message.as_ref().map_or(0, String::len))
+                .saturating_add(
+                    tool_calls
+                        .iter()
+                        .map(|call| {
+                            call.id
+                                .to_string()
+                                .len()
+                                .saturating_add(call.name.len())
+                                .saturating_add(call.arguments.as_str().len())
+                        })
+                        .sum::<usize>(),
+                ),
+            AgentMessage::ToolResult {
+                tool_call_id,
+                tool_name,
+                content,
+                details,
+                ..
+            } => tool_call_id
+                .to_string()
+                .len()
+                .saturating_add(tool_name.len())
+                .saturating_add(content.len())
+                .saturating_add(details.as_ref().map_or(0, |details| details.as_str().len())),
+        };
+        total.saturating_add(body).saturating_add(16)
+    })
+}
+
+fn tool_result_bytes(messages: &[AgentMessage]) -> usize {
+    messages
+        .iter()
+        .fold(0_usize, |total, message| match message {
+            AgentMessage::ToolResult {
+                content, details, ..
+            } => total
+                .saturating_add(content.len())
+                .saturating_add(details.as_ref().map_or(0, |details| details.as_str().len())),
+            _ => total,
+        })
+}
+
+fn context_generation_matches(agent: &AgentInner, expected: u64) -> bool {
+    agent
+        .state
+        .lock()
+        .expect("agent state mutex poisoned")
+        .history_revision
+        == expected
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn held_out_strategy_descriptors_are_versioned_and_non_default() {
+        let tool_free = CompactionStrategy::tool_free_replay_summary_v1(10);
+        let structured = CompactionStrategy::structured_checkpoint_v1(11);
+        let incremental = CompactionStrategy::incremental_checkpoint_update_v1(12);
+        assert_eq!(tool_free.id, TOOL_FREE_REPLAY_SUMMARY_V1);
+        assert_eq!(tool_free.schema_version, 1);
+        assert_eq!(
+            tool_free.request_layout,
+            CompactionRequestLayout::ExactReplay
+        );
+        assert_eq!(structured.id, STRUCTURED_CHECKPOINT_V1);
+        assert_eq!(structured.schema_version, 1);
+        assert_eq!(
+            structured.request_layout,
+            CompactionRequestLayout::StandaloneFallback
+        );
+        assert_eq!(incremental.id, INCREMENTAL_CHECKPOINT_UPDATE_V1);
+        assert_eq!(
+            incremental.request_layout,
+            CompactionRequestLayout::IncrementalCheckpointUpdate
+        );
+        assert_ne!(structured.id, CACHE_REPLAY_SUMMARY_V0);
+        assert_ne!(incremental.id, CACHE_REPLAY_SUMMARY_V0);
+        assert_ne!(tool_free.id, CACHE_REPLAY_SUMMARY_V0);
+    }
+
+    #[test]
+    fn stale_generation_cannot_replace_newer_canonical_history() {
+        let agent = Agent::builder().build();
+        let run_id = crate::state::RunId(7);
+        {
+            let mut state = agent
+                .inner
+                .state
+                .lock()
+                .expect("fixture state mutex poisoned");
+            state.phase = AgentPhase::Running(run_id);
+            let id = state.allocate_message_id();
+            state.append_message(AgentMessage::User {
+                id,
+                content: "source".into(),
+            });
+        }
+        let source = snapshot_context(&agent.inner);
+        {
+            let mut state = agent
+                .inner
+                .state
+                .lock()
+                .expect("fixture state mutex poisoned");
+            let id = state.allocate_message_id();
+            state.append_message(AgentMessage::User {
+                id,
+                content: "newer".into(),
+            });
+        }
+
+        let error = commit_replacement(
+            &agent.inner,
+            run_id,
+            &CancellationToken::new(),
+            source.source_history_revision,
+            source.messages,
+        )
+        .expect_err("a stale snapshot must never overwrite newer history");
+        assert!(matches!(
+            error,
+            CoreError::Compaction(CompactionError::StaleSource {
+                expected_revision: 1,
+                actual_revision: 2,
+            })
+        ));
+        assert_eq!(agent.snapshot().messages.len(), 2);
     }
 }

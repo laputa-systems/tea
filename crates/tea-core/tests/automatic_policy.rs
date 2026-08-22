@@ -2,8 +2,8 @@ use std::num::NonZeroU64;
 use std::sync::{Arc, Mutex};
 use tea_core::compaction::{
     AutomaticCompactionPolicy, AutomaticCompactionReason, AutomaticCompactionRequest,
-    CompactionContext, CompactionError, CompactionFuture, CompactionResult, Compactor,
-    ContextBudgetSource, OverflowRecovery,
+    CompactionContext, CompactionError, CompactionFuture, CompactionRejection, CompactionResult,
+    CompactionTerminalOutcome, Compactor, ContextBudgetSource, OverflowRecovery,
 };
 use tea_core::scheduler::{
     CancellationToken, ModelFuture, ModelProvider, ModelRequest, ModelStream, ModelStreamEvent,
@@ -114,6 +114,16 @@ struct RecordingCompactor {
 
 struct CancellingCompactor;
 
+enum RejectionMode {
+    NonShrinking,
+    EmptyCheckpoint,
+    InsufficientHeadroom,
+}
+
+struct RejectionCompactor {
+    mode: RejectionMode,
+}
+
 impl Compactor for CancellingCompactor {
     fn compact<'a>(
         &'a self,
@@ -135,6 +145,48 @@ impl Compactor for CancellingCompactor {
         Box::pin(std::future::ready(Ok(CompactionResult::new(
             context.messages,
         ))))
+    }
+}
+
+impl Compactor for RejectionCompactor {
+    fn compact<'a>(
+        &'a self,
+        context: CompactionContext,
+        _cancellation: CancellationToken,
+    ) -> CompactionFuture<'a> {
+        Box::pin(std::future::ready(Ok(CompactionResult::new(
+            context.messages,
+        ))))
+    }
+
+    fn compact_automatic<'a>(
+        &'a self,
+        context: CompactionContext,
+        _request: AutomaticCompactionRequest,
+        _cancellation: CancellationToken,
+    ) -> CompactionFuture<'a> {
+        let messages = match self.mode {
+            RejectionMode::NonShrinking
+            | RejectionMode::EmptyCheckpoint
+            | RejectionMode::InsufficientHeadroom => context
+                .messages
+                .first()
+                .cloned()
+                .map(|message| match message {
+                    AgentMessage::User { id, .. } => AgentMessage::User {
+                        id,
+                        content: match self.mode {
+                            RejectionMode::NonShrinking => "x".repeat(1_000),
+                            RejectionMode::EmptyCheckpoint => "   ".into(),
+                            RejectionMode::InsufficientHeadroom => "C".into(),
+                        },
+                    },
+                    message => message,
+                })
+                .into_iter()
+                .collect(),
+        };
+        Box::pin(std::future::ready(Ok(CompactionResult::new(messages))))
     }
 }
 
@@ -188,7 +240,14 @@ impl Compactor for RecordingCompactor {
             CompactorMode::Reduce => {
                 let mut messages = Vec::new();
                 if let Some(first) = context.messages.first() {
-                    messages.push(first.clone());
+                    let checkpoint = match first {
+                        AgentMessage::User { id, .. } => AgentMessage::User {
+                            id: *id,
+                            content: "C".into(),
+                        },
+                        message => message.clone(),
+                    };
+                    messages.push(checkpoint);
                 }
                 messages.extend(request.retained_messages);
                 Box::pin(std::future::ready(Ok(CompactionResult::new(messages))))
@@ -208,6 +267,7 @@ fn policy(
             NonZeroU64::new(context_tokens).expect("non-zero fixture budget"),
         ),
         reserved_tokens: 0,
+        minimum_headroom_tokens: 1,
         recent_tokens,
         overflow_recovery,
         max_compactions_per_run: 2,
@@ -620,4 +680,71 @@ fn cancelled_automatic_compaction_leaves_the_pre_transaction_transcript_unchange
         Ok::<(), CoreError>(())
     })
     .expect("cancelled compaction is transactional");
+}
+
+#[test]
+fn automatic_rejection_gates_are_typed_and_non_mutating() {
+    smol::block_on(async {
+        let cases = [
+            (
+                RejectionMode::NonShrinking,
+                policy(90, 0, OverflowRecovery::Disabled),
+                CompactionRejection::NonShrinkingReplacement,
+            ),
+            (
+                RejectionMode::EmptyCheckpoint,
+                policy(90, 0, OverflowRecovery::Disabled),
+                CompactionRejection::EmptyCheckpoint,
+            ),
+            (
+                RejectionMode::InsufficientHeadroom,
+                AutomaticCompactionPolicy {
+                    minimum_headroom_tokens: 99,
+                    ..policy(100, 0, OverflowRecovery::Disabled)
+                },
+                CompactionRejection::InsufficientHeadroom,
+            ),
+        ];
+        for (mode, configured_policy, expected) in cases {
+            let order = Arc::new(Mutex::new(Vec::new()));
+            let provider = Arc::new(RecordingProvider::new(
+                vec![ModelStream {
+                    events: vec![
+                        ModelStreamEvent::Usage(Usage {
+                            input_tokens: Some(100),
+                            ..Usage::default()
+                        }),
+                        ModelStreamEvent::ToolCall(tool_call("gate-rejection")),
+                        ModelStreamEvent::End(StopReason::ToolUse),
+                    ],
+                }],
+                Arc::clone(&order),
+            ));
+            let agent = Agent::builder()
+                .model_provider(provider)
+                .tool(Arc::new(OutputTool {
+                    outputs: Mutex::new(vec!["x".repeat(300)]),
+                }))
+                .compactor(Arc::new(RejectionCompactor { mode }))
+                .automatic_compaction(configured_policy)?
+                .build();
+            let run = agent.start_prompt("start")?;
+            assert!(matches!(
+                run.drive().await,
+                Err(CoreError::AutomaticCompaction { .. })
+            ));
+            assert!(run.events().iter().any(|event| matches!(
+                event.kind,
+                tea_core::AgentEventKind::CompactionLifecycle {
+                    record: tea_core::CompactionLifecycleRecord::Terminal {
+                        outcome: CompactionTerminalOutcome::Rejected(rejection),
+                        ..
+                    }
+                } if rejection == expected
+            )));
+            assert!(matches!(agent.snapshot().messages.last(), Some(AgentMessage::ToolResult { content, .. }) if content.len() == 300));
+        }
+        Ok::<(), CoreError>(())
+    })
+    .expect("rejection gates preserve the transaction source");
 }

@@ -171,7 +171,9 @@ impl TerminalGuard {
         let size = match self.size() {
             Ok(size) => size,
             Err(error) => {
-                let _ = self.write_mode_sequences(false).and_then(|()| self.flush_io());
+                let _ = self
+                    .write_mode_sequences(false)
+                    .and_then(|()| self.flush_io());
                 let _ = tcsetattr(&self.input, OptionalActions::Now, &original);
                 return Err(error);
             }
@@ -189,7 +191,9 @@ impl TerminalGuard {
         if !self.active {
             return Ok(());
         }
-        let command_result = self.write_mode_sequences(false).and_then(|()| self.flush_io());
+        let command_result = self
+            .write_mode_sequences(false)
+            .and_then(|()| self.flush_io());
         let raw_result = self
             .original_termios
             .take()
@@ -221,7 +225,10 @@ impl TerminalGuard {
     }
 
     /// Poll for a synchronous terminal input event.
-    pub fn poll_event(&mut self, timeout: Duration) -> Result<Option<TerminalEvent>, TerminalError> {
+    pub fn poll_event(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<Option<TerminalEvent>, TerminalError> {
         if !self.active {
             return Err(TerminalError::Inactive);
         }
@@ -231,9 +238,10 @@ impl TerminalGuard {
         }
 
         let now = Instant::now();
-        let wait = self.decoder.timeout_until_escape(now).map_or(timeout, |remaining| {
-            remaining.min(timeout)
-        });
+        let wait = self
+            .decoder
+            .timeout_until_escape(now)
+            .map_or(timeout, |remaining| remaining.min(timeout));
         let timespec = duration_to_timespec(wait);
         let ready = {
             let mut fds = [PollFd::new(&self.input, PollFlags::IN)];
@@ -389,7 +397,9 @@ impl InputDecoder {
                 let text = self.take(end);
                 self.take(PASTE_END.len());
                 self.paste = false;
-                return Some(TerminalEvent::Paste(String::from_utf8_lossy(&text).into_owned()));
+                return Some(TerminalEvent::Paste(
+                    String::from_utf8_lossy(&text).into_owned(),
+                ));
             }
             return None;
         }
@@ -562,7 +572,12 @@ impl InputDecoder {
 
     fn starts_with(&self, expected: &[u8]) -> bool {
         self.bytes.len() >= expected.len()
-            && self.bytes.iter().take(expected.len()).copied().eq(expected.iter().copied())
+            && self
+                .bytes
+                .iter()
+                .take(expected.len())
+                .copied()
+                .eq(expected.iter().copied())
     }
 
     fn take(&mut self, count: usize) -> Vec<u8> {
@@ -604,10 +619,19 @@ mod tests {
         let mut decoder = InputDecoder::default();
         decoder.push(b"a\x1b[A\x7f\r\x03");
         decoder.push("é".as_bytes());
-        assert_eq!(decoder.next_event(Instant::now()), Some(key(KeyCode::Char('a'))));
+        assert_eq!(
+            decoder.next_event(Instant::now()),
+            Some(key(KeyCode::Char('a')))
+        );
         assert_eq!(decoder.next_event(Instant::now()), Some(key(KeyCode::Up)));
-        assert_eq!(decoder.next_event(Instant::now()), Some(key(KeyCode::Backspace)));
-        assert_eq!(decoder.next_event(Instant::now()), Some(key(KeyCode::Enter)));
+        assert_eq!(
+            decoder.next_event(Instant::now()),
+            Some(key(KeyCode::Backspace))
+        );
+        assert_eq!(
+            decoder.next_event(Instant::now()),
+            Some(key(KeyCode::Enter))
+        );
         assert_eq!(
             decoder.next_event(Instant::now()),
             Some(TerminalEvent::Key(KeyEvent {
@@ -616,7 +640,10 @@ mod tests {
                 kind: KeyEventKind::Press,
             }))
         );
-        assert_eq!(decoder.next_event(Instant::now()), Some(key(KeyCode::Char('é'))));
+        assert_eq!(
+            decoder.next_event(Instant::now()),
+            Some(key(KeyCode::Char('é')))
+        );
     }
 
     #[test]

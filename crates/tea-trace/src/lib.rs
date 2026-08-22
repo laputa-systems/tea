@@ -23,8 +23,9 @@ pub mod sink;
 
 pub use encoding::{CborSink, JsonLinesSink};
 pub use event::{
-    EndReason, EpisodeEnd, EpisodeHeader, ModelTurn, TRACE_SCHEMA_VERSION, Tool, ToolExecution,
-    TraceEvent, TraceEventKind, Turn, TurnIndex,
+    COMPACTION_TRACE_SCHEMA_VERSION, Compaction, CompactionStage, EndReason, EpisodeEnd,
+    EpisodeHeader, ModelTurn, TRACE_SCHEMA_VERSION, Tool, ToolExecution, TraceEvent,
+    TraceEventKind, Turn, TurnIndex,
 };
 pub use redaction::{NoRedaction, RedactingSink, Redactor};
 pub use sink::{IsolatedSink, NoopSink, TraceSink};

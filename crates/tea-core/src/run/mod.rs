@@ -137,15 +137,24 @@ impl ContextEstimator {
 
     fn estimate(&self, agent: &AgentInner) -> u64 {
         let state = agent.state.lock().expect("agent state mutex poisoned");
+        let raw_canonical_estimate = estimate_messages_tokens(&state.messages);
         match self.last_valid_input {
             Some((input_tokens, source_message_count))
                 if source_message_count <= state.messages.len() =>
             {
-                input_tokens.saturating_add(estimate_messages_tokens(
-                    &state.messages[source_message_count..],
-                ))
+                // A provider usage checkpoint can be lower than the raw
+                // canonical estimate when a provider omits system/tool input,
+                // normalizes a request, or reports a partial usage shape.
+                // Never let that lower report suppress an explicit host
+                // capacity policy: retain the conservative maximum until a
+                // provider supplies a complete, trusted accounting contract.
+                input_tokens
+                    .saturating_add(estimate_messages_tokens(
+                        &state.messages[source_message_count..],
+                    ))
+                    .max(raw_canonical_estimate)
             }
-            _ => estimate_messages_tokens(&state.messages),
+            _ => raw_canonical_estimate,
         }
     }
 
@@ -281,7 +290,7 @@ impl RunHandle {
             };
             state.partial_response = None;
             state.pending_tool_calls.clear();
-            state.messages.push(message.clone());
+            state.append_message(message.clone());
             message
         };
         let turn_id = self.snapshot().turn_id.unwrap_or(TurnId(1));
@@ -513,7 +522,7 @@ impl RunHandle {
                     // before passing it to the transactional compactor.
                     {
                         let mut state = agent.state.lock().expect("agent state mutex poisoned");
-                        state.messages.truncate(request_message_count);
+                        state.truncate_messages(request_message_count);
                         state.partial_response = None;
                         state.is_streaming = false;
                     }
@@ -825,12 +834,63 @@ impl RunHandle {
         )
         .await?;
 
+        // Snapshot before the compactor yields. This generation is the CAS
+        // precondition for the later replacement commit.
+        let mut context = crate::compaction::snapshot_context(agent);
+        let (prefix_messages, retained_messages, split_turn_prefix) =
+            automatic_compaction_split(&context.messages, policy.recent_tokens);
+        let mut source_messages = prefix_messages.clone();
+        source_messages.extend(split_turn_prefix.iter().cloned());
+        let overflow_retry_ordinal = retry_provider_request.then(|| {
+            self.policy
+                .lock()
+                .expect("run policy mutex poisoned")
+                .overflow_retries
+        });
+
         let Some(compactor) = agent
             .compactor
             .read()
             .expect("agent compactor lock poisoned")
             .clone()
         else {
+            let operation = automatic_operation(
+                self.id(),
+                count,
+                reason,
+                retry_provider_request,
+                overflow_retry_ordinal,
+                context.source_history_revision,
+                crate::compaction::CompactionStrategy::caller_supplied(),
+            );
+            self.emit_compaction_lifecycle(
+                agent,
+                crate::compaction::CompactionLifecycleRecord::Started {
+                    operation: operation.clone(),
+                },
+            )
+            .await?;
+            self.emit_compaction_lifecycle(
+                agent,
+                crate::compaction::CompactionLifecycleRecord::SourceSelected {
+                    id: operation.id,
+                    source: crate::compaction::observe_source(
+                        &context.messages,
+                        &source_messages,
+                        &retained_messages,
+                        &split_turn_prefix,
+                    ),
+                },
+            )
+            .await?;
+            self.emit_compaction_lifecycle(
+                agent,
+                crate::compaction::CompactionLifecycleRecord::Terminal {
+                    id: operation.id,
+                    outcome: crate::compaction::CompactionTerminalOutcome::Unavailable,
+                },
+            )
+            .await?;
             self.emit(
                 agent,
                 AgentEventKind::AutomaticCompactionEnd {
@@ -842,12 +902,35 @@ impl RunHandle {
             .await?;
             return Err(CoreError::AutomaticCompactionUnavailable { reason });
         };
-
-        let mut context = crate::compaction::snapshot_context(agent);
-        let (prefix_messages, retained_messages, split_turn_prefix) =
-            automatic_compaction_split(&context.messages, policy.recent_tokens);
-        let mut source_messages = prefix_messages.clone();
-        source_messages.extend(split_turn_prefix.iter().cloned());
+        let operation = automatic_operation(
+            self.id(),
+            count,
+            reason,
+            retry_provider_request,
+            overflow_retry_ordinal,
+            context.source_history_revision,
+            compactor.strategy(),
+        );
+        self.emit_compaction_lifecycle(
+            agent,
+            crate::compaction::CompactionLifecycleRecord::Started {
+                operation: operation.clone(),
+            },
+        )
+        .await?;
+        self.emit_compaction_lifecycle(
+            agent,
+            crate::compaction::CompactionLifecycleRecord::SourceSelected {
+                id: operation.id,
+                source: crate::compaction::observe_source(
+                    &context.messages,
+                    &source_messages,
+                    &retained_messages,
+                    &split_turn_prefix,
+                ),
+            },
+        )
+        .await?;
         let provider_context = async {
             let source_provider_context = self
                 .build_provider_context(
@@ -892,6 +975,14 @@ impl RunHandle {
                         },
                     )
                     .await?;
+                    self.emit_compaction_lifecycle(
+                        agent,
+                        crate::compaction::CompactionLifecycleRecord::Terminal {
+                            id: operation.id,
+                            outcome: crate::compaction::CompactionTerminalOutcome::Cancelled,
+                        },
+                    )
+                    .await?;
                     return Err(CoreError::Cancelled);
                 }
                 let message = crate::tool::truncate_middle(&error.to_string(), 1024);
@@ -906,9 +997,40 @@ impl RunHandle {
                     },
                 )
                 .await?;
+                self.emit_compaction_lifecycle(
+                    agent,
+                    crate::compaction::CompactionLifecycleRecord::Terminal {
+                        id: operation.id,
+                        outcome: crate::compaction::CompactionTerminalOutcome::Failed,
+                    },
+                )
+                .await?;
                 return Err(CoreError::AutomaticCompaction { reason, message });
             }
         };
+        let request_layout = if operation.strategy.request_layout
+            == crate::compaction::CompactionRequestLayout::ExactReplay
+        {
+            crate::compaction::CompactionRequestLayout::ExactReplay
+        } else {
+            crate::compaction::CompactionRequestLayout::Unobserved
+        };
+        self.emit_compaction_lifecycle(
+            agent,
+            crate::compaction::CompactionLifecycleRecord::RequestPrepared {
+                id: operation.id,
+                request: crate::compaction::CompactorRequestObservation {
+                    layout: request_layout,
+                    provider_context_bytes: Some(provider_context.context.len()),
+                    tool_count: Some(provider_context.tools.len()),
+                    tools_execution_prohibited: true,
+                    // Provider contexts are opaque to tea-core. A concrete
+                    // compactor may record a stronger provider-format check.
+                    source_is_active_context_prefix: None,
+                },
+            },
+        )
+        .await?;
         context.provider_context = Some(provider_context);
         let request = crate::compaction::AutomaticCompactionRequest {
             reason,
@@ -921,6 +1043,8 @@ impl RunHandle {
             split_turn_prefix,
             retry_provider_request,
         };
+        let source_history_revision = context.source_history_revision;
+        let canonical_source_bytes = crate::compaction::messages_bytes(&context.messages);
         let replacement = match compactor
             .compact_automatic(context, request, self.cancellation.clone())
             .await
@@ -941,8 +1065,22 @@ impl RunHandle {
                         },
                     )
                     .await?;
+                    self.emit_compaction_lifecycle(
+                        agent,
+                        crate::compaction::CompactionLifecycleRecord::Terminal {
+                            id: operation.id,
+                            outcome: crate::compaction::CompactionTerminalOutcome::Cancelled,
+                        },
+                    )
+                    .await?;
                     return Err(CoreError::Cancelled);
                 }
+                let terminal_outcome =
+                    if matches!(error, crate::compaction::CompactionError::TimedOut { .. }) {
+                        crate::compaction::CompactionTerminalOutcome::TimedOut
+                    } else {
+                        crate::compaction::CompactionTerminalOutcome::Failed
+                    };
                 let message = crate::tool::truncate_middle(&error.to_string(), 1024);
                 self.emit(
                     agent,
@@ -952,6 +1090,14 @@ impl RunHandle {
                         outcome: AutomaticCompactionOutcome::Failed {
                             message: message.clone(),
                         },
+                    },
+                )
+                .await?;
+                self.emit_compaction_lifecycle(
+                    agent,
+                    crate::compaction::CompactionLifecycleRecord::Terminal {
+                        id: operation.id,
+                        outcome: terminal_outcome,
                     },
                 )
                 .await?;
@@ -972,8 +1118,35 @@ impl RunHandle {
                 },
             )
             .await?;
+            self.emit_compaction_lifecycle(
+                agent,
+                crate::compaction::CompactionLifecycleRecord::Terminal {
+                    id: operation.id,
+                    outcome: crate::compaction::CompactionTerminalOutcome::Cancelled,
+                },
+            )
+            .await?;
             return Err(CoreError::Cancelled);
         }
+        self.emit_compaction_lifecycle(
+            agent,
+            crate::compaction::CompactionLifecycleRecord::ProviderUsageObserved {
+                id: operation.id,
+                usage: replacement.usage.clone(),
+                request_observation: replacement.request_observation.clone(),
+                request: replacement.request_layout.map(|layout| {
+                    crate::compaction::CompactorRequestObservation {
+                        layout,
+                        provider_context_bytes: None,
+                        tool_count: None,
+                        tools_execution_prohibited: true,
+                        source_is_active_context_prefix: replacement
+                            .source_is_active_context_prefix,
+                    }
+                }),
+            },
+        )
+        .await?;
         if let Err(error) = crate::compaction::validate_messages(&replacement.messages) {
             let message = crate::tool::truncate_middle(&error.to_string(), 1024);
             self.emit(
@@ -984,6 +1157,35 @@ impl RunHandle {
                     outcome: AutomaticCompactionOutcome::Failed {
                         message: message.clone(),
                     },
+                },
+            )
+            .await?;
+            self.emit_compaction_lifecycle(
+                agent,
+                crate::compaction::CompactionLifecycleRecord::ReplacementProposed {
+                    id: operation.id,
+                    proposal: crate::compaction::CompactionProposalObservation {
+                        replacement_message_count: replacement.messages.len(),
+                        replacement_bytes: crate::compaction::messages_bytes(&replacement.messages),
+                        estimated_context_tokens_after: None,
+                        headroom_tokens: None,
+                        structural_validation_passed: false,
+                        retained_suffix_exact: false,
+                        source_generation_matches: automatic_source_generation_matches(
+                            agent,
+                            source_history_revision,
+                        ),
+                    },
+                },
+            )
+            .await?;
+            self.emit_compaction_lifecycle(
+                agent,
+                crate::compaction::CompactionLifecycleRecord::Terminal {
+                    id: operation.id,
+                    outcome: crate::compaction::CompactionTerminalOutcome::Rejected(
+                        crate::compaction::CompactionRejection::InvalidStructure,
+                    ),
                 },
             )
             .await?;
@@ -1004,15 +1206,220 @@ impl RunHandle {
                 },
             )
             .await?;
+            self.emit_compaction_lifecycle(
+                agent,
+                crate::compaction::CompactionLifecycleRecord::ReplacementProposed {
+                    id: operation.id,
+                    proposal: crate::compaction::CompactionProposalObservation {
+                        replacement_message_count: replacement.messages.len(),
+                        replacement_bytes: crate::compaction::messages_bytes(&replacement.messages),
+                        estimated_context_tokens_after: None,
+                        headroom_tokens: None,
+                        structural_validation_passed: true,
+                        retained_suffix_exact: false,
+                        source_generation_matches: automatic_source_generation_matches(
+                            agent,
+                            source_history_revision,
+                        ),
+                    },
+                },
+            )
+            .await?;
+            self.emit_compaction_lifecycle(
+                agent,
+                crate::compaction::CompactionLifecycleRecord::Terminal {
+                    id: operation.id,
+                    outcome: crate::compaction::CompactionTerminalOutcome::Rejected(
+                        crate::compaction::CompactionRejection::RetainedSuffixMismatch,
+                    ),
+                },
+            )
+            .await?;
             return Err(CoreError::AutomaticCompaction {
                 reason,
                 message: message.into(),
             });
         }
+        if let Some(rejection) =
+            automatic_checkpoint_rejection(&replacement.messages, retained_messages.len())
+        {
+            let message = match rejection {
+                crate::compaction::CompactionRejection::EmptyCheckpoint => {
+                    "automatic compactor returned an empty checkpoint"
+                }
+                crate::compaction::CompactionRejection::UnexpectedToolCall => {
+                    "automatic compactor checkpoint contained a tool call or result"
+                }
+                _ => unreachable!("checkpoint validation returns only checkpoint rejections"),
+            };
+            self.emit(
+                agent,
+                AgentEventKind::AutomaticCompactionEnd {
+                    reason,
+                    retry_provider_request,
+                    outcome: AutomaticCompactionOutcome::Failed {
+                        message: message.into(),
+                    },
+                },
+            )
+            .await?;
+            self.emit_compaction_lifecycle(
+                agent,
+                crate::compaction::CompactionLifecycleRecord::ReplacementProposed {
+                    id: operation.id,
+                    proposal: crate::compaction::CompactionProposalObservation {
+                        replacement_message_count: replacement.messages.len(),
+                        replacement_bytes: crate::compaction::messages_bytes(&replacement.messages),
+                        estimated_context_tokens_after: None,
+                        headroom_tokens: None,
+                        structural_validation_passed: true,
+                        retained_suffix_exact: true,
+                        source_generation_matches: automatic_source_generation_matches(
+                            agent,
+                            source_history_revision,
+                        ),
+                    },
+                },
+            )
+            .await?;
+            self.emit_compaction_lifecycle(
+                agent,
+                crate::compaction::CompactionLifecycleRecord::Terminal {
+                    id: operation.id,
+                    outcome: crate::compaction::CompactionTerminalOutcome::Rejected(rejection),
+                },
+            )
+            .await?;
+            return Err(CoreError::AutomaticCompaction {
+                reason,
+                message: message.into(),
+            });
+        }
+        let replacement_bytes = crate::compaction::messages_bytes(&replacement.messages);
+        if replacement_bytes >= canonical_source_bytes {
+            let message =
+                "automatic compactor replacement did not strictly reduce canonical history";
+            self.emit(
+                agent,
+                AgentEventKind::AutomaticCompactionEnd {
+                    reason,
+                    retry_provider_request,
+                    outcome: AutomaticCompactionOutcome::Failed {
+                        message: message.into(),
+                    },
+                },
+            )
+            .await?;
+            self.emit_compaction_lifecycle(
+                agent,
+                crate::compaction::CompactionLifecycleRecord::ReplacementProposed {
+                    id: operation.id,
+                    proposal: crate::compaction::CompactionProposalObservation {
+                        replacement_message_count: replacement.messages.len(),
+                        replacement_bytes,
+                        estimated_context_tokens_after: None,
+                        headroom_tokens: None,
+                        structural_validation_passed: true,
+                        retained_suffix_exact: true,
+                        source_generation_matches: automatic_source_generation_matches(
+                            agent,
+                            source_history_revision,
+                        ),
+                    },
+                },
+            )
+            .await?;
+            self.emit_compaction_lifecycle(
+                agent,
+                crate::compaction::CompactionLifecycleRecord::Terminal {
+                    id: operation.id,
+                    outcome: crate::compaction::CompactionTerminalOutcome::Rejected(
+                        crate::compaction::CompactionRejection::NonShrinkingReplacement,
+                    ),
+                },
+            )
+            .await?;
+            return Err(CoreError::AutomaticCompaction {
+                reason,
+                message: message.into(),
+            });
+        }
+        let estimated_replacement_tokens = estimate_messages_tokens(&replacement.messages);
+        let replacement_headroom = policy
+            .context_budget
+            .tokens()
+            .saturating_sub(estimated_replacement_tokens);
+        if replacement_headroom < policy.minimum_headroom_tokens {
+            let message = "automatic compactor replacement left insufficient working headroom";
+            self.emit(
+                agent,
+                AgentEventKind::AutomaticCompactionEnd {
+                    reason,
+                    retry_provider_request,
+                    outcome: AutomaticCompactionOutcome::Failed {
+                        message: message.into(),
+                    },
+                },
+            )
+            .await?;
+            self.emit_compaction_lifecycle(
+                agent,
+                crate::compaction::CompactionLifecycleRecord::ReplacementProposed {
+                    id: operation.id,
+                    proposal: crate::compaction::CompactionProposalObservation {
+                        replacement_message_count: replacement.messages.len(),
+                        replacement_bytes,
+                        estimated_context_tokens_after: Some(estimated_replacement_tokens),
+                        headroom_tokens: Some(replacement_headroom),
+                        structural_validation_passed: true,
+                        retained_suffix_exact: true,
+                        source_generation_matches: automatic_source_generation_matches(
+                            agent,
+                            source_history_revision,
+                        ),
+                    },
+                },
+            )
+            .await?;
+            self.emit_compaction_lifecycle(
+                agent,
+                crate::compaction::CompactionLifecycleRecord::Terminal {
+                    id: operation.id,
+                    outcome: crate::compaction::CompactionTerminalOutcome::Rejected(
+                        crate::compaction::CompactionRejection::InsufficientHeadroom,
+                    ),
+                },
+            )
+            .await?;
+            return Err(CoreError::AutomaticCompaction {
+                reason,
+                message: message.into(),
+            });
+        }
+        self.emit_compaction_lifecycle(
+            agent,
+            crate::compaction::CompactionLifecycleRecord::ReplacementProposed {
+                id: operation.id,
+                proposal: crate::compaction::CompactionProposalObservation {
+                    replacement_message_count: replacement.messages.len(),
+                    replacement_bytes,
+                    estimated_context_tokens_after: Some(estimated_replacement_tokens),
+                    headroom_tokens: Some(replacement_headroom),
+                    structural_validation_passed: true,
+                    retained_suffix_exact: true,
+                    source_generation_matches: automatic_source_generation_matches(
+                        agent,
+                        source_history_revision,
+                    ),
+                },
+            },
+        )
+        .await?;
         if let Err(error) = crate::compaction::commit_replacement(
             agent,
             self.id(),
             &self.cancellation,
+            source_history_revision,
             replacement.messages,
         ) {
             if matches!(error, CoreError::Cancelled) {
@@ -1029,9 +1436,39 @@ impl RunHandle {
                     },
                 )
                 .await?;
+                self.emit_compaction_lifecycle(
+                    agent,
+                    crate::compaction::CompactionLifecycleRecord::Terminal {
+                        id: operation.id,
+                        outcome: crate::compaction::CompactionTerminalOutcome::Cancelled,
+                    },
+                )
+                .await?;
+            } else if matches!(
+                error,
+                CoreError::Compaction(crate::compaction::CompactionError::StaleSource { .. })
+            ) {
+                self.emit_compaction_lifecycle(
+                    agent,
+                    crate::compaction::CompactionLifecycleRecord::Terminal {
+                        id: operation.id,
+                        outcome: crate::compaction::CompactionTerminalOutcome::Rejected(
+                            crate::compaction::CompactionRejection::StaleSourceGeneration,
+                        ),
+                    },
+                )
+                .await?;
             }
             return Err(error);
         }
+        self.emit_compaction_lifecycle(
+            agent,
+            crate::compaction::CompactionLifecycleRecord::Terminal {
+                id: operation.id,
+                outcome: crate::compaction::CompactionTerminalOutcome::Committed,
+            },
+        )
+        .await?;
         estimator.reset_after_compaction();
         let estimated_tokens_after = estimator.estimate(agent);
         let still_above = estimated_tokens_after >= policy.threshold_tokens();
@@ -1092,6 +1529,16 @@ impl RunHandle {
         )
         .await?;
         Ok(())
+    }
+
+    async fn emit_compaction_lifecycle(
+        &self,
+        agent: &AgentInner,
+        record: crate::compaction::CompactionLifecycleRecord,
+    ) -> Result<(), CoreError> {
+        self.emit(agent, AgentEventKind::CompactionLifecycle { record })
+            .await
+            .map(|_| ())
     }
 
     fn current_context(
@@ -1159,7 +1606,7 @@ impl RunHandle {
                     id: state.allocate_message_id(),
                     content: queued_message.content,
                 };
-                state.messages.push(message.clone());
+                state.append_message(message.clone());
                 message
             };
             context.messages.push(message.clone());
@@ -1217,13 +1664,23 @@ impl RunHandle {
                 });
             }
             match item {
+                ModelStreamEvent::RequestObservation(observation) => {
+                    self.emit(
+                        agent,
+                        AgentEventKind::ProviderRequestObserved {
+                            turn_id,
+                            observation,
+                        },
+                    )
+                    .await?;
+                }
                 ModelStreamEvent::TextDelta(delta) => {
                     let (message, message_id, first_delta) = {
                         let mut state = agent.state.lock().expect("agent state mutex poisoned");
                         let first_delta = assistant_id.is_none();
                         let id = *assistant_id.get_or_insert_with(|| state.allocate_message_id());
                         if first_delta {
-                            state.messages.push(AgentMessage::Assistant {
+                            state.append_message(AgentMessage::Assistant {
                                 id,
                                 content: String::new(),
                                 tool_calls: Vec::new(),
@@ -1240,10 +1697,7 @@ impl RunHandle {
                             stop_reason: None,
                             error_message: None,
                         };
-                        *state
-                            .messages
-                            .last_mut()
-                            .expect("assistant message was inserted") = message.clone();
+                        state.replace_last_message(message.clone());
                         (message, id, first_delta)
                     };
                     if first_delta {
@@ -1311,12 +1765,9 @@ impl RunHandle {
             state.partial_response = None;
             state.is_streaming = false;
             if assistant_id.is_some() {
-                *state
-                    .messages
-                    .last_mut()
-                    .expect("streamed assistant message was inserted") = assistant.clone();
+                state.replace_last_message(assistant.clone());
             } else {
-                state.messages.push(assistant.clone());
+                state.append_message(assistant.clone());
             }
             assistant
         };
@@ -1440,7 +1891,7 @@ impl RunHandle {
                     stop_reason: Some(StopReason::Aborted),
                     error_message: Some("Operation aborted".into()),
                 };
-                state.messages.push(message.clone());
+                state.append_message(message.clone());
                 Some(message)
             }
         };
@@ -2033,6 +2484,85 @@ fn error_tool_result(call: &ToolCall, content: impl Into<String>) -> AgentToolRe
         is_error: true,
         failure: Some(crate::tool::ToolFailure::recoverable()),
     }
+}
+
+fn automatic_operation(
+    run_id: RunId,
+    automatic_ordinal: u32,
+    reason: crate::compaction::AutomaticCompactionReason,
+    retry_provider_request: bool,
+    overflow_retry_ordinal: Option<u32>,
+    source_history_revision: u64,
+    strategy: crate::compaction::CompactionStrategy,
+) -> crate::compaction::CompactionOperation {
+    crate::compaction::CompactionOperation {
+        id: crate::compaction::CompactionId {
+            run_id,
+            ordinal: automatic_ordinal,
+        },
+        trigger: crate::compaction::CompactionTrigger::Automatic,
+        reason: match reason {
+            crate::compaction::AutomaticCompactionReason::Threshold => {
+                crate::compaction::CompactionReason::Threshold
+            }
+            crate::compaction::AutomaticCompactionReason::Overflow => {
+                crate::compaction::CompactionReason::ProviderOverflow
+            }
+        },
+        phase: if retry_provider_request {
+            crate::compaction::CompactionPhase::BetweenModelCalls
+        } else {
+            crate::compaction::CompactionPhase::BeforeModelRequest
+        },
+        strategy,
+        source_history_revision,
+        attempt: automatic_ordinal,
+        automatic_ordinal: Some(automatic_ordinal),
+        overflow_retry_ordinal,
+        retry_provider_request,
+    }
+}
+
+fn automatic_source_generation_matches(agent: &AgentInner, expected: u64) -> bool {
+    agent
+        .state
+        .lock()
+        .expect("agent state mutex poisoned")
+        .history_revision
+        == expected
+}
+
+fn automatic_checkpoint_rejection(
+    replacement: &[AgentMessage],
+    retained_suffix_len: usize,
+) -> Option<crate::compaction::CompactionRejection> {
+    let checkpoint_len = replacement.len().saturating_sub(retained_suffix_len);
+    let checkpoint = &replacement[..checkpoint_len];
+    if checkpoint.is_empty() {
+        return Some(crate::compaction::CompactionRejection::EmptyCheckpoint);
+    }
+    let mut text_bytes = 0_usize;
+    for message in checkpoint {
+        match message {
+            AgentMessage::User { content, .. } => {
+                text_bytes = text_bytes.saturating_add(content.trim().len())
+            }
+            AgentMessage::Assistant {
+                content,
+                tool_calls,
+                ..
+            } => {
+                if !tool_calls.is_empty() {
+                    return Some(crate::compaction::CompactionRejection::UnexpectedToolCall);
+                }
+                text_bytes = text_bytes.saturating_add(content.trim().len());
+            }
+            AgentMessage::ToolResult { .. } => {
+                return Some(crate::compaction::CompactionRejection::UnexpectedToolCall);
+            }
+        }
+    }
+    (text_bytes == 0).then_some(crate::compaction::CompactionRejection::EmptyCheckpoint)
 }
 
 fn tool_error_message(error: crate::error::ToolError) -> String {

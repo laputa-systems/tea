@@ -28,7 +28,7 @@ uses the standalone summary prompt.
 Run the focused baseline with:
 
 ```bash
-cargo +nightly-2026-07-24 test -p tea-core --test cache_friendliness -- --nocapture
+rustup run nightly-2026-07-24 cargo test -p tea-core --test cache_friendliness -- --nocapture
 ```
 
 The measurement intentionally excludes provider-native envelopes and tokenizer-specific token

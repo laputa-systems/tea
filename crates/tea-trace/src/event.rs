@@ -10,8 +10,132 @@ use std::collections::BTreeMap;
 /// Version of the compact trace schema described by this crate.
 pub const TRACE_SCHEMA_VERSION: u16 = 0;
 
+/// Schema version used only by the additive, content-free compaction records.
+///
+/// Existing header, turn, tool, and episode-end records retain
+/// [`TRACE_SCHEMA_VERSION`]. Readers that only understand V0 can therefore
+/// continue to consume historical episodes unchanged and choose to ignore the
+/// new `compaction` records by their type discriminator.
+pub const COMPACTION_TRACE_SCHEMA_VERSION: u16 = 1;
+
 /// The stable, host-assigned number of a model turn within an episode.
 pub type TurnIndex = u32;
+
+/// One content-free stage in a compaction operation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Default)]
+pub enum CompactionStage {
+    /// Identity and immutable policy were allocated.
+    #[default]
+    Started,
+    /// The canonical source and retained suffix were selected.
+    SourceSelected,
+    /// A compactor request was prepared.
+    RequestPrepared,
+    /// Provider usage or its serialized request observation arrived.
+    ProviderUsageObserved,
+    /// A replacement was checked before commit.
+    ReplacementProposed,
+    /// The compaction reached one terminal outcome.
+    Terminal,
+    /// The first normal provider request after a committed replacement.
+    PostCompactionRequestObserved,
+}
+
+/// Content-free, append-only observability record for one compaction.
+///
+/// This type deliberately contains identifiers, sizes, fingerprints,
+/// counters, and classified outcomes only. It never carries a checkpoint,
+/// prompt, tool argument, tool result, or serialized request body.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct Compaction {
+    /// Stable join key shared by all stages of one operation.
+    pub compaction_id: String,
+    /// Which lifecycle stage this record captures.
+    pub stage: CompactionStage,
+    /// Manual or automatic trigger, when allocated.
+    pub trigger: Option<String>,
+    /// Concrete threshold, overflow, or user-request reason, when allocated.
+    pub reason: Option<String>,
+    /// Agent-loop phase, when allocated.
+    pub phase: Option<String>,
+    /// Versioned strategy identity, when allocated.
+    pub strategy_id: Option<String>,
+    /// Strategy schema version, when allocated.
+    pub strategy_schema_version: Option<u32>,
+    /// Model-visible request layout, when known.
+    pub request_layout: Option<String>,
+    /// Fingerprint of the model-facing strategy instruction, when supplied.
+    pub prompt_fingerprint: Option<u64>,
+    /// Canonical history generation selected for the source.
+    pub source_history_revision: Option<u64>,
+    /// Attempt count within the operation kind.
+    pub attempt: Option<u32>,
+    /// Automatic-operation ordinal in its run.
+    pub automatic_ordinal: Option<u32>,
+    /// Overflow-retry ordinal in its run.
+    pub overflow_retry_ordinal: Option<u32>,
+    /// Whether this operation will retry an interrupted provider request.
+    pub retry_provider_request: Option<bool>,
+    /// Canonical source message count.
+    pub source_message_count: Option<usize>,
+    /// Canonical source byte count.
+    pub source_message_bytes: Option<usize>,
+    /// Exact retained suffix message count.
+    pub retained_message_count: Option<usize>,
+    /// Exact retained suffix byte count.
+    pub retained_suffix_bytes: Option<usize>,
+    /// Selected source tool-result byte count.
+    pub tool_result_bytes: Option<usize>,
+    /// Prepared compactor-context bytes, when known.
+    pub compactor_context_bytes: Option<usize>,
+    /// Prepared compactor tool count, when known.
+    pub compactor_tool_count: Option<usize>,
+    /// Whether compactor tool execution was prohibited.
+    pub tools_execution_prohibited: Option<bool>,
+    /// Whether the selected source was an exact active-context prefix.
+    pub source_is_active_context_prefix: Option<bool>,
+    /// Proposed replacement message count.
+    pub replacement_message_count: Option<usize>,
+    /// Proposed replacement byte count.
+    pub replacement_bytes: Option<usize>,
+    /// Estimated context tokens after replacement, when a policy supplied a budget.
+    pub estimated_context_tokens_after: Option<u64>,
+    /// Working context headroom after replacement, when a policy supplied a budget.
+    pub headroom_tokens: Option<u64>,
+    /// Whether structural validation passed.
+    pub structural_validation_passed: Option<bool>,
+    /// Whether the retained suffix matched exactly.
+    pub retained_suffix_exact: Option<bool>,
+    /// Whether source generation still matched during proposal validation.
+    pub source_generation_matches: Option<bool>,
+    /// Provider-reported input tokens, when available.
+    pub provider_input_tokens: Option<u64>,
+    /// Provider-reported output tokens, when available.
+    pub provider_output_tokens: Option<u64>,
+    /// Provider-reported cache-read input tokens, when available.
+    pub provider_cache_read_tokens: Option<u64>,
+    /// Provider-reported cache-write input tokens, when available.
+    pub provider_cache_write_tokens: Option<u64>,
+    /// Exact adapter-serialized request bytes, when available.
+    pub serialized_request_bytes: Option<usize>,
+    /// Adapter-defined cache-domain fingerprint, when available.
+    pub cache_domain_fingerprint: Option<u64>,
+    /// One classified terminal outcome.
+    pub terminal_outcome: Option<String>,
+    /// Model turn joined to the first normal request after a committed replacement.
+    pub post_compaction_turn_index: Option<TurnIndex>,
+}
+
+impl Compaction {
+    /// Creates a content-free record for `compaction_id` and `stage`.
+    pub fn new(compaction_id: impl Into<String>, stage: CompactionStage) -> Self {
+        Self {
+            compaction_id: compaction_id.into(),
+            stage,
+            ..Self::default()
+        }
+    }
+}
 
 /// The first record in an episode.
 ///
@@ -223,6 +347,8 @@ pub enum TraceEvent {
     Turn(Turn),
     /// A tool request and result.
     Tool(Tool),
+    /// A content-free compaction lifecycle or post-compaction request record.
+    Compaction(Compaction),
     /// Must be the final record in an episode.
     EpisodeEnd(EpisodeEnd),
 }
@@ -243,6 +369,11 @@ impl TraceEvent {
         Self::Tool(tool)
     }
 
+    /// Creates a content-free compaction record.
+    pub fn compaction(compaction: Compaction) -> Self {
+        Self::Compaction(compaction)
+    }
+
     /// Creates the episode-end event.
     pub fn episode_end(end: EpisodeEnd) -> Self {
         Self::EpisodeEnd(end)
@@ -254,6 +385,7 @@ impl TraceEvent {
             Self::EpisodeHeader(_) => TraceEventKind::EpisodeHeader,
             Self::Turn(_) => TraceEventKind::Turn,
             Self::Tool(_) => TraceEventKind::Tool,
+            Self::Compaction(_) => TraceEventKind::Compaction,
             Self::EpisodeEnd(_) => TraceEventKind::EpisodeEnd,
         }
     }
@@ -282,6 +414,12 @@ impl From<Tool> for TraceEvent {
     }
 }
 
+impl From<Compaction> for TraceEvent {
+    fn from(value: Compaction) -> Self {
+        Self::Compaction(value)
+    }
+}
+
 impl From<EpisodeEnd> for TraceEvent {
     fn from(value: EpisodeEnd) -> Self {
         Self::EpisodeEnd(value)
@@ -297,6 +435,8 @@ pub enum TraceEventKind {
     Turn,
     /// Tool execution.
     Tool,
+    /// Content-free compaction lifecycle record.
+    Compaction,
     /// Episode end.
     EpisodeEnd,
 }

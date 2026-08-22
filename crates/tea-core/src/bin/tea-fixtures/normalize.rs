@@ -103,6 +103,10 @@ pub(super) fn normalize_event(
     turn_offset: u64,
 ) -> Result<JsonValue, String> {
     let (kind, data) = match &event.kind {
+        AgentEventKind::CompactionLifecycle { .. } => ("compaction_lifecycle", empty_object()),
+        AgentEventKind::ProviderRequestObserved { .. } => {
+            ("provider_request_observed", empty_object())
+        }
         AgentEventKind::CompactionStart { .. } => ("compaction_start", empty_object()),
         AgentEventKind::CompactionResult { .. } => ("compaction_result", empty_object()),
         AgentEventKind::CompactionEnd { .. } => ("compaction_end", empty_object()),

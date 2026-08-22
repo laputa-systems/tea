@@ -23,6 +23,30 @@ diagnostics. Source fixtures live under
 PYTHONDONTWRITEBYTECODE=1 python3 -m evals.quality resources --out /tmp/pi-quality-resources.json
 ```
 
+## Compaction contract gate
+
+The provider-free compaction lane runs 70 named pressure, recovery, lifecycle,
+cache-layout, and compatibility coverage rows against focused Rust tests, plus
+five independently executed continuation episodes. The episodes assert
+critical-fact survival, latest-wins obsolete-state removal, five-generation
+checkpoint behavior, exact ledger/rework classification, headroom, and next
+compaction distance. They are deterministic evaluator evidence, not a claim
+about a provider's semantic-summary skill. The lane has no network, provider,
+credential, or ambient cache dependency and writes content-free artifacts:
+
+```sh
+PYTHONDONTWRITEBYTECODE=1 python3 -m evals.quality compaction --out /tmp/tea-compaction-quality
+```
+
+The checked-in baseline guards the scenario contract, not a model-quality
+score. Replacing it requires an audit reason:
+
+```sh
+PYTHONDONTWRITEBYTECODE=1 python3 -m evals.quality compaction \
+  --out /tmp/tea-compaction-quality --update-baseline \
+  --reason "reviewed contract change"
+```
+
 The resource probe uses the Rust-only
 `rustybench::AllocProfiler` benchmark from
 `crates/tea-core/benches/quality_memory.rs`. Allocation and timing values

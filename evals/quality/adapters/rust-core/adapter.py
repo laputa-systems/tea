@@ -82,8 +82,10 @@ def run_runner(root: Path, fixture: Path) -> tuple[int, Any]:
     check_toolchain(root)
     completed = subprocess.run(
         [
+            "rustup",
+            "run",
+            TOOLCHAIN,
             "cargo",
-            f"+{TOOLCHAIN}",
             "run",
             "--quiet",
             "-p",

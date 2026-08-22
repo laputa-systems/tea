@@ -124,6 +124,8 @@ impl Args {
 
 fn event_name(event: &AgentEventKind) -> &'static str {
     match event {
+        AgentEventKind::CompactionLifecycle { .. } => "compaction_lifecycle",
+        AgentEventKind::ProviderRequestObserved { .. } => "provider_request_observed",
         AgentEventKind::CompactionStart { .. } => "compaction_start",
         AgentEventKind::CompactionResult { .. } => "compaction_result",
         AgentEventKind::CompactionEnd { .. } => "compaction_end",

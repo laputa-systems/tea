@@ -1,0 +1,90 @@
+{
+  "schema_version": "tea-compaction-continuation/v1",
+  "cases": [
+    {
+      "id": "cumulative-five-generations-latest-wins",
+      "generations": [
+        {"facts": [{"id": "goal", "value": "finish compaction", "critical": true}, {"id": "constraint.old", "value": "use old mode", "critical": true}]},
+        {"obsolete": ["constraint.old"], "facts": [{"id": "constraint.new", "value": "preserve baseline", "critical": true}]},
+        {"facts": [{"id": "decision.cache", "value": "measure, do not claim hit", "critical": true}]},
+        {"facts": [{"id": "failed.xs", "value": "tool envelope rejected", "critical": true}]},
+        {"facts": [{"id": "next", "value": "run controlled canary", "critical": true}]}
+      ],
+      "required_fact_ids": ["goal", "constraint.new", "decision.cache", "failed.xs", "next"],
+      "forbidden_fact_ids": ["constraint.old"],
+      "ledger_entries": 5,
+      "continuation": [
+        {"kind": "read", "target": "crates/tea-agent/src/app/compaction.rs", "bytes": 600, "productive": true},
+        {"kind": "edit", "target": "crates/tea-agent/src/app/compaction.rs", "productive": true},
+        {"kind": "command", "target": "cargo-test", "status": "succeeded", "productive": true}
+      ],
+      "expected": {"headroom_tokens": 4096, "requests_until_next_compaction": 7, "immediate_recompaction": false}
+    },
+    {
+      "id": "stale-decision-does-not-resurrect",
+      "generations": [
+        {"facts": [{"id": "decision.a", "value": "try approach a", "critical": true}]},
+        {"obsolete": ["decision.a"], "facts": [{"id": "decision.b", "value": "approach b accepted", "critical": true}]}
+      ],
+      "required_fact_ids": ["decision.b"],
+      "forbidden_fact_ids": ["decision.a"],
+      "ledger_entries": 2,
+      "continuation": [
+        {"kind": "read", "target": "docs/compaction.md", "bytes": 200, "productive": true},
+        {"kind": "command", "target": "quality-compaction", "status": "succeeded", "productive": true}
+      ],
+      "expected": {"headroom_tokens": 2048, "requests_until_next_compaction": 5, "immediate_recompaction": false}
+    },
+    {
+      "id": "operation-ledger-rework-classification",
+      "generations": [
+        {"facts": [{"id": "path", "value": "src/lib.rs", "critical": true}, {"id": "test", "value": "not run", "critical": true}]},
+        {"facts": [{"id": "test", "value": "failed before edit", "critical": true}]},
+        {"facts": [{"id": "test", "value": "passed after edit", "critical": true}]}
+      ],
+      "required_fact_ids": ["path", "test"],
+      "forbidden_fact_ids": [],
+      "ledger_entries": 4,
+      "continuation": [
+        {"kind": "read", "target": "src/lib.rs", "bytes": 100, "productive": true},
+        {"kind": "read", "target": "src/lib.rs", "bytes": 100},
+        {"kind": "command", "target": "cargo-test", "status": "failed"},
+        {"kind": "command", "target": "cargo-test", "status": "failed"},
+        {"kind": "edit", "target": "src/lib.rs", "productive": true},
+        {"kind": "command", "target": "cargo-test", "status": "succeeded", "productive": true},
+        {"kind": "read", "target": "src/lib.rs", "bytes": 110, "productive": true}
+      ],
+      "expected": {"headroom_tokens": 3072, "requests_until_next_compaction": 6, "immediate_recompaction": false}
+    },
+    {
+      "id": "retained-suffix-and-split-turn-continuation",
+      "generations": [
+        {"facts": [{"id": "suffix", "value": "assistant tool-call pair retained", "critical": true}, {"id": "goal", "value": "complete edit", "critical": true}]}
+      ],
+      "required_fact_ids": ["suffix", "goal"],
+      "forbidden_fact_ids": [],
+      "ledger_entries": 3,
+      "continuation": [
+        {"kind": "edit", "target": "src/feature.rs", "productive": true},
+        {"kind": "command", "target": "feature-test", "status": "succeeded", "productive": true}
+      ],
+      "expected": {"headroom_tokens": 4096, "requests_until_next_compaction": 8, "immediate_recompaction": false}
+    },
+    {
+      "id": "failed-attempt-and-verification-status",
+      "generations": [
+        {"facts": [{"id": "failed.approach", "value": "provider returned empty checkpoint", "critical": true}, {"id": "verification", "value": "offline suite passed", "critical": true}]},
+        {"facts": [{"id": "next", "value": "retry only after envelope change", "critical": true}]}
+      ],
+      "required_fact_ids": ["failed.approach", "verification", "next"],
+      "forbidden_fact_ids": [],
+      "ledger_entries": 3,
+      "continuation": [
+        {"kind": "command", "target": "provider-canary", "status": "failed"},
+        {"kind": "edit", "target": "crates/tea-core/src/provider/openrouter/response.rs", "productive": true},
+        {"kind": "command", "target": "provider-canary", "status": "succeeded", "productive": true}
+      ],
+      "expected": {"headroom_tokens": 2048, "requests_until_next_compaction": 4, "immediate_recompaction": false}
+    }
+  ]
+}

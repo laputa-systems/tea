@@ -1,6 +1,7 @@
 use std::sync::{Arc, Mutex};
 use tea_core::compaction::{
-    CompactionContext, CompactionError, CompactionFuture, CompactionResult, Compactor,
+    CompactionContext, CompactionError, CompactionFuture, CompactionLifecycleRecord,
+    CompactionResult, CompactionTerminalOutcome, Compactor,
 };
 use tea_core::event::{AgentEventKind, CompactionOutcome};
 use tea_core::scheduler::{
@@ -61,6 +62,8 @@ impl Compactor for DuplicateMessage {
 
 struct FailingCompactor;
 
+struct TimedOutCompactor;
+
 impl Compactor for FailingCompactor {
     fn compact<'a>(
         &'a self,
@@ -69,6 +72,18 @@ impl Compactor for FailingCompactor {
     ) -> CompactionFuture<'a> {
         Box::pin(std::future::ready(Err(CompactionError::failed(
             "fixture compactor failed",
+        ))))
+    }
+}
+
+impl Compactor for TimedOutCompactor {
+    fn compact<'a>(
+        &'a self,
+        _context: CompactionContext,
+        _cancellation: CancellationToken,
+    ) -> CompactionFuture<'a> {
+        Box::pin(std::future::ready(Err(CompactionError::timed_out(
+            "fixture deadline elapsed",
         ))))
     }
 }
@@ -131,6 +146,34 @@ fn compaction_replaces_context_emits_its_grammar_and_allows_reuse() {
                 outcome: CompactionOutcome::Succeeded {
                     retained_message_count: 1
                 }
+            })
+        ));
+        let lifecycle: Vec<_> = compaction
+            .events()
+            .into_iter()
+            .filter_map(|event| match event.kind {
+                AgentEventKind::CompactionLifecycle { record } => Some(record),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(lifecycle.len(), 6);
+        let ids: Vec<_> = lifecycle
+            .iter()
+            .map(|record| match record {
+                CompactionLifecycleRecord::Started { operation } => operation.id,
+                CompactionLifecycleRecord::SourceSelected { id, .. }
+                | CompactionLifecycleRecord::RequestPrepared { id, .. }
+                | CompactionLifecycleRecord::ProviderUsageObserved { id, .. }
+                | CompactionLifecycleRecord::ReplacementProposed { id, .. }
+                | CompactionLifecycleRecord::Terminal { id, .. } => *id,
+            })
+            .collect();
+        assert!(ids.iter().all(|id| *id == ids[0]));
+        assert!(matches!(
+            lifecycle.last(),
+            Some(CompactionLifecycleRecord::Terminal {
+                outcome: CompactionTerminalOutcome::Committed,
+                ..
             })
         ));
 
@@ -217,4 +260,33 @@ fn compaction_rejects_an_active_run_and_cancellation_preserves_history() {
         ));
         assert_eq!(agent.snapshot().messages, original);
     });
+}
+
+#[test]
+fn typed_compactor_timeout_preserves_history_and_lifecycle() {
+    smol::block_on(async {
+        let agent = Agent::builder()
+            .model_provider(provider_with_answers(&["answer"]))
+            .compactor(Arc::new(TimedOutCompactor))
+            .build();
+        agent.start_prompt("prompt")?.drive().await?;
+        let original = agent.snapshot().messages;
+        let compaction = agent.start_compaction()?;
+        assert!(matches!(
+            compaction.drive().await,
+            Err(CoreError::Compaction(CompactionError::TimedOut { .. }))
+        ));
+        assert_eq!(agent.snapshot().messages, original);
+        assert!(compaction.events().iter().any(|event| matches!(
+            event.kind,
+            AgentEventKind::CompactionLifecycle {
+                record: CompactionLifecycleRecord::Terminal {
+                    outcome: CompactionTerminalOutcome::TimedOut,
+                    ..
+                }
+            }
+        )));
+        Ok::<(), CoreError>(())
+    })
+    .expect("typed timeout remains transactional");
 }

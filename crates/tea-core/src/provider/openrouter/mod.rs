@@ -14,14 +14,14 @@ mod transport;
 use super::http::{stream, HttpStream, Request, StreamEvent};
 use super::retry::{retry_with_backoff, RetryableError};
 use crate::scheduler::{
-    CancellationToken, ModelEventFuture, ModelEventStream, ModelFuture, ModelProvider,
-    ModelRequest, ModelStream, ModelStreamEvent,
+    AdapterRequestObservation, CancellationToken, ModelEventFuture, ModelEventStream, ModelFuture,
+    ModelProvider, ModelRequest, ModelStream, ModelStreamEvent,
 };
 use crate::state::{StopReason, Usage};
 use accounting::{add_usage, Accounting};
 pub use accounting::{OpenRouterCostReport, OpenRouterCostSource, OpenRouterCostTurn};
 pub use config::{OpenRouterConfig, OpenRouterConfigError};
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
 #[cfg(test)]
 use std::io::Read;
@@ -164,6 +164,15 @@ impl OpenRouterEventStream {
             }
         };
         event_stream.payload_bytes = payload.len();
+        event_stream
+            .pending
+            .push_back(ModelStreamEvent::RequestObservation(
+                openrouter_request_observation(
+                    &event_stream.provider.config,
+                    &request,
+                    payload.len(),
+                ),
+            ));
         event_stream.response = Some(stream(
             Request::post(
                 event_stream.provider.config.completion_url(),
@@ -351,6 +360,61 @@ impl ModelEventStream for OpenRouterEventStream {
             self.poll_next_event(context, cancellation.clone())
         }))
     }
+}
+
+/// Return content-safe facts from the same OpenRouter payload bytes handed to
+/// transport. The payload itself is never retained in this observation.
+fn openrouter_request_observation(
+    config: &OpenRouterConfig,
+    request: &ModelRequest,
+    serialized_request_bytes: usize,
+) -> AdapterRequestObservation {
+    let mut components = BTreeMap::<String, u64>::new();
+    components.insert(
+        "adapter".into(),
+        stable_fingerprint(b"openrouter-chat-completions/v1"),
+    );
+    components.insert(
+        "output_token_limit".into(),
+        stable_fingerprint(format!("{:?}", config.max_tokens).as_bytes()),
+    );
+    components.insert(
+        "reasoning_encoding".into(),
+        stable_fingerprint(
+            payload::reasoning_effort(request.thinking_level)
+                .unwrap_or("omitted")
+                .as_bytes(),
+        ),
+    );
+    components.insert(
+        "tool_transport".into(),
+        stable_fingerprint(if request.tools.is_empty() {
+            b"no-tools"
+        } else {
+            b"function-tools-require-parameters"
+        }),
+    );
+    let mut domain_bytes = Vec::new();
+    for (name, fingerprint) in &components {
+        domain_bytes.extend_from_slice(name.as_bytes());
+        domain_bytes.push(0);
+        domain_bytes.extend_from_slice(&fingerprint.to_le_bytes());
+    }
+    AdapterRequestObservation {
+        serialized_request_bytes: Some(serialized_request_bytes),
+        cache_domain_fingerprint: Some(stable_fingerprint(&domain_bytes)),
+        cache_domain_components: components,
+        provider_request_id: None,
+    }
+}
+
+fn stable_fingerprint(bytes: &[u8]) -> u64 {
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
 }
 
 impl OpenRouterProvider {
@@ -909,6 +973,13 @@ data: [DONE]
         ))
         .expect("OpenRouter should start an event source");
 
+        assert!(matches!(
+            smol::block_on(source.next_event(cancellation.clone()))
+                .expect("request observation should arrive"),
+            Some(ModelStreamEvent::RequestObservation(observation))
+                if observation.serialized_request_bytes.is_some()
+                    && observation.cache_domain_fingerprint.is_some()
+        ));
         assert_eq!(
             smol::block_on(source.next_event(cancellation.clone()))
                 .expect("first event should arrive"),
@@ -1140,6 +1211,12 @@ data: [DONE]
     fn classifies_context_capacity_errors_for_automatic_recovery() {
         assert!(openrouter_context_overflow(
             br#"{"error":{"code":400,"message":"This model's maximum context length is 131072 tokens"}}"#
+        ));
+        // Poolside through OpenRouter omits the word `context` from its
+        // overflow diagnostic. It must still produce the typed core event so
+        // bounded automatic compaction can recover the interrupted request.
+        assert!(openrouter_context_overflow(
+            br#"{"error":{"code":400,"message":"Input length 32769 exceeds the maximum allowed input length of 32768 tokens."}}"#
         ));
         assert!(openrouter_context_overflow(
             br#"{"error":{"message":"prompt is too long"}}"#

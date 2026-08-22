@@ -16,10 +16,10 @@ use payload::local_payload;
 use response::{parse_local_response, LocalSseComplete, LocalSseDecoder};
 
 use crate::scheduler::{
-    CancellationToken, ModelEventFuture, ModelEventStream, ModelFuture, ModelProvider,
-    ModelRequest, ModelStreamEvent,
+    AdapterRequestObservation, CancellationToken, ModelEventFuture, ModelEventStream, ModelFuture,
+    ModelProvider, ModelRequest, ModelStreamEvent,
 };
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
 use std::task::{Context, Poll};
 
@@ -92,6 +92,11 @@ impl LocalEventStream {
                 return event_stream;
             }
         };
+        event_stream
+            .pending
+            .push_back(ModelStreamEvent::RequestObservation(
+                local_request_observation(&event_stream.config, payload.len()),
+            ));
         let endpoint = format!(
             "{}/chat/completions",
             event_stream.config.base_url.trim_end_matches('/')
@@ -224,6 +229,46 @@ impl LocalEventStream {
             }
         }
     }
+}
+
+fn local_request_observation(
+    config: &LocalConfig,
+    serialized_request_bytes: usize,
+) -> AdapterRequestObservation {
+    let mut components = BTreeMap::<String, u64>::new();
+    components.insert(
+        "adapter".into(),
+        stable_fingerprint(b"openai-compatible-chat/v1"),
+    );
+    components.insert(
+        "output_token_limit".into(),
+        stable_fingerprint(config.max_tokens.to_string().as_bytes()),
+    );
+    components.insert(
+        "reasoning_encoding".into(),
+        stable_fingerprint(config.enable_thinking.to_string().as_bytes()),
+    );
+    let mut domain_bytes = Vec::new();
+    for (name, fingerprint) in &components {
+        domain_bytes.extend_from_slice(name.as_bytes());
+        domain_bytes.push(0);
+        domain_bytes.extend_from_slice(&fingerprint.to_le_bytes());
+    }
+    AdapterRequestObservation {
+        serialized_request_bytes: Some(serialized_request_bytes),
+        cache_domain_fingerprint: Some(stable_fingerprint(&domain_bytes)),
+        cache_domain_components: components,
+        provider_request_id: None,
+    }
+}
+
+fn stable_fingerprint(bytes: &[u8]) -> u64 {
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
 }
 
 impl ModelEventStream for LocalEventStream {
@@ -369,6 +414,12 @@ data: [DONE]
         let mut source = smol::block_on(provider.stream(request, cancellation.clone()))
             .expect("mock local response should start");
         server.join().expect("mock server should finish");
+        assert!(matches!(
+            smol::block_on(source.next_event(cancellation.clone())),
+            Ok(Some(ModelStreamEvent::RequestObservation(observation)))
+                if observation.serialized_request_bytes.is_some()
+                    && observation.cache_domain_fingerprint.is_some()
+        ));
         assert!(
             matches!(smol::block_on(source.next_event(cancellation.clone())), Ok(Some(ModelStreamEvent::TextDelta(text))) if text == "READY")
         );
@@ -446,6 +497,11 @@ data: [DONE]
             cancellation.clone(),
         ))
         .expect("local provider should start an event source");
+        assert!(matches!(
+            smol::block_on(source.next_event(cancellation.clone())),
+            Ok(Some(ModelStreamEvent::RequestObservation(observation)))
+                if observation.serialized_request_bytes.is_some()
+        ));
         assert_eq!(
             smol::block_on(source.next_event(cancellation.clone())),
             Ok(Some(ModelStreamEvent::TextDelta("first ".into())))

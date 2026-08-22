@@ -672,7 +672,9 @@ impl Agent {
                 content,
             })
             .collect::<Vec<_>>();
-        state.messages.extend(initial_messages.iter().cloned());
+        for message in &initial_messages {
+            state.append_message(message.clone());
+        }
         state.phase = AgentPhase::Running(run_id);
         state.last_error = None;
         state.partial_response = None;

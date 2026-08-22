@@ -749,6 +749,12 @@ pub(super) fn openrouter_context_overflow(bytes: &[u8]) -> bool {
         || message.contains("too long")
         || message.contains("over limit")
         || message.contains("limit reached");
+    // Poolside through OpenRouter reports a precise input-bound diagnostic
+    // without mentioning "context". Keep this adapter-specific wording here
+    // instead of teaching the provider-neutral core to inspect remote errors.
+    let poolside_input_limit = message.contains("input length")
+        && message.contains("maximum allowed input length")
+        && message.contains("token");
     (overflow
         && message.contains("context")
         && (message.contains("length")
@@ -756,6 +762,7 @@ pub(super) fn openrouter_context_overflow(bytes: &[u8]) -> bool {
             || message.contains("window")
             || message.contains("token")
             || message.contains("capacity")))
+        || poolside_input_limit
         || message.contains("too many tokens")
         || message.contains("prompt is too long")
 }

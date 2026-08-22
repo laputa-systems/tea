@@ -39,6 +39,7 @@ For the trace-first quality gate, run:
 ```bash
 PYTHONDONTWRITEBYTECODE=1 python3 -m evals.quality fast
 PYTHONDONTWRITEBYTECODE=1 python3 -m evals.quality resources
+PYTHONDONTWRITEBYTECODE=1 python3 -m evals.quality compaction --out /tmp/tea-compaction-quality
 ```
 
 The live three-Express-task check is manual and requires explicit provider
@@ -49,6 +50,13 @@ interpretation are documented in
 For prompt-cacheability and compaction-prefix evidence, run the deterministic fixture described
 in [`docs/cache-friendliness.md`](cache-friendliness.md). Its common-prefix values are a proxy;
 provider-reported cache usage remains the authoritative hit/write measurement.
+
+The compaction matrix is the provider-free CI gate. It writes 70 content-free
+coverage reports for pressure, suffix integrity, cancellation, cache-layout,
+trace, and deterministic replay contracts, plus five independent continuation
+episodes for facts, stale-state removal, ledger/rework, and cumulative
+generations. Its baseline is updated only with an explicit audit reason; see
+[`docs/compaction.md`](compaction.md).
 
 ## Completion evidence
 
