@@ -355,9 +355,6 @@ fn compaction_layout_name(layout: crate::compaction::CompactionRequestLayout) ->
     match layout {
         crate::compaction::CompactionRequestLayout::ExactReplay => "exact_replay",
         crate::compaction::CompactionRequestLayout::StandaloneFallback => "standalone_fallback",
-        crate::compaction::CompactionRequestLayout::IncrementalCheckpointUpdate => {
-            "incremental_checkpoint_update"
-        }
         crate::compaction::CompactionRequestLayout::Unobserved => "unobserved",
     }
 }

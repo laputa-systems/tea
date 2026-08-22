@@ -10,7 +10,7 @@ use std::sync::mpsc::sync_channel;
 use std::sync::{Arc, Mutex};
 use tea_core::compaction::{
     AutomaticCompactionReason, AutomaticCompactionRequest, CompactionContext,
-    CompactionRequestLayout, Compactor, OverflowRecovery, ProviderContext,
+    Compactor, OverflowRecovery, ProviderContext,
 };
 use tea_core::scheduler::{
     CancellationToken, ModelFuture, ModelProvider, ModelRequest, ModelStream, ModelStreamEvent,
@@ -125,6 +125,12 @@ fn cli_rejects_ambiguous_and_unknown_inputs() {
         CliOptions::parse(["tea", "unexpected"].map(OsString::from)),
         Err(CliError::UnexpectedArgument(_))
     ));
+    assert!(matches!(
+        CliOptions::parse(
+            ["tea", "--compaction-strategy", "tool_free_replay_summary_v1"].map(OsString::from)
+        ),
+        Err(CliError::UnknownOption(_))
+    ));
 }
 
 #[test]
@@ -149,8 +155,6 @@ fn cli_parses_one_shot_prompt_and_thinking_level() {
             "openrouter",
             "--model",
             "poolside/laguna-xs-2.1:free",
-            "--compaction-strategy",
-            "tool_free_replay_summary_v1",
             "--local-base-url",
             "http://127.0.0.1:12345/v1",
             "--thinking",
@@ -167,10 +171,6 @@ fn cli_parses_one_shot_prompt_and_thinking_level() {
     assert_eq!(
         options.model(),
         Some(std::ffi::OsStr::new("poolside/laguna-xs-2.1:free"))
-    );
-    assert_eq!(
-        options.compaction_strategy(),
-        Some(std::ffi::OsStr::new("tool_free_replay_summary_v1"))
     );
     assert_eq!(
         options.local_base_url(),
@@ -792,180 +792,6 @@ fn cache_friendly_compaction_falls_back_when_a_transform_breaks_the_prefix() {
             .system_prompt
             .contains("You compact coding-agent conversation history"));
         assert!(!requests[0].system_prompt.contains("active system"));
-    });
-}
-
-#[test]
-fn tool_free_replay_is_a_distinct_opt_in_provider_compatibility_candidate() {
-    smol::block_on(async {
-        let model = ModelDescriptor {
-            provider: "local".into(),
-            model: tea_core::provider::local::LAGUNA_XS_2_1_MODEL.into(),
-            revision: None,
-        };
-        let requests = Arc::new(Mutex::new(Vec::new()));
-        let compactor =
-            ProviderCompactor::with_strategy(ProviderCompactionStrategy::ToolFreeReplaySummaryV1);
-        compactor.configure(
-            model.clone(),
-            Arc::new(RecordingSummaryProvider {
-                expected_model: model.clone(),
-                requests: Arc::clone(&requests),
-            }),
-        );
-        let source = r#"[{"content":"old work","role":"user"}]"#;
-        let result = compactor
-            .compact_automatic(
-                CompactionContext {
-                    version: tea_core::COMPACTION_CONTEXT_VERSION,
-                    system_prompt: String::new(),
-                    model: Some(model),
-                    messages: vec![Message::User {
-                        id: MessageId(1),
-                        content: "old work".into(),
-                    }],
-                    source_history_revision: 0,
-                    host_messages: Vec::new(),
-                    provider_context: Some(ProviderContext {
-                        system_prompt: "active system".into(),
-                        context: source.into(),
-                        active_context: Some(source.into()),
-                        tools: vec![ToolDefinition {
-                            name: "read".into(),
-                            description: "read a workspace file".into(),
-                            schema: tea_protocol::JsonValue::object([(
-                                "type",
-                                tea_protocol::JsonValue::from("object"),
-                            )]),
-                            execution_mode: ToolExecutionMode::Parallel,
-                        }],
-                    }),
-                },
-                AutomaticCompactionRequest {
-                    reason: AutomaticCompactionReason::Threshold,
-                    estimated_tokens_before: Some(30_000),
-                    context_budget_tokens: 100_000,
-                    reserved_tokens: 1_000,
-                    recent_tokens: 20_000,
-                    prefix_messages: vec![Message::User {
-                        id: MessageId(1),
-                        content: "old work".into(),
-                    }],
-                    retained_messages: Vec::new(),
-                    split_turn_prefix: Vec::new(),
-                    retry_provider_request: false,
-                },
-                CancellationToken::new(),
-            )
-            .await
-            .expect("tool-free replay succeeds");
-        assert_eq!(
-            compactor.strategy().id,
-            tea_core::TOOL_FREE_REPLAY_SUMMARY_V1
-        );
-        assert_eq!(
-            result.request_layout,
-            Some(CompactionRequestLayout::ExactReplay)
-        );
-        assert_eq!(result.source_is_active_context_prefix, Some(true));
-        assert!(requests.lock().expect("request mutex")[0].tools.is_empty());
-    });
-}
-
-#[test]
-fn structured_and_incremental_candidates_emit_marker_and_distinct_layouts() {
-    smol::block_on(async {
-        let model = ModelDescriptor {
-            provider: "local".into(),
-            model: tea_core::provider::local::LAGUNA_XS_2_1_MODEL.into(),
-            revision: None,
-        };
-        let structured_requests = Arc::new(Mutex::new(Vec::new()));
-        let structured =
-            ProviderCompactor::with_strategy(ProviderCompactionStrategy::StructuredCheckpointV1);
-        structured.configure(
-            model.clone(),
-            Arc::new(RecordingSummaryProvider {
-                expected_model: model.clone(),
-                requests: Arc::clone(&structured_requests),
-            }),
-        );
-        let first = Message::User {
-            id: MessageId(1),
-            content: "inspect src/main.rs then run tests".into(),
-        };
-        let structured_result = structured
-            .compact(
-                CompactionContext {
-                    version: tea_core::COMPACTION_CONTEXT_VERSION,
-                    system_prompt: String::new(),
-                    model: Some(model.clone()),
-                    messages: vec![first.clone()],
-                    source_history_revision: 0,
-                    host_messages: Vec::new(),
-                    provider_context: None,
-                },
-                CancellationToken::new(),
-            )
-            .await
-            .expect("structured candidate succeeds");
-        assert_eq!(structured.strategy().id, tea_core::STRUCTURED_CHECKPOINT_V1);
-        assert!(matches!(
-            &structured_result.messages[0],
-            Message::User { content, .. } if content.starts_with("<!-- tea-checkpoint:v1 generation=1 -->")
-        ));
-        assert!(structured_requests.lock().expect("request mutex")[0]
-            .system_prompt
-            .contains("durable checkpoint"));
-
-        let prior = structured_result.messages[0].clone();
-        let incremental_requests = Arc::new(Mutex::new(Vec::new()));
-        let incremental = ProviderCompactor::with_strategy(
-            ProviderCompactionStrategy::IncrementalCheckpointUpdateV1,
-        );
-        incremental.configure(
-            model.clone(),
-            Arc::new(RecordingSummaryProvider {
-                expected_model: model.clone(),
-                requests: Arc::clone(&incremental_requests),
-            }),
-        );
-        let incremental_result = incremental
-            .compact(
-                CompactionContext {
-                    version: tea_core::COMPACTION_CONTEXT_VERSION,
-                    system_prompt: String::new(),
-                    model: Some(model),
-                    messages: vec![
-                        prior,
-                        Message::User {
-                            id: MessageId(2),
-                            content: "new constrained work".into(),
-                        },
-                    ],
-                    source_history_revision: 0,
-                    host_messages: Vec::new(),
-                    provider_context: None,
-                },
-                CancellationToken::new(),
-            )
-            .await
-            .expect("incremental candidate succeeds");
-        assert_eq!(
-            incremental.strategy().id,
-            tea_core::INCREMENTAL_CHECKPOINT_UPDATE_V1
-        );
-        assert_eq!(
-            incremental_result.request_layout,
-            Some(CompactionRequestLayout::IncrementalCheckpointUpdate)
-        );
-        assert!(matches!(
-            &incremental_result.messages[0],
-            Message::User { content, .. } if content.starts_with("<!-- tea-checkpoint:v1 generation=2 -->")
-        ));
-        assert!(incremental_requests.lock().expect("request mutex")[0]
-            .context
-            .contains("Previous tea checkpoint"));
     });
 }
 

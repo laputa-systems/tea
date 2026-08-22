@@ -66,18 +66,9 @@ downstream optional layers.
 - [Verification](verification.md) — required checks and completed V0 evidence.
 - [Prompt cache-friendliness](cache-friendliness.md) — deterministic prefix measurements and
   compaction cache discipline.
-- [Conversation compaction](compaction.md) — transactional checkpoint lifecycle, strategy
-  promotion rules, trace/privacy boundary, and provider-free quality gate.
-- [Compaction research](compaction-research.md) — pinned upstream observations, adopted
-  hypotheses, rejected scope, and exact source paths.
-- [Compaction metrics](compaction-metrics.md) — evidence levels for lifecycle, cache, usage, and
-  headroom measurements.
-- [Compaction fixtures](compaction-fixtures.md) — provider-free contract coverage and continuation
-  episode inventory.
-- [Compaction canary record](compaction-canary-2026-08-22.md) — sanitized free-provider outcome
-  and the explicit non-promotion decision.
-- [Compaction comparison](compaction-comparison.md) — initial baseline-versus-candidate evidence
-  classification and default-selection decision.
+- [Conversation compaction](compaction.md) — transactional lifecycle, policy,
+  request-layout evidence, trace/privacy boundary, historical rationale, and
+  provider-free verification.
 - [Quality evaluation](quality-evaluation.md) — deterministic trace checks,
   three pinned Express tasks, fixture artifacts, and resource diagnostics.
 - [Tracing](trace.md) — optional trajectory observer boundary.

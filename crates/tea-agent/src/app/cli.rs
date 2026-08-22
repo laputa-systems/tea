@@ -9,7 +9,6 @@ use tea_core::ThinkingLevel;
 pub struct CliOptions {
     provider: Option<OsString>,
     model: Option<OsString>,
-    compaction_strategy: Option<OsString>,
     local_base_url: Option<OsString>,
     local_context_window: Option<NonZeroU64>,
     cwd: Option<PathBuf>,
@@ -19,8 +18,8 @@ pub struct CliOptions {
 }
 
 impl CliOptions {
-    /// Parse explicit provider/model, compaction, local endpoint/capacity, thinking, prompt, and
-    /// workspace options.
+    /// Parse explicit provider/model, local endpoint/capacity, thinking, prompt, and workspace
+    /// options.
     pub fn parse<I>(args: I) -> Result<Self, CliError>
     where
         I: IntoIterator<Item = OsString>,
@@ -41,7 +40,7 @@ impl CliOptions {
 
     /// Render the command-line usage text.
     pub const fn help_text() -> &'static str {
-        "Usage: tea [OPTIONS]\n\nOptions:\n    -h, --help                  Show this help text\n        --provider <id>         Select a compiled provider\n        --model <id>            Select a compiled model\n        --compaction-strategy <id>\n                                Select an explicit compaction strategy experiment\n        --local-base-url <url>  Set the local provider API root\n        --local-context-window <tokens>\n                                Set explicit local context capacity for automatic compaction\n        --thinking <level>      Set reasoning level (off, minimal, low, medium, high, xhigh, max)\n    -p, --prompt <message>      Stream one response and exit (requires provider/model)\n        --cwd <path>            Use path as the explicit workspace\n        --tea-home <path>      Use path as the explicit Tea extension home (default: ~/.tea)\n"
+        "Usage: tea [OPTIONS]\n\nOptions:\n    -h, --help                  Show this help text\n        --provider <id>         Select a compiled provider\n        --model <id>            Select a compiled model\n        --local-base-url <url>  Set the local provider API root\n        --local-context-window <tokens>\n                                Set explicit local context capacity for automatic compaction\n        --thinking <level>      Set reasoning level (off, minimal, low, medium, high, xhigh, max)\n    -p, --prompt <message>      Stream one response and exit (requires provider/model)\n        --cwd <path>            Use path as the explicit workspace\n        --tea-home <path>      Use path as the explicit Tea extension home (default: ~/.tea)\n"
     }
 
     /// Borrow the explicitly selected provider, if supplied.
@@ -52,11 +51,6 @@ impl CliOptions {
     /// Borrow the explicitly selected model, if supplied.
     pub fn model(&self) -> Option<&OsStr> {
         self.model.as_deref()
-    }
-
-    /// Borrow the explicitly selected compaction strategy, if supplied.
-    pub fn compaction_strategy(&self) -> Option<&OsStr> {
-        self.compaction_strategy.as_deref()
     }
 
     /// Borrow the explicit local provider API root, if supplied.
@@ -93,7 +87,6 @@ impl CliOptions {
         let destination = match slot {
             OptionSlot::Provider => &mut self.provider,
             OptionSlot::Model => &mut self.model,
-            OptionSlot::CompactionStrategy => &mut self.compaction_strategy,
             OptionSlot::LocalBaseUrl => &mut self.local_base_url,
             OptionSlot::Prompt => &mut self.prompt,
             OptionSlot::TeaHome => {
@@ -152,7 +145,6 @@ where
             "-h" | "--help" if recognize_help => return Ok(CliCommand::Help),
             "--provider" => OptionSlot::Provider,
             "--model" => OptionSlot::Model,
-            "--compaction-strategy" => OptionSlot::CompactionStrategy,
             "--local-base-url" => OptionSlot::LocalBaseUrl,
             "--local-context-window" => OptionSlot::LocalContextWindow,
             "--thinking" => OptionSlot::Thinking,
@@ -179,7 +171,6 @@ where
 enum OptionSlot {
     Provider,
     Model,
-    CompactionStrategy,
     LocalBaseUrl,
     LocalContextWindow,
     Thinking,
@@ -193,7 +184,6 @@ impl OptionSlot {
         match self {
             Self::Provider => "--provider",
             Self::Model => "--model",
-            Self::CompactionStrategy => "--compaction-strategy",
             Self::LocalBaseUrl => "--local-base-url",
             Self::LocalContextWindow => "--local-context-window",
             Self::Thinking => "--thinking",

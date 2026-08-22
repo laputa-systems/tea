@@ -2,8 +2,8 @@
 
 This module validates a compact, checked-in fixture corpus without a provider
 or model. It is intentionally not an LLM-summary evaluator: fixtures provide
-the checkpoint facts and continuation operations explicitly, then this runner
-proves the merge, obsolete-state, ledger, and rework contracts around them.
+the compacted-state facts and continuation operations explicitly, then this
+runner proves the merge, obsolete-state, and rework contracts around them.
 """
 
 from __future__ import annotations
@@ -118,8 +118,8 @@ def _continuation_metrics(operations: Any) -> dict[str, int]:
     }
 
 
-def _checkpoint_bytes(active: dict[str, Fact], generations: int, ledger_entries: int) -> int:
-    lines = [f"<!-- tea-checkpoint:v1 generation={generations} -->"]
+def _compacted_state_bytes(active: dict[str, Fact], generations: int, ledger_entries: int) -> int:
+    lines = [f"compaction-generations: {generations}"]
     lines.extend(f"- {fact.id}: {fact.value}" for fact in sorted(active.values(), key=lambda fact: fact.id))
     lines.append(f"- workspace-ledger-entries: {ledger_entries}")
     return len("\n".join(lines).encode("utf-8"))
@@ -154,8 +154,8 @@ def run_continuation_fixtures() -> dict[str, Any]:
                 "required_facts_missing": len(missing_required),
                 "obsolete_facts_present": len(resurrected),
                 "contradictions": len(resurrected),
-                "checkpoint_generation": generations,
-                "checkpoint_bytes": _checkpoint_bytes(active, generations, ledger_entries),
+                "compaction_generations": generations,
+                "compacted_state_bytes": _compacted_state_bytes(active, generations, ledger_entries),
                 "ledger_entries": ledger_entries,
                 "headroom_tokens": int(expected.get("headroom_tokens", 0)),
                 "requests_until_next_compaction": int(expected.get("requests_until_next_compaction", 0)),
@@ -163,8 +163,6 @@ def run_continuation_fixtures() -> dict[str, Any]:
             }
         )
         hard_pass = not missing_required and not resurrected and not metrics["immediate_recompaction"]
-        # Both comparison rows use the same asserted checkpoint facts. This proves evaluator and
-        # lifecycle contracts only; it intentionally says nothing about a provider's summary skill.
         reports.append(
             {
                 "id": case["id"],
@@ -172,23 +170,6 @@ def run_continuation_fixtures() -> dict[str, Any]:
                 "missing_required_fact_ids": missing_required,
                 "resurrected_obsolete_fact_ids": resurrected,
                 "metrics": metrics,
-                "strategy_comparison": {
-                    "baseline_fixture": {
-                        "strategy_id": "cache_replay_summary_v0",
-                        "evidence": "deterministic_checkpoint_fixture",
-                        "hard_pass": hard_pass,
-                    },
-                    "structured_fixture": {
-                        "strategy_id": "structured_checkpoint_v1",
-                        "evidence": "deterministic_checkpoint_fixture",
-                        "hard_pass": hard_pass,
-                    },
-                    "incremental_fixture": {
-                        "strategy_id": "incremental_checkpoint_update_v1",
-                        "evidence": "deterministic_checkpoint_fixture",
-                        "hard_pass": hard_pass,
-                    },
-                },
             }
         )
     return {

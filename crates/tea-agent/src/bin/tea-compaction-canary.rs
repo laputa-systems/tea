@@ -4,7 +4,7 @@ use std::env;
 use std::num::NonZeroU64;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tea_agent::{build_compacting_host_agent_with_strategy, ProviderCompactionStrategy};
+use tea_agent::build_compacting_host_agent;
 use tea_core::event::AgentEventKind;
 use tea_core::provider::openrouter::{OpenRouterConfig, OpenRouterProvider};
 use tea_core::state::ModelDescriptor;
@@ -17,7 +17,6 @@ struct Args {
     cwd: PathBuf,
     pressure_bytes: usize,
     context_window: NonZeroU64,
-    strategy: ProviderCompactionStrategy,
     continuation_check: bool,
 }
 
@@ -25,7 +24,6 @@ impl Args {
     fn parse() -> Result<Self, String> {
         let mut model = None;
         let mut cwd = None;
-        let mut strategy = None;
         let mut pressure_bytes = 5_000_usize;
         let mut context_window = NonZeroU64::new(5_000).expect("fixed non-zero window");
         let mut continuation_check = false;
@@ -44,7 +42,6 @@ impl Args {
                 .ok_or_else(|| format!("missing value for {flag}"))?;
             match flag.as_str() {
                 "--model" => set_once(&mut model, value, "--model")?,
-                "--strategy" => set_once(&mut strategy, value, "--strategy")?,
                 "--cwd" => set_once(&mut cwd, value, "--cwd")?,
                 "--pressure-bytes" => {
                     pressure_bytes = value
@@ -69,10 +66,6 @@ impl Args {
         if model.trim().is_empty() || pressure_bytes == 0 {
             return Err("--model and --pressure-bytes must not be empty or zero".into());
         }
-        let strategy = strategy
-            .unwrap_or_else(|| tea_core::CACHE_REPLAY_SUMMARY_V0.into())
-            .into_string()
-            .map_err(|_| "--strategy must be valid UTF-8".to_owned())?;
         Ok(Self {
             model,
             cwd: cwd
@@ -80,7 +73,6 @@ impl Args {
                 .unwrap_or(env::current_dir().map_err(|error| error.to_string())?),
             pressure_bytes,
             context_window,
-            strategy: ProviderCompactionStrategy::from_id(&strategy)?,
             continuation_check,
         })
     }
@@ -113,7 +105,7 @@ fn run() -> Result<(), String> {
         OpenRouterConfig::try_new(api_key, args.model.clone())
             .map_err(|error| error.to_string())?,
     ));
-    let agent = build_compacting_host_agent_with_strategy(
+    let agent = build_compacting_host_agent(
         DefaultCodingTools::new(&args.cwd).map_err(|error| error.to_string())?,
         ModelDescriptor {
             provider: "openrouter".into(),
@@ -122,7 +114,6 @@ fn run() -> Result<(), String> {
         },
         provider,
         args.context_window,
-        args.strategy,
     )
     .map_err(|error| error.to_string())?;
     let pressure = "x".repeat(args.pressure_bytes);
@@ -231,7 +222,7 @@ fn run() -> Result<(), String> {
         println!(
             "{{\"schema_version\":\"tea-compaction-canary/v2\",\"model\":\"{}\",\"strategy_id\":\"{}\",\"compaction_lifecycle_records\":{},\"terminal_records\":{},\"continuation_fact_checked\":{},\"continuation_fact_survived\":{},\"run_failed\":{},\"committed\":{}}}",
             args.model.replace('"', "\\\""),
-            args.strategy.id(),
+            tea_core::CACHE_REPLAY_SUMMARY_V0,
             lifecycle.len(),
             terminal_count,
             args.continuation_check,
@@ -247,7 +238,7 @@ fn run() -> Result<(), String> {
     println!(
         "{{\"schema_version\":\"tea-compaction-canary/v2\",\"model\":\"{}\",\"strategy_id\":\"{}\",\"compaction_lifecycle_records\":{},\"terminal_records\":{},\"provider_usage_records\":{},\"provider_cache_accounting_records\":{},\"adapter_request_observations\":{},\"continuation_fact_checked\":{},\"continuation_fact_survived\":{},\"run_failed\":{},\"committed\":true}}",
         args.model.replace('"', "\\\""),
-        args.strategy.id(),
+        tea_core::CACHE_REPLAY_SUMMARY_V0,
         lifecycle.len(),
         terminal_count,
         provider_usage_records,

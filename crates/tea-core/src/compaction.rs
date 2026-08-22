@@ -26,23 +26,9 @@ pub const COMPACTION_CONTEXT_VERSION: u32 = 1;
 
 /// Stable identifier for the checked-in, current model-facing compaction layout.
 ///
-/// The TUI's provider-backed compactor implements this strategy. Experimental
-/// layouts must select their own identifier instead of changing this prompt
-/// and request construction in place.
+/// The TUI's provider-backed compactor implements this strategy. Its prompt
+/// and request construction are part of the host contract.
 pub const CACHE_REPLAY_SUMMARY_V0: &str = "cache_replay_summary_v0";
-
-/// Stable identifier for the tool-free exact-replay compatibility experiment.
-///
-/// Some hosted models accept ordinary tool-enabled turns but reject a summary
-/// request carrying those same definitions. This candidate changes only the
-/// tool-envelope dimension; it is never selected by the baseline strategy.
-pub const TOOL_FREE_REPLAY_SUMMARY_V1: &str = "tool_free_replay_summary_v1";
-
-/// Reserved identifier for a held-out standalone structured-checkpoint candidate.
-pub const STRUCTURED_CHECKPOINT_V1: &str = "structured_checkpoint_v1";
-
-/// Reserved identifier for a held-out incremental checkpoint-update candidate.
-pub const INCREMENTAL_CHECKPOINT_UPDATE_V1: &str = "incremental_checkpoint_update_v1";
 
 /// Stable identity of one compaction attempt within a run.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Hash)]
@@ -108,8 +94,6 @@ pub enum CompactionRequestLayout {
     ExactReplay,
     /// A self-contained summary request was constructed without a reusable prefix.
     StandaloneFallback,
-    /// A previous structured checkpoint and only new discarded history were supplied.
-    IncrementalCheckpointUpdate,
     /// The core could not observe a caller-owned compactor's request layout.
     Unobserved,
 }
@@ -152,49 +136,6 @@ impl CompactionStrategy {
         }
     }
 
-    /// Descriptor for the tool-free exact-replay compatibility candidate.
-    ///
-    /// It retains the selected provider context and appends the same single
-    /// instruction as the baseline, but deliberately omits tools from the
-    /// compaction request. Adapter observations expose this domain difference;
-    /// a matching context prefix is not treated as a cache hit.
-    pub fn tool_free_replay_summary_v1(prompt_fingerprint: u64) -> Self {
-        Self {
-            id: TOOL_FREE_REPLAY_SUMMARY_V1.into(),
-            schema_version: 1,
-            implementation: CompactionImplementation::ProviderSummarization,
-            request_layout: CompactionRequestLayout::ExactReplay,
-            prompt_fingerprint: Some(prompt_fingerprint),
-        }
-    }
-
-    /// Descriptor for a held-out standalone structured-checkpoint candidate.
-    ///
-    /// Constructing this descriptor never selects it as a default. A host must
-    /// explicitly bind an implementation and supply reviewed provider evidence.
-    pub fn structured_checkpoint_v1(prompt_fingerprint: u64) -> Self {
-        Self {
-            id: STRUCTURED_CHECKPOINT_V1.into(),
-            schema_version: 1,
-            implementation: CompactionImplementation::ProviderSummarization,
-            request_layout: CompactionRequestLayout::StandaloneFallback,
-            prompt_fingerprint: Some(prompt_fingerprint),
-        }
-    }
-
-    /// Descriptor for a held-out incremental checkpoint-update candidate.
-    ///
-    /// A future implementation must preserve its checkpoint marker/schema and
-    /// validate its retained suffix before it can be bound by a host.
-    pub fn incremental_checkpoint_update_v1(prompt_fingerprint: u64) -> Self {
-        Self {
-            id: INCREMENTAL_CHECKPOINT_UPDATE_V1.into(),
-            schema_version: 1,
-            implementation: CompactionImplementation::ProviderSummarization,
-            request_layout: CompactionRequestLayout::IncrementalCheckpointUpdate,
-            prompt_fingerprint: Some(prompt_fingerprint),
-        }
-    }
 }
 
 /// Immutable identity and policy state for one attempted compaction.
@@ -1378,33 +1319,6 @@ fn context_generation_matches(agent: &AgentInner, expected: u64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn held_out_strategy_descriptors_are_versioned_and_non_default() {
-        let tool_free = CompactionStrategy::tool_free_replay_summary_v1(10);
-        let structured = CompactionStrategy::structured_checkpoint_v1(11);
-        let incremental = CompactionStrategy::incremental_checkpoint_update_v1(12);
-        assert_eq!(tool_free.id, TOOL_FREE_REPLAY_SUMMARY_V1);
-        assert_eq!(tool_free.schema_version, 1);
-        assert_eq!(
-            tool_free.request_layout,
-            CompactionRequestLayout::ExactReplay
-        );
-        assert_eq!(structured.id, STRUCTURED_CHECKPOINT_V1);
-        assert_eq!(structured.schema_version, 1);
-        assert_eq!(
-            structured.request_layout,
-            CompactionRequestLayout::StandaloneFallback
-        );
-        assert_eq!(incremental.id, INCREMENTAL_CHECKPOINT_UPDATE_V1);
-        assert_eq!(
-            incremental.request_layout,
-            CompactionRequestLayout::IncrementalCheckpointUpdate
-        );
-        assert_ne!(structured.id, CACHE_REPLAY_SUMMARY_V0);
-        assert_ne!(incremental.id, CACHE_REPLAY_SUMMARY_V0);
-        assert_ne!(tool_free.id, CACHE_REPLAY_SUMMARY_V0);
-    }
 
     #[test]
     fn stale_generation_cannot_replace_newer_canonical_history() {

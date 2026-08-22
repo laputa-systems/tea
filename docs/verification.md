@@ -51,11 +51,11 @@ For prompt-cacheability and compaction-prefix evidence, run the deterministic fi
 in [`docs/cache-friendliness.md`](cache-friendliness.md). Its common-prefix values are a proxy;
 provider-reported cache usage remains the authoritative hit/write measurement.
 
-The compaction matrix is the provider-free CI gate. It writes 70 content-free
-coverage reports for pressure, suffix integrity, cancellation, cache-layout,
-trace, and deterministic replay contracts, plus five independent continuation
-episodes for facts, stale-state removal, ledger/rework, and cumulative
-generations. Its baseline is updated only with an explicit audit reason; see
+The compaction matrix is a provider-free manual check. It writes 70
+content-free coverage reports for pressure, suffix integrity, cancellation,
+cache-layout, trace, and deterministic replay contracts, plus five independent
+continuation episodes for facts, stale-state removal, rework, and repeated
+compactions. Its baseline is updated only with an explicit audit reason; see
 [`docs/compaction.md`](compaction.md).
 
 ## Completion evidence

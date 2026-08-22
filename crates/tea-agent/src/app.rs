@@ -18,13 +18,11 @@ mod session;
 mod state;
 mod support;
 mod tea;
-mod workspace_ledger;
 
 #[cfg(test)]
 mod tests;
 
 pub use cli::{CliCommand, CliError, CliOptions};
-pub use compaction::ProviderCompactionStrategy;
 pub use error::AppError;
 pub use host::build_host_agent;
 pub use runtime::App;
@@ -46,27 +44,7 @@ pub fn build_compacting_host_agent(
     provider: std::sync::Arc<dyn tea_core::scheduler::ModelProvider>,
     context_window: std::num::NonZeroU64,
 ) -> Result<tea_core::Agent, AppError> {
-    build_compacting_host_agent_with_strategy(
-        tools,
-        model,
-        provider,
-        context_window,
-        ProviderCompactionStrategy::default(),
-    )
-}
-
-/// Build the explicit provider canary host with a non-default compaction candidate.
-///
-/// This constructor is intentionally separate from [`build_compacting_host_agent`]
-/// so callers must opt in to any model-facing experiment by stable strategy ID.
-pub fn build_compacting_host_agent_with_strategy(
-    tools: tea_core::DefaultCodingTools,
-    model: tea_core::ModelDescriptor,
-    provider: std::sync::Arc<dyn tea_core::scheduler::ModelProvider>,
-    context_window: std::num::NonZeroU64,
-    strategy: ProviderCompactionStrategy,
-) -> Result<tea_core::Agent, AppError> {
-    let compactor = std::sync::Arc::new(compaction::ProviderCompactor::with_strategy(strategy));
+    let compactor = std::sync::Arc::new(compaction::ProviderCompactor::default());
     compactor.configure(model.clone(), std::sync::Arc::clone(&provider));
     let compactor_capability: std::sync::Arc<dyn tea_core::Compactor> = compactor;
     Ok(host::build_host_agent(tools)?

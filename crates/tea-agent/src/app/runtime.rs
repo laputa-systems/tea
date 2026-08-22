@@ -15,7 +15,7 @@ use tea_core::{
 };
 
 use super::cli::CliOptions;
-use super::compaction::{ProviderCompactionStrategy, ProviderCompactor};
+use super::compaction::ProviderCompactor;
 use super::error::AppError;
 use super::host::{build_host_agent_with_thinking, compose_tea_configuration};
 use super::preferences::load_last_model;
@@ -170,15 +170,6 @@ impl App {
         if self.core.is_some() {
             return Ok(());
         }
-        let compaction_strategy = self
-            .options
-            .compaction_strategy()
-            .map(|value| {
-                let value = os_text(value, "--compaction-strategy")?;
-                ProviderCompactionStrategy::from_id(&value).map_err(AppError::Setup)
-            })
-            .transpose()?
-            .unwrap_or_default();
         let workspace = match self.options.cwd() {
             Some(path) => path.to_path_buf(),
             None => std::env::current_dir().map_err(|error| {
@@ -189,7 +180,7 @@ impl App {
             .map_err(|error| AppError::Setup(format!("invalid --cwd: {error}")))?;
         self.workspace = Some(tools.workspace().as_path().to_path_buf());
         let builder = build_host_agent_with_thinking(tools, self.options.thinking_level())?;
-        let compactor = Arc::new(ProviderCompactor::with_strategy(compaction_strategy));
+        let compactor = Arc::new(ProviderCompactor::default());
         let compactor_capability: Arc<dyn tea_core::compaction::Compactor> = compactor.clone();
         let builder = builder.compactor(compactor_capability);
         self.compactor = Some(compactor);

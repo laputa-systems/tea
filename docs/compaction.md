@@ -1,108 +1,136 @@
 # Conversation compaction
 
 Compaction is a transactional replacement of canonical conversation history.
-It is not a provider feature, a session-store rewrite, or a claim that a
-provider prompt cache was hit. The core owns the history and performs the only
-commit; a caller-owned `Compactor` sees an owned `CompactionContext` and can
-only return a proposal.
+It is not provider-native history management, session persistence, or evidence
+of a provider cache hit. `tea-core` owns the history and its only commit; a
+caller-owned `Compactor` receives an owned `CompactionContext` and can return
+only a proposed replacement. The host owns the provider, prompt, model,
+context capacity, and compactor algorithm.
 
-`cache_replay_summary_v0` is the current `tea-agent` default. It preserves the
-existing provider-visible source conversation, ordered tool definitions, and
-system instructions, then appends exactly one update instruction when that
-source is an exact active-context prefix and fits the configured reserve. Tool
-execution is prohibited by the compactor stream even though the model-visible
-tool envelope is retained. Otherwise it uses the existing standalone summary
-layout. The fallback is observable; it is not silently described as
-cache-friendly.
+`tea-agent` has one provider-backed strategy:
+`cache_replay_summary_v0`. It preserves a usable provider-visible source
+conversation, ordered tool definitions, and system instructions, then appends
+one compaction instruction. The compactor stream rejects tool calls, so tools
+can remain in the prompt-facing envelope without gaining execution authority.
+When exact replay is unavailable, it sends the existing standalone summary
+request instead. The selected layout is observable; standalone fallback is
+never described as cache-friendly.
 
-## Lifecycle and safety contract
+The former tool-free, structured-checkpoint, and incremental-checkpoint
+experiments were removed. Their provider-free results and one-off canaries did
+not meet the promotion bar for semantic continuation quality or provider cache
+reuse. A future strategy must arrive as a new, reviewed implementation and ID;
+it must not repurpose this baseline.
 
-Every manual or automatic attempt receives one `CompactionId` and emits the
-content-free `CompactionLifecycleRecord` sequence:
+## Lifecycle and safety
+
+Every manual or automatic attempt has a `CompactionId` and emits a
+content-free lifecycle stream:
 
 ```text
-Started → SourceSelected → RequestPrepared → ProviderUsageObserved?
+Started → SourceSelected → RequestPrepared? → ProviderUsageObserved?
         → ReplacementProposed? → Terminal
 ```
 
-`Terminal` is exactly one of committed, rejected with a typed reason, failed,
-cancelled, timed out, or unavailable. The record includes the trigger,
-threshold/overflow reason, agent-loop phase, strategy ID/schema/prompt
-fingerprint, source history revision, ordinal counters, source/replacement
-sizes, tool-result size, request-layout facts, adapter request bytes, and
-provider usage when supplied. It does not include checkpoints, prompts,
-arguments, tool results, or serialized request bodies.
+`RequestPrepared`, provider usage, and a proposal are conditional. For
+example, an automatic attempt without a configured compactor reaches
+`Terminal(Unavailable)` after source selection; preparation can also fail
+before a request is ready. Terminal outcome is exactly one of committed,
+typed rejection, failed, cancelled, timed out, or unavailable.
 
-The commit is guarded by `AgentState.history_revision`. A compactor snapshot
-can never replace history that was mutated after source selection. Manual
-compaction reserves an idle agent; automatic compaction commits only in the
-owning run and only if cancellation has not won.
+The operation records its manual/automatic trigger, threshold/overflow/user
+reason, loop phase, strategy and schema, source-history revision, and retry
+counters. Source and proposal records carry only IDs, counts, byte sizes,
+request-layout facts, usage, and classified outcomes; they never contain
+summary text, prompts, arguments, tool results, or serialized request bodies.
 
-Automatic proposals must validate message/tool-pair structure, retain the
-selected recent suffix byte-for-byte as canonical messages, have a nonempty
-non-tool checkpoint, strictly reduce canonical bytes, and leave the explicit
-`minimum_headroom_tokens`. Rejection or failure leaves the pre-transaction
-history intact.
+The commit is guarded by `AgentState.history_revision`. A snapshot may not
+replace history changed after source selection. Manual compaction reserves an
+idle agent. Automatic compaction remains in its owning run and checks
+cancellation before commit. Failed, cancelled, stale, and rejected proposals
+leave canonical history unchanged.
 
-The OpenRouter adapter has explicit request and stall bounds; provider-backed
-compaction uses that same bounded `ModelProvider` boundary. A host that can
-classify its own deadline returns `CompactionError::timed_out`, which becomes a
-typed terminal timeout rather than a successful or ambiguous failure.
+Automatic proposals must have valid message/tool-call structure, preserve the
+core-selected recent suffix byte-for-byte as canonical messages, contain a
+nonempty non-tool checkpoint, strictly reduce canonical bytes, and satisfy the
+configured `minimum_headroom_tokens`. Rejections are typed, observable, and do
+not loop indefinitely.
 
-## Strategies
+## Automatic policy and request layout
 
-The strategy descriptor is versioned and is emitted on every attempt.
+`AutomaticCompactionPolicy` is opt-in. A host supplies a context capacity,
+reserved compaction tokens, recent-tail budget, minimum headroom, overflow
+recovery policy, and per-run compaction/retry limits. The core estimates the
+next request from valid provider usage plus new messages, or a deterministic
+canonical-byte estimate when no valid checkpoint exists. It does not infer
+capacity from a model name.
 
-| ID | Layout | Status |
+After a completed assistant/tool turn, the policy can compact before the next
+provider request. A typed `ModelStreamEvent::ContextOverflow` can restore the
+pre-request transcript, compact once, and retry that incomplete continuation.
+Each continuation retries at most once; the run policy bounds total recovery.
+Only the typed event authorizes overflow recovery—the core does not parse
+provider error text.
+
+Exact replay is used only when the selected provider context is an exact
+message prefix of the active context (when active context is supplied) and
+when the system prompt, context, and ordered tools fit within the declared
+context budget after adding both the configured reserve and the fixed
+4,096-token safety margin. Otherwise the host uses the explicit standalone
+fallback.
+
+The compactor-request measurement describes the exact request sent: it does
+not run hooks, provider projection, or serialization a second time. The
+adapter may provide serialized request bytes and a normalized cache-domain
+fingerprint without exposing provider-specific request types through core.
+
+## Evidence and metrics
+
+Every value has an evidence level. Unknown remains unknown; zero means the
+source actually reported zero.
+
+| Metric | Meaning | Evidence |
 | --- | --- | --- |
-| `cache_replay_summary_v0` | exact replay when safe; standalone fallback otherwise | default baseline |
-| `tool_free_replay_summary_v1` | exact replay with tools omitted | provider-compatibility candidate only |
-| `structured_checkpoint_v1` | standalone marker-versioned structured checkpoint plus host ledger | candidate only |
-| `incremental_checkpoint_update_v1` | prior marker checkpoint plus discarded delta and ledger delta | candidate only |
+| `compaction_id`, source revision, trigger/reason/phase, strategy, terminal outcome | lifecycle identity and state | lifecycle fact |
+| canonical/source/replacement/retained/tool-result bytes | history size and composition | deterministic proxy |
+| estimated context tokens and headroom | policy budget after replacement | estimate, not tokenizer truth |
+| serialized request bytes and cache-domain fingerprint | exact adapter envelope observation | adapter fact |
+| common context prefix, exact extension, append-only context | request-layout diagnostic | prefix proxy |
+| provider input/output tokens | compactor usage | provider fact |
+| `cache_read_tokens` / `cache_write_tokens` | provider prompt-cache accounting | provider fact |
+| critical facts, obsolete facts, repeated reads, duplicate tools, failed repeats, next-compaction distance | provider-free continuation fixture | deterministic fixture result |
 
-Candidate strategies are deliberately not the default. Offline evidence can
-prove safety and determinism but cannot establish provider cache behavior or
-semantic recovery quality. Promotion requires an explicit provider canary and
-a committed comparison artifact; rollback is selecting the prior strategy ID.
+Matching context prefixes and stable envelopes help diagnose cache-friendly
+layout. They never prove a cache hit and must not be converted into estimated
+cache-read tokens. Only provider-reported cache usage supports a cache claim.
 
-The host binds every listed candidate to the existing `ModelProvider` through
-`ProviderCompactor`. `structured_checkpoint_v1` owns a readable v1 marker and
-injects a bounded, host-derived operation ledger after the model's semantic
-text. `incremental_checkpoint_update_v1` recognizes that exact marker, sends
-only the previous checkpoint and newly discarded provider history, and uses a
-visible standalone first-generation fallback. `tool_free_replay_summary_v1`
-changes only the prompt-facing tool envelope, so it can isolate provider
-compatibility from checkpoint-prompt changes. All remain non-default.
+With `tea-core/trace`, `TraceObserver` converts lifecycle events to additive,
+content-free `tea-trace::Compaction` V1 records. Existing header, turn, tool,
+and episode-end records remain V0. A committed operation is joined to the
+first normal post-compaction request, including its turn index and adapter
+request facts when available. Use `tea_trace::RedactingSink` for ordinary
+turn/tool trace content; compaction records themselves intentionally cannot
+contain sensitive payloads.
 
-## Trace and privacy
+## Provider-free verification
 
-With `tea-core/trace`, `TraceObserver` maps lifecycle records to additive
-`tea-trace::Compaction` V1 records. Existing header/turn/tool/end records
-remain schema V0. The terminal committed record is joined to the first normal
-post-compaction adapter request, including exact serialized request bytes and
-an adapter cache-domain fingerprint when safely available.
-
-Compaction trace records are content-free by construction. Ordinary turn/tool
-trace records can contain redacted user and tool values, so production sinks
-still need `tea_trace::RedactingSink`. Never put raw checkpoints, prompt
-payloads, provider response bodies, credentials, or workspace content in an
-artifact.
-
-## Verification and operations
-
-The normal gate is offline and does not make a provider request:
+The normal compaction check is manual, offline, deterministic, and has no
+provider, credential, network, or ambient-cache dependency:
 
 ```sh
-PYTHONDONTWRITEBYTECODE=1 python3 -m evals.quality compaction --out /tmp/tea-compaction-quality
+PYTHONDONTWRITEBYTECODE=1 python3 -m evals.quality compaction \
+  --out /tmp/tea-compaction-quality
 ```
 
-It writes 70 named Rust-contract coverage reports, five independently executed
-continuation episodes, and a summary that distinguishes provider cache
-accounting from a prefix proxy. The continuation fixtures assert facts,
-latest-wins removal, operation-ledger/rework metrics, and five successive
-generations; they do not grade a provider-generated checkpoint. To replace its
-checked-in contract baseline,
-an explicit reason is required:
+It writes 70 named coverage rows backed by focused Rust tests and five
+independent continuation episodes. The latter assert durable-fact retention,
+latest-wins obsolete-state removal, retained-suffix behavior, rework
+classification, headroom, and distance to the next compaction. They validate
+the transaction and evaluator contracts, not a provider-generated summary.
+
+`evals/quality/cases/compaction/baseline.json` pins the reviewed scenario
+contract and historical source provenance. Replacing that contract requires an
+explicit reason:
 
 ```sh
 PYTHONDONTWRITEBYTECODE=1 python3 -m evals.quality compaction \
@@ -110,38 +138,44 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m evals.quality compaction \
   --reason "describe the reviewed contract change"
 ```
 
-Run the focused Rust checks with the pinned toolchain:
+The focused Rust checks use the pinned toolchain:
 
 ```sh
-CARGO_TARGET_DIR=/tmp/tea-compaction-target rustup run nightly-2026-07-24 cargo test \
-  -p tea-core --test compaction --test automatic_policy --test cache_friendliness
-CARGO_TARGET_DIR=/tmp/tea-compaction-target rustup run nightly-2026-07-24 cargo test \
-  -p tea-core --features trace --lib trace::tests
+CARGO_TARGET_DIR=/tmp/tea-compaction-target rustup run nightly-2026-07-24 \
+  cargo test -p tea-core --test compaction --test automatic_policy --test cache_friendliness
+CARGO_TARGET_DIR=/tmp/tea-compaction-target rustup run nightly-2026-07-24 \
+  cargo test -p tea-core --features trace --lib trace::tests
 ```
 
-Provider canaries are manual, credential-scoped, and must use a free model.
-Use the `vault OPENROUTER_API_KEY -- …` boundary for the final provider command
-and write only sanitized outcomes, model ID, strategy ID, timing, and
-provider-reported usage to an external artifact directory. Do not treat an
-unavailable or rate-limited free model as a semantic comparison result.
-
-The repository-owned probe drives four pressured turns through the same host
-assembly and requires one committed compaction:
+An optional `tea-compaction-canary` binary exercises only the default host
+assembly against an explicitly credentialed OpenRouter model. It emits
+content-free lifecycle and usage-presence counts; it does not measure semantic
+quality, latency, or a cache hit. It is never run implicitly:
 
 ```sh
-vault OPENROUTER_API_KEY -- env CARGO_TARGET_DIR=/tmp/tea-compaction-target \
+OPENROUTER_API_KEY=… CARGO_TARGET_DIR=/tmp/tea-compaction-target \
   rustup run nightly-2026-07-24 cargo run --quiet -p tea-agent \
-  --bin tea-compaction-canary -- \
-  --model poolside/laguna-xs-2.1:free --strategy tool_free_replay_summary_v1 \
+  --bin tea-compaction-canary -- --model <provider-model> \
   --pressure-bytes 5000 --context-window 5000 --continuation-check
 ```
 
-It emits only content-free JSON counts, a stable strategy ID, and (when
-requested) a boolean fact-survival continuation check; it never emits the
-fact itself. The ordinary `tea` host accepts the same deliberate selection through
-`--compaction-strategy <id>`; omitted means the baseline. Try
-`poolside/laguna-s-2.1:free` only when the preferred free model is unavailable.
-The latest sanitized result and non-promotion decision are recorded in
-[`compaction-canary-2026-08-22.md`](compaction-canary-2026-08-22.md).
-The checked-in initial strategy comparison is
-[`compaction-comparison.md`](compaction-comparison.md).
+One 2026-08-22 free-model baseline probe committed; later free-provider
+attempts ended before compaction. Neither result establishes semantic
+continuation quality or provider cache reuse, so the design makes neither
+claim.
+
+## Design rationale and exclusions
+
+On 2026-08-22, tea reviewed OpenAI Codex (`343074d4207d`), Pi
+(`c49906ec7778`), DeepSeek Harness (`b150a551b8d4`), and the OpenAI Cookbook
+prompt-caching examples. The durable decisions were explicit lifecycle IDs,
+source-generation compare-and-swap, exact retained suffixes, minimum
+headroom, same-path request observation, bounded overflow recovery, and the
+strict distinction between prefix proxies and provider cache accounting.
+
+Tea deliberately does not import upstream session persistence, client reuse,
+UI-specific summaries, tool-result pruning, model-name token limits, provider
+routing, or background compaction workers. Tool-result pruning remains
+unimplemented: no retained baseline showed old tool-result payloads dominating
+pressure while preserving the needed continuation state. The core stays
+executor- and provider-agnostic.

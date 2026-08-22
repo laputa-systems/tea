@@ -15,7 +15,6 @@ from pathlib import Path
 import subprocess
 from typing import Any, Iterable
 
-from .checkpoint import LedgerEntry, StructuredCheckpoint, checkpoint_fingerprint
 from .continuation import run_continuation_fixtures
 
 
@@ -235,31 +234,6 @@ def _run_target(target: str) -> dict[str, Any]:
     }
 
 
-def _structured_candidate_report() -> dict[str, Any]:
-    checkpoint = StructuredCheckpoint.empty()
-    for generation in range(1, 6):
-        checkpoint = checkpoint.merge(
-            {
-                "Goal": ["continue the active task"],
-                "Current Checkpoint": [f"generation {generation}"],
-                "Verification": [f"fixture-{generation} passed"],
-            },
-            [LedgerEntry("test", f"fixture-{generation}", "/workspace", "passed", generation=generation)],
-        )
-    rendered = checkpoint.render()
-    return {
-        "strategy_id": "structured_checkpoint_v1",
-        "schema_version": 1,
-        "changed_dimension": "checkpoint schema and deterministic workspace ledger",
-        "hard_invariants": "passed_provider_free",
-        "checkpoint_generation": checkpoint.generation,
-        "checkpoint_bytes": len(rendered.encode("utf-8")),
-        "ledger_entries": len(checkpoint.ledger.entries),
-        "checkpoint_fingerprint": checkpoint_fingerprint(rendered),
-        "provider_quality": "unresolved; experimental strategy is not runtime-default",
-    }
-
-
 def _markdown_report(summary: dict[str, Any]) -> str:
     """Render a compact human-readable run report beside the JSON artifact."""
 
@@ -292,13 +266,10 @@ def _markdown_report(summary: dict[str, Any]) -> str:
                 duplicates=metrics["duplicate_tool_calls"],
             )
         )
-    lines.extend(("", "## Strategy status", ""))
-    for name, strategy in summary["strategy_comparison"].items():
-        lines.append(f"- `{strategy['strategy_id']}` ({name}): {strategy.get('status', strategy.get('hard_invariants'))}")
     lines.extend(
         (
             "",
-            "Deterministic checkpoints validate the transaction and evaluator contracts only. "
+            "Deterministic compacted-state fixtures validate the transaction and evaluator contracts only. "
             "They do not establish provider-generated semantic quality or a provider cache hit.",
             "",
         )
@@ -345,32 +316,9 @@ def run_compaction_quality(*, out: Path, update_baseline: bool = False, reason: 
             "fixture_compaction_episodes": continuation["case_count"],
             "provider_cache_accounting": "unavailable_offline",
             "prefix_proxy": "not_a_cache_hit_claim",
-            "model_free_pruning": "not_promoted_without_a_dominant-tool-result-baseline",
+            "model_free_pruning": "not implemented without a dominant-tool-result baseline",
         },
-        "default_decision": "cache_replay_summary_v0 remains the default; no candidate is promoted by offline evidence alone",
-        "strategy_comparison": {
-            "baseline": {
-                "strategy_id": "cache_replay_summary_v0",
-                "schema_version": 0,
-                "status": "default",
-                "provider_quality": "one free-model canary committed; later free retries were rejected before compaction; semantic quality unresolved",
-            },
-            "structured_checkpoint": _structured_candidate_report(),
-            "incremental_checkpoint": {
-                "strategy_id": "incremental_checkpoint_update_v1",
-                "schema_version": 1,
-                "changed_dimension": "previous checkpoint plus newly discarded span",
-                "status": "runtime-bound experimental candidate; no promotion",
-                "provider_quality": "unresolved",
-            },
-            "tool_free_replay": {
-                "strategy_id": "tool_free_replay_summary_v1",
-                "schema_version": 1,
-                "changed_dimension": "tool definitions omitted from otherwise exact replay",
-                "status": "runtime-bound provider compatibility candidate; no promotion",
-                "provider_quality": "unresolved",
-            },
-        },
+        "default_decision": "cache_replay_summary_v0 is the only runtime strategy",
         "continuation_fixtures": continuation,
     }
     summary["report_sha256"] = _digest({key: value for key, value in summary.items() if key != "report_sha256"})

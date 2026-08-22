@@ -26,13 +26,13 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m evals.quality resources --out /tmp/pi-quali
 ## Compaction contract gate
 
 The provider-free compaction lane runs 70 named pressure, recovery, lifecycle,
-cache-layout, and compatibility coverage rows against focused Rust tests, plus
-five independently executed continuation episodes. The episodes assert
-critical-fact survival, latest-wins obsolete-state removal, five-generation
-checkpoint behavior, exact ledger/rework classification, headroom, and next
-compaction distance. They are deterministic evaluator evidence, not a claim
-about a provider's semantic-summary skill. The lane has no network, provider,
-credential, or ambient cache dependency and writes content-free artifacts:
+cache-layout, and trace-compatibility coverage rows against focused Rust tests,
+plus five independently executed continuation episodes. The episodes assert
+critical-fact survival, latest-wins obsolete-state removal, retained-suffix
+behavior, rework classification, headroom, and next-compaction distance. They
+are deterministic evaluator evidence, not a claim about a provider's
+semantic-summary skill. The lane has no network, provider, credential, or
+ambient cache dependency and writes content-free artifacts:
 
 ```sh
 PYTHONDONTWRITEBYTECODE=1 python3 -m evals.quality compaction --out /tmp/tea-compaction-quality

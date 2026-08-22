@@ -50,6 +50,5 @@ archive reader that already understands V0 retains its prior behavior and can
 ignore the new type discriminator. A compaction record contains only lifecycle
 IDs, stages, strategy metadata, sizes, fingerprints, usage, and classified
 outcomes. It deliberately cannot carry a checkpoint, prompt, raw provider
-request, tool arguments, or tool result. See
-[`docs/compaction.md`](compaction.md) for the lifecycle and
-[`docs/compaction-metrics.md`](compaction-metrics.md) for evidence levels.
+request, tool arguments, or tool result. See [`docs/compaction.md`](compaction.md)
+for lifecycle and evidence levels.

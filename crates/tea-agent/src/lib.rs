@@ -16,7 +16,6 @@ pub mod terminal;
 pub mod ui;
 
 pub use app::{
-    build_compacting_host_agent, build_compacting_host_agent_with_strategy, build_host_agent, App,
-    AppError, AppState, CliCommand, CliOptions, NoticeSeverity, ProviderCompactionStrategy,
-    ToolProjection, ToolState, TranscriptEntry, UiSurface,
+    build_compacting_host_agent, build_host_agent, App, AppError, AppState, CliCommand,
+    CliOptions, NoticeSeverity, ToolProjection, ToolState, TranscriptEntry, UiSurface,
 };

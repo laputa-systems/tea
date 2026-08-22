@@ -49,7 +49,6 @@ pub use compaction::{
     CompactionResult, CompactionSourceObservation, CompactionStrategy, CompactionTerminalOutcome,
     CompactionTrigger, Compactor, CompactorRequestObservation, ContextBudgetSource,
     OverflowRecovery, ProviderContext, CACHE_REPLAY_SUMMARY_V0, COMPACTION_CONTEXT_VERSION,
-    INCREMENTAL_CHECKPOINT_UPDATE_V1, STRUCTURED_CHECKPOINT_V1, TOOL_FREE_REPLAY_SUMMARY_V1,
 };
 pub use default_tools::{
     CodingOperations, DefaultCodingTools, LocalCodingOperations, WorkspaceRoot,
