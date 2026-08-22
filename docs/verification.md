@@ -20,7 +20,12 @@ and the real-binary PTY suite. All three use deterministic fixtures and do not
 contact a live provider.
 
 On a host with Docker, `make test-linux` repeats the same checks in a Linux
-AArch64 Debian container (`linux/arm64`), including the PTY visual suite.
+AArch64 Alpine/musl container (`linux/arm64`), including the PTY visual suite.
+The image uses LLVM compiler-rt and libc++; it does not install glibc, GCC, or
+libstdc++ in the final image. The Python fixture checker is installed only
+while the image is being built and is removed before the image is tagged.
+The `libgcc_s.so.1` name is a compatibility symlink to Alpine's LLVM
+`libunwind`; it is not the GCC runtime.
 
 For a profile or contract change, also run the Rust fixture check in
 [`crates/tea-core/fixtures/README.md`](../crates/tea-core/fixtures/README.md)

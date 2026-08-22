@@ -488,7 +488,7 @@ mod tests {
     use super::{send, stream, Request, StreamEvent};
     use crate::scheduler::CancellationToken;
     use std::io::Write;
-    use std::net::TcpListener;
+    use std::net::{Shutdown, TcpListener};
     use std::sync::mpsc;
     use std::time::Duration;
 
@@ -554,8 +554,13 @@ mod tests {
             let mut request = [0_u8; 1024];
             let _ = std::io::Read::read(&mut stream, &mut request);
             stream
-                .write_all(b"HTTP/1.1 429 Too Many Requests\r\nContent-Length: 3\r\n\r\nbad")
+                .write_all(
+                    b"HTTP/1.1 429 Too Many Requests\r\nContent-Length: 3\r\nConnection: close\r\n\r\nbad",
+                )
                 .expect("mock response should write");
+            stream
+                .shutdown(Shutdown::Write)
+                .expect("mock response should close its write side");
         });
 
         let response = send(
