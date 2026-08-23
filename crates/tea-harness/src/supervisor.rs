@@ -893,9 +893,9 @@ where
             }
             if let Some(plan) = &reduction.recovery_plan
                 && !matches!(&plan, RecoveryPlan::StartEpoch { operation_id: plan_operation } if plan_operation == operation_id)
-                {
-                    return Err(HarnessError::RecoveryRequired { plan: plan.clone() });
-                }
+            {
+                return Err(HarnessError::RecoveryRequired { plan: plan.clone() });
+            }
             let configuration = self.configuration_for_reduction(&reduction)?;
             let epoch_index = snapshot
                 .records()
@@ -2176,17 +2176,26 @@ where
             return persisted_tool_result_matches(existing, model_result, &call.name)
                 .map_err(|message| self.fault(message));
         }
+        // A policy that requires pre-persistence redaction makes the
+        // post-policy result the sole durable content source. Usage still
+        // describes the completed effect below, but raw content never reaches
+        // an inline payload or immutable artifact under that policy.
+        let durable_result = if self.template.artifact_policy_config().redact_before_persist {
+            model_result
+        } else {
+            raw_result
+        };
         let retained = if is_direct_recovery_tool(&call.name) {
             retain_direct_recovery_result_with_projection(
                 self.template.artifact_policy_config(),
-                raw_result,
+                durable_result,
                 model_result,
             )
         } else {
             retain_tool_result_with_projection(
                 self.artifacts.as_ref(),
                 self.template.artifact_policy_config(),
-                raw_result,
+                durable_result,
                 model_result,
             )
         }

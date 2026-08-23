@@ -1150,13 +1150,11 @@ fn validate_plugin_bundle(
         }
     }
 
-    let limits = manifest
-        .resource_limits
-        .unwrap_or(PluginResourceLimits {
-            source_bytes: snapshot.resource_limits.source_bytes,
-            memory_bytes: snapshot.resource_limits.memory_bytes,
-            instruction_checks: snapshot.resource_limits.instruction_checks,
-        });
+    let limits = manifest.resource_limits.unwrap_or(PluginResourceLimits {
+        source_bytes: snapshot.resource_limits.source_bytes,
+        memory_bytes: snapshot.resource_limits.memory_bytes,
+        instruction_checks: snapshot.resource_limits.instruction_checks,
+    });
     if limits.source_bytes > snapshot.resource_limits.source_bytes
         || limits.memory_bytes > snapshot.resource_limits.memory_bytes
         || limits.instruction_checks > snapshot.resource_limits.instruction_checks
@@ -1512,8 +1510,10 @@ fn validate_candidate(
             bundle
                 .requested_capabilities
                 .iter()
-                .filter(|&capability| !bound_capabilities
-                        .contains(&(bundle.plugin_id.as_str(), capability.as_str()))).map(|capability| format!("{}.{}", bundle.plugin_id, capability))
+                .filter(|&capability| {
+                    !bound_capabilities.contains(&(bundle.plugin_id.as_str(), capability.as_str()))
+                })
+                .map(|capability| format!("{}.{}", bundle.plugin_id, capability))
         })
         .collect::<Vec<_>>();
     if !unbound.is_empty() {
@@ -1524,12 +1524,13 @@ fn validate_candidate(
     }
     for bundle in &snapshot.spec.ordered_session_plugins {
         if let Some(tree) = trees.get(&bundle.tree_id)
-            && !tree_has_plugin_layout(tree, &bundle.plugin_id) {
-                diagnostics.push(format!(
-                    "plugin {} tree does not contain the required closed source layout",
-                    bundle.plugin_id
-                ));
-            }
+            && !tree_has_plugin_layout(tree, &bundle.plugin_id)
+        {
+            diagnostics.push(format!(
+                "plugin {} tree does not contain the required closed source layout",
+                bundle.plugin_id
+            ));
+        }
     }
     if draft.changed_surfaces.is_empty() && parent.snapshot_id != draft.proposed_snapshot_id {
         diagnostics.push("non-noop candidate must name at least one changed surface".into());
@@ -1788,10 +1789,30 @@ fn candidate_id(draft: &HarnessCandidateDraft) -> Result<HarnessCandidateId, Har
     for path in &draft.changed_paths {
         writer.normalized_path("changed_path", path);
     }
+    writer.u64(
+        "registry_operation_count",
+        draft.registry_operations.len() as u64,
+    );
+    for operation in &draft.registry_operations {
+        match operation {
+            RegistryOperation::Add { plugin_id } => {
+                writer.discriminant("registry_operation_kind", 1);
+                writer.string("registry_operation_plugin_id", plugin_id);
+            }
+            RegistryOperation::Remove { plugin_id } => {
+                writer.discriminant("registry_operation_kind", 2);
+                writer.string("registry_operation_plugin_id", plugin_id);
+            }
+        }
+    }
     writer.u64("surface_count", draft.changed_surfaces.len() as u64);
     for surface in &draft.changed_surfaces {
         writer.discriminant("surface", surface_discriminant(*surface));
     }
+    write_candidate_strings(&mut writer, "targeted_failure", &draft.targeted_failures);
+    write_candidate_strings(&mut writer, "evidence", &draft.evidence);
+    write_candidate_strings(&mut writer, "expected_effect", &draft.expected_effects);
+    write_candidate_strings(&mut writer, "regression_risk", &draft.regression_risks);
     writer.u64("ceiling_count", draft.capability_ceiling.len() as u64);
     for capability in &draft.capability_ceiling {
         writer.string("capability_ceiling", capability);
@@ -1801,6 +1822,13 @@ fn candidate_id(draft: &HarnessCandidateDraft) -> Result<HarnessCandidateId, Har
             message: error.to_string(),
         },
     )
+}
+
+fn write_candidate_strings(writer: &mut CanonicalHashWriter, name: &str, values: &[String]) {
+    writer.u64(&format!("{name}_count"), values.len() as u64);
+    for value in values {
+        writer.string(name, value);
+    }
 }
 
 fn actor_discriminant(actor: HarnessActor) -> u16 {

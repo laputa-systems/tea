@@ -722,13 +722,7 @@ fn encode_revision(revision: &HarnessRevisionV1) -> JsonValue {
         ("snapshot_id", string(&revision.snapshot_id)),
         (
             "parent_revision_ids",
-            JsonValue::Array(
-                revision
-                    .parent_revision_ids
-                    .iter()
-                    .map(string)
-                    .collect(),
-            ),
+            JsonValue::Array(revision.parent_revision_ids.iter().map(string).collect()),
         ),
         (
             "actor",

@@ -11,6 +11,7 @@ mod durable;
 mod error;
 mod host;
 mod input;
+mod persistence;
 mod picker;
 mod preferences;
 mod runtime;
@@ -20,8 +21,9 @@ mod support;
 #[cfg(test)]
 mod tests;
 
-pub use cli::{CliCommand, CliError, CliOptions};
+pub use cli::{CliCommand, CliError, CliOptions, SessionCommand};
 pub use error::AppError;
+pub use persistence::run_session_command;
 pub use runtime::App;
 pub use state::{
     AppState, NoticeSeverity, ToolProjection, ToolState, TranscriptEntry, UiStatus, UiSurface,

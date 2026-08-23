@@ -2,19 +2,167 @@
 
 use crate::ids::*;
 use crate::model::*;
-use crate::store::{SessionError, SessionReader, SessionWriter, commit_time_ms, validate_snapshot};
-use crate::{
-    ArtifactError, ArtifactStore, JsonValue, LaneId, SessionVerification, SessionVerificationError,
-    verify_session,
+use crate::store::{
+    SessionAppendIndex, SessionClock, SessionError, SessionReader, SessionWriter,
+    SystemSessionClock, validate_snapshot, validate_snapshot_append,
 };
+use crate::{
+    ArtifactError, JsonValue, LaneId, SessionVerification, SessionVerificationError, verify_session,
+};
+#[cfg(any(
+    target_os = "android",
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "tvos",
+    target_os = "visionos",
+    target_os = "watchos",
+    target_os = "redox",
+))]
+use rustix::fs::{CWD, RenameFlags, renameat_with};
 use rustix::fs::{FlockOperation, flock};
+#[cfg(any(
+    target_os = "android",
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "tvos",
+    target_os = "visionos",
+    target_os = "watchos",
+    target_os = "redox",
+))]
+use rustix::io::Errno;
+#[cfg(test)]
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static NEXT_EXPORT_DIRECTORY: AtomicU64 = AtomicU64::new(1);
+static NEXT_SESSION_DIRECTORY: AtomicU64 = AtomicU64::new(1);
+static NEXT_HEAD_CACHE_FILE: AtomicU64 = AtomicU64::new(1);
+const MAX_SESSION_LINE_BYTES: usize = 1_048_576;
+
+/// Deterministic append-stage interruption used only by the storage matrix.
+///
+/// The production write path has no fault-injection branch. Tests install one
+/// thread-local stage after session creation, so parallel fixtures cannot
+/// interrupt each other's file handles.
+#[cfg(test)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum TestWriteFailpoint {
+    BeforeAppend,
+    /// Fail after writing exactly this many JSON bytes and before the newline.
+    AfterJsonBytes(usize),
+    AfterJsonBeforeNewline,
+    AfterNewlineBeforeFlush,
+    DuringFlush,
+    AfterFlushBeforeSync,
+    DuringSync,
+    AfterSyncBeforeReturn,
+}
+
+/// Deterministic session-creation interruption used only by the creation matrix.
+///
+/// Creation publishes a fully initialized private directory with a no-replace
+/// rename. A failure before publication must leave no candidate session; a
+/// failure after publication may leave only that valid, reopenable directory.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TestCreationFailpoint {
+    BeforeTemporaryDirectory,
+    AfterTemporaryDirectory,
+    AfterLayout,
+    AfterHeaderWrite,
+    AfterHeadCache,
+    BeforeTemporaryDirectorySync,
+    AfterTemporaryDirectorySync,
+    BeforePublication,
+    AfterPublication,
+    BeforeParentDirectorySync,
+    AfterParentDirectorySync,
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_WRITE_FAILPOINT: RefCell<Option<TestWriteFailpoint>> = const { RefCell::new(None) };
+    static TEST_CREATION_FAILPOINT: RefCell<Option<TestCreationFailpoint>> = const { RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) struct TestWriteFailpointGuard;
+
+#[cfg(test)]
+impl Drop for TestWriteFailpointGuard {
+    fn drop(&mut self) {
+        TEST_WRITE_FAILPOINT.with(|slot| *slot.borrow_mut() = None);
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn install_test_write_failpoint(
+    failpoint: TestWriteFailpoint,
+) -> TestWriteFailpointGuard {
+    TEST_WRITE_FAILPOINT.with(|slot| {
+        assert!(
+            slot.borrow().is_none(),
+            "a test write failpoint is already installed on this thread"
+        );
+        *slot.borrow_mut() = Some(failpoint);
+    });
+    TestWriteFailpointGuard
+}
+
+#[cfg(test)]
+pub(crate) struct TestCreationFailpointGuard;
+
+#[cfg(test)]
+impl Drop for TestCreationFailpointGuard {
+    fn drop(&mut self) {
+        TEST_CREATION_FAILPOINT.with(|slot| *slot.borrow_mut() = None);
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn install_test_creation_failpoint(
+    failpoint: TestCreationFailpoint,
+) -> TestCreationFailpointGuard {
+    TEST_CREATION_FAILPOINT.with(|slot| {
+        assert!(
+            slot.borrow().is_none(),
+            "a test creation failpoint is already installed on this thread"
+        );
+        *slot.borrow_mut() = Some(failpoint);
+    });
+    TestCreationFailpointGuard
+}
+
+#[cfg(test)]
+fn test_write_failpoint() -> Option<TestWriteFailpoint> {
+    TEST_WRITE_FAILPOINT.with(|slot| slot.borrow().clone())
+}
+
+#[cfg(test)]
+fn test_creation_failpoint() -> Option<TestCreationFailpoint> {
+    TEST_CREATION_FAILPOINT.with(|slot| *slot.borrow())
+}
+
+#[cfg(test)]
+fn interrupt_creation_at(
+    failpoint: TestCreationFailpoint,
+    path: &Path,
+) -> Result<(), SessionError> {
+    if test_creation_failpoint() == Some(failpoint) {
+        return Err(SessionError::Io {
+            path: path.display().to_string(),
+            message: format!("injected session creation interruption at {failpoint:?}"),
+        });
+    }
+    Ok(())
+}
 
 macro_rules! parse_id {
     ($type:ty, $value:expr) => {
@@ -45,6 +193,28 @@ pub struct SessionExport {
     pub directory: PathBuf,
     /// Verification evidence computed from the exported durable prefix.
     pub verification: SessionVerification,
+}
+
+/// Read-only replay evidence for a v1 session directory.
+///
+/// `torn_tail_offset` identifies only an unterminated final write. Complete
+/// malformed lines are never repairable through this API.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SessionInspection {
+    /// Fully validated committed prefix.
+    pub snapshot: SessionSnapshot,
+    /// Byte offset at which an uncommitted final tail begins, if present.
+    pub torn_tail_offset: Option<u64>,
+}
+
+/// Result of the explicit torn-tail repair operation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SessionRepair {
+    /// Truncated uncommitted tail offset, if the log had one.
+    pub truncated_tail_offset: Option<u64>,
+    /// Failure while rebuilding a disposable cache after the authoritative
+    /// truncation committed. The repair itself remains successful.
+    pub cache_warning: Option<String>,
 }
 
 /// Failure while creating an atomic portable session export.
@@ -100,8 +270,11 @@ pub struct JsonlSession {
     session_path: PathBuf,
     file: File,
     snapshot: SessionSnapshot,
+    append_index: SessionAppendIndex,
     durability: DurabilityMode,
     fault: Option<String>,
+    cache_warning: Option<String>,
+    clock: Arc<dyn SessionClock>,
 }
 
 impl JsonlSession {
@@ -111,11 +284,22 @@ impl JsonlSession {
         header: SessionHeader,
         durability: DurabilityMode,
     ) -> Result<Self, SessionError> {
+        Self::create_with_clock(directory, header, durability, Arc::new(SystemSessionClock))
+    }
+
+    /// Create a new session with an explicit commit clock.
+    pub fn create_with_clock(
+        directory: impl AsRef<Path>,
+        mut header: SessionHeader,
+        durability: DurabilityMode,
+        clock: Arc<dyn SessionClock>,
+    ) -> Result<Self, SessionError> {
         if header.kind != "session" || header.version != SESSION_FORMAT_VERSION {
             return Err(SessionError::InvalidInput {
                 message: "JSONL v1 creation requires a v1 session header".into(),
             });
         }
+        seal_header(&mut header)?;
         let directory = directory.as_ref().to_path_buf();
         if directory.exists() {
             return Err(SessionError::Io {
@@ -123,48 +307,119 @@ impl JsonlSession {
                 message: "refusing to create a session over an existing directory".into(),
             });
         }
-        create_private_directory(&directory)?;
-        create_layout(&directory)?;
-        let session_path = directory.join("session.jsonl");
+        let parent = directory
+            .parent()
+            .ok_or_else(|| SessionError::InvalidInput {
+                message: "session directory must have a parent directory".into(),
+            })?;
+        ensure_export_parent(parent)?;
+        let name = directory
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| SessionError::InvalidInput {
+                message: "session directory must have a UTF-8 file name".into(),
+            })?;
+        let nonce = NEXT_SESSION_DIRECTORY.fetch_add(1, Ordering::Relaxed);
+        let temporary = parent.join(format!(
+            ".{name}.create-{}-{nonce:016x}",
+            std::process::id()
+        ));
         let encoded = encode_header(&header).to_json_string().map_err(|error| {
             SessionError::InvalidInput {
                 message: format!("session header cannot encode as JSON: {error}"),
             }
         })?;
-        let mut options = OpenOptions::new();
-        options.read(true).write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt as _;
-            options.mode(0o600);
+        let mut created_temporary = false;
+        let result = (|| {
+            #[cfg(test)]
+            interrupt_creation_at(TestCreationFailpoint::BeforeTemporaryDirectory, &temporary)?;
+            fs::create_dir(&temporary).map_err(|error| io(&temporary, error))?;
+            created_temporary = true;
+            #[cfg(test)]
+            interrupt_creation_at(TestCreationFailpoint::AfterTemporaryDirectory, &temporary)?;
+            set_private_directory(&temporary)?;
+            create_layout(&temporary)?;
+            #[cfg(test)]
+            interrupt_creation_at(TestCreationFailpoint::AfterLayout, &temporary)?;
+            let temporary_session_path = temporary.join("session.jsonl");
+            let mut options = OpenOptions::new();
+            options.read(true).write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt as _;
+                options.mode(0o600);
+            }
+            let mut file = options
+                .open(&temporary_session_path)
+                .map_err(|error| io(&temporary_session_path, error))?;
+            acquire_writer_lock(&file, &temporary_session_path)?;
+            write_complete_line(&mut file, &encoded, durability, &temporary_session_path)?;
+            #[cfg(test)]
+            interrupt_creation_at(TestCreationFailpoint::AfterHeaderWrite, &temporary)?;
+            let snapshot = SessionSnapshot::empty(header);
+            let append_index = SessionAppendIndex::empty(snapshot.header());
+            write_head_cache(&temporary, &snapshot, durability)?;
+            #[cfg(test)]
+            interrupt_creation_at(TestCreationFailpoint::AfterHeadCache, &temporary)?;
+            if durability == DurabilityMode::Strict {
+                #[cfg(test)]
+                interrupt_creation_at(
+                    TestCreationFailpoint::BeforeTemporaryDirectorySync,
+                    &temporary,
+                )?;
+                sync_directory(&temporary)?;
+                #[cfg(test)]
+                interrupt_creation_at(
+                    TestCreationFailpoint::AfterTemporaryDirectorySync,
+                    &temporary,
+                )?;
+            }
+            #[cfg(test)]
+            interrupt_creation_at(TestCreationFailpoint::BeforePublication, &temporary)?;
+            publish_directory_noreplace(&temporary, &directory)?;
+            #[cfg(test)]
+            interrupt_creation_at(TestCreationFailpoint::AfterPublication, &directory)?;
+            if durability == DurabilityMode::Strict {
+                #[cfg(test)]
+                interrupt_creation_at(TestCreationFailpoint::BeforeParentDirectorySync, parent)?;
+                sync_directory(parent)?;
+                #[cfg(test)]
+                interrupt_creation_at(TestCreationFailpoint::AfterParentDirectorySync, parent)?;
+            }
+            Ok(Self {
+                directory: directory.clone(),
+                session_path: directory.join("session.jsonl"),
+                file,
+                snapshot,
+                append_index,
+                durability,
+                fault: None,
+                cache_warning: None,
+                clock,
+            })
+        })();
+        if result.is_err() && created_temporary && temporary.exists() {
+            let _ = fs::remove_dir_all(&temporary);
         }
-        let mut file = options
-            .open(&session_path)
-            .map_err(|error| io(&session_path, error))?;
-        acquire_writer_lock(&file, &session_path)?;
-        if let Err(error) = write_complete_line(&mut file, &encoded, durability, &session_path) {
-            let _ = fs::remove_file(&session_path);
-            return Err(error);
-        }
-        if durability == DurabilityMode::Strict {
-            sync_directory(&directory)?;
-        }
-        write_head_cache(&directory, Sequence(0), durability)?;
-        Ok(Self {
-            directory,
-            session_path,
-            file,
-            snapshot: SessionSnapshot::empty(header),
-            durability,
-            fault: None,
-        })
+        result
     }
 
-    /// Open a v1 session, truncate only an uncommitted final tail, validate
-    /// every complete line, and acquire the sole writer lock.
+    /// Open a fully committed v1 session and acquire its sole writer lock.
+    ///
+    /// An unterminated tail is intentionally not repaired here; call
+    /// [`Self::inspect`] then [`Self::repair_torn_tail`] explicitly.
     pub fn open(
         directory: impl AsRef<Path>,
         durability: DurabilityMode,
+    ) -> Result<Self, SessionError> {
+        Self::open_with_clock(directory, durability, Arc::new(SystemSessionClock))
+    }
+
+    /// Open a v1 session with an explicit clock for subsequent commits.
+    pub fn open_with_clock(
+        directory: impl AsRef<Path>,
+        durability: DurabilityMode,
+        clock: Arc<dyn SessionClock>,
     ) -> Result<Self, SessionError> {
         let directory = directory.as_ref().to_path_buf();
         ensure_real_directory(&directory)?;
@@ -173,29 +428,108 @@ impl JsonlSession {
         ensure_regular_file(&session_path)?;
         let mut file = OpenOptions::new()
             .read(true)
-            
             .append(true)
             .open(&session_path)
             .map_err(|error| io(&session_path, error))?;
         acquire_writer_lock(&file, &session_path)?;
-        let source = recover_complete_source(&mut file, &session_path, durability)?;
-        let source =
-            truncate_malformed_final_json_line(&mut file, &session_path, source, durability)?;
-        let snapshot = decode_snapshot(&session_path, &source)?;
+        reject_unsupported_format(&mut file, &session_path)?;
+        let (snapshot, append_index, incomplete_tail_offset) =
+            decode_snapshot_stream(&mut file, &session_path)?;
+        if let Some(offset) = incomplete_tail_offset {
+            return Err(SessionError::RecoveryRequired {
+                path: session_path.display().to_string(),
+                offset,
+            });
+        }
         validate_snapshot(&snapshot)?;
+        let cache_warning = if Self::head_cache_is_current(&directory, &snapshot) {
+            None
+        } else {
+            write_head_cache(&directory, &snapshot, durability)
+                .err()
+                .map(|error| error.to_string())
+        };
         Ok(Self {
             directory,
             session_path,
             file,
             snapshot,
+            append_index,
             durability,
             fault: None,
+            cache_warning,
+            clock,
+        })
+    }
+
+    /// Replay a session without acquiring its writer lock or modifying any
+    /// file. This is the inspection path for operators and recovery tooling.
+    pub fn inspect(directory: impl AsRef<Path>) -> Result<SessionInspection, SessionError> {
+        let directory = directory.as_ref().to_path_buf();
+        ensure_real_directory(&directory)?;
+        ensure_layout(&directory)?;
+        let session_path = directory.join("session.jsonl");
+        ensure_regular_file(&session_path)?;
+        let mut file = File::open(&session_path).map_err(|error| io(&session_path, error))?;
+        reject_unsupported_format(&mut file, &session_path)?;
+        let (snapshot, _, torn_tail_offset) = decode_snapshot_stream(&mut file, &session_path)?;
+        validate_snapshot(&snapshot)?;
+        Ok(SessionInspection {
+            snapshot,
+            torn_tail_offset,
+        })
+    }
+
+    /// Truncate only an explicitly identified unterminated final tail.
+    ///
+    /// This obtains the session's writer lock, validates the complete prefix,
+    /// synchronizes the truncation in strict mode, and then refreshes the
+    /// derived `HEAD` cache. A cache failure is reported separately because
+    /// it cannot undo the authoritative repair.
+    pub fn repair_torn_tail(
+        directory: impl AsRef<Path>,
+        durability: DurabilityMode,
+    ) -> Result<SessionRepair, SessionError> {
+        let directory = directory.as_ref().to_path_buf();
+        ensure_real_directory(&directory)?;
+        ensure_layout(&directory)?;
+        let session_path = directory.join("session.jsonl");
+        ensure_regular_file(&session_path)?;
+        let mut file = OpenOptions::new()
+            .read(true)
+            .append(true)
+            .open(&session_path)
+            .map_err(|error| io(&session_path, error))?;
+        acquire_writer_lock(&file, &session_path)?;
+        reject_unsupported_format(&mut file, &session_path)?;
+        let (snapshot, _, torn_tail_offset) = decode_snapshot_stream(&mut file, &session_path)?;
+        validate_snapshot(&snapshot)?;
+        if let Some(offset) = torn_tail_offset {
+            file.set_len(offset)
+                .map_err(|error| io(&session_path, error))?;
+            if durability == DurabilityMode::Strict {
+                file.sync_data().map_err(|error| io(&session_path, error))?;
+            }
+        }
+        let cache_warning = write_head_cache(&directory, &snapshot, durability)
+            .err()
+            .map(|error| error.to_string());
+        Ok(SessionRepair {
+            truncated_tail_offset: torn_tail_offset,
+            cache_warning,
         })
     }
 
     /// Return the explicit session-directory root.
     pub fn directory(&self) -> &Path {
         &self.directory
+    }
+
+    /// Return the most recent failure while refreshing a disposable cache.
+    ///
+    /// The JSONL log remains committed and authoritative when this is set.
+    pub fn cache_warning(&self) -> Option<&str> {
+        self.cache_warning.as_deref()
     }
 
     /// Open the immutable object store colocated with this v1 session.
@@ -205,6 +539,26 @@ impl JsonlSession {
     /// `tea-artifact://` locator remains valid after the JSONL writer reopens.
     pub fn artifact_store(&self) -> Result<crate::FileArtifactStore, crate::ArtifactError> {
         crate::FileArtifactStore::open(self.directory.join("objects"))
+    }
+
+    /// Plan and apply immutable artifact collection while this session's sole
+    /// writer lock is held. The authoritative snapshot supplies the primary
+    /// roots; callers add retained harness, experiment, or export roots.
+    pub fn collect_unreferenced_artifacts(
+        &mut self,
+        additional_roots: impl IntoIterator<Item = crate::ArtifactId>,
+        quota: crate::ArtifactQuota,
+    ) -> Result<crate::ArtifactGcReport, crate::ArtifactError> {
+        if let Some(message) = &self.fault {
+            return Err(crate::ArtifactError::InvalidRequest {
+                message: format!(
+                    "cannot collect artifacts from a faulted session writer: {message}"
+                ),
+            });
+        }
+        let store = self.artifact_store()?;
+        let plan = crate::plan_artifact_gc(&store, &self.snapshot, additional_roots, quota)?;
+        crate::apply_artifact_gc(&store, &plan, quota)
     }
 
     /// Create a complete immutable export at a new sibling directory.
@@ -265,13 +619,14 @@ impl JsonlSession {
                 &temporary.join("session.jsonl"),
                 self.durability,
             )?;
-            write_head_cache(&temporary, snapshot.last_sequence(), self.durability)?;
+            write_head_cache(&temporary, &snapshot, self.durability)?;
 
             let destination_store = crate::FileArtifactStore::open(temporary.join("objects"))?;
             for artifact_id in &verification.artifact_roots {
-                let bytes = source_store.get(*artifact_id)?;
-                let copied = destination_store.put(&bytes, "application/octet-stream")?;
-                if copied.artifact_id != *artifact_id || copied.byte_len != bytes.len() as u64 {
+                let mut input = source_store.open_verified_reader(*artifact_id)?;
+                let copied =
+                    destination_store.put_reader(&mut input, "application/octet-stream")?;
+                if copied.artifact_id != *artifact_id {
                     return Err(
                         SessionVerificationError::Artifact(ArtifactError::Corruption {
                             artifact_id: *artifact_id,
@@ -288,7 +643,14 @@ impl JsonlSession {
                 &destination_store,
                 additional_roots.iter().copied(),
             )?;
-            fs::rename(&temporary, &destination).map_err(|error| io(&destination, error))?;
+            write_export_manifest(
+                &temporary,
+                &snapshot,
+                &verification,
+                &destination_store,
+                self.durability,
+            )?;
+            publish_directory_noreplace(&temporary, &destination)?;
             if self.durability == DurabilityMode::Strict {
                 sync_directory(parent)?;
             }
@@ -316,6 +678,13 @@ impl JsonlSession {
         Ok(self.snapshot.clone())
     }
 
+    /// Return whether `HEAD` is the exact disposable cache derived from this
+    /// validated snapshot. The check is read-only, so operator verification
+    /// can report cache disagreement without trusting or repairing the cache.
+    pub fn head_cache_is_current(directory: impl AsRef<Path>, snapshot: &SessionSnapshot) -> bool {
+        head_cache_matches(directory.as_ref(), snapshot)
+    }
+
     fn writable(&self) -> Result<(), SessionError> {
         match &self.fault {
             Some(message) => Err(SessionError::Faulted {
@@ -325,40 +694,113 @@ impl JsonlSession {
         }
     }
 
-    fn write_mutation(&mut self, mutation: StoredMutation) -> Result<(), SessionError> {
+    fn write_mutation(&mut self, mutation: SessionMutation) -> Result<(), SessionError> {
         self.writable()?;
-        let mut candidate = self.snapshot.clone();
-        match &mutation {
-            StoredMutation::Entry(value) => candidate.push_entry(value.clone()),
-            StoredMutation::Record(value) => candidate.push_record(value.clone()),
-            StoredMutation::Lane(value) => candidate.push_lane_mutation(value.clone()),
-            StoredMutation::Fact(value) => candidate.push_fact(value.clone()),
+        let mutation = seal_mutation(&self.snapshot, mutation)?;
+        let refresh_head = selects_main_harness_revision(&mutation);
+        let locally_validated = self.append_index.is_locally_validated_mutation(&mutation)?;
+        if !locally_validated {
+            // Reject cross-record invalid input before it can become durable,
+            // but borrow the prospective payload through the sole pure
+            // reducer instead of cloning the complete retained prefix.
+            validate_snapshot_append(&self.snapshot, &mutation)?;
         }
-        // Reject invalid caller input before it can become a durable line.
-        // This keeps an in-process validation failure from poisoning the
-        // append-only log or requiring recovery to interpret an invalid fact.
-        validate_snapshot(&candidate)?;
         let encoded = encode_mutation(&mutation)
             .to_json_string()
             .map_err(|error| SessionError::InvalidInput {
                 message: format!("session mutation cannot encode as JSON: {error}"),
             })?;
+        ensure_complete_line_size(&encoded)?;
         if let Err(error) = write_complete_line(
             &mut self.file,
             &encoded,
             self.durability,
             &self.session_path,
         ) {
-            self.fault = Some(error.to_string());
+            if matches!(error, SessionError::IndeterminateWrite { .. }) {
+                self.fault = Some(error.to_string());
+            }
             return Err(error);
         }
         // `session.jsonl` is authoritative. A cache failure cannot undo its
-        // committed prefix, so omit cache update rather than claiming a write
-        // failed after its durable model already succeeded.
-        let _ = write_head_cache(&self.directory, candidate.last_sequence(), self.durability);
-        self.snapshot = candidate;
+        // committed prefix, so defer the disposable cache until after the
+        // reduced state advances and never report it as a failed commit.
+        self.append_index.advance(&mutation);
+        self.snapshot.push_mutation(mutation);
+        if refresh_head {
+            self.cache_warning = write_head_cache(&self.directory, &self.snapshot, self.durability)
+                .err()
+                .map(|error| error.to_string());
+        }
         Ok(())
     }
+}
+
+/// Inspect only the complete header line before any v1 recovery work. This is
+/// the clean-slate format boundary: discarded formats cannot trigger record
+/// decoding or mutation of the file that contains them.
+fn reject_unsupported_format(file: &mut File, path: &Path) -> Result<(), SessionError> {
+    let Some(header_line) = read_first_complete_line(file, path)? else {
+        return Ok(());
+    };
+    let Ok(header) = JsonValue::parse(&header_line) else {
+        return Ok(());
+    };
+    let Some(fields) = header.as_object() else {
+        return Ok(());
+    };
+    if fields.get("kind").and_then(JsonValue::as_str) != Some("session") {
+        return Ok(());
+    }
+    let observed_version = fields.get("version").and_then(JsonValue::as_u64);
+    if let Some(observed_version) = observed_version
+        && observed_version != u64::from(SESSION_FORMAT_VERSION)
+    {
+        return Err(SessionError::UnsupportedFormat {
+            path: path.display().to_string(),
+            observed_version: Some(observed_version),
+        });
+    }
+    Ok(())
+}
+
+fn read_first_complete_line(file: &mut File, path: &Path) -> Result<Option<String>, SessionError> {
+    file.seek(SeekFrom::Start(0))
+        .map_err(|error| io(path, error))?;
+    let mut bytes = Vec::new();
+    let mut byte = [0_u8; 1];
+    loop {
+        match file.read(&mut byte).map_err(|error| io(path, error))? {
+            0 if bytes.is_empty() => return Ok(None),
+            0 => return Ok(None),
+            _ if byte[0] == b'\n' => break,
+            _ => {
+                if bytes.len() == MAX_SESSION_LINE_BYTES {
+                    return Err(SessionError::Format {
+                        path: path.display().to_string(),
+                        line: 1,
+                        offset: 0,
+                        sequence: None,
+                        mutation_kind: None,
+                        message: format!(
+                            "session header exceeds the {MAX_SESSION_LINE_BYTES}-byte line limit"
+                        ),
+                    });
+                }
+                bytes.push(byte[0]);
+            }
+        }
+    }
+    String::from_utf8(bytes)
+        .map(Some)
+        .map_err(|error| SessionError::Format {
+            path: path.display().to_string(),
+            line: 1,
+            offset: 0,
+            sequence: None,
+            mutation_kind: None,
+            message: format!("session header is not UTF-8: {error}"),
+        })
 }
 
 impl SessionReader for JsonlSession {
@@ -374,28 +816,23 @@ impl SessionWriter for JsonlSession {
         entry: ProvisionedEntry,
     ) -> Result<StoredEntry, SessionError> {
         self.writable()?;
-        if self
-            .snapshot
-            .entries()
-            .iter()
-            .any(|stored| stored.header.id == entry.id)
-        {
+        if self.append_index.contains_entry(&entry.id) {
             return Err(SessionError::InvalidInput {
                 message: format!("entry ID {} already materialized", entry.id),
             });
         }
-        let reduction = crate::reduce_lane(self.snapshot.clone(), lane_id.clone())?;
+        let parent_id = self.append_index.lane_leaf(lane_id)?;
         let stored = StoredEntry {
             lane_id: lane_id.clone(),
             header: EntryHeader {
                 id: entry.id,
-                parent_id: reduction.lane_state.leaf_id,
+                parent_id,
                 seq: self.snapshot.next_sequence(),
-                timestamp_ms: commit_time_ms(),
+                timestamp_ms: self.clock.now_ms(),
             },
             body: entry.body,
         };
-        self.write_mutation(StoredMutation::Entry(stored.clone()))?;
+        self.write_mutation(SessionMutation::Entry(stored.clone()))?;
         Ok(stored)
     }
 
@@ -403,10 +840,10 @@ impl SessionWriter for JsonlSession {
         self.writable()?;
         let stored = StoredRecord {
             seq: self.snapshot.next_sequence(),
-            timestamp_ms: commit_time_ms(),
+            timestamp_ms: self.clock.now_ms(),
             record,
         };
-        self.write_mutation(StoredMutation::Record(stored.clone()))?;
+        self.write_mutation(SessionMutation::Record(stored.clone()))?;
         Ok(stored)
     }
 
@@ -417,10 +854,10 @@ impl SessionWriter for JsonlSession {
         self.writable()?;
         let stored = StoredLaneMutation {
             seq: self.snapshot.next_sequence(),
-            timestamp_ms: commit_time_ms(),
+            timestamp_ms: self.clock.now_ms(),
             mutation,
         };
-        self.write_mutation(StoredMutation::Lane(stored.clone()))?;
+        self.write_mutation(SessionMutation::Lane(stored.clone()))?;
         Ok(stored)
     }
 
@@ -428,10 +865,10 @@ impl SessionWriter for JsonlSession {
         self.writable()?;
         let stored = StoredFact {
             seq: self.snapshot.next_sequence(),
-            timestamp_ms: commit_time_ms(),
+            timestamp_ms: self.clock.now_ms(),
             fact,
         };
-        self.write_mutation(StoredMutation::Fact(stored.clone()))?;
+        self.write_mutation(SessionMutation::Fact(stored.clone()))?;
         Ok(stored)
     }
 }
@@ -469,6 +906,52 @@ fn ensure_export_parent(path: &Path) -> Result<(), SessionError> {
     Ok(())
 }
 
+/// Publish a completed session directory without replacing any destination.
+///
+/// Ordinary directory rename may replace an empty destination on Unix. That
+/// would turn a collision into an overwrite, so v1 uses the platform's
+/// no-replace primitive and fails closed when it is unavailable.
+fn publish_directory_noreplace(source: &Path, destination: &Path) -> Result<(), SessionError> {
+    #[cfg(any(
+        target_os = "android",
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "tvos",
+        target_os = "visionos",
+        target_os = "watchos",
+        target_os = "redox",
+    ))]
+    {
+        match renameat_with(CWD, source, CWD, destination, RenameFlags::NOREPLACE) {
+            Ok(()) => Ok(()),
+            Err(Errno::NOSYS | Errno::INVAL) => Err(SessionError::InvalidInput {
+                message:
+                    "atomic no-replace directory publication is unavailable on this filesystem"
+                        .into(),
+            }),
+            Err(error) => Err(io(destination, error.into())),
+        }
+    }
+    #[cfg(not(any(
+        target_os = "android",
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "tvos",
+        target_os = "visionos",
+        target_os = "watchos",
+        target_os = "redox",
+    )))]
+    {
+        let _ = source;
+        Err(SessionError::InvalidInput {
+            message: "atomic no-replace directory publication is unsupported on this platform"
+                .into(),
+        })
+    }
+}
+
 fn copy_session_prefix(
     source: &Path,
     destination: &Path,
@@ -483,7 +966,7 @@ fn copy_session_prefix(
             ),
         });
     }
-    let bytes = fs::read(source).map_err(|error| io(source, error))?;
+    let mut input = File::open(source).map_err(|error| io(source, error))?;
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -494,12 +977,68 @@ fn copy_session_prefix(
     let mut output = options
         .open(destination)
         .map_err(|error| io(destination, error))?;
-    output
-        .write_all(&bytes)
-        .map_err(|error| io(destination, error))?;
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let count = input.read(&mut buffer).map_err(|error| io(source, error))?;
+        if count == 0 {
+            break;
+        }
+        output
+            .write_all(&buffer[..count])
+            .map_err(|error| io(destination, error))?;
+    }
     output.flush().map_err(|error| io(destination, error))?;
     if durability == DurabilityMode::Strict {
         output.sync_data().map_err(|error| io(destination, error))?;
+    }
+    Ok(())
+}
+
+fn write_export_manifest(
+    directory: &Path,
+    snapshot: &SessionSnapshot,
+    verification: &SessionVerification,
+    artifacts: &dyn crate::ArtifactStore,
+    durability: DurabilityMode,
+) -> Result<(), SessionExportError> {
+    let artifacts = verification
+        .artifact_roots
+        .iter()
+        .map(|artifact_id| {
+            artifacts.verify_object(*artifact_id).map(|byte_len| {
+                JsonValue::object([
+                    ("artifact_id", JsonValue::String(artifact_id.to_hex())),
+                    ("byte_len", JsonValue::from(byte_len)),
+                ])
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let contents = JsonValue::object([
+        ("artifacts", JsonValue::Array(artifacts)),
+        ("format", JsonValue::String("tea-session-export-v1".into())),
+        ("session_id", string_value(&snapshot.header().session_id)),
+        (
+            "through_digest",
+            JsonValue::String(snapshot.last_digest().to_hex()),
+        ),
+        ("through_seq", JsonValue::from(snapshot.last_sequence().0)),
+    ])
+    .to_json_string()
+    .map_err(|error| SessionError::InvalidInput {
+        message: format!("export manifest cannot encode as JSON: {error}"),
+    })?;
+    let path = directory.join("export.json");
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&path).map_err(|error| io(&path, error))?;
+    write_complete_line(&mut file, &contents, durability, &path)?;
+    if durability == DurabilityMode::Strict {
+        sync_directory(directory)?;
     }
     Ok(())
 }
@@ -586,25 +1125,123 @@ fn write_complete_line(
     durability: DurabilityMode,
     path: &Path,
 ) -> Result<(), SessionError> {
+    ensure_complete_line_size(json)?;
+    #[cfg(test)]
+    if let Some(failpoint) = test_write_failpoint() {
+        match failpoint {
+            TestWriteFailpoint::BeforeAppend => return Err(injected_pre_write_failure(path)),
+            TestWriteFailpoint::AfterJsonBytes(byte_count) => {
+                let byte_count = byte_count.min(json.len());
+                file.write_all(&json.as_bytes()[..byte_count])
+                    .map_err(|error| indeterminate_write(path, error))?;
+                return Err(if byte_count == 0 {
+                    injected_pre_write_failure(path)
+                } else {
+                    injected_write_failure(path)
+                });
+            }
+            TestWriteFailpoint::AfterJsonBeforeNewline
+            | TestWriteFailpoint::AfterNewlineBeforeFlush
+            | TestWriteFailpoint::DuringFlush
+            | TestWriteFailpoint::AfterFlushBeforeSync
+            | TestWriteFailpoint::DuringSync
+            | TestWriteFailpoint::AfterSyncBeforeReturn => {}
+        }
+    }
     file.write_all(json.as_bytes())
-        .map_err(|error| io(path, error))?;
-    file.write_all(b"\n").map_err(|error| io(path, error))?;
-    file.flush().map_err(|error| io(path, error))?;
+        .map_err(|error| indeterminate_write(path, error))?;
+    #[cfg(test)]
+    if matches!(
+        test_write_failpoint(),
+        Some(TestWriteFailpoint::AfterJsonBeforeNewline)
+    ) {
+        return Err(injected_write_failure(path));
+    }
+    file.write_all(b"\n")
+        .map_err(|error| indeterminate_write(path, error))?;
+    #[cfg(test)]
+    if matches!(
+        test_write_failpoint(),
+        Some(TestWriteFailpoint::AfterNewlineBeforeFlush)
+    ) {
+        return Err(injected_write_failure(path));
+    }
+    #[cfg(test)]
+    if matches!(
+        test_write_failpoint(),
+        Some(TestWriteFailpoint::DuringFlush)
+    ) {
+        return Err(injected_write_failure(path));
+    }
+    file.flush()
+        .map_err(|error| indeterminate_write(path, error))?;
+    #[cfg(test)]
+    if matches!(
+        test_write_failpoint(),
+        Some(TestWriteFailpoint::AfterFlushBeforeSync)
+    ) {
+        return Err(injected_write_failure(path));
+    }
     if durability == DurabilityMode::Strict {
-        file.sync_data().map_err(|error| io(path, error))?;
+        #[cfg(test)]
+        if matches!(test_write_failpoint(), Some(TestWriteFailpoint::DuringSync)) {
+            return Err(injected_write_failure(path));
+        }
+        file.sync_data()
+            .map_err(|error| indeterminate_write(path, error))?;
+        #[cfg(test)]
+        if matches!(
+            test_write_failpoint(),
+            Some(TestWriteFailpoint::AfterSyncBeforeReturn)
+        ) {
+            return Err(injected_write_failure(path));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+fn injected_write_failure(path: &Path) -> SessionError {
+    indeterminate_write(
+        path,
+        std::io::Error::other("injected session write interruption"),
+    )
+}
+
+#[cfg(test)]
+fn injected_pre_write_failure(path: &Path) -> SessionError {
+    io(
+        path,
+        std::io::Error::other("injected session write rejection before append"),
+    )
+}
+
+fn indeterminate_write(path: &Path, error: std::io::Error) -> SessionError {
+    SessionError::IndeterminateWrite {
+        path: path.display().to_string(),
+        message: error.to_string(),
+    }
+}
+
+fn ensure_complete_line_size(json: &str) -> Result<(), SessionError> {
+    if json.len() > MAX_SESSION_LINE_BYTES {
+        return Err(SessionError::InvalidInput {
+            message: format!("session line exceeds the {MAX_SESSION_LINE_BYTES}-byte line limit"),
+        });
     }
     Ok(())
 }
 
 fn write_head_cache(
     directory: &Path,
-    sequence: Sequence,
+    snapshot: &SessionSnapshot,
     durability: DurabilityMode,
 ) -> Result<(), SessionError> {
     let destination = directory.join("HEAD");
-    let temporary = directory.join(".HEAD.tmp");
+    let nonce = NEXT_HEAD_CACHE_FILE.fetch_add(1, Ordering::Relaxed);
+    let temporary = directory.join(format!(".HEAD.{}-{nonce:016x}.tmp", std::process::id()));
     let mut options = OpenOptions::new();
-    options.write(true).create(true).truncate(true);
+    options.write(true).create_new(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt as _;
@@ -613,19 +1250,83 @@ fn write_head_cache(
     let mut file = options
         .open(&temporary)
         .map_err(|error| io(&temporary, error))?;
-    file.write_all(sequence.0.to_string().as_bytes())
-        .and_then(|_| file.write_all(b"\n"))
-        .and_then(|_| file.flush())
-        .map_err(|error| io(&temporary, error))?;
-    if durability == DurabilityMode::Strict {
-        file.sync_data().map_err(|error| io(&temporary, error))?;
+    let contents = head_cache_contents(snapshot)?;
+    let result = (|| {
+        file.write_all(contents.as_bytes())
+            .and_then(|_| file.write_all(b"\n"))
+            .and_then(|_| file.flush())
+            .map_err(|error| io(&temporary, error))?;
+        if durability == DurabilityMode::Strict {
+            file.sync_data().map_err(|error| io(&temporary, error))?;
+        }
+        drop(file);
+        fs::rename(&temporary, &destination).map_err(|error| io(&destination, error))?;
+        if durability == DurabilityMode::Strict {
+            sync_directory(directory)?;
+        }
+        Ok(())
+    })();
+    if result.is_err() && temporary.exists() {
+        let _ = fs::remove_file(&temporary);
     }
-    drop(file);
-    fs::rename(&temporary, &destination).map_err(|error| io(&destination, error))?;
-    if durability == DurabilityMode::Strict {
-        sync_directory(directory)?;
+    result
+}
+
+/// `HEAD` identifies only the selected main-lane revision and the immutable
+/// header that names its session. It deliberately does not mirror the latest
+/// log prefix: ordinary record commits do not change active-harness selection
+/// and must not add a second synchronous replace to the hot append path.
+fn head_cache_contents(snapshot: &SessionSnapshot) -> Result<String, SessionError> {
+    JsonValue::object([
+        (
+            "active_harness_revision",
+            snapshot
+                .active_main_harness_revision()
+                .map(string_value)
+                .unwrap_or(JsonValue::Null),
+        ),
+        (
+            "header_digest",
+            JsonValue::String(snapshot.header().digest.to_hex()),
+        ),
+        ("session_id", string_value(&snapshot.header().session_id)),
+        ("version", JsonValue::from(1_u64)),
+    ])
+    .to_json_string()
+    .map_err(|error| SessionError::InvalidInput {
+        message: format!("HEAD cache cannot encode as JSON: {error}"),
+    })
+}
+
+fn head_cache_matches(directory: &Path, snapshot: &SessionSnapshot) -> bool {
+    let destination = directory.join("HEAD");
+    let metadata = match fs::symlink_metadata(&destination) {
+        Ok(metadata) if metadata.file_type().is_file() && !metadata.file_type().is_symlink() => {
+            metadata
+        }
+        Ok(_) | Err(_) => return false,
+    };
+    // `HEAD` is a fixed-size, derived cache; treating an unexpected large file
+    // as stale avoids making session open allocate in proportion to untrusted
+    // cache bytes.
+    if metadata.len() > 16 * 1024 {
+        return false;
     }
-    Ok(())
+    let mut expected = match head_cache_contents(snapshot) {
+        Ok(contents) => contents.into_bytes(),
+        Err(_) => return false,
+    };
+    expected.push(b'\n');
+    fs::read(destination).is_ok_and(|contents| contents == expected)
+}
+
+fn selects_main_harness_revision(mutation: &StoredMutation) -> bool {
+    matches!(
+        &mutation.mutation,
+        SessionMutation::Entry(entry)
+            if entry.lane_id == LaneId::main()
+                && matches!(entry.body, SessionEntry::HarnessRevisionChanged(_))
+    )
 }
 
 fn sync_directory(path: &Path) -> Result<(), SessionError> {
@@ -644,106 +1345,233 @@ fn sync_directory(path: &Path) -> Result<(), SessionError> {
     }
 }
 
-fn recover_complete_source(
+fn decode_snapshot_stream(
     file: &mut File,
     path: &Path,
-    durability: DurabilityMode,
-) -> Result<String, SessionError> {
+) -> Result<(SessionSnapshot, SessionAppendIndex, Option<u64>), SessionError> {
     file.seek(SeekFrom::Start(0))
         .map_err(|error| io(path, error))?;
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)
-        .map_err(|error| io(path, error))?;
-    let original_len = bytes.len();
-    let committed_len = match bytes.iter().rposition(|byte| *byte == b'\n') {
-        Some(position) => position + 1,
-        None => 0,
+    let mut lines = BoundedLineReader::new(file, path);
+    let header_line = match lines.next_line()? {
+        ReadLine::Complete(line) => line,
+        ReadLine::End | ReadLine::IncompleteTail { .. } => {
+            return Err(SessionError::Format {
+                path: path.display().to_string(),
+                line: 1,
+                offset: 0,
+                sequence: None,
+                mutation_kind: None,
+                message: "session file has no complete header line".into(),
+            });
+        }
     };
-    if committed_len != original_len {
-        bytes.truncate(committed_len);
-        file.set_len(committed_len as u64)
-            .map_err(|error| io(path, error))?;
-        if durability == DurabilityMode::Strict {
-            file.sync_data().map_err(|error| io(path, error))?;
+    let header_json = parse_canonical_line(path, &header_line)?;
+    let header = decode_header(&header_json)
+        .map_err(|message| format_error(path, header_line.line, header_line.offset, message))?;
+    let mut snapshot = SessionSnapshot::empty(header);
+    let mut append_index = SessionAppendIndex::empty(snapshot.header());
+    loop {
+        match lines.next_line()? {
+            ReadLine::Complete(line) => {
+                let value = parse_canonical_line(path, &line)?;
+                let mutation = decode_mutation(&value, &snapshot.header().session_id)
+                    .map_err(|error| format_mutation_error(path, line.line, line.offset, error))?;
+                if mutation.seq != snapshot.next_sequence() {
+                    return Err(format_decoded_mutation_error(
+                        path,
+                        line.line,
+                        line.offset,
+                        &mutation,
+                        format!(
+                            "non-consecutive sequence {}; expected {}",
+                            mutation.seq.0,
+                            snapshot.next_sequence().0
+                        ),
+                    ));
+                }
+                if mutation.prev_digest != snapshot.last_digest() {
+                    return Err(format_decoded_mutation_error(
+                        path,
+                        line.line,
+                        line.offset,
+                        &mutation,
+                        "previous digest mismatch".into(),
+                    ));
+                }
+                append_index.advance(&mutation);
+                snapshot.push_mutation(mutation);
+            }
+            ReadLine::End => return Ok((snapshot, append_index, None)),
+            ReadLine::IncompleteTail { offset } => {
+                return Ok((snapshot, append_index, Some(offset)));
+            }
         }
     }
-    String::from_utf8(bytes).map_err(|error| SessionError::Format {
+}
+
+struct CompleteLine {
+    line: usize,
+    offset: u64,
+    bytes: Vec<u8>,
+}
+
+enum ReadLine {
+    Complete(CompleteLine),
+    End,
+    IncompleteTail { offset: u64 },
+}
+
+struct BoundedLineReader<'a> {
+    reader: BufReader<&'a mut File>,
+    path: &'a Path,
+    next_line: usize,
+    next_offset: u64,
+}
+
+impl<'a> BoundedLineReader<'a> {
+    fn new(file: &'a mut File, path: &'a Path) -> Self {
+        Self {
+            reader: BufReader::new(file),
+            path,
+            next_line: 1,
+            next_offset: 0,
+        }
+    }
+
+    fn next_line(&mut self) -> Result<ReadLine, SessionError> {
+        let line = self.next_line;
+        let offset = self.next_offset;
+        let mut bytes = Vec::new();
+        let mut oversized = false;
+        loop {
+            let buffer = self.reader.fill_buf().map_err(|error| SessionError::Io {
+                path: self.path.display().to_string(),
+                message: error.to_string(),
+            })?;
+            if buffer.is_empty() {
+                return if bytes.is_empty() && !oversized {
+                    Ok(ReadLine::End)
+                } else {
+                    Ok(ReadLine::IncompleteTail { offset })
+                };
+            }
+            let newline = buffer.iter().position(|byte| *byte == b'\n');
+            let content_length = newline.unwrap_or(buffer.len());
+            if !oversized {
+                if bytes.len().saturating_add(content_length) > MAX_SESSION_LINE_BYTES {
+                    oversized = true;
+                    bytes.clear();
+                } else {
+                    bytes.extend_from_slice(&buffer[..content_length]);
+                }
+            }
+            let consumed = newline.map_or(buffer.len(), |position| position + 1);
+            self.reader.consume(consumed);
+            self.next_offset = self.next_offset.saturating_add(consumed as u64);
+            if newline.is_some() {
+                self.next_line = self.next_line.saturating_add(1);
+                if oversized {
+                    return Err(SessionError::Format {
+                        path: self.path.display().to_string(),
+                        line,
+                        offset,
+                        sequence: None,
+                        mutation_kind: None,
+                        message: format!(
+                            "session line exceeds the {MAX_SESSION_LINE_BYTES}-byte line limit"
+                        ),
+                    });
+                }
+                return Ok(ReadLine::Complete(CompleteLine {
+                    line,
+                    offset,
+                    bytes,
+                }));
+            }
+        }
+    }
+}
+
+fn parse_canonical_line(path: &Path, line: &CompleteLine) -> Result<JsonValue, SessionError> {
+    let source = std::str::from_utf8(&line.bytes).map_err(|error| SessionError::Format {
         path: path.display().to_string(),
-        line: 0,
+        line: line.line,
+        offset: line.offset,
+        sequence: None,
+        mutation_kind: None,
         message: format!("session JSONL is not UTF-8: {error}"),
-    })
-}
-
-fn truncate_malformed_final_json_line(
-    file: &mut File,
-    path: &Path,
-    source: String,
-    durability: DurabilityMode,
-) -> Result<String, SessionError> {
-    if !source.ends_with('\n') {
-        return Ok(source);
-    }
-    let without_final_newline = &source[..source.len() - 1];
-    let Some(previous_newline) = without_final_newline.rfind('\n') else {
-        // The lone line is the required header. It is not a recoverable tail.
-        return Ok(source);
-    };
-    let final_line = &without_final_newline[previous_newline + 1..];
-    let final_line_is_valid_mutation = JsonValue::parse(final_line)
-        .ok()
-        .and_then(|value| decode_mutation(&value).ok())
-        .is_some();
-    if final_line_is_valid_mutation {
-        return Ok(source);
-    }
-    let retained_len = previous_newline + 1;
-    file.set_len(retained_len as u64)
-        .map_err(|error| io(path, error))?;
-    if durability == DurabilityMode::Strict {
-        file.sync_data().map_err(|error| io(path, error))?;
-    }
-    Ok(source[..retained_len].to_owned())
-}
-
-fn decode_snapshot(path: &Path, source: &str) -> Result<SessionSnapshot, SessionError> {
-    let mut lines = source.lines();
-    let Some(header_line) = lines.next() else {
+    })?;
+    let value = JsonValue::parse(source).map_err(|error| SessionError::Format {
+        path: path.display().to_string(),
+        line: line.line,
+        offset: line.offset,
+        sequence: None,
+        mutation_kind: None,
+        message: error.to_string(),
+    })?;
+    let canonical = value
+        .to_json_string()
+        .map_err(|error| SessionError::Format {
+            path: path.display().to_string(),
+            line: line.line,
+            offset: line.offset,
+            sequence: None,
+            mutation_kind: None,
+            message: format!("could not re-encode session JSON canonically: {error}"),
+        })?;
+    if canonical.as_bytes() != line.bytes {
         return Err(SessionError::Format {
             path: path.display().to_string(),
-            line: 1,
-            message: "session file has no header".into(),
+            line: line.line,
+            offset: line.offset,
+            sequence: None,
+            mutation_kind: None,
+            message: "session line is not canonical JSON".into(),
         });
-    };
-    let header_json = parse_line(path, 1, header_line)?;
-    let header = decode_header(&header_json).map_err(|message| format_error(path, 1, message))?;
-    let mut snapshot = SessionSnapshot::empty(header);
-    for (offset, line) in lines.enumerate() {
-        let line_number = offset + 2;
-        let value = parse_line(path, line_number, line)?;
-        let mutation =
-            decode_mutation(&value).map_err(|message| format_error(path, line_number, message))?;
-        match mutation {
-            StoredMutation::Entry(value) => snapshot.push_entry(value),
-            StoredMutation::Record(value) => snapshot.push_record(value),
-            StoredMutation::Lane(value) => snapshot.push_lane_mutation(value),
-            StoredMutation::Fact(value) => snapshot.push_fact(value),
-        }
     }
-    Ok(snapshot)
+    Ok(value)
 }
 
-fn parse_line(path: &Path, line: usize, source: &str) -> Result<JsonValue, SessionError> {
-    JsonValue::parse(source).map_err(|error| SessionError::Format {
-        path: path.display().to_string(),
-        line,
-        message: error.to_string(),
-    })
-}
-
-fn format_error(path: &Path, line: usize, message: String) -> SessionError {
+fn format_error(path: &Path, line: usize, offset: u64, message: String) -> SessionError {
     SessionError::Format {
         path: path.display().to_string(),
         line,
+        offset,
+        sequence: None,
+        mutation_kind: None,
+        message,
+    }
+}
+
+fn format_mutation_error(
+    path: &Path,
+    line: usize,
+    offset: u64,
+    error: MutationDecodeError,
+) -> SessionError {
+    SessionError::Format {
+        path: path.display().to_string(),
+        line,
+        offset,
+        sequence: error.sequence,
+        mutation_kind: error.mutation_kind,
+        message: error.message,
+    }
+}
+
+fn format_decoded_mutation_error(
+    path: &Path,
+    line: usize,
+    offset: u64,
+    mutation: &StoredMutation,
+    message: String,
+) -> SessionError {
+    SessionError::Format {
+        path: path.display().to_string(),
+        line,
+        offset,
+        sequence: Some(mutation.seq),
+        mutation_kind: Some(mutation_kind_name(&mutation.mutation).into()),
         message,
     }
 }
@@ -755,7 +1583,7 @@ fn io(path: &Path, error: std::io::Error) -> SessionError {
     }
 }
 
-fn encode_header(header: &SessionHeader) -> JsonValue {
+fn encode_unsigned_header(header: &SessionHeader) -> JsonValue {
     JsonValue::object([
         ("kind", JsonValue::String("session".into())),
         ("version", JsonValue::from(u64::from(header.version))),
@@ -767,8 +1595,46 @@ fn encode_header(header: &SessionHeader) -> JsonValue {
     ])
 }
 
+fn encode_header(header: &SessionHeader) -> JsonValue {
+    let mut fields = encode_unsigned_header(header)
+        .as_object()
+        .expect("unsigned session header is an object")
+        .clone();
+    fields.insert("digest".into(), digest_value(header.digest));
+    JsonValue::Object(fields)
+}
+
+pub(crate) fn seal_header(header: &mut SessionHeader) -> Result<(), SessionError> {
+    header.digest = calculate_header_digest(header)
+        .map_err(|message| SessionError::InvalidInput { message })?;
+    Ok(())
+}
+
+fn calculate_header_digest(header: &SessionHeader) -> Result<Digest, String> {
+    let canonical = encode_unsigned_header(header)
+        .to_json_string()
+        .map_err(|error| format!("session header cannot encode canonically: {error}"))?;
+    let mut hasher = CanonicalHashWriter::new("tea-session-header-v1", 1, 1);
+    hasher.bytes("canonical_unsigned_header", canonical.as_bytes());
+    Ok(hasher.finish())
+}
+
 fn decode_header(value: &JsonValue) -> Result<SessionHeader, String> {
     let object = object(value)?;
+    require_exact_fields(
+        object,
+        &[
+            "kind",
+            "version",
+            "session_id",
+            "created_at_ms",
+            "workspace",
+            "metadata",
+            "initial_lane",
+            "digest",
+        ],
+        "header",
+    )?;
     if required_string(object, "kind")? != "session" {
         return Err("header kind must be `session`".into());
     }
@@ -776,7 +1642,8 @@ fn decode_header(value: &JsonValue) -> Result<SessionHeader, String> {
     if version != u64::from(SESSION_FORMAT_VERSION) {
         return Err(format!("unsupported session version {version}"));
     }
-    Ok(SessionHeader {
+    let digest = parse_digest(required_string(object, "digest")?)?;
+    let header = SessionHeader {
         kind: "session".into(),
         version: SESSION_FORMAT_VERSION,
         session_id: parse_id!(SessionId, required_string(object, "session_id")?),
@@ -784,15 +1651,28 @@ fn decode_header(value: &JsonValue) -> Result<SessionHeader, String> {
         workspace: required_string(object, "workspace")?,
         metadata: required_metadata(object, "metadata")?,
         initial_lane: parse_id!(LaneId, required_string(object, "initial_lane")?),
-    })
+        digest,
+    };
+    if calculate_header_digest(&header)? != digest {
+        return Err("header digest mismatch".into());
+    }
+    Ok(header)
 }
 
-fn encode_mutation(mutation: &StoredMutation) -> JsonValue {
+pub(crate) fn encode_mutation(mutation: &StoredMutation) -> JsonValue {
+    JsonValue::object([
+        ("seq", JsonValue::from(mutation.seq.0)),
+        ("timestamp_ms", JsonValue::from(mutation.timestamp_ms)),
+        ("prev_digest", digest_value(mutation.prev_digest)),
+        ("mutation", encode_mutation_payload(&mutation.mutation)),
+        ("digest", digest_value(mutation.digest)),
+    ])
+}
+
+fn encode_mutation_payload(mutation: &SessionMutation) -> JsonValue {
     match mutation {
-        StoredMutation::Entry(entry) => JsonValue::object([
+        SessionMutation::Entry(entry) => JsonValue::object([
             ("kind", JsonValue::String("entry".into())),
-            ("seq", JsonValue::from(entry.header.seq.0)),
-            ("timestamp_ms", JsonValue::from(entry.header.timestamp_ms)),
             (
                 "payload",
                 JsonValue::object([
@@ -803,32 +1683,157 @@ fn encode_mutation(mutation: &StoredMutation) -> JsonValue {
                 ]),
             ),
         ]),
-        StoredMutation::Record(record) => JsonValue::object([
+        SessionMutation::Record(record) => JsonValue::object([
             ("kind", JsonValue::String("record".into())),
-            ("seq", JsonValue::from(record.seq.0)),
-            ("timestamp_ms", JsonValue::from(record.timestamp_ms)),
             ("payload", encode_record(&record.record)),
         ]),
-        StoredMutation::Lane(lane) => JsonValue::object([
+        SessionMutation::Lane(lane) => JsonValue::object([
             ("kind", JsonValue::String("lane".into())),
-            ("seq", JsonValue::from(lane.seq.0)),
-            ("timestamp_ms", JsonValue::from(lane.timestamp_ms)),
             ("payload", encode_lane_mutation(&lane.mutation)),
         ]),
-        StoredMutation::Fact(fact) => JsonValue::object([
+        SessionMutation::Fact(fact) => JsonValue::object([
             ("kind", JsonValue::String("fact".into())),
-            ("seq", JsonValue::from(fact.seq.0)),
-            ("timestamp_ms", JsonValue::from(fact.timestamp_ms)),
             ("payload", encode_fact(&fact.fact)),
         ]),
     }
 }
 
-fn decode_mutation(value: &JsonValue) -> Result<StoredMutation, String> {
+pub(crate) fn seal_mutation(
+    snapshot: &SessionSnapshot,
+    mutation: SessionMutation,
+) -> Result<StoredMutation, SessionError> {
+    let (seq, timestamp_ms) = mutation_envelope_values(&mutation);
+    let prev_digest = snapshot.last_digest();
+    let digest = calculate_record_digest(
+        &snapshot.header().session_id,
+        seq,
+        timestamp_ms,
+        prev_digest,
+        &mutation,
+    )
+    .map_err(|message| SessionError::InvalidInput { message })?;
+    Ok(StoredMutation {
+        seq,
+        timestamp_ms,
+        prev_digest,
+        digest,
+        mutation,
+    })
+}
+
+fn mutation_envelope_values(mutation: &SessionMutation) -> (Sequence, u64) {
+    match mutation {
+        SessionMutation::Entry(entry) => (entry.header.seq, entry.header.timestamp_ms),
+        SessionMutation::Record(record) => (record.seq, record.timestamp_ms),
+        SessionMutation::Lane(lane) => (lane.seq, lane.timestamp_ms),
+        SessionMutation::Fact(fact) => (fact.seq, fact.timestamp_ms),
+    }
+}
+
+fn calculate_record_digest(
+    session_id: &SessionId,
+    seq: Sequence,
+    timestamp_ms: u64,
+    prev_digest: Digest,
+    mutation: &SessionMutation,
+) -> Result<Digest, String> {
+    let canonical_payload = encode_mutation_payload(mutation)
+        .to_json_string()
+        .map_err(|error| format!("session mutation cannot encode canonically: {error}"))?;
+    let mut hasher = CanonicalHashWriter::new("tea-session-record-v1", 1, 1);
+    hasher.string("session_id", session_id.as_str());
+    hasher.u64("sequence", seq.0);
+    hasher.u64("timestamp_ms", timestamp_ms);
+    hasher.bytes("previous_digest", prev_digest.as_bytes());
+    hasher.bytes("canonical_mutation_payload", canonical_payload.as_bytes());
+    Ok(hasher.finish())
+}
+
+#[derive(Debug)]
+struct MutationDecodeError {
+    message: String,
+    sequence: Option<Sequence>,
+    mutation_kind: Option<String>,
+}
+
+impl From<String> for MutationDecodeError {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            sequence: None,
+            mutation_kind: None,
+        }
+    }
+}
+
+impl MutationDecodeError {
+    fn from_decoded_mutation(message: impl Into<String>, mutation: &StoredMutation) -> Self {
+        Self {
+            message: message.into(),
+            sequence: Some(mutation.seq),
+            mutation_kind: Some(mutation_kind_name(&mutation.mutation).into()),
+        }
+    }
+}
+
+fn decode_mutation(
+    value: &JsonValue,
+    session_id: &SessionId,
+) -> Result<StoredMutation, MutationDecodeError> {
     let fields = object(value)?;
-    let kind = required_string(fields, "kind")?;
+    require_exact_fields(
+        fields,
+        &["seq", "timestamp_ms", "prev_digest", "mutation", "digest"],
+        "mutation envelope",
+    )?;
     let seq = Sequence(required_u64(fields, "seq")?);
     let timestamp_ms = required_u64(fields, "timestamp_ms")?;
+    let prev_digest = parse_digest(required_string(fields, "prev_digest")?)?;
+    let digest = parse_digest(required_string(fields, "digest")?)?;
+    let mutation = decode_session_mutation(required_value(fields, "mutation")?, seq, timestamp_ms)?;
+    if calculate_record_digest(session_id, seq, timestamp_ms, prev_digest, &mutation)? != digest {
+        return Err(MutationDecodeError {
+            message: "record digest mismatch".into(),
+            sequence: Some(seq),
+            mutation_kind: Some(mutation_kind_name(&mutation).into()),
+        });
+    }
+    let stored = StoredMutation {
+        seq,
+        timestamp_ms,
+        prev_digest,
+        digest,
+        mutation,
+    };
+    // Decoding must be lossless for the closed v1 wire schema. In particular,
+    // an unknown nested field must not be silently excluded from the digest
+    // calculation just because this decoder has no semantic home for it.
+    if encode_mutation(&stored) != *value {
+        return Err(MutationDecodeError::from_decoded_mutation(
+            "mutation does not match the v1 schema",
+            &stored,
+        ));
+    }
+    Ok(stored)
+}
+
+fn mutation_kind_name(mutation: &SessionMutation) -> &'static str {
+    match mutation {
+        SessionMutation::Entry(_) => "entry",
+        SessionMutation::Record(_) => "record",
+        SessionMutation::Lane(_) => "lane",
+        SessionMutation::Fact(_) => "fact",
+    }
+}
+
+fn decode_session_mutation(
+    value: &JsonValue,
+    seq: Sequence,
+    timestamp_ms: u64,
+) -> Result<SessionMutation, String> {
+    let fields = object(value)?;
+    require_exact_fields(fields, &["kind", "payload"], "mutation")?;
+    let kind = required_string(fields, "kind")?;
     let payload = required_value(fields, "payload")?;
     match kind.as_str() {
         "entry" => {
@@ -837,7 +1842,7 @@ fn decode_mutation(value: &JsonValue) -> Result<StoredMutation, String> {
             let id = parse_id!(EntryId, required_string(payload, "id")?);
             let parent_id = optional_id_of::<EntryId>(payload, "parent_id")?;
             let body = decode_entry(required_value(payload, "entry")?)?;
-            Ok(StoredMutation::Entry(StoredEntry {
+            Ok(SessionMutation::Entry(StoredEntry {
                 lane_id,
                 header: EntryHeader {
                     id,
@@ -848,17 +1853,17 @@ fn decode_mutation(value: &JsonValue) -> Result<StoredMutation, String> {
                 body,
             }))
         }
-        "record" => Ok(StoredMutation::Record(StoredRecord {
+        "record" => Ok(SessionMutation::Record(StoredRecord {
             seq,
             timestamp_ms,
             record: decode_record(payload)?,
         })),
-        "lane" => Ok(StoredMutation::Lane(StoredLaneMutation {
+        "lane" => Ok(SessionMutation::Lane(StoredLaneMutation {
             seq,
             timestamp_ms,
             mutation: decode_lane_mutation(payload)?,
         })),
-        "fact" => Ok(StoredMutation::Fact(StoredFact {
+        "fact" => Ok(SessionMutation::Fact(StoredFact {
             seq,
             timestamp_ms,
             fact: decode_fact(payload)?,
@@ -1962,6 +2967,17 @@ fn required_value<'a>(
     object
         .get(field)
         .ok_or_else(|| format!("missing required field {field:?}"))
+}
+
+fn require_exact_fields(
+    object: &BTreeMap<String, JsonValue>,
+    expected: &[&str],
+    context: &str,
+) -> Result<(), String> {
+    if object.len() != expected.len() || expected.iter().any(|field| !object.contains_key(*field)) {
+        return Err(format!("unknown or missing {context} fields"));
+    }
+    Ok(())
 }
 
 fn required_string(object: &BTreeMap<String, JsonValue>, field: &str) -> Result<String, String> {

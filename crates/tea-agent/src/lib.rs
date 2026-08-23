@@ -16,6 +16,6 @@ pub mod terminal;
 pub mod ui;
 
 pub use app::{
-    App, AppError, AppState, CliCommand, CliOptions, NoticeSeverity, ToolProjection, ToolState,
-    TranscriptEntry, UiSurface,
+    run_session_command, App, AppError, AppState, CliCommand, CliOptions, NoticeSeverity,
+    SessionCommand, ToolProjection, ToolState, TranscriptEntry, UiSurface,
 };

@@ -1,0 +1,86 @@
+{"version":1,"sequence":0,"elapsed_ns":833,"kind":"spawn","payload":"pid=54446 process-group=54446"}
+{"version":1,"sequence":1,"elapsed_ns":269833,"kind":"predicate","payload":"\"local model readiness\"=false"}
+{"version":1,"sequence":2,"elapsed_ns":27569500,"kind":"predicate","payload":"\"local model readiness\"=false"}
+{"version":1,"sequence":3,"elapsed_ns":53640833,"kind":"predicate","payload":"\"local model readiness\"=false"}
+{"version":1,"sequence":4,"elapsed_ns":77499458,"kind":"read","payload":"output-offset=0 output-length=22"}
+{"version":1,"sequence":5,"elapsed_ns":82535542,"kind":"read","payload":"output-offset=22 output-length=1024"}
+{"version":1,"sequence":6,"elapsed_ns":317022625,"kind":"read","payload":"output-offset=1046 output-length=656"}
+{"version":1,"sequence":7,"elapsed_ns":468259875,"kind":"predicate","payload":"\"local model readiness\"=true"}
+{"version":1,"sequence":8,"elapsed_ns":468517458,"kind":"write","payload":"input-offset=0 input-length=36"}
+{"version":1,"sequence":9,"elapsed_ns":468778250,"kind":"predicate","payload":"\"multiline composer\"=false"}
+{"version":1,"sequence":10,"elapsed_ns":468798750,"kind":"read","payload":"output-offset=1702 output-length=1024"}
+{"version":1,"sequence":11,"elapsed_ns":705630542,"kind":"read","payload":"output-offset=2726 output-length=999"}
+{"version":1,"sequence":12,"elapsed_ns":938228208,"kind":"predicate","payload":"\"multiline composer\"=true"}
+{"version":1,"sequence":13,"elapsed_ns":938248042,"kind":"write","payload":"input-offset=36 input-length=1"}
+{"version":1,"sequence":14,"elapsed_ns":938250083,"kind":"write","payload":"input-offset=37 input-length=6"}
+{"version":1,"sequence":15,"elapsed_ns":938252208,"kind":"write","payload":"input-offset=43 input-length=1"}
+{"version":1,"sequence":16,"elapsed_ns":938506208,"kind":"predicate","payload":"\"cross-provider model selector\"=false"}
+{"version":1,"sequence":17,"elapsed_ns":938543500,"kind":"read","payload":"output-offset=3725 output-length=1024"}
+{"version":1,"sequence":18,"elapsed_ns":1177838583,"kind":"read","payload":"output-offset=4749 output-length=1024"}
+{"version":1,"sequence":19,"elapsed_ns":1416951667,"kind":"read","payload":"output-offset=5773 output-length=1024"}
+{"version":1,"sequence":20,"elapsed_ns":1656811042,"kind":"read","payload":"output-offset=6797 output-length=1024"}
+{"version":1,"sequence":21,"elapsed_ns":1898240583,"kind":"read","payload":"output-offset=7821 output-length=1024"}
+{"version":1,"sequence":22,"elapsed_ns":2140482500,"kind":"read","payload":"output-offset=8845 output-length=1024"}
+{"version":1,"sequence":23,"elapsed_ns":2384125625,"kind":"read","payload":"output-offset=9869 output-length=1024"}
+{"version":1,"sequence":24,"elapsed_ns":2629392208,"kind":"read","payload":"output-offset=10893 output-length=1024"}
+{"version":1,"sequence":25,"elapsed_ns":2876186417,"kind":"read","payload":"output-offset=11917 output-length=1024"}
+{"version":1,"sequence":26,"elapsed_ns":3124908417,"kind":"read","payload":"output-offset=12941 output-length=1024"}
+{"version":1,"sequence":27,"elapsed_ns":3374886958,"kind":"read","payload":"output-offset=13965 output-length=1024"}
+{"version":1,"sequence":28,"elapsed_ns":3626370667,"kind":"read","payload":"output-offset=14989 output-length=1024"}
+{"version":1,"sequence":29,"elapsed_ns":3879942583,"kind":"read","payload":"output-offset=16013 output-length=1024"}
+{"version":1,"sequence":30,"elapsed_ns":4135406083,"kind":"read","payload":"output-offset=17037 output-length=1024"}
+{"version":1,"sequence":31,"elapsed_ns":4392111292,"kind":"read","payload":"output-offset=18061 output-length=1024"}
+{"version":1,"sequence":32,"elapsed_ns":4649680667,"kind":"read","payload":"output-offset=19085 output-length=1024"}
+{"version":1,"sequence":33,"elapsed_ns":4907510167,"kind":"read","payload":"output-offset=20109 output-length=1024"}
+{"version":1,"sequence":34,"elapsed_ns":5166447583,"kind":"read","payload":"output-offset=21133 output-length=1024"}
+{"version":1,"sequence":35,"elapsed_ns":5425610292,"kind":"read","payload":"output-offset=22157 output-length=1024"}
+{"version":1,"sequence":36,"elapsed_ns":5684398417,"kind":"read","payload":"output-offset=23181 output-length=1024"}
+{"version":1,"sequence":37,"elapsed_ns":5942777833,"kind":"read","payload":"output-offset=24205 output-length=1024"}
+{"version":1,"sequence":38,"elapsed_ns":6200991417,"kind":"read","payload":"output-offset=25229 output-length=1024"}
+{"version":1,"sequence":39,"elapsed_ns":6460192458,"kind":"read","payload":"output-offset=26253 output-length=1024"}
+{"version":1,"sequence":40,"elapsed_ns":6720861750,"kind":"read","payload":"output-offset=27277 output-length=1024"}
+{"version":1,"sequence":41,"elapsed_ns":6982182833,"kind":"read","payload":"output-offset=28301 output-length=1024"}
+{"version":1,"sequence":42,"elapsed_ns":7243816667,"kind":"read","payload":"output-offset=29325 output-length=1024"}
+{"version":1,"sequence":43,"elapsed_ns":7504928208,"kind":"read","payload":"output-offset=30349 output-length=1024"}
+{"version":1,"sequence":44,"elapsed_ns":7766505583,"kind":"read","payload":"output-offset=31373 output-length=1024"}
+{"version":1,"sequence":45,"elapsed_ns":8028145125,"kind":"read","payload":"output-offset=32397 output-length=1024"}
+{"version":1,"sequence":46,"elapsed_ns":8289871958,"kind":"read","payload":"output-offset=33421 output-length=1024"}
+{"version":1,"sequence":47,"elapsed_ns":8551235708,"kind":"read","payload":"output-offset=34445 output-length=1024"}
+{"version":1,"sequence":48,"elapsed_ns":8812734208,"kind":"read","payload":"output-offset=35469 output-length=1024"}
+{"version":1,"sequence":49,"elapsed_ns":9074403333,"kind":"read","payload":"output-offset=36493 output-length=1024"}
+{"version":1,"sequence":50,"elapsed_ns":9336537083,"kind":"read","payload":"output-offset=37517 output-length=1024"}
+{"version":1,"sequence":51,"elapsed_ns":9598622917,"kind":"read","payload":"output-offset=38541 output-length=1024"}
+{"version":1,"sequence":52,"elapsed_ns":9860784917,"kind":"read","payload":"output-offset=39565 output-length=1024"}
+{"version":1,"sequence":53,"elapsed_ns":10123901208,"kind":"read","payload":"output-offset=40589 output-length=1024"}
+{"version":1,"sequence":54,"elapsed_ns":10388623417,"kind":"read","payload":"output-offset=41613 output-length=976"}
+{"version":1,"sequence":55,"elapsed_ns":10643191000,"kind":"predicate","payload":"\"cross-provider model selector\"=true"}
+{"version":1,"sequence":56,"elapsed_ns":10643219667,"kind":"write","payload":"input-offset=44 input-length=1"}
+{"version":1,"sequence":57,"elapsed_ns":10643487833,"kind":"predicate","payload":"\"model selector closed\"=false"}
+{"version":1,"sequence":58,"elapsed_ns":10670360208,"kind":"predicate","payload":"\"model selector closed\"=false"}
+{"version":1,"sequence":59,"elapsed_ns":10675866083,"kind":"read","payload":"output-offset=42589 output-length=1024"}
+{"version":1,"sequence":60,"elapsed_ns":10943617250,"kind":"read","payload":"output-offset=43613 output-length=1024"}
+{"version":1,"sequence":61,"elapsed_ns":11210878667,"kind":"read","payload":"output-offset=44637 output-length=1024"}
+{"version":1,"sequence":62,"elapsed_ns":11477490292,"kind":"read","payload":"output-offset=45661 output-length=1024"}
+{"version":1,"sequence":63,"elapsed_ns":11744181042,"kind":"read","payload":"output-offset=46685 output-length=1024"}
+{"version":1,"sequence":64,"elapsed_ns":12010564958,"kind":"read","payload":"output-offset=47709 output-length=1024"}
+{"version":1,"sequence":65,"elapsed_ns":12276631250,"kind":"read","payload":"output-offset=48733 output-length=1024"}
+{"version":1,"sequence":66,"elapsed_ns":12542137958,"kind":"read","payload":"output-offset=49757 output-length=1024"}
+{"version":1,"sequence":67,"elapsed_ns":12807286542,"kind":"read","payload":"output-offset=50781 output-length=1024"}
+{"version":1,"sequence":68,"elapsed_ns":13071902083,"kind":"read","payload":"output-offset=51805 output-length=105"}
+{"version":1,"sequence":69,"elapsed_ns":13099388958,"kind":"predicate","payload":"\"model selector closed\"=true"}
+{"version":1,"sequence":70,"elapsed_ns":13099412750,"kind":"write","payload":"input-offset=45 input-length=1"}
+{"version":1,"sequence":71,"elapsed_ns":13099666917,"kind":"predicate","payload":"\"slash completion menu\"=false"}
+{"version":1,"sequence":72,"elapsed_ns":13099689958,"kind":"read","payload":"output-offset=51910 output-length=1024"}
+{"version":1,"sequence":73,"elapsed_ns":13364465500,"kind":"read","payload":"output-offset=52934 output-length=1024"}
+{"version":1,"sequence":74,"elapsed_ns":13629105375,"kind":"read","payload":"output-offset=53958 output-length=1024"}
+{"version":1,"sequence":75,"elapsed_ns":13893937542,"kind":"read","payload":"output-offset=54982 output-length=1024"}
+{"version":1,"sequence":76,"elapsed_ns":14159209167,"kind":"read","payload":"output-offset=56006 output-length=1024"}
+{"version":1,"sequence":77,"elapsed_ns":14424312125,"kind":"read","payload":"output-offset=57030 output-length=1024"}
+{"version":1,"sequence":78,"elapsed_ns":14689747708,"kind":"read","payload":"output-offset=58054 output-length=1024"}
+{"version":1,"sequence":79,"elapsed_ns":14955096625,"kind":"read","payload":"output-offset=59078 output-length=1024"}
+{"version":1,"sequence":80,"elapsed_ns":15220907625,"kind":"read","payload":"output-offset=60102 output-length=1024"}
+{"version":1,"sequence":81,"elapsed_ns":15486595750,"kind":"read","payload":"output-offset=61126 output-length=1024"}
+{"version":1,"sequence":82,"elapsed_ns":15752444125,"kind":"read","payload":"output-offset=62150 output-length=1024"}
+{"version":1,"sequence":83,"elapsed_ns":16018875625,"kind":"read","payload":"output-offset=63174 output-length=1024"}
+{"version":1,"sequence":84,"elapsed_ns":16285623625,"kind":"read","payload":"output-offset=64198 output-length=110"}
+{"version":1,"sequence":85,"elapsed_ns":16314547708,"kind":"predicate","payload":"\"slash completion menu\"=false"}

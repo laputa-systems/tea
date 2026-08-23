@@ -1,0 +1,10 @@
+scenario: native composer interaction
+size: columns=80 rows=16
+profile: xterm-minimal-v1
+trace-limit: 8388608
+platform: macos
+input-bytes: 46
+output-bytes: 64308
+event-count: 86
+elapsed-ns: 16308143250
+timeout-deadline-ns: not-applicable

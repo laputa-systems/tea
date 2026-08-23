@@ -1877,11 +1877,10 @@ mod tests {
             .expect("trace-backed signature persists");
         store.stage(candidate).expect("candidate persists");
         assert!(
-            store
+            !store
                 .record_evaluation(evaluation(&lock, candidate_id.clone(), 0))
                 .expect("rejected evaluation persists")
                 .is_promotable()
-                == false
         );
         drop(store);
 
@@ -1889,7 +1888,7 @@ mod tests {
         assert!(reopened.campaign().proposals().contains_key(&candidate_id));
         assert!(reopened.failure_signatures().contains_key(&signature.id));
         assert_eq!(reopened.artifact_roots(), [trace].into_iter().collect());
-        assert!(matches!(reopened.campaign().champion(), None));
+        assert!(reopened.campaign().champion().is_none());
         let _ = fs::remove_dir_all(path);
     }
 

@@ -1,0 +1,86 @@
+#0000 +833ns spawn pid=54446 process-group=54446
+#0001 +269.833µs predicate "local model readiness"=false
+#0002 +27.5695ms predicate "local model readiness"=false
+#0003 +53.640833ms predicate "local model readiness"=false
+#0004 +77.499458ms read output-offset=0 output-length=22
+#0005 +82.535542ms read output-offset=22 output-length=1024
+#0006 +317.022625ms read output-offset=1046 output-length=656
+#0007 +468.259875ms predicate "local model readiness"=true
+#0008 +468.517458ms write input-offset=0 input-length=36
+#0009 +468.77825ms predicate "multiline composer"=false
+#0010 +468.79875ms read output-offset=1702 output-length=1024
+#0011 +705.630542ms read output-offset=2726 output-length=999
+#0012 +938.228208ms predicate "multiline composer"=true
+#0013 +938.248042ms write input-offset=36 input-length=1
+#0014 +938.250083ms write input-offset=37 input-length=6
+#0015 +938.252208ms write input-offset=43 input-length=1
+#0016 +938.506208ms predicate "cross-provider model selector"=false
+#0017 +938.5435ms read output-offset=3725 output-length=1024
+#0018 +1.177838583s read output-offset=4749 output-length=1024
+#0019 +1.416951667s read output-offset=5773 output-length=1024
+#0020 +1.656811042s read output-offset=6797 output-length=1024
+#0021 +1.898240583s read output-offset=7821 output-length=1024
+#0022 +2.1404825s read output-offset=8845 output-length=1024
+#0023 +2.384125625s read output-offset=9869 output-length=1024
+#0024 +2.629392208s read output-offset=10893 output-length=1024
+#0025 +2.876186417s read output-offset=11917 output-length=1024
+#0026 +3.124908417s read output-offset=12941 output-length=1024
+#0027 +3.374886958s read output-offset=13965 output-length=1024
+#0028 +3.626370667s read output-offset=14989 output-length=1024
+#0029 +3.879942583s read output-offset=16013 output-length=1024
+#0030 +4.135406083s read output-offset=17037 output-length=1024
+#0031 +4.392111292s read output-offset=18061 output-length=1024
+#0032 +4.649680667s read output-offset=19085 output-length=1024
+#0033 +4.907510167s read output-offset=20109 output-length=1024
+#0034 +5.166447583s read output-offset=21133 output-length=1024
+#0035 +5.425610292s read output-offset=22157 output-length=1024
+#0036 +5.684398417s read output-offset=23181 output-length=1024
+#0037 +5.942777833s read output-offset=24205 output-length=1024
+#0038 +6.200991417s read output-offset=25229 output-length=1024
+#0039 +6.460192458s read output-offset=26253 output-length=1024
+#0040 +6.72086175s read output-offset=27277 output-length=1024
+#0041 +6.982182833s read output-offset=28301 output-length=1024
+#0042 +7.243816667s read output-offset=29325 output-length=1024
+#0043 +7.504928208s read output-offset=30349 output-length=1024
+#0044 +7.766505583s read output-offset=31373 output-length=1024
+#0045 +8.028145125s read output-offset=32397 output-length=1024
+#0046 +8.289871958s read output-offset=33421 output-length=1024
+#0047 +8.551235708s read output-offset=34445 output-length=1024
+#0048 +8.812734208s read output-offset=35469 output-length=1024
+#0049 +9.074403333s read output-offset=36493 output-length=1024
+#0050 +9.336537083s read output-offset=37517 output-length=1024
+#0051 +9.598622917s read output-offset=38541 output-length=1024
+#0052 +9.860784917s read output-offset=39565 output-length=1024
+#0053 +10.123901208s read output-offset=40589 output-length=1024
+#0054 +10.388623417s read output-offset=41613 output-length=976
+#0055 +10.643191s predicate "cross-provider model selector"=true
+#0056 +10.643219667s write input-offset=44 input-length=1
+#0057 +10.643487833s predicate "model selector closed"=false
+#0058 +10.670360208s predicate "model selector closed"=false
+#0059 +10.675866083s read output-offset=42589 output-length=1024
+#0060 +10.94361725s read output-offset=43613 output-length=1024
+#0061 +11.210878667s read output-offset=44637 output-length=1024
+#0062 +11.477490292s read output-offset=45661 output-length=1024
+#0063 +11.744181042s read output-offset=46685 output-length=1024
+#0064 +12.010564958s read output-offset=47709 output-length=1024
+#0065 +12.27663125s read output-offset=48733 output-length=1024
+#0066 +12.542137958s read output-offset=49757 output-length=1024
+#0067 +12.807286542s read output-offset=50781 output-length=1024
+#0068 +13.071902083s read output-offset=51805 output-length=105
+#0069 +13.099388958s predicate "model selector closed"=true
+#0070 +13.09941275s write input-offset=45 input-length=1
+#0071 +13.099666917s predicate "slash completion menu"=false
+#0072 +13.099689958s read output-offset=51910 output-length=1024
+#0073 +13.3644655s read output-offset=52934 output-length=1024
+#0074 +13.629105375s read output-offset=53958 output-length=1024
+#0075 +13.893937542s read output-offset=54982 output-length=1024
+#0076 +14.159209167s read output-offset=56006 output-length=1024
+#0077 +14.424312125s read output-offset=57030 output-length=1024
+#0078 +14.689747708s read output-offset=58054 output-length=1024
+#0079 +14.955096625s read output-offset=59078 output-length=1024
+#0080 +15.220907625s read output-offset=60102 output-length=1024
+#0081 +15.48659575s read output-offset=61126 output-length=1024
+#0082 +15.752444125s read output-offset=62150 output-length=1024
+#0083 +16.018875625s read output-offset=63174 output-length=1024
+#0084 +16.285623625s read output-offset=64198 output-length=110
+#0085 +16.314547708s predicate "slash completion menu"=false

@@ -1,14 +1,65 @@
 use crate::{ArtifactId, ArtifactPolicyId};
+#[cfg(test)]
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
-use std::io::Write;
+use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 const MAX_PAGE_BYTES: usize = 1_048_576;
 static NEXT_TEMPORARY: AtomicU64 = AtomicU64::new(1);
+
+/// Deterministic immutable-publication interruption used only by the artifact
+/// storage matrix. Production publication has no failpoint branch.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TestArtifactWriteFailpoint {
+    BeforeTemporaryCreation,
+    BeforeFileSync,
+    AfterFileSync,
+    BeforePublication,
+    AfterPublication,
+    BeforeDirectorySync,
+    AfterDirectorySync,
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_ARTIFACT_WRITE_FAILPOINT: RefCell<Option<TestArtifactWriteFailpoint>> =
+        const { RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) struct TestArtifactWriteFailpointGuard;
+
+#[cfg(test)]
+impl Drop for TestArtifactWriteFailpointGuard {
+    fn drop(&mut self) {
+        TEST_ARTIFACT_WRITE_FAILPOINT.with(|slot| *slot.borrow_mut() = None);
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn install_test_artifact_write_failpoint(
+    failpoint: TestArtifactWriteFailpoint,
+) -> TestArtifactWriteFailpointGuard {
+    TEST_ARTIFACT_WRITE_FAILPOINT.with(|slot| {
+        assert!(
+            slot.borrow().is_none(),
+            "an artifact write failpoint is already installed on this thread"
+        );
+        *slot.borrow_mut() = Some(failpoint);
+    });
+    TestArtifactWriteFailpointGuard
+}
+
+#[cfg(test)]
+fn test_artifact_write_failpoint() -> Option<TestArtifactWriteFailpoint> {
+    TEST_ARTIFACT_WRITE_FAILPOINT.with(|slot| *slot.borrow())
+}
 
 /// Explicit retention and direct-reader bounds for model-readable artifacts.
 ///
@@ -152,6 +203,20 @@ pub trait ArtifactStore: Send + Sync {
     /// Load exact immutable bytes.
     fn get(&self, artifact_id: ArtifactId) -> Result<Vec<u8>, ArtifactError>;
 
+    /// Rehash one immutable object and return its exact byte length without
+    /// exposing content to the caller. Backends may implement this as a
+    /// streaming verification path.
+    fn verify_object(&self, artifact_id: ArtifactId) -> Result<u64, ArtifactError> {
+        let bytes = self.get(artifact_id)?;
+        if ArtifactId::from_bytes(&bytes) != artifact_id {
+            return Err(ArtifactError::Corruption {
+                artifact_id,
+                message: "artifact bytes do not match their content-addressed identity".into(),
+            });
+        }
+        Ok(bytes.len() as u64)
+    }
+
     /// List immutable object identities and sizes for an explicit GC pass.
     ///
     /// Stores that do not support inventory should leave the default typed
@@ -200,16 +265,7 @@ pub trait ArtifactStore: Send + Sync {
         maximum_results: usize,
         context_bytes: usize,
     ) -> Result<Vec<ArtifactMatch>, ArtifactError> {
-        if query.is_empty() {
-            return Err(ArtifactError::InvalidRequest {
-                message: "literal artifact query cannot be empty".into(),
-            });
-        }
-        if maximum_results == 0 || maximum_results > 1_000 || context_bytes > MAX_PAGE_BYTES {
-            return Err(ArtifactError::InvalidRequest {
-                message: "artifact search bounds exceed the durable reader limits".into(),
-            });
-        }
+        validate_search_bounds(query, maximum_results, context_bytes)?;
         let bytes = self.get(artifact_id)?;
         let mut matches = Vec::new();
         let mut cursor = 0_usize;
@@ -336,65 +392,156 @@ impl FileArtifactStore {
         let digest = artifact_id.to_hex();
         self.root.join("blake3").join(&digest[..2]).join(digest)
     }
-}
 
-impl ArtifactStore for FileArtifactStore {
-    fn put(&self, bytes: &[u8], media_type: &str) -> Result<ArtifactDescriptor, ArtifactError> {
+    /// Stream one immutable object to a private temporary file while hashing
+    /// it, then publish the completed identity without overwriting an
+    /// existing object. The input never has to be materialized in memory by
+    /// the store.
+    pub fn put_reader(
+        &self,
+        reader: &mut dyn Read,
+        media_type: &str,
+    ) -> Result<ArtifactDescriptor, ArtifactError> {
         validate_media_type(media_type)?;
-        let artifact_id = ArtifactId::from_bytes(bytes);
-        let destination = self.object_path(artifact_id);
-        let parent = destination
-            .parent()
-            .expect("content-addressed destination always has a parent");
-        ensure_directory(parent)?;
-        if destination.exists() {
-            verify_existing(&destination, artifact_id, bytes)?;
-            return Ok(ArtifactDescriptor {
-                artifact_id,
-                byte_len: bytes.len() as u64,
-                media_type: media_type.into(),
-            });
-        }
-
+        let object_root = self.root.join("blake3");
+        ensure_directory(&object_root)?;
         let nonce = NEXT_TEMPORARY.fetch_add(1, Ordering::Relaxed);
-        let temporary = parent.join(format!(".{nonce:016x}.artifact.tmp"));
+        let temporary =
+            object_root.join(format!(".{}-{nonce:016x}.artifact.tmp", std::process::id()));
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
         let result = (|| {
-            let mut options = OpenOptions::new();
-            options.write(true).create_new(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt as _;
-                options.mode(0o600);
+            #[cfg(test)]
+            if matches!(
+                test_artifact_write_failpoint(),
+                Some(TestArtifactWriteFailpoint::BeforeTemporaryCreation)
+            ) {
+                return Err(injected_artifact_write_failure(&temporary));
             }
             let mut file = options
                 .open(&temporary)
                 .map_err(|error| io(&temporary, error))?;
-            file.write_all(bytes)
-                .map_err(|error| io(&temporary, error))?;
+            let mut hasher = blake3::Hasher::new();
+            let mut byte_len = 0_u64;
+            let mut buffer = [0_u8; 64 * 1024];
+            loop {
+                let count = reader
+                    .read(&mut buffer)
+                    .map_err(|error| ArtifactError::Io {
+                        path: "artifact input stream".into(),
+                        message: error.to_string(),
+                    })?;
+                if count == 0 {
+                    break;
+                }
+                hasher.update(&buffer[..count]);
+                byte_len = byte_len.saturating_add(count as u64);
+                file.write_all(&buffer[..count])
+                    .map_err(|error| io(&temporary, error))?;
+            }
             file.flush().map_err(|error| io(&temporary, error))?;
+            #[cfg(test)]
+            if matches!(
+                test_artifact_write_failpoint(),
+                Some(TestArtifactWriteFailpoint::BeforeFileSync)
+            ) {
+                return Err(injected_artifact_write_failure(&temporary));
+            }
             file.sync_all().map_err(|error| io(&temporary, error))?;
+            #[cfg(test)]
+            if matches!(
+                test_artifact_write_failpoint(),
+                Some(TestArtifactWriteFailpoint::AfterFileSync)
+            ) {
+                return Err(injected_artifact_write_failure(&temporary));
+            }
             drop(file);
-            match fs::rename(&temporary, &destination) {
-                Ok(()) => {}
-                Err(_error) if destination.exists() => {
-                    verify_existing(&destination, artifact_id, bytes)?;
-                    let _ = fs::remove_file(&temporary);
+
+            let artifact_id = ArtifactId::from_hex(hasher.finalize().to_hex().as_str())
+                .expect("BLAKE3 produces a canonical artifact digest");
+            let destination = self.object_path(artifact_id);
+            let parent = destination
+                .parent()
+                .expect("content-addressed destination always has a parent");
+            ensure_directory(parent)?;
+            #[cfg(test)]
+            if matches!(
+                test_artifact_write_failpoint(),
+                Some(TestArtifactWriteFailpoint::BeforePublication)
+            ) {
+                return Err(injected_artifact_write_failure(&temporary));
+            }
+            match fs::hard_link(&temporary, &destination) {
+                Ok(()) => {
+                    #[cfg(test)]
+                    if matches!(
+                        test_artifact_write_failpoint(),
+                        Some(TestArtifactWriteFailpoint::AfterPublication)
+                    ) {
+                        return Err(injected_artifact_write_failure(&destination));
+                    }
+                    fs::remove_file(&temporary).map_err(|error| io(&temporary, error))?;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    verify_existing_identity(&destination, artifact_id)?;
+                    fs::remove_file(&temporary).map_err(|error| io(&temporary, error))?;
                 }
                 Err(error) => return Err(io(&destination, error)),
             }
+            #[cfg(test)]
+            if matches!(
+                test_artifact_write_failpoint(),
+                Some(TestArtifactWriteFailpoint::BeforeDirectorySync)
+            ) {
+                return Err(injected_artifact_write_failure(&destination));
+            }
             sync_directory(parent)?;
-            Ok(())
+            sync_directory(&object_root)?;
+            #[cfg(test)]
+            if matches!(
+                test_artifact_write_failpoint(),
+                Some(TestArtifactWriteFailpoint::AfterDirectorySync)
+            ) {
+                return Err(injected_artifact_write_failure(&destination));
+            }
+            verify_existing_identity(&destination, artifact_id)?;
+            Ok(ArtifactDescriptor {
+                artifact_id,
+                byte_len,
+                media_type: media_type.into(),
+            })
         })();
         if result.is_err() {
             let _ = fs::remove_file(&temporary);
         }
-        result?;
-        verify_existing(&destination, artifact_id, bytes)?;
-        Ok(ArtifactDescriptor {
-            artifact_id,
-            byte_len: bytes.len() as u64,
-            media_type: media_type.into(),
-        })
+        result
+    }
+
+    /// Open a verified immutable object for streaming consumption.
+    pub fn open_verified_reader(&self, artifact_id: ArtifactId) -> Result<File, ArtifactError> {
+        let path = self.object_path(artifact_id);
+        let _ = verify_existing_identity(&path, artifact_id)?;
+        File::open(&path).map_err(|error| io(&path, error))
+    }
+}
+
+#[cfg(test)]
+fn injected_artifact_write_failure(path: &Path) -> ArtifactError {
+    io(
+        path,
+        std::io::Error::other("injected artifact publication interruption"),
+    )
+}
+
+impl ArtifactStore for FileArtifactStore {
+    fn put(&self, bytes: &[u8], media_type: &str) -> Result<ArtifactDescriptor, ArtifactError> {
+        let mut reader = Cursor::new(bytes);
+        self.put_reader(&mut reader, media_type)
     }
 
     fn get(&self, artifact_id: ArtifactId) -> Result<Vec<u8>, ArtifactError> {
@@ -419,6 +566,11 @@ impl ArtifactStore for FileArtifactStore {
         Ok(bytes)
     }
 
+    fn verify_object(&self, artifact_id: ArtifactId) -> Result<u64, ArtifactError> {
+        let path = self.object_path(artifact_id);
+        verify_existing_identity(&path, artifact_id)
+    }
+
     fn read_page(
         &self,
         artifact_id: ArtifactId,
@@ -426,15 +578,81 @@ impl ArtifactStore for FileArtifactStore {
         maximum_bytes: usize,
     ) -> Result<ArtifactPage, ArtifactError> {
         validate_bound(maximum_bytes)?;
-        let object = self.get(artifact_id)?;
-        let length = object.len();
-        let offset = (offset as usize).min(length);
-        let end = offset.saturating_add(maximum_bytes).min(length);
+        let path = self.object_path(artifact_id);
+        let length = verify_existing_identity(&path, artifact_id)?;
+        let offset = offset.min(length);
+        let available = length.saturating_sub(offset);
+        let count = available.min(maximum_bytes as u64) as usize;
+        let mut object = File::open(&path).map_err(|error| io(&path, error))?;
+        object
+            .seek(SeekFrom::Start(offset))
+            .map_err(|error| io(&path, error))?;
+        let mut bytes = vec![0_u8; count];
+        object
+            .read_exact(&mut bytes)
+            .map_err(|error| io(&path, error))?;
         Ok(ArtifactPage {
-            offset: offset as u64,
-            eof: end == length,
-            bytes: object[offset..end].to_vec(),
+            offset,
+            eof: count as u64 == available,
+            bytes,
         })
+    }
+
+    fn search_literal(
+        &self,
+        artifact_id: ArtifactId,
+        query: &[u8],
+        maximum_results: usize,
+        context_bytes: usize,
+    ) -> Result<Vec<ArtifactMatch>, ArtifactError> {
+        validate_search_bounds(query, maximum_results, context_bytes)?;
+        let path = self.object_path(artifact_id);
+        let length = verify_existing_identity(&path, artifact_id)?;
+        let mut file = File::open(&path).map_err(|error| io(&path, error))?;
+        let mut matches = Vec::new();
+        let mut carry = Vec::new();
+        let mut consumed = 0_u64;
+        let mut buffer = [0_u8; 64 * 1024];
+        while matches.len() < maximum_results {
+            let count = file.read(&mut buffer).map_err(|error| io(&path, error))?;
+            if count == 0 {
+                break;
+            }
+            let chunk_start = consumed;
+            consumed = consumed.saturating_add(count as u64);
+            let carry_len = carry.len();
+            let mut scan = carry;
+            scan.extend_from_slice(&buffer[..count]);
+            let base_offset = chunk_start.saturating_sub(carry_len as u64);
+            let first_new_start = carry_len.saturating_sub(query.len().saturating_sub(1));
+            let mut cursor = first_new_start;
+            while cursor.saturating_add(query.len()) <= scan.len()
+                && matches.len() < maximum_results
+            {
+                let Some(relative) = scan[cursor..]
+                    .windows(query.len())
+                    .position(|window| window == query)
+                else {
+                    break;
+                };
+                let start = cursor + relative;
+                let offset = base_offset.saturating_add(start as u64);
+                matches.push(ArtifactMatch {
+                    offset,
+                    context: read_search_context(
+                        &path,
+                        length,
+                        offset,
+                        query.len(),
+                        context_bytes,
+                    )?,
+                });
+                cursor = start.saturating_add(query.len());
+            }
+            let keep = query.len().saturating_sub(1).min(scan.len());
+            carry = scan[scan.len() - keep..].to_vec();
+        }
+        Ok(matches)
     }
 
     fn inventory(&self) -> Result<Vec<ArtifactInventoryItem>, ArtifactError> {
@@ -453,6 +671,13 @@ impl ArtifactStore for FileArtifactStore {
             let bucket = bucket.map_err(|error| io(&object_root, error))?;
             let bucket_path = bucket.path();
             let bucket_name = bucket.file_name().to_string_lossy().into_owned();
+            if is_private_artifact_temporary_name(&bucket_name) {
+                // A process can die after private temporary creation and
+                // before publication. These names never participate in the
+                // immutable object namespace, so inventory and GC must not
+                // mistake one for a malformed digest bucket.
+                continue;
+            }
             let metadata =
                 fs::symlink_metadata(&bucket_path).map_err(|error| io(&bucket_path, error))?;
             if metadata.file_type().is_symlink() || !metadata.is_dir() {
@@ -506,7 +731,7 @@ impl ArtifactStore for FileArtifactStore {
         // Read and hash before the destructive operation. This makes a path
         // swap/corrupt object fail closed rather than deleting an arbitrary
         // neighbor selected through a forged filename.
-        let _ = self.get(artifact_id)?;
+        let _ = verify_existing_identity(&path, artifact_id)?;
         fs::remove_file(&path).map_err(|error| match error.kind() {
             std::io::ErrorKind::NotFound => ArtifactError::NotFound { artifact_id },
             _ => io(&path, error),
@@ -516,6 +741,22 @@ impl ArtifactStore for FileArtifactStore {
         }
         Ok(())
     }
+}
+
+fn is_private_artifact_temporary_name(name: &str) -> bool {
+    let Some(name) = name.strip_prefix('.') else {
+        return false;
+    };
+    let Some(name) = name.strip_suffix(".artifact.tmp") else {
+        return false;
+    };
+    let Some((process_id, nonce)) = name.split_once('-') else {
+        return false;
+    };
+    !process_id.is_empty()
+        && process_id.bytes().all(|byte| byte.is_ascii_digit())
+        && nonce.len() == 16
+        && nonce.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn validate_media_type(media_type: &str) -> Result<(), ArtifactError> {
@@ -536,36 +777,89 @@ fn validate_bound(maximum_bytes: usize) -> Result<(), ArtifactError> {
     Ok(())
 }
 
-fn verify_existing(
-    path: &Path,
-    artifact_id: ArtifactId,
-    expected: &[u8],
+fn validate_search_bounds(
+    query: &[u8],
+    maximum_results: usize,
+    context_bytes: usize,
 ) -> Result<(), ArtifactError> {
-    let metadata = fs::symlink_metadata(path).map_err(|error| io(path, error))?;
+    if query.is_empty() || query.len() > MAX_PAGE_BYTES {
+        return Err(ArtifactError::InvalidRequest {
+            message: "literal artifact query must contain 1..=1048576 bytes".into(),
+        });
+    }
+    if maximum_results == 0 || maximum_results > 1_000 || context_bytes > MAX_PAGE_BYTES {
+        return Err(ArtifactError::InvalidRequest {
+            message: "artifact search bounds exceed the durable reader limits".into(),
+        });
+    }
+    Ok(())
+}
+
+fn read_search_context(
+    path: &Path,
+    length: u64,
+    offset: u64,
+    query_len: usize,
+    context_bytes: usize,
+) -> Result<Vec<u8>, ArtifactError> {
+    let start = offset.saturating_sub(context_bytes as u64);
+    let end = offset
+        .saturating_add(query_len as u64)
+        .saturating_add(context_bytes as u64)
+        .min(length);
+    let count = end.saturating_sub(start) as usize;
+    let mut file = File::open(path).map_err(|error| io(path, error))?;
+    file.seek(SeekFrom::Start(start))
+        .map_err(|error| io(path, error))?;
+    let mut context = vec![0_u8; count];
+    file.read_exact(&mut context)
+        .map_err(|error| io(path, error))?;
+    Ok(context)
+}
+
+fn verify_existing_identity(path: &Path, artifact_id: ArtifactId) -> Result<u64, ArtifactError> {
+    let metadata = fs::symlink_metadata(path).map_err(|error| match error.kind() {
+        std::io::ErrorKind::NotFound => ArtifactError::NotFound { artifact_id },
+        _ => io(path, error),
+    })?;
     if metadata.file_type().is_symlink() || !metadata.is_file() {
         return Err(ArtifactError::UnsafePath {
             path: path.display().to_string(),
             message: "artifact object must be a regular non-symlink file".into(),
         });
     }
-    let bytes = fs::read(path).map_err(|error| io(path, error))?;
-    if bytes != expected || ArtifactId::from_bytes(&bytes) != artifact_id {
+    let mut file = File::open(path).map_err(|error| io(path, error))?;
+    let mut hasher = blake3::Hasher::new();
+    let mut byte_len = 0_u64;
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let count = file.read(&mut buffer).map_err(|error| io(path, error))?;
+        if count == 0 {
+            break;
+        }
+        hasher.update(&buffer[..count]);
+        byte_len = byte_len.saturating_add(count as u64);
+    }
+    let observed = ArtifactId::from_hex(hasher.finalize().to_hex().as_str())
+        .expect("BLAKE3 produces a canonical artifact digest");
+    if observed != artifact_id {
         return Err(ArtifactError::Corruption {
             artifact_id,
-            message: "existing object disagrees with its expected exact bytes".into(),
+            message: "existing object bytes do not match its content-addressed identity".into(),
         });
     }
-    Ok(())
+    Ok(byte_len)
 }
 
 fn ensure_directory(path: &Path) -> Result<(), ArtifactError> {
     if let Ok(metadata) = fs::symlink_metadata(path)
-        && (metadata.file_type().is_symlink() || !metadata.is_dir()) {
-            return Err(ArtifactError::UnsafePath {
-                path: path.display().to_string(),
-                message: "artifact directory must be a real directory, not a symlink".into(),
-            });
-        }
+        && (metadata.file_type().is_symlink() || !metadata.is_dir())
+    {
+        return Err(ArtifactError::UnsafePath {
+            path: path.display().to_string(),
+            message: "artifact directory must be a real directory, not a symlink".into(),
+        });
+    }
     fs::create_dir_all(path).map_err(|error| io(path, error))?;
     let metadata = fs::symlink_metadata(path).map_err(|error| io(path, error))?;
     if metadata.file_type().is_symlink() || !metadata.is_dir() {

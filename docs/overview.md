@@ -16,6 +16,10 @@ through the durable harness for every prompt.
 
 - [Durable harness](durable-harness.md) explains the execution boundary.
 - [Session format v1](session-format-v1.md) defines the only session format.
+- [Persistence inventory](persistence-inventory.md) classifies every
+  repository-owned persistence path by authority and recovery role.
+- [Persistence measurements](persistence-benchmarks.md) records reproducible
+  generated fixture commands and local comparison evidence.
 - [Harness recovery](harness-recovery.md) explains reopening and effect safety.
 - [Artifact recovery](artifact-recovery.md) defines immutable evidence roots.
 - [Trace](trace.md) defines redacted v1 trace artifacts.

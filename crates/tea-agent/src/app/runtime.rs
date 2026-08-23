@@ -221,7 +221,6 @@ impl App {
             // A managed durable epoch is the authoritative transcript and
             // accounting source for this terminal session. Do not overwrite
             // its projection with the idle configuration agent below.
-            return;
         }
     }
 
@@ -252,7 +251,6 @@ impl App {
                 }
                 Err(TryRecvError::Empty) => {}
             }
-            return;
         }
     }
 

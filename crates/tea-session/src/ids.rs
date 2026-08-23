@@ -7,6 +7,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 pub struct Digest([u8; 32]);
 
 impl Digest {
+    /// The absence of a prior digest before a header is sealed. Persisted
+    /// session headers and records never use this as a valid digest value.
+    pub const fn zero() -> Self {
+        Self([0; 32])
+    }
+
     /// Hash exact bytes with BLAKE3.
     pub fn from_bytes(bytes: impl AsRef<[u8]>) -> Self {
         Self(*blake3::hash(bytes.as_ref()).as_bytes())

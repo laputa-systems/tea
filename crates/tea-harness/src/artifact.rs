@@ -74,10 +74,10 @@ impl From<ArtifactError> for ToolResultRetentionError {
 ///
 /// This compatibility helper is appropriate when no policy changes the
 /// model-visible projection. Durable execution uses
-/// [`retain_tool_result_with_projection`] so raw capability evidence remains
-/// recoverable even when a post-tool policy redacts its model-facing view.
-/// Retain exact raw capability evidence before exposing a potentially changed
-/// model projection.
+/// [`retain_tool_result_with_projection`] so ordinary capability evidence
+/// remains recoverable even when a post-tool policy redacts its model-facing
+/// view. When the selected artifact policy requires redaction before durable
+/// storage, the supervisor instead supplies the post-policy result here.
 ///
 /// `raw_result` is never rewritten by this function. `model_result` may have
 /// been produced by a bounded policy hook, but it cannot alter the artifact or

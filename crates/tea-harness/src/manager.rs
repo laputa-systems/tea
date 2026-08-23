@@ -30,6 +30,28 @@ use tea_session::{
 pub(crate) const HARNESS_CATALOG_MEDIA_TYPE: &str = "application/vnd.tea.harness-catalog+json";
 const HARNESS_CATALOG_SCHEMA_VERSION: u16 = 1;
 
+/// Verify one immutable durable harness catalog without constructing an
+/// executable manager.
+///
+/// Operator tooling uses this boundary to check every catalog fact retained
+/// in a session. It validates the catalog descriptor, canonical JSON wrapper,
+/// immutable lineage identities, and every source artifact before returning
+/// the complete transitive artifact root set for verification, export, or GC.
+/// The trusted capability ceiling comparison remains a manager responsibility
+/// because it depends on host-selected session configuration.
+pub fn verify_harness_catalog(
+    fact: &HarnessCatalogFact,
+    artifacts: Arc<dyn ArtifactStore>,
+) -> Result<BTreeSet<ArtifactId>, HarnessLineageError> {
+    let catalog = decode_harness_catalog(fact, artifacts)?;
+    Ok(catalog.repository.artifact_roots())
+}
+
+struct DecodedHarnessCatalog {
+    capability_ceiling: BTreeSet<String>,
+    repository: HarnessRepository,
+}
+
 /// One guarded atomic source edit accepted by the stable `tea_harness` host
 /// tool.  A delete names the currently visible immutable blob so stale or
 /// destructive requests cannot silently remove newer source.
@@ -744,80 +766,13 @@ impl HarnessManager {
         fact: &HarnessCatalogFact,
         artifacts: std::sync::Arc<dyn ArtifactStore>,
     ) -> Result<(), HarnessError> {
-        if fact.schema_version != HARNESS_CATALOG_SCHEMA_VERSION {
-            return Err(HarnessError::invalid_state(format!(
-                "unsupported harness catalog schema version {}; expected {HARNESS_CATALOG_SCHEMA_VERSION}",
-                fact.schema_version
-            )));
-        }
-        let bytes = artifacts.get(fact.artifact_id).map_err(|error| {
-            HarnessError::invalid_state(format!(
-                "required harness catalog artifact {} is unavailable: {error}",
-                fact.artifact_id
-            ))
-        })?;
-        if bytes.len() as u64 != fact.byte_len || ArtifactId::from_bytes(&bytes) != fact.artifact_id
-        {
-            return Err(HarnessError::invalid_state(
-                "harness catalog artifact does not match its durable descriptor",
-            ));
-        }
-        let value = JsonValue::parse(std::str::from_utf8(&bytes).map_err(|_| {
-            HarnessError::invalid_state("harness catalog artifact is not valid UTF-8 JSON")
-        })?)
-        .map_err(|error| {
-            HarnessError::invalid_state(format!(
-                "harness catalog artifact is invalid JSON: {error}"
-            ))
-        })?;
-        let object = value.as_object().ok_or_else(|| {
-            HarnessError::invalid_state("harness catalog root must be a JSON object")
-        })?;
-        require_catalog_fields(
-            object,
-            &["schema_version", "capability_ceiling", "repository"],
-        )?;
-        let schema_version = object
-            .get("schema_version")
-            .and_then(JsonValue::as_u64)
-            .ok_or_else(|| {
-                HarnessError::invalid_state(
-                    "harness catalog schema_version must be an unsigned integer",
-                )
-            })?;
-        if schema_version != u64::from(HARNESS_CATALOG_SCHEMA_VERSION) {
-            return Err(HarnessError::invalid_state(format!(
-                "unsupported harness catalog payload version {schema_version}"
-            )));
-        }
-        let ceiling = object
-            .get("capability_ceiling")
-            .and_then(JsonValue::as_array)
-            .ok_or_else(|| {
-                HarnessError::invalid_state("harness catalog capability_ceiling must be an array")
-            })?
-            .iter()
-            .map(|value| {
-                value.as_str().map(str::to_owned).ok_or_else(|| {
-                    HarnessError::invalid_state(
-                        "harness catalog capability_ceiling must contain only strings",
-                    )
-                })
-            })
-            .collect::<Result<BTreeSet<_>, _>>()?;
-        if ceiling != self.capability_ceiling {
+        let catalog = decode_harness_catalog(fact, artifacts).map_err(lineage_error)?;
+        if catalog.capability_ceiling != self.capability_ceiling {
             return Err(HarnessError::invalid_state(
                 "durable harness catalog capability ceiling does not match the trusted session manager configuration",
             ));
         }
-        let repository = HarnessRepository::from_catalog_json(
-            artifacts,
-            object
-                .get("repository")
-                .expect("required catalog field was checked"),
-        )
-        .map_err(lineage_error)?;
-        *self.lock_repository()? = repository;
+        *self.lock_repository()? = catalog.repository;
         Ok(())
     }
 
@@ -863,22 +818,121 @@ impl HarnessManager {
 fn require_catalog_fields(
     object: &BTreeMap<String, JsonValue>,
     fields: &[&str],
-) -> Result<(), HarnessError> {
+) -> Result<(), HarnessLineageError> {
     for field in fields {
         if !object.contains_key(*field) {
-            return Err(HarnessError::invalid_state(format!(
-                "harness catalog is missing required field {field}",
-            )));
+            return Err(HarnessLineageError::Invalid {
+                message: format!("harness catalog is missing required field {field}",),
+            });
         }
     }
     for field in object.keys() {
         if !fields.contains(&field.as_str()) {
-            return Err(HarnessError::invalid_state(format!(
-                "harness catalog has unknown field {field}",
-            )));
+            return Err(HarnessLineageError::Invalid {
+                message: format!("harness catalog has unknown field {field}",),
+            });
         }
     }
     Ok(())
+}
+
+fn decode_harness_catalog(
+    fact: &HarnessCatalogFact,
+    artifacts: Arc<dyn ArtifactStore>,
+) -> Result<DecodedHarnessCatalog, HarnessLineageError> {
+    if fact.schema_version != HARNESS_CATALOG_SCHEMA_VERSION {
+        return Err(HarnessLineageError::Invalid {
+            message: format!(
+                "unsupported harness catalog schema version {}; expected {HARNESS_CATALOG_SCHEMA_VERSION}",
+                fact.schema_version
+            ),
+        });
+    }
+    let bytes = artifacts
+        .get(fact.artifact_id)
+        .map_err(|error| HarnessLineageError::Artifact {
+            message: format!(
+                "required harness catalog artifact {} is unavailable: {error}",
+                fact.artifact_id
+            ),
+        })?;
+    if bytes.len() as u64 != fact.byte_len || ArtifactId::from_bytes(&bytes) != fact.artifact_id {
+        return Err(HarnessLineageError::Invalid {
+            message: "harness catalog artifact does not match its durable descriptor".into(),
+        });
+    }
+    let source = std::str::from_utf8(&bytes).map_err(|_| HarnessLineageError::Invalid {
+        message: "harness catalog artifact is not valid UTF-8 JSON".into(),
+    })?;
+    let value = JsonValue::parse(source).map_err(|error| HarnessLineageError::Invalid {
+        message: format!("harness catalog artifact is invalid JSON: {error}"),
+    })?;
+    let canonical = value
+        .to_json_string()
+        .map_err(|error| HarnessLineageError::Invalid {
+            message: format!("harness catalog artifact cannot encode canonically: {error}"),
+        })?;
+    if canonical.as_bytes() != bytes {
+        return Err(HarnessLineageError::Invalid {
+            message: "harness catalog artifact is not canonical JSON".into(),
+        });
+    }
+    let object = value
+        .as_object()
+        .ok_or_else(|| HarnessLineageError::Invalid {
+            message: "harness catalog root must be a JSON object".into(),
+        })?;
+    require_catalog_fields(
+        object,
+        &["schema_version", "capability_ceiling", "repository"],
+    )?;
+    let schema_version = object
+        .get("schema_version")
+        .and_then(JsonValue::as_u64)
+        .ok_or_else(|| HarnessLineageError::Invalid {
+            message: "harness catalog schema_version must be an unsigned integer".into(),
+        })?;
+    if schema_version != u64::from(HARNESS_CATALOG_SCHEMA_VERSION) {
+        return Err(HarnessLineageError::Invalid {
+            message: format!("unsupported harness catalog payload version {schema_version}"),
+        });
+    }
+    let capability_ceiling = object
+        .get("capability_ceiling")
+        .and_then(JsonValue::as_array)
+        .ok_or_else(|| HarnessLineageError::Invalid {
+            message: "harness catalog capability_ceiling must be an array".into(),
+        })?
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| HarnessLineageError::Invalid {
+                    message: "harness catalog capability_ceiling must contain only strings".into(),
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut sorted_ceiling = capability_ceiling.clone();
+    sorted_ceiling.sort();
+    sorted_ceiling.dedup();
+    if capability_ceiling != sorted_ceiling {
+        return Err(HarnessLineageError::Invalid {
+            message:
+                "harness catalog capability_ceiling must be strictly sorted without duplicates"
+                    .into(),
+        });
+    }
+    let repository = HarnessRepository::from_catalog_json(
+        artifacts,
+        object
+            .get("repository")
+            .expect("required catalog field was checked"),
+    )?;
+    Ok(DecodedHarnessCatalog {
+        capability_ceiling: capability_ceiling.into_iter().collect(),
+        repository,
+    })
 }
 
 fn resolve_snapshot(

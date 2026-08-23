@@ -10,7 +10,7 @@ use tea_core::tool::{
 use tea_protocol::{JsonNumber, JsonValue};
 use tea_session::{
     ArtifactId, ArtifactPolicy, ArtifactStore, LaneRecord, PayloadRef, SessionEntry,
-    SessionSnapshot, SessionWriter, StoredMutation,
+    SessionMutationRef, SessionSnapshot, SessionWriter,
 };
 
 pub(crate) const STABLE_ARTIFACT_TOOL_NAMES: [&str; 3] = [
@@ -485,8 +485,8 @@ fn operation_by_entry(snapshot: &SessionSnapshot) -> BTreeMap<tea_session::Entry
     let mut active = None::<String>;
     let mut result = BTreeMap::new();
     for mutation in snapshot.mutations() {
-        match mutation {
-            StoredMutation::Record(record) => match &record.record {
+        match mutation.mutation {
+            SessionMutationRef::Record(record) => match &record.record {
                 LaneRecord::OperationStarted(record) => active = Some(record.id.to_string()),
                 LaneRecord::OperationFinished(record)
                     if active.as_deref() == Some(record.operation_id.as_str()) =>
@@ -495,12 +495,12 @@ fn operation_by_entry(snapshot: &SessionSnapshot) -> BTreeMap<tea_session::Entry
                 }
                 _ => {}
             },
-            StoredMutation::Entry(entry) => {
+            SessionMutationRef::Entry(entry) => {
                 if let Some(operation_id) = &active {
                     result.insert(entry.header.id.clone(), operation_id.clone());
                 }
             }
-            StoredMutation::Lane(_) | StoredMutation::Fact(_) => {}
+            SessionMutationRef::Lane(_) | SessionMutationRef::Fact(_) => {}
         }
     }
     result

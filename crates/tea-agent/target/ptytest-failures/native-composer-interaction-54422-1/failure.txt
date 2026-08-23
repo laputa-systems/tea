@@ -1,0 +1,2 @@
+operation: drop cleanup
+error: live PTY harness dropped failed: Operation canceled (os error 89)

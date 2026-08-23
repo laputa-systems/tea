@@ -20,8 +20,7 @@ pub const AUTHORING_AUTHORIZATION_METADATA_KEY: &str = "tea.authoring_authorized
 pub const SELF_EXTENSION_V1_CONCISE: &str = "Session harness self-extension\n\nYou may improve Tea's session-local harness only when repeated evidence or a clearly reusable failure indicates a harness problem. Do not create a plugin for one-off task facts or ordinary implementation work. Prefer the smallest change and preserve unrelated behavior.\n\nUse `tea_harness` to inspect or atomically edit Luau plugins. A plugin is a closed directory containing `manifest.json` and its declared `.luau` modules. The manifest names the entrypoint and every module. The entrypoint returns named prompt sections and may declare bounded hooks or capability-neutral tools. Imports must be relative and declared. Plugins have no ambient filesystem, process, network, environment, session-storage, evaluator, or capability-grant access. Use `tea_harness` with `operation: \"help\"` for the complete ABI.\n\nAfter an edit, Tea validates and snapshots the complete harness automatically. A valid snapshot activates only at a safe run boundary; Tea then continues the task under the new snapshot. Failure leaves the previous snapshot active. Never issue or wait for a reload command.";
 
 /// Trusted session-level policy for exposing self-extension capabilities.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[derive(Default)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Default)]
 pub enum SelfExtensionMode {
     /// No authoring prompt or `tea_harness` model capability.
     #[default]
@@ -31,7 +30,6 @@ pub enum SelfExtensionMode {
     /// The model may stage bounded reusable repairs under the rollover budget.
     Adaptive,
 }
-
 
 impl SelfExtensionMode {
     /// Stable durable spelling suitable for session metadata and diagnostics.

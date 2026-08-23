@@ -293,8 +293,10 @@ pub struct ToolEffectOutcome {
     pub raw_result: AgentToolResult,
     /// Final model-facing result that downstream core work observes.
     ///
-    /// A durable host retains `raw_result` before exposing this projection, so
-    /// a policy cannot erase already-completed external evidence.
+    /// A durable host ordinarily retains `raw_result` before exposing this
+    /// projection, so a policy cannot erase already-completed external
+    /// evidence. A host policy that requires redaction before persistence may
+    /// instead retain this already-redacted result.
     pub result: AgentToolResult,
 }
 

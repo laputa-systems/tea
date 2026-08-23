@@ -1,0 +1,10 @@
+scenario: OpenRouter streaming
+size: columns=100 rows=24
+profile: xterm-minimal-v1
+trace-limit: 8388608
+platform: macos
+input-bytes: 29
+output-bytes: 24102
+event-count: 102
+elapsed-ns: 4223276542
+timeout-deadline-ns: not-applicable

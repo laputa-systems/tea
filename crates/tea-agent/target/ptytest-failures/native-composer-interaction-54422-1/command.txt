@@ -1,0 +1,16 @@
+program: /Users/josh/d/tea/target/debug/tea
+arg: --provider
+arg: local
+arg: --model
+arg: Laguna-XS-2.1-5bit
+env HOME=/var/folders/0q/q5v8s26n7_n7mjrwx1zwh3540000gn/T/ptytest/54422-0/home
+env LANG=C
+env LC_ALL=C
+env PATH=/usr/bin:/bin
+env TERM=xterm-256color
+env TMPDIR=/var/folders/0q/q5v8s26n7_n7mjrwx1zwh3540000gn/T/ptytest/54422-0/tmp
+env TZ=UTC
+env XDG_CACHE_HOME=/var/folders/0q/q5v8s26n7_n7mjrwx1zwh3540000gn/T/ptytest/54422-0/cache
+env XDG_CONFIG_HOME=/var/folders/0q/q5v8s26n7_n7mjrwx1zwh3540000gn/T/ptytest/54422-0/config
+env XDG_DATA_HOME=/var/folders/0q/q5v8s26n7_n7mjrwx1zwh3540000gn/T/ptytest/54422-0/data
+env XDG_STATE_HOME=/var/folders/0q/q5v8s26n7_n7mjrwx1zwh3540000gn/T/ptytest/54422-0/state

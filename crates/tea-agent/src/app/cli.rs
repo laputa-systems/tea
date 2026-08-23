@@ -27,6 +27,9 @@ impl CliOptions {
         match parse_impl(args, false)? {
             CliCommand::Options(options) => Ok(options),
             CliCommand::Help => unreachable!("help is disabled for CliOptions::parse"),
+            CliCommand::Session(_) => {
+                unreachable!("session commands are disabled for CliOptions::parse")
+            }
         }
     }
 
@@ -40,7 +43,7 @@ impl CliOptions {
 
     /// Render the command-line usage text.
     pub const fn help_text() -> &'static str {
-        "Usage: tea [OPTIONS]\n\nOptions:\n    -h, --help                  Show this help text\n        --provider <id>         Select a compiled provider\n        --model <id>            Select a compiled model\n        --local-base-url <url>  Set the local provider API root\n        --local-context-window <tokens>\n                                Set explicit local context capacity for automatic compaction\n        --thinking <level>      Set reasoning level (off, minimal, low, medium, high, xhigh, max)\n    -p, --prompt <message>      Stream one response and exit (requires provider/model)\n        --cwd <path>            Use path as the explicit workspace\n        --tea-home <path>      Use path as the explicit Tea extension home (default: ~/.tea)\n"
+        "Usage: tea [OPTIONS]\n       tea session <inspect|repair|rebuild-meta|verify|gc|export|restore> ...\n\nOptions:\n    -h, --help                  Show this help text\n        --provider <id>         Select a compiled provider\n        --model <id>            Select a compiled model\n        --local-base-url <url>  Set the local provider API root\n        --local-context-window <tokens>\n                                Set explicit local context capacity for automatic compaction\n        --thinking <level>      Set reasoning level (off, minimal, low, medium, high, xhigh, max)\n    -p, --prompt <message>      Stream one response and exit (requires provider/model)\n        --cwd <path>            Use path as the explicit workspace\n        --tea-home <path>      Use path as the explicit Tea extension home (default: ~/.tea)\n\nSession commands emit one JSON object to stdout. `gc` is a dry run unless --apply is supplied.\n"
     }
 
     /// Borrow the explicitly selected provider, if supplied.
@@ -131,6 +134,42 @@ pub enum CliCommand {
     Options(CliOptions),
     /// Print command-line usage and exit.
     Help,
+    /// Run one explicit, machine-readable durable-session operation.
+    Session(SessionCommand),
+}
+
+/// An explicit persistence operation over a caller-supplied session directory.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SessionCommand {
+    /// Read-only replay and prefix identity inspection.
+    Inspect { directory: PathBuf },
+    /// Explicitly remove only an unterminated final JSONL tail.
+    Repair { directory: PathBuf },
+    /// Rebuild disposable `HEAD` and terminal-host `meta.json` caches from a
+    /// validated authoritative prefix.
+    RebuildMeta { directory: PathBuf },
+    /// Replay and verify session-owned immutable objects.
+    Verify {
+        directory: PathBuf,
+        additional_roots: Vec<OsString>,
+    },
+    /// Plan collection, or apply the plan when requested.
+    Gc {
+        directory: PathBuf,
+        additional_roots: Vec<OsString>,
+        apply: bool,
+    },
+    /// Create a non-overwriting portable export.
+    Export {
+        source: PathBuf,
+        destination: PathBuf,
+        additional_roots: Vec<OsString>,
+    },
+    /// Restore an export into a new non-overwriting directory.
+    Restore {
+        source: PathBuf,
+        destination: PathBuf,
+    },
 }
 
 fn parse_impl<I>(args: I, recognize_help: bool) -> Result<CliCommand, CliError>
@@ -139,6 +178,11 @@ where
 {
     let mut arguments = args.into_iter();
     let _program = arguments.next();
+    let first = arguments.next();
+    if recognize_help && first.as_deref() == Some(OsStr::new("session")) {
+        return parse_session_command(arguments);
+    }
+    let mut arguments = first.into_iter().chain(arguments);
     let mut options = CliOptions::default();
     while let Some(argument) = arguments.next() {
         let slot = match argument.to_string_lossy().as_ref() {
@@ -165,6 +209,98 @@ where
         options.set(slot, value)?;
     }
     Ok(CliCommand::Options(options))
+}
+
+fn parse_session_command<I>(mut arguments: I) -> Result<CliCommand, CliError>
+where
+    I: Iterator<Item = OsString>,
+{
+    let operation = arguments
+        .next()
+        .ok_or(CliError::MissingValue("session operation"))?;
+    let operation_name = operation.to_string_lossy();
+    let required_path = |arguments: &mut I, label| {
+        arguments
+            .next()
+            .map(PathBuf::from)
+            .ok_or(CliError::MissingValue(label))
+    };
+    let command = match operation_name.as_ref() {
+        "inspect" => SessionCommand::Inspect {
+            directory: required_path(&mut arguments, "session directory")?,
+        },
+        "repair" => SessionCommand::Repair {
+            directory: required_path(&mut arguments, "session directory")?,
+        },
+        "rebuild-meta" => SessionCommand::RebuildMeta {
+            directory: required_path(&mut arguments, "session directory")?,
+        },
+        "verify" => SessionCommand::Verify {
+            directory: required_path(&mut arguments, "session directory")?,
+            additional_roots: parse_root_flags(&mut arguments)?,
+        },
+        "gc" => {
+            let directory = required_path(&mut arguments, "session directory")?;
+            let (additional_roots, apply) = parse_gc_flags(&mut arguments)?;
+            SessionCommand::Gc {
+                directory,
+                additional_roots,
+                apply,
+            }
+        }
+        "export" => SessionCommand::Export {
+            source: required_path(&mut arguments, "source session directory")?,
+            destination: required_path(&mut arguments, "export destination directory")?,
+            additional_roots: parse_root_flags(&mut arguments)?,
+        },
+        "restore" => SessionCommand::Restore {
+            source: required_path(&mut arguments, "source export directory")?,
+            destination: required_path(&mut arguments, "restore destination directory")?,
+        },
+        _ => return Err(CliError::UnknownSessionOperation(operation)),
+    };
+    if let Some(argument) = arguments.next() {
+        return Err(CliError::UnexpectedArgument(argument));
+    }
+    Ok(CliCommand::Session(command))
+}
+
+fn parse_root_flags<I>(arguments: &mut I) -> Result<Vec<OsString>, CliError>
+where
+    I: Iterator<Item = OsString>,
+{
+    let mut roots = Vec::new();
+    while let Some(argument) = arguments.next() {
+        if argument != "--root" {
+            return Err(CliError::UnexpectedArgument(argument));
+        }
+        roots.push(
+            arguments
+                .next()
+                .ok_or(CliError::MissingValue("--root artifact ID"))?,
+        );
+    }
+    Ok(roots)
+}
+
+fn parse_gc_flags<I>(arguments: &mut I) -> Result<(Vec<OsString>, bool), CliError>
+where
+    I: Iterator<Item = OsString>,
+{
+    let mut roots = Vec::new();
+    let mut apply = false;
+    while let Some(argument) = arguments.next() {
+        match argument.to_string_lossy().as_ref() {
+            "--root" => roots.push(
+                arguments
+                    .next()
+                    .ok_or(CliError::MissingValue("--root artifact ID"))?,
+            ),
+            "--apply" if !apply => apply = true,
+            _ => return Err(CliError::UnexpectedArgument(argument)),
+        }
+    }
+    Ok((roots, apply))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -205,6 +341,8 @@ pub enum CliError {
     EmptyValue(&'static str),
     /// The option is not supported by v1.
     UnknownOption(OsString),
+    /// A persistence operation name is not part of the explicit command surface.
+    UnknownSessionOperation(OsString),
     /// An option value is not valid for its declared domain.
     InvalidValue {
         /// Option whose value was rejected.
@@ -223,6 +361,9 @@ impl fmt::Display for CliError {
             Self::DuplicateOption(flag) => write!(formatter, "duplicate option {flag}"),
             Self::EmptyValue(flag) => write!(formatter, "empty value for {flag}"),
             Self::UnknownOption(option) => write!(formatter, "unknown option {option:?}"),
+            Self::UnknownSessionOperation(operation) => {
+                write!(formatter, "unknown session operation {operation:?}")
+            }
             Self::InvalidValue { flag, value } => {
                 write!(formatter, "invalid value {value:?} for {flag}")
             }

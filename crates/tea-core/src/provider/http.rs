@@ -538,10 +538,14 @@ mod tests {
         finish_response
             .send(())
             .expect("server remains ready to finish");
-        while !matches!(
+        assert!(matches!(
+            smol::block_on(std::future::poll_fn(|context| response.poll_next(context))),
+            StreamEvent::Chunk(bytes) if bytes == b"second"
+        ));
+        assert!(matches!(
             smol::block_on(std::future::poll_fn(|context| response.poll_next(context))),
             StreamEvent::End
-        ) {}
+        ));
         server.join().expect("mock server should finish");
     }
 

@@ -335,7 +335,7 @@ fn real_binary_keeps_native_multiline_editing_and_history_inside_a_pty() {
                 screen.row(3).is_some_and(|row| row.starts_with('─'))
                     && screen
                         .row(4)
-                        .is_some_and(|row| row.starts_with("Results 12"))
+                        .is_some_and(|row| row.starts_with("Results 9"))
                     && screen
                         .row(13)
                         .is_some_and(|row| row.starts_with("↑↓ Navigate"))
@@ -385,7 +385,7 @@ fn real_binary_keeps_native_multiline_editing_and_history_inside_a_pty() {
             "help output",
             |screen| {
                 screen.row(0).is_some_and(|row| row.starts_with("┃"))
-                    && screen.contains("Commands 12")
+                    && screen.contains("Commands 9")
                     && screen.contains("show keybindings and commands")
                     && screen.row(14).is_some_and(|row| row.starts_with('─'))
                     && screen
@@ -401,7 +401,7 @@ fn real_binary_keeps_native_multiline_editing_and_history_inside_a_pty() {
         .wait_for_screen(
             terminal.deadline(Duration::from_secs(3)),
             "help surface closed",
-            |screen| screen.contains("𝒕ea") && !screen.contains("Commands 12"),
+            |screen| screen.contains("𝒕ea") && !screen.contains("Commands 9"),
         )
         .expect("Esc should remove temporary help content");
     terminal

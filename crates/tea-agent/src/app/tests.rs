@@ -18,6 +18,11 @@ use tea_core::state::{AgentMessage, MessageId, SerializedJson, ToolCallId};
 use tea_core::tool::ToolUpdate;
 use tea_core::tool::{ToolDefinition, ToolExecutionMode};
 use tea_core::{AgentToolResult, ModelDescriptor, ThinkingLevel, Usage};
+use tea_session::{
+    ArtifactStore, CustomEntry, DurabilityMode, EntryId, HarnessCatalogFact, JsonValue,
+    JsonlSession, LaneId, Metadata, PayloadRef, ProvisionedEntry, SessionEntry, SessionFact,
+    SessionHeader, SessionId, SessionWriter,
+};
 
 fn test_tea_home(label: &str) -> PathBuf {
     static NEXT_HOME: AtomicU64 = AtomicU64::new(1);
@@ -123,6 +128,421 @@ fn cli_help_accepts_short_and_long_forms() {
         Ok(CliCommand::Help)
     );
     assert!(CliOptions::help_text().contains("--provider <id>"));
+}
+
+#[test]
+fn cli_parses_explicit_machine_session_commands() {
+    assert_eq!(
+        CliOptions::parse_command(
+            ["tea", "session", "inspect", "/tmp/session.tea"].map(OsString::from)
+        ),
+        Ok(CliCommand::Session(SessionCommand::Inspect {
+            directory: PathBuf::from("/tmp/session.tea"),
+        }))
+    );
+    assert_eq!(
+        CliOptions::parse_command(
+            ["tea", "session", "gc", "/tmp/session.tea", "--apply"].map(OsString::from)
+        ),
+        Ok(CliCommand::Session(SessionCommand::Gc {
+            directory: PathBuf::from("/tmp/session.tea"),
+            additional_roots: Vec::new(),
+            apply: true,
+        }))
+    );
+    assert_eq!(
+        CliOptions::parse_command(
+            ["tea", "session", "rebuild-meta", "/tmp/session.tea"].map(OsString::from)
+        ),
+        Ok(CliCommand::Session(SessionCommand::RebuildMeta {
+            directory: PathBuf::from("/tmp/session.tea"),
+        }))
+    );
+    assert!(matches!(
+        CliOptions::parse_command(
+            ["tea", "session", "unknown", "/tmp/session.tea"].map(OsString::from)
+        ),
+        Err(CliError::UnknownSessionOperation(_))
+    ));
+}
+
+#[test]
+fn machine_session_inspect_and_verify_emit_authenticated_json() {
+    let home = test_tea_home("machine-session-command");
+    let directory = home.join("session.tea");
+    let mut session = JsonlSession::create(
+        &directory,
+        SessionHeader::new(
+            SessionId::new("machine-session-command").expect("valid session ID"),
+            "workspace-test",
+            Metadata::new(),
+        ),
+        DurabilityMode::Strict,
+    )
+    .expect("session creates");
+    session
+        .append_entry(
+            &LaneId::main(),
+            ProvisionedEntry::user(
+                EntryId::new("machine-session-command-entry").expect("valid entry ID"),
+                "inspect me",
+            ),
+        )
+        .expect("entry commits");
+    let expected_digest = session.snapshot().expect("snapshot").last_digest().to_hex();
+    drop(session);
+
+    for command in [
+        SessionCommand::Inspect {
+            directory: directory.clone(),
+        },
+        SessionCommand::Verify {
+            directory: directory.clone(),
+            additional_roots: Vec::new(),
+        },
+    ] {
+        let output = run_session_command(command).expect("machine command succeeds");
+        let fields = JsonValue::parse(&output)
+            .expect("machine output is JSON")
+            .as_object()
+            .expect("machine output is an object")
+            .clone();
+        assert_eq!(
+            fields.get("through_digest").and_then(JsonValue::as_str),
+            Some(expected_digest.as_str())
+        );
+        assert_eq!(
+            fields.get("through_seq").and_then(JsonValue::as_u64),
+            Some(1)
+        );
+    }
+    let _ = fs::remove_dir_all(home);
+}
+
+#[test]
+fn machine_session_verify_reports_finalized_orphans_separately() {
+    let home = test_tea_home("machine-session-verify-orphan");
+    let directory = home.join("session.tea");
+    let session = JsonlSession::create(
+        &directory,
+        SessionHeader::new(
+            SessionId::new("machine-session-verify-orphan").expect("valid session ID"),
+            "workspace-test",
+            Metadata::new(),
+        ),
+        DurabilityMode::Strict,
+    )
+    .expect("session creates");
+    let artifact = session
+        .artifact_store()
+        .expect("object store opens")
+        .put(b"unreferenced immutable evidence", "text/plain")
+        .expect("orphan object publishes");
+    drop(session);
+
+    let output = run_session_command(SessionCommand::Verify {
+        directory,
+        additional_roots: Vec::new(),
+    })
+    .expect("verify succeeds with an orphan");
+    let output = JsonValue::parse(&output).expect("machine output is JSON");
+    let fields = output.as_object().expect("machine output is an object");
+    assert_eq!(
+        fields.get("artifact_count").and_then(JsonValue::as_u64),
+        Some(0)
+    );
+    assert_eq!(
+        fields
+            .get("orphan_artifacts")
+            .and_then(JsonValue::as_array)
+            .expect("verify reports orphan array"),
+        &[JsonValue::object([
+            (
+                "artifact_id",
+                JsonValue::String(artifact.artifact_id.to_hex())
+            ),
+            ("byte_len", JsonValue::from(artifact.byte_len)),
+        ])],
+        "orphan reporting contains identities and lengths, never artifact bytes"
+    );
+    let _ = fs::remove_dir_all(home);
+}
+
+#[test]
+fn machine_session_verify_rejects_an_invalid_immutable_harness_catalog() {
+    let home = test_tea_home("machine-session-verify-harness-catalog");
+    let directory = home.join("session.tea");
+    let mut session = JsonlSession::create(
+        &directory,
+        SessionHeader::new(
+            SessionId::new("machine-session-verify-harness-catalog").expect("valid session ID"),
+            "workspace-test",
+            Metadata::new(),
+        ),
+        DurabilityMode::Strict,
+    )
+    .expect("session creates");
+    let catalog = session
+        .artifact_store()
+        .expect("object store opens")
+        .put(br#"{\"not_a_harness_catalog\":true}"#, "application/json")
+        .expect("invalid catalog bytes still publish as an immutable object");
+    session
+        .append_fact(SessionFact::HarnessCatalog(HarnessCatalogFact {
+            schema_version: 1,
+            artifact_id: catalog.artifact_id,
+            byte_len: catalog.byte_len,
+        }))
+        .expect("catalog fact commits");
+    drop(session);
+
+    let error = run_session_command(SessionCommand::Verify {
+        directory,
+        additional_roots: Vec::new(),
+    })
+    .expect_err("operator verification rejects an invalid harness manifest");
+    assert!(
+        error.to_string().contains("harness catalog"),
+        "verification reports the manifest contract rather than accepting a rehashed blob: {error}"
+    );
+
+    let _ = fs::remove_dir_all(home);
+}
+
+#[test]
+fn machine_session_verify_reports_a_stale_head_cache_without_repairing_it() {
+    let home = test_tea_home("machine-session-verify-head");
+    let directory = home.join("session.tea");
+    let session = JsonlSession::create(
+        &directory,
+        SessionHeader::new(
+            SessionId::new("machine-session-verify-head").expect("valid session ID"),
+            "workspace-test",
+            Metadata::new(),
+        ),
+        DurabilityMode::Strict,
+    )
+    .expect("session creates");
+    drop(session);
+    let head_path = directory.join("HEAD");
+    std::fs::write(&head_path, "stale derived cache\n").expect("stale cache writes");
+
+    let output = run_session_command(SessionCommand::Verify {
+        directory: directory.clone(),
+        additional_roots: Vec::new(),
+    })
+    .expect("read-only verify succeeds");
+    let output = JsonValue::parse(&output).expect("machine output is JSON");
+    assert_eq!(
+        output
+            .as_object()
+            .and_then(|fields| fields.get("head_cache_current")),
+        Some(&JsonValue::Bool(false)),
+        "verify reports cache disagreement without making the cache authoritative"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&head_path).expect("HEAD rereads"),
+        "stale derived cache\n",
+        "read-only verification does not repair a derived cache"
+    );
+    let _ = fs::remove_dir_all(home);
+}
+
+#[test]
+fn machine_session_verify_reports_stale_metadata_cache_without_repairing_it() {
+    let home = test_tea_home("machine-session-verify-meta");
+    let directory = home.join("session.tea");
+    let mut metadata = Metadata::new();
+    metadata.insert(
+        "tea.self_extension_mode".into(),
+        JsonValue::String("off".into()),
+    );
+    metadata.insert("tea.thinking".into(), JsonValue::String("medium".into()));
+    let session = JsonlSession::create(
+        &directory,
+        SessionHeader::new(
+            SessionId::new("machine-session-verify-meta").expect("valid session ID"),
+            "workspace-test",
+            metadata,
+        ),
+        DurabilityMode::Strict,
+    )
+    .expect("session creates");
+    drop(session);
+    run_session_command(SessionCommand::RebuildMeta {
+        directory: directory.clone(),
+    })
+    .expect("metadata cache rebuilds");
+    let current_output = run_session_command(SessionCommand::Verify {
+        directory: directory.clone(),
+        additional_roots: Vec::new(),
+    })
+    .expect("verification accepts the reconstructed cache");
+    let current_output = JsonValue::parse(&current_output).expect("machine output is JSON");
+    assert_eq!(
+        current_output
+            .as_object()
+            .and_then(|fields| fields.get("metadata_cache_current")),
+        Some(&JsonValue::Bool(true)),
+        "rebuild-meta produces a cache for the current authoritative prefix"
+    );
+    let metadata_path = directory.join("meta.json");
+    let stale_metadata = std::fs::read_to_string(&metadata_path)
+        .expect("metadata cache reads")
+        .replacen("\"through_seq\":0", "\"through_seq\":1", 1);
+    assert_ne!(
+        stale_metadata,
+        std::fs::read_to_string(&metadata_path).expect("metadata cache rereads"),
+        "fixture changes one valid cache field while keeping its schema intact"
+    );
+    std::fs::write(&metadata_path, &stale_metadata).expect("stale metadata writes");
+
+    let output = run_session_command(SessionCommand::Verify {
+        directory: directory.clone(),
+        additional_roots: Vec::new(),
+    })
+    .expect("read-only verify succeeds");
+    let output = JsonValue::parse(&output).expect("machine output is JSON");
+    assert_eq!(
+        output
+            .as_object()
+            .and_then(|fields| fields.get("metadata_cache_current")),
+        Some(&JsonValue::Bool(false)),
+        "verify diagnoses a stale metadata cache without trusting it"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&metadata_path).expect("metadata cache rereads"),
+        stale_metadata,
+        "read-only verification does not repair a derived metadata cache"
+    );
+    let _ = fs::remove_dir_all(home);
+}
+
+#[test]
+fn machine_session_export_and_restore_preserve_the_authenticated_prefix() {
+    let home = test_tea_home("machine-session-restore");
+    let source = home.join("source.tea");
+    let export = home.join("export.tea");
+    let restore = home.join("restore.tea");
+    let mut session = JsonlSession::create(
+        &source,
+        SessionHeader::new(
+            SessionId::new("machine-session-restore").expect("valid session ID"),
+            "workspace-test",
+            Metadata::new(),
+        ),
+        DurabilityMode::Strict,
+    )
+    .expect("session creates");
+    session
+        .append_entry(
+            &LaneId::main(),
+            ProvisionedEntry::user(
+                EntryId::new("machine-session-restore-entry").expect("valid entry ID"),
+                "portable evidence",
+            ),
+        )
+        .expect("entry commits");
+    let expected = session.snapshot().expect("snapshot");
+    drop(session);
+
+    run_session_command(SessionCommand::Export {
+        source: source.clone(),
+        destination: export.clone(),
+        additional_roots: Vec::new(),
+    })
+    .expect("machine export succeeds");
+    let manifest_path = export.join("export.json");
+    let manifest = fs::read(&manifest_path).expect("export manifest reads");
+    fs::write(&manifest_path, "not a canonical export manifest\n")
+        .expect("corrupt export manifest writes");
+    assert!(
+        run_session_command(SessionCommand::Restore {
+            source: export.clone(),
+            destination: restore.clone(),
+        })
+        .is_err(),
+        "restore validates its manifest before it prepares a destination"
+    );
+    assert!(
+        !restore.exists(),
+        "a rejected export manifest never leaves a published restore destination"
+    );
+    fs::write(&manifest_path, manifest).expect("valid export manifest restores");
+    run_session_command(SessionCommand::Restore {
+        source: export,
+        destination: restore.clone(),
+    })
+    .expect("machine restore succeeds");
+    let restored = JsonlSession::open(&restore, DurabilityMode::Strict).expect("restored opens");
+    assert_eq!(restored.snapshot().expect("restored snapshot"), expected);
+    drop(restored);
+    let _ = fs::remove_dir_all(home);
+}
+
+#[test]
+fn machine_session_export_manifest_lists_artifact_identities_and_lengths() {
+    let home = test_tea_home("machine-session-export-manifest-lengths");
+    let source = home.join("source.tea");
+    let export = home.join("export.tea");
+    let mut session = JsonlSession::create(
+        &source,
+        SessionHeader::new(
+            SessionId::new("machine-session-export-manifest-lengths").expect("valid session ID"),
+            "workspace-test",
+            Metadata::new(),
+        ),
+        DurabilityMode::Strict,
+    )
+    .expect("session creates");
+    let artifact = session
+        .artifact_store()
+        .expect("object store opens")
+        .put(b"immutable exported evidence", "text/plain")
+        .expect("artifact publishes");
+    session
+        .append_entry(
+            &LaneId::main(),
+            ProvisionedEntry {
+                id: EntryId::new("machine-session-export-manifest-entry").expect("valid entry ID"),
+                body: SessionEntry::Custom(CustomEntry {
+                    type_name: "trusted.export-evidence".into(),
+                    payload: PayloadRef::Artifact {
+                        artifact_id: artifact.artifact_id,
+                        byte_len: artifact.byte_len,
+                        media_type: artifact.media_type.clone(),
+                    },
+                    model_visible: false,
+                }),
+            },
+        )
+        .expect("artifact reference commits");
+    drop(session);
+
+    run_session_command(SessionCommand::Export {
+        source,
+        destination: export.clone(),
+        additional_roots: Vec::new(),
+    })
+    .expect("machine export succeeds");
+    let manifest = JsonValue::parse(
+        &fs::read_to_string(export.join("export.json")).expect("export manifest reads"),
+    )
+    .expect("export manifest is JSON");
+    let fields = manifest.as_object().expect("export manifest is an object");
+    assert_eq!(
+        fields.get("artifacts"),
+        Some(&JsonValue::Array(vec![JsonValue::object([
+            (
+                "artifact_id",
+                JsonValue::String(artifact.artifact_id.to_hex())
+            ),
+            ("byte_len", JsonValue::from(artifact.byte_len)),
+        ])])),
+        "an export manifest carries complete immutable-object descriptors"
+    );
+
+    let _ = fs::remove_dir_all(home);
 }
 
 #[test]

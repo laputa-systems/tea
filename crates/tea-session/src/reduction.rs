@@ -1,8 +1,9 @@
 use crate::{
     EffectiveLaneConfiguration, EntryId, EpochId, HarnessRevisionChangedEntry, LaneId, LaneRecord,
     LaneState, LaneStatus, OperationId, PendingHarnessActivation, PendingQueues, PendingWrite,
-    ProvisionedEntry, Sequence, SessionEntry, SessionSnapshot, StepId, StepKind, StoredEntry,
-    StoredMutation, ToolReplayPolicy, ToolStartedRecord, Usage,
+    ProvisionedEntry, Sequence, SessionEntry, SessionMutationRef, SessionSnapshot, StepId,
+    StepKind, StoredEntry, StoredMutation, StoredMutationRef, ToolReplayPolicy, ToolStartedRecord,
+    Usage,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -17,7 +18,7 @@ pub struct Corruption {
 }
 
 impl Corruption {
-    fn new(message: impl Into<String>) -> Self {
+    pub(crate) fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
         }
@@ -119,8 +120,55 @@ struct OperationState {
 /// Reduce one complete session snapshot without reading clocks, files, hooks,
 /// providers, tools, or mutable live state.
 pub fn reduce_lane(input: SessionSnapshot, lane: LaneId) -> Result<LaneReduction, Corruption> {
+    reduce_lane_ref(&input, lane)
+}
+
+/// Borrowed form used while a store validates a candidate before commit.
+///
+/// The reducer never consumes or mutates its input. Keeping this form crate
+/// private avoids making snapshot ownership part of the public contract while
+/// preventing an append validation from cloning the complete history merely to
+/// call the same pure reducer.
+pub(crate) fn reduce_lane_ref(
+    input: &SessionSnapshot,
+    lane: LaneId,
+) -> Result<LaneReduction, Corruption> {
+    reduce_lane_prefix(
+        input.header(),
+        input.last_sequence(),
+        input.mutations(),
+        lane,
+    )
+}
+
+/// Borrowed form of the pure reducer that includes one prospective mutation.
+///
+/// A writer calls this before its one append. The candidate payload remains
+/// borrowed at the wire boundary, so full-prefix validation never makes a
+/// second owned `SessionSnapshot` or duplicates large semantic payloads.
+pub(crate) fn reduce_lane_ref_with_append(
+    input: &SessionSnapshot,
+    appended: &StoredMutation,
+    lane: LaneId,
+) -> Result<LaneReduction, Corruption> {
+    reduce_lane_prefix(
+        input.header(),
+        appended.seq,
+        input
+            .mutations()
+            .chain(std::iter::once(appended.borrowed())),
+        lane,
+    )
+}
+
+fn reduce_lane_prefix<'a>(
+    header: &crate::SessionHeader,
+    last_sequence: Sequence,
+    mutations: impl Iterator<Item = StoredMutationRef<'a>>,
+    lane: LaneId,
+) -> Result<LaneReduction, Corruption> {
     let mut lane_leaves = BTreeMap::<LaneId, Option<EntryId>>::new();
-    lane_leaves.insert(input.header().initial_lane.clone(), None);
+    lane_leaves.insert(header.initial_lane.clone(), None);
 
     let mut entries = BTreeMap::<EntryId, StoredEntry>::new();
     let mut operations = BTreeMap::<OperationId, OperationState>::new();
@@ -137,7 +185,7 @@ pub fn reduce_lane(input: SessionSnapshot, lane: LaneId) -> Result<LaneReduction
     let mut usage_by_lane = BTreeMap::<LaneId, Usage>::new();
     let mut expected_sequence = 1_u64;
 
-    for mutation in input.mutations() {
+    for mutation in mutations {
         let sequence = mutation.sequence();
         if sequence != Sequence(expected_sequence) {
             return Err(Corruption::new(format!(
@@ -147,8 +195,8 @@ pub fn reduce_lane(input: SessionSnapshot, lane: LaneId) -> Result<LaneReduction
         }
         expected_sequence = expected_sequence.saturating_add(1);
 
-        match mutation {
-            StoredMutation::Lane(stored) => match &stored.mutation {
+        match mutation.mutation {
+            SessionMutationRef::Lane(stored) => match &stored.mutation {
                 crate::LaneMutation::Created {
                     lane_id,
                     base_leaf_id,
@@ -157,15 +205,16 @@ pub fn reduce_lane(input: SessionSnapshot, lane: LaneId) -> Result<LaneReduction
                         return Err(Corruption::new(format!("duplicate lane ID {lane_id}")));
                     }
                     if let Some(base_leaf_id) = base_leaf_id
-                        && !entries.contains_key(base_leaf_id) {
-                            return Err(Corruption::new(format!(
-                                "lane {lane_id} refers to missing base entry {base_leaf_id}"
-                            )));
-                        }
+                        && !entries.contains_key(base_leaf_id)
+                    {
+                        return Err(Corruption::new(format!(
+                            "lane {lane_id} refers to missing base entry {base_leaf_id}"
+                        )));
+                    }
                     lane_leaves.insert(lane_id.clone(), base_leaf_id.clone());
                 }
             },
-            StoredMutation::Entry(stored) => {
+            SessionMutationRef::Entry(stored) => {
                 let Some(current_leaf) = lane_leaves.get(&stored.lane_id).cloned() else {
                     return Err(Corruption::new(format!(
                         "entry {} targets unknown lane {}",
@@ -185,19 +234,21 @@ pub fn reduce_lane(input: SessionSnapshot, lane: LaneId) -> Result<LaneReduction
                     )));
                 }
                 if let Some(provisioned) = provisioned_entries.get(&stored.header.id)
-                    && provisioned.body != stored.body {
-                        return Err(Corruption::new(format!(
-                            "provisioned entry {} materialized with different content",
-                            stored.header.id
-                        )));
-                    }
+                    && provisioned.body != stored.body
+                {
+                    return Err(Corruption::new(format!(
+                        "provisioned entry {} materialized with different content",
+                        stored.header.id
+                    )));
+                }
                 if let Some(parent_id) = &stored.header.parent_id
-                    && !entries.contains_key(parent_id) {
-                        return Err(Corruption::new(format!(
-                            "entry {} refers to missing parent {parent_id}",
-                            stored.header.id
-                        )));
-                    }
+                    && !entries.contains_key(parent_id)
+                {
+                    return Err(Corruption::new(format!(
+                        "entry {} refers to missing parent {parent_id}",
+                        stored.header.id
+                    )));
+                }
                 if let Some(operation_id) = active_operations.get(&stored.lane_id) {
                     operations
                         .get_mut(operation_id)
@@ -208,7 +259,7 @@ pub fn reduce_lane(input: SessionSnapshot, lane: LaneId) -> Result<LaneReduction
                 lane_leaves.insert(stored.lane_id.clone(), Some(stored.header.id.clone()));
                 entries.insert(stored.header.id.clone(), stored.clone());
             }
-            StoredMutation::Record(stored) => match &stored.record {
+            SessionMutationRef::Record(stored) => match &stored.record {
                 LaneRecord::OperationStarted(record) => {
                     if operations.contains_key(&record.id) {
                         return Err(Corruption::new(format!(
@@ -468,11 +519,11 @@ pub fn reduce_lane(input: SessionSnapshot, lane: LaneId) -> Result<LaneReduction
                         .saturating_add_assign(&record.usage);
                 }
             },
-            StoredMutation::Fact(_) => {}
+            SessionMutationRef::Fact(_) => {}
         }
     }
 
-    if input.last_sequence().0.saturating_add(1) != expected_sequence {
+    if last_sequence.0.saturating_add(1) != expected_sequence {
         return Err(Corruption::new(
             "snapshot last sequence disagrees with mutation timeline",
         ));

@@ -8,8 +8,8 @@
 //! crate must not take ownership of another state plane's manifest format.
 
 use crate::{
-    ArtifactError, ArtifactId, ArtifactStore, Corruption, PayloadRef, SessionEntry, SessionFact,
-    SessionSnapshot, session_artifact_roots,
+    ArtifactError, ArtifactId, ArtifactInventoryItem, ArtifactStore, Corruption, PayloadRef,
+    SessionEntry, SessionFact, SessionSnapshot, session_artifact_roots,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -21,12 +21,17 @@ pub struct SessionVerification {
     pub session_id: crate::SessionId,
     /// Last committed mutation sequence in the verified prefix.
     pub last_sequence: crate::Sequence,
+    /// Authenticated digest naming the verified committed prefix.
+    pub last_digest: crate::Digest,
     /// Every direct or caller-supplied immutable artifact root checked.
     pub artifact_roots: BTreeSet<ArtifactId>,
     /// Number of checked artifact objects.
     pub artifact_count: usize,
     /// Total exact bytes of checked artifact objects.
     pub artifact_bytes: u64,
+    /// Finalized objects outside the verified root set. These are not
+    /// corruption; a separate reviewed GC pass may remove them.
+    pub orphaned_artifacts: Vec<ArtifactInventoryItem>,
 }
 
 /// Failure while checking a recovered durable prefix.
@@ -109,16 +114,7 @@ pub fn verify_session(
 
     let mut artifact_bytes = 0_u64;
     for artifact_id in &artifact_roots {
-        let bytes = artifacts.get(*artifact_id)?;
-        if ArtifactId::from_bytes(&bytes) != *artifact_id {
-            return Err(SessionVerificationError::Artifact(
-                ArtifactError::Corruption {
-                    artifact_id: *artifact_id,
-                    message: "artifact bytes do not match the durable content identity".into(),
-                },
-            ));
-        }
-        let actual = bytes.len() as u64;
+        let actual = artifacts.verify_object(*artifact_id)?;
         if let Some(expected) = expected_lengths.get(artifact_id)
             && *expected != actual
         {
@@ -130,13 +126,20 @@ pub fn verify_session(
         }
         artifact_bytes = artifact_bytes.saturating_add(actual);
     }
+    let orphaned_artifacts = artifacts
+        .inventory()?
+        .into_iter()
+        .filter(|item| !artifact_roots.contains(&item.artifact_id))
+        .collect();
 
     Ok(SessionVerification {
         session_id: snapshot.header().session_id.clone(),
         last_sequence: snapshot.last_sequence(),
+        last_digest: snapshot.last_digest(),
         artifact_count: artifact_roots.len(),
         artifact_roots,
         artifact_bytes,
+        orphaned_artifacts,
     })
 }
 

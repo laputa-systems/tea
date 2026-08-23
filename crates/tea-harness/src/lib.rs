@@ -42,6 +42,7 @@ pub use lineage::{
 };
 pub use manager::{
     HarnessApplyRequest, HarnessFilePatch, HarnessManager, ResolvedHarnessConfiguration,
+    verify_harness_catalog,
 };
 pub use mode::{
     AUTHORING_AUTHORIZATION_METADATA_KEY, SELF_EXTENSION_MODE_METADATA_KEY,

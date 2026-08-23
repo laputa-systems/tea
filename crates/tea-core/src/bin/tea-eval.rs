@@ -295,6 +295,7 @@ fn terminal_code(result: &Result<(), tea_core::CoreError>) -> Option<&'static st
         Err(tea_core::CoreError::ModelProvider { .. }) => Some("model_provider"),
         Err(tea_core::CoreError::UnsupportedModelStream { .. }) => Some("unsupported_model_stream"),
         Err(tea_core::CoreError::Hook(_)) => Some("hook"),
+        Err(tea_core::CoreError::EffectGate(_)) => Some("effect_gate"),
         Err(tea_core::CoreError::MissingModelProvider) => Some("missing_model_provider"),
         Err(tea_core::CoreError::ActiveRun { .. }) => Some("active_run"),
         Err(tea_core::CoreError::InvalidTransition(_)) => Some("invalid_transition"),
@@ -474,4 +475,17 @@ fn main() -> Result<(), String> {
     fs::write(&args.result_json, encoded)
         .map_err(|_| "cannot write evaluation result".to_owned())?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::terminal_code;
+
+    #[test]
+    fn terminal_code_redacts_effect_gate_failures() {
+        let error = tea_core::CoreError::EffectGate(tea_core::EffectGateError::new(
+            "host durability detail must not enter the evaluation report",
+        ));
+        assert_eq!(terminal_code(&Err(error)), Some("effect_gate"));
+    }
 }

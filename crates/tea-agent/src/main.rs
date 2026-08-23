@@ -1,6 +1,7 @@
 //! `tea` command-line entry point.
 
-use tea_agent::{App, AppError, CliCommand, CliOptions};
+use tea_agent::{run_session_command, App, AppError, CliCommand, CliOptions};
+use tea_protocol::JsonValue;
 
 fn main() {
     if let Err(error) = run() {
@@ -17,6 +18,22 @@ fn run() -> Result<(), AppError> {
             print!("{}", CliOptions::help_text());
             Ok(())
         }
+        CliCommand::Session(command) => match run_session_command(command) {
+            Ok(output) => {
+                println!("{output}");
+                Ok(())
+            }
+            Err(error) => {
+                let output = JsonValue::object([
+                    ("error", JsonValue::String(error.to_string())),
+                    ("ok", JsonValue::Bool(false)),
+                ])
+                .to_json_string()
+                .expect("session command error JSON is encodable");
+                println!("{output}");
+                Err(error)
+            }
+        },
         CliCommand::Options(options) => {
             let prompt = options.prompt().map(std::ffi::OsStr::to_owned);
             let mut app = App::new(options);

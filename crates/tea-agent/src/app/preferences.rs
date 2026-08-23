@@ -5,7 +5,8 @@
 //! opening an interactive picker.
 
 use std::fs;
-use std::io;
+use std::fs::OpenOptions;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use tea_core::ModelDescriptor;
@@ -125,16 +126,23 @@ pub(crate) fn save_last_model(
         ".last-model-{}.tmp",
         NEXT_TEMPORARY.fetch_add(1, Ordering::Relaxed)
     ));
-    fs::write(&temporary, source.as_bytes()).map_err(|error| io_error(&temporary, error))?;
-    if let Err(error) = set_private_file(&temporary) {
+    let mut created_temporary = false;
+    let result = (|| {
+        let mut file = create_private_temporary(&temporary)?;
+        created_temporary = true;
+        file.write_all(source.as_bytes())
+            .and_then(|_| file.flush())
+            .and_then(|_| file.sync_data())
+            .map_err(|error| io_error(&temporary, error))?;
+        drop(file);
+        fs::rename(&temporary, &path).map_err(|error| io_error(&path, error))?;
+        sync_preference_directory(tea_home)?;
+        Ok(())
+    })();
+    if result.is_err() && created_temporary {
         let _ = fs::remove_file(&temporary);
-        return Err(error);
     }
-    if let Err(error) = fs::rename(&temporary, &path) {
-        let _ = fs::remove_file(&temporary);
-        return Err(io_error(&path, error));
-    }
-    Ok(())
+    result
 }
 
 fn ensure_home_directory(path: &Path) -> Result<(), PreferenceError> {
@@ -163,14 +171,31 @@ fn required_string(
     Ok(value.to_owned())
 }
 
-fn set_private_file(path: &Path) -> Result<(), PreferenceError> {
+fn sync_preference_directory(path: &Path) -> Result<(), PreferenceError> {
+    let directory = fs::File::open(path).map_err(|error| io_error(path, error))?;
+    match directory.sync_all() {
+        Ok(()) => Ok(()),
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::InvalidInput | io::ErrorKind::PermissionDenied
+            ) =>
+        {
+            Ok(())
+        }
+        Err(error) => Err(io_error(path, error)),
+    }
+}
+
+fn create_private_temporary(path: &Path) -> Result<fs::File, PreferenceError> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-            .map_err(|error| io_error(path, error))?;
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
     }
-    Ok(())
+    options.open(path).map_err(|error| io_error(path, error))
 }
 
 fn io_error(path: &Path, error: io::Error) -> PreferenceError {
@@ -227,6 +252,23 @@ mod tests {
             load_last_model(&root),
             Err(PreferenceError::Contract { .. })
         ));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn temporary_creation_does_not_overwrite_an_existing_file() {
+        let root = std::env::temp_dir().join(format!(
+            "tea-preference-test-{}",
+            NEXT_TEMPORARY.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let temporary = root.join(".last-model.tmp");
+        fs::write(&temporary, b"must not be overwritten").unwrap();
+
+        let error = create_private_temporary(&temporary).unwrap_err();
+
+        assert!(matches!(error, PreferenceError::Io { .. }));
+        assert_eq!(fs::read(&temporary).unwrap(), b"must not be overwritten");
         let _ = fs::remove_dir_all(root);
     }
 }

@@ -7,7 +7,7 @@
 //! a second, direct-core persistence path.
 
 use std::collections::BTreeMap;
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -51,6 +51,8 @@ pub(super) struct DurableSessionSummary {
 }
 
 static NEXT_SESSION_NONCE: AtomicU64 = AtomicU64::new(1);
+const HOST_SESSION_METADATA_VERSION: u64 = 1;
+const MAX_HOST_SESSION_METADATA_BYTES: u64 = 65_536;
 
 /// Create one fresh session-local managed harness under the host-selected Tea
 /// home. The committed initial branch revision and immutable catalog exist
@@ -181,6 +183,12 @@ pub(super) fn create_host_harness(
         let identity = HarnessIdentity::new(revision.revision_id, snapshot.id, profile.profile_id);
         let harness =
             DurableHarness::new_with_artifact_store(session, manager, identity, artifacts)?;
+        if let Err(error) = write_host_session_metadata(&directory, &harness.snapshot()?) {
+            eprintln!(
+                "warning: durable session metadata cache was not written for {}: {error}",
+                directory.display()
+            );
+        }
         return Ok(Arc::new(harness));
     }
 
@@ -190,8 +198,9 @@ pub(super) fn create_host_harness(
 }
 
 /// List durable sessions scoped to one explicit workspace. This deliberately
-/// reads only each directory's fixed header; opening a session would acquire
-/// its sole writer lock and make an idle, already-open session unlistable.
+/// reads only each session's bounded derived metadata cache; opening a session
+/// would acquire its sole writer lock and make an idle, already-open session
+/// unlistable.
 pub(super) fn list_host_sessions(
     tea_home: &Path,
     workspace: &Path,
@@ -232,20 +241,41 @@ pub(super) fn list_host_sessions(
                 path.display()
             )));
         }
-        let header = read_host_session_header(&path)?;
-        if header.workspace != workspace.to_string_lossy() {
-            return Err(AppError::Setup(format!(
-                "durable session {} belongs to a different workspace",
-                header.session_id
-            )));
-        }
-        sessions.push(DurableSessionSummary {
-            id: header.session_id,
-            model: header.model,
-        });
+        let directory_id = name.trim_end_matches(".tea");
+        SessionId::new(directory_id.to_owned())
+            .map_err(|error| AppError::Setup(error.to_string()))?;
+        let metadata = read_host_session_metadata(&path)?;
+        let (id, model) = match metadata {
+            Some(metadata)
+                if metadata.session_id == directory_id
+                    && metadata.workspace == workspace.to_string_lossy() =>
+            {
+                (metadata.session_id, metadata.model)
+            }
+            // `meta.json` is only a bounded discovery cache. A stale or
+            // foreign cache must not alter the directory-derived session
+            // identity or make listing fail; opening the session rebuilds it
+            // from the authoritative v1 header.
+            Some(_) => (directory_id.to_owned(), None),
+            None => (directory_id.to_owned(), None),
+        };
+        sessions.push(DurableSessionSummary { id, model });
     }
     sessions.sort_by(|left, right| right.id.cmp(&left.id));
     Ok(sessions)
+}
+
+/// Reconstruct the terminal host's disposable caches from one validated v1
+/// session prefix. The JSONL opener refreshes `HEAD`; `meta.json` is then
+/// replaced from the same snapshot while the writer lock remains held.
+pub(super) fn rebuild_host_session_metadata(
+    directory: &Path,
+) -> Result<(SessionSnapshot, Option<String>), AppError> {
+    let session = JsonlSession::open(directory, DurabilityMode::Strict)?;
+    let snapshot = session.snapshot()?;
+    let head_cache_warning = session.cache_warning().map(str::to_owned);
+    write_host_session_metadata(directory, &snapshot)?;
+    Ok((snapshot, head_cache_warning))
 }
 
 /// Reopen one durable session with the exact model selected by its immutable
@@ -290,6 +320,12 @@ pub(super) fn reopen_host_harness(
             "durable session {} requires model {}/{}; select that exact model before reopening",
             session_id, stored_model.provider, stored_model.model
         )));
+    }
+    if let Err(error) = write_host_session_metadata(session.directory(), &snapshot) {
+        eprintln!(
+            "warning: durable session metadata cache was not refreshed for {}: {error}",
+            session.directory().display()
+        );
     }
     let artifacts: Arc<dyn tea_session::ArtifactStore> =
         Arc::new(session.artifact_store().map_err(AppError::from)?);
@@ -573,36 +609,268 @@ struct HostSessionHeader {
     self_extension_mode: SelfExtensionMode,
 }
 
+#[derive(Clone, Debug)]
+struct HostSessionMetadata {
+    session_id: String,
+    workspace: String,
+    model: Option<ModelDescriptor>,
+    header_digest: Digest,
+    created_at_ms: u64,
+    active_lane: LaneId,
+    through_seq: u64,
+    through_digest: Digest,
+}
+
 fn session_workspace_root(tea_home: &Path, workspace: &Path) -> PathBuf {
     tea_home.join("sessions").join(workspace_key(workspace))
 }
 
-fn read_host_session_header(directory: &Path) -> Result<HostSessionHeader, AppError> {
-    let path = directory.join("session.jsonl");
-    let metadata = fs::symlink_metadata(&path).map_err(|error| {
-        AppError::Setup(format!("could not inspect {}: {error}", path.display()))
-    })?;
+fn read_host_session_metadata(directory: &Path) -> Result<Option<HostSessionMetadata>, AppError> {
+    let path = directory.join("meta.json");
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(AppError::Setup(format!(
+                "could not inspect {}: {error}",
+                path.display()
+            )));
+        }
+    };
     if metadata.file_type().is_symlink() || !metadata.is_file() {
         return Err(AppError::Setup(format!(
-            "durable session header {} must be a regular file",
+            "durable session metadata {} must be a regular file",
             path.display()
         )));
     }
+    if metadata.len() > MAX_HOST_SESSION_METADATA_BYTES {
+        return Ok(None);
+    }
     let source = fs::read_to_string(&path)
         .map_err(|error| AppError::Setup(format!("could not read {}: {error}", path.display())))?;
-    let line = source.lines().next().ok_or_else(|| {
-        AppError::Setup(format!(
-            "durable session {} has no header",
+    let value = match JsonValue::parse(&source) {
+        Ok(value) => value,
+        Err(_) => return Ok(None),
+    };
+    let object = match value.as_object() {
+        Some(object) if object.len() == 9 => object,
+        _ => return Ok(None),
+    };
+    let version = object.get("version").and_then(JsonValue::as_u64);
+    let session_id = object.get("session_id").and_then(JsonValue::as_str);
+    let workspace = object.get("workspace").and_then(JsonValue::as_str);
+    let model = object.get("model");
+    let header_digest = object.get("header_digest").and_then(JsonValue::as_str);
+    let created_at_ms = object.get("created_at_ms").and_then(JsonValue::as_u64);
+    let active_lane = object.get("active_lane").and_then(JsonValue::as_str);
+    let through_seq = object.get("through_seq").and_then(JsonValue::as_u64);
+    let through_digest = object.get("through_digest").and_then(JsonValue::as_str);
+    let (
+        Some(HOST_SESSION_METADATA_VERSION),
+        Some(session_id),
+        Some(workspace),
+        Some(model),
+        Some(header_digest),
+        Some(created_at_ms),
+        Some(active_lane),
+        Some(through_seq),
+        Some(through_digest),
+    ) = (
+        version,
+        session_id,
+        workspace,
+        model,
+        header_digest,
+        created_at_ms,
+        active_lane,
+        through_seq,
+        through_digest,
+    )
+    else {
+        return Ok(None);
+    };
+    if SessionId::new(session_id.to_owned()).is_err() {
+        return Ok(None);
+    }
+    let model = match decode_cached_model(model) {
+        Ok(model) => model,
+        Err(()) => return Ok(None),
+    };
+    let Ok(header_digest) = Digest::from_hex(header_digest) else {
+        return Ok(None);
+    };
+    let Ok(active_lane) = LaneId::new(active_lane.to_owned()) else {
+        return Ok(None);
+    };
+    let Ok(through_digest) = Digest::from_hex(through_digest) else {
+        return Ok(None);
+    };
+    Ok(Some(HostSessionMetadata {
+        session_id: session_id.into(),
+        workspace: workspace.into(),
+        model,
+        header_digest,
+        created_at_ms,
+        active_lane,
+        through_seq,
+        through_digest,
+    }))
+}
+
+/// Compare the terminal host's bounded discovery cache to a validated v1
+/// prefix. A missing, malformed, foreign, or stale cache is simply not
+/// current: callers must continue to treat the JSONL prefix as authority.
+pub(super) fn host_session_metadata_is_current(
+    directory: &Path,
+    snapshot: &SessionSnapshot,
+) -> bool {
+    let Ok(Some(metadata)) = read_host_session_metadata(directory) else {
+        return false;
+    };
+    let Ok(header) = host_session_header_from_snapshot(snapshot) else {
+        return false;
+    };
+    metadata.session_id == header.session_id
+        && metadata.workspace == header.workspace
+        && metadata.model == header.model
+        && metadata.header_digest == snapshot.header().digest
+        && metadata.created_at_ms == snapshot.header().created_at_ms
+        && metadata.active_lane == snapshot.header().initial_lane
+        && metadata.through_seq == snapshot.last_sequence().0
+        && metadata.through_digest == snapshot.last_digest()
+}
+
+fn write_host_session_metadata(
+    directory: &Path,
+    snapshot: &SessionSnapshot,
+) -> Result<(), AppError> {
+    let header = host_session_header_from_snapshot(snapshot)?;
+    let model = match &header.model {
+        Some(model) => JsonValue::object([
+            ("provider", JsonValue::String(model.provider.clone())),
+            ("model", JsonValue::String(model.model.clone())),
+            (
+                "revision",
+                model
+                    .revision
+                    .as_ref()
+                    .map(|revision| JsonValue::String(revision.clone()))
+                    .unwrap_or(JsonValue::Null),
+            ),
+        ]),
+        None => JsonValue::Null,
+    };
+    let bytes = JsonValue::object([
+        (
+            "active_lane",
+            JsonValue::String(snapshot.header().initial_lane.to_string()),
+        ),
+        (
+            "created_at_ms",
+            JsonValue::from(snapshot.header().created_at_ms),
+        ),
+        (
+            "header_digest",
+            JsonValue::String(snapshot.header().digest.to_hex()),
+        ),
+        ("version", JsonValue::from(HOST_SESSION_METADATA_VERSION)),
+        ("session_id", JsonValue::String(header.session_id.clone())),
+        (
+            "through_digest",
+            JsonValue::String(snapshot.last_digest().to_hex()),
+        ),
+        ("through_seq", JsonValue::from(snapshot.last_sequence().0)),
+        ("workspace", JsonValue::String(header.workspace.clone())),
+        ("model", model),
+    ])
+    .to_json_string()
+    .map_err(|error| {
+        AppError::Setup(format!("could not encode session metadata cache: {error}"))
+    })?;
+    let temporary = directory.join(format!(
+        ".meta-{}-{:016x}.tmp",
+        std::process::id(),
+        NEXT_SESSION_NONCE.fetch_add(1, Ordering::Relaxed)
+    ));
+    let destination = directory.join("meta.json");
+    let result = (|| {
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&temporary).map_err(|error| {
+            AppError::Setup(format!("could not create {}: {error}", temporary.display()))
+        })?;
+        file.write_all(bytes.as_bytes())
+            .and_then(|_| file.write_all(b"\n"))
+            .and_then(|_| file.flush())
+            .and_then(|_| file.sync_data())
+            .map_err(|error| {
+                AppError::Setup(format!("could not write {}: {error}", temporary.display()))
+            })?;
+        drop(file);
+        fs::rename(&temporary, &destination).map_err(|error| {
+            AppError::Setup(format!(
+                "could not publish {}: {error}",
+                destination.display()
+            ))
+        })?;
+        sync_host_directory(directory)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
+fn decode_cached_model(value: &JsonValue) -> Result<Option<ModelDescriptor>, ()> {
+    if matches!(value, JsonValue::Null) {
+        return Ok(None);
+    }
+    let object = value.as_object().ok_or(())?;
+    if object.len() != 3 {
+        return Err(());
+    }
+    let provider = object
+        .get("provider")
+        .and_then(JsonValue::as_str)
+        .ok_or(())?;
+    let model = object.get("model").and_then(JsonValue::as_str).ok_or(())?;
+    let revision = match object.get("revision") {
+        Some(JsonValue::Null) => None,
+        Some(value) => Some(value.as_str().ok_or(())?.to_owned()),
+        None => return Err(()),
+    };
+    Ok(Some(ModelDescriptor {
+        provider: provider.into(),
+        model: model.into(),
+        revision,
+    }))
+}
+
+fn sync_host_directory(directory: &Path) -> Result<(), AppError> {
+    let file = fs::File::open(directory).map_err(|error| {
+        AppError::Setup(format!("could not open {}: {error}", directory.display()))
+    })?;
+    match file.sync_all() {
+        Ok(()) => Ok(()),
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::InvalidInput | io::ErrorKind::PermissionDenied
+            ) =>
+        {
+            Ok(())
+        }
+        Err(error) => Err(AppError::Setup(format!(
+            "could not synchronize {}: {error}",
             directory.display()
-        ))
-    })?;
-    let value = JsonValue::parse(line).map_err(|error| {
-        AppError::Setup(format!(
-            "durable session header {} is invalid JSON: {error}",
-            path.display()
-        ))
-    })?;
-    host_session_header_from_value(&value)
+        ))),
+    }
 }
 
 fn host_session_header_from_snapshot(
@@ -617,32 +885,6 @@ fn host_session_header_from_snapshot(
         header.workspace.clone(),
         &header.metadata,
     )
-}
-
-fn host_session_header_from_value(value: &JsonValue) -> Result<HostSessionHeader, AppError> {
-    let object = value
-        .as_object()
-        .ok_or_else(|| AppError::Setup("durable session header must be a JSON object".into()))?;
-    let kind = required_header_string(object, "kind")?;
-    let version = object
-        .get("version")
-        .and_then(JsonValue::as_u64)
-        .ok_or_else(|| {
-            AppError::Setup("durable session header version must be an integer".into())
-        })?;
-    if kind != "session" || version != u64::from(SESSION_FORMAT_VERSION) {
-        return Err(AppError::Setup("unsupported durable session format".into()));
-    }
-    let session_id = required_header_string(object, "session_id")?;
-    SessionId::new(session_id.clone()).map_err(|error| AppError::Setup(error.to_string()))?;
-    let workspace = required_header_string(object, "workspace")?;
-    let metadata = object
-        .get("metadata")
-        .and_then(JsonValue::as_object)
-        .ok_or_else(|| {
-            AppError::Setup("durable session header metadata must be an object".into())
-        })?;
-    host_session_metadata(session_id, workspace, metadata)
 }
 
 fn host_session_metadata(
@@ -697,17 +939,6 @@ fn host_session_metadata(
         thinking_level,
         self_extension_mode,
     })
-}
-
-fn required_header_string(
-    object: &BTreeMap<String, JsonValue>,
-    field: &str,
-) -> Result<String, AppError> {
-    object
-        .get(field)
-        .and_then(JsonValue::as_str)
-        .map(str::to_owned)
-        .ok_or_else(|| AppError::Setup(format!("durable session header {field} must be a string")))
 }
 
 fn thinking_level_name(level: ThinkingLevel) -> &'static str {
@@ -1029,6 +1260,367 @@ mod tests {
         ));
 
         drop(reopened);
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn session_listing_reads_derived_metadata_without_opening_the_log() {
+        let home = temporary_home();
+        let workspace = home.join("workspace");
+        fs::create_dir(&workspace).expect("workspace creates");
+        let configuration = AgentConfiguration::new(
+            "trusted system prompt",
+            ToolRegistry::default(),
+            Arc::new(NoHooks),
+        );
+        let model = ModelDescriptor {
+            provider: "fixture".into(),
+            model: "fixture-model".into(),
+            revision: None,
+        };
+        let harness = create_host_harness(
+            &home,
+            &workspace,
+            configuration,
+            model.clone(),
+            Arc::new(StopProvider),
+            ThinkingLevel::Off,
+            None,
+            AutomaticCompactionPolicy::disabled(),
+        )
+        .expect("host harness creates");
+        let session_id = harness
+            .snapshot()
+            .expect("session snapshot")
+            .header()
+            .session_id
+            .to_string();
+        drop(harness);
+
+        let directory = session_workspace_root(&home, &workspace).join(format!("{session_id}.tea"));
+        fs::rename(
+            directory.join("session.jsonl"),
+            directory.join("session.jsonl.hidden"),
+        )
+        .expect("authoritative log is hidden from the listing test");
+        fs::create_dir(
+            session_workspace_root(&home, &workspace).join(".interrupted.create-fixture"),
+        )
+        .expect("unpublished creation directory creates");
+
+        let listed = list_host_sessions(&home, &workspace).expect("listing reads meta.json");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, session_id);
+        assert_eq!(listed[0].model, Some(model));
+        let _ = fs::remove_dir_all(home);
+    }
+
+    /// Reproducible session-picker workload that contains no `session.jsonl`
+    /// files. A listing regression that tries to replay every session will
+    /// therefore fail rather than silently measuring a different path.
+    #[test]
+    #[ignore = "run explicitly to measure generated bounded-metadata session listing"]
+    fn generated_session_listing_fixture_measures_bounded_metadata_reads() {
+        const SESSION_COUNT: usize = 1_000;
+        let home = temporary_home();
+        let workspace = home.join("workspace");
+        fs::create_dir(&workspace).expect("workspace creates");
+        let root = session_workspace_root(&home, &workspace);
+        fs::create_dir_all(&root).expect("session root creates");
+        let workspace_json = workspace.to_string_lossy();
+
+        for index in 0..SESSION_COUNT {
+            let session_id = format!("generated-list-{index:04}");
+            let directory = root.join(format!("{session_id}.tea"));
+            fs::create_dir(&directory).expect("generated session directory creates");
+            match index % 4 {
+                0 => fs::write(
+                    directory.join("meta.json"),
+                    format!(
+                        r#"{{"active_lane":"main","created_at_ms":0,"header_digest":"{}","model":{{"model":"fixture-model","provider":"fixture","revision":null}},"session_id":"{session_id}","through_digest":"{}","through_seq":0,"version":{},"workspace":"{}"}}"#,
+                        "0".repeat(64),
+                        "0".repeat(64),
+                        HOST_SESSION_METADATA_VERSION,
+                        workspace_json,
+                    ),
+                )
+                .expect("valid generated metadata writes"),
+                1 => {}
+                2 => fs::write(
+                    directory.join("meta.json"),
+                    format!(
+                        r#"{{"active_lane":"main","created_at_ms":0,"header_digest":"{}","model":null,"session_id":"{session_id}","through_digest":"{}","through_seq":0,"version":{},"workspace":"other-workspace"}}"#,
+                        "0".repeat(64),
+                        "0".repeat(64),
+                        HOST_SESSION_METADATA_VERSION,
+                    ),
+                )
+                .expect("stale generated metadata writes"),
+                _ => fs::write(directory.join("meta.json"), "not JSON")
+                    .expect("malformed generated metadata writes"),
+            }
+        }
+
+        let started = std::time::Instant::now();
+        let listed = list_host_sessions(&home, &workspace).expect("listing succeeds without logs");
+        let elapsed = started.elapsed();
+        assert_eq!(listed.len(), SESSION_COUNT);
+        assert_eq!(
+            listed
+                .iter()
+                .filter(|summary| summary.model.is_some())
+                .count(),
+            SESSION_COUNT / 4,
+            "only valid, matching metadata supplies the optional picker model"
+        );
+        eprintln!(
+            "generated-session-listing sessions={SESSION_COUNT} valid_metadata={} listing_ms={}",
+            SESSION_COUNT / 4,
+            elapsed.as_millis()
+        );
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn host_metadata_names_the_committed_prefix_it_describes() {
+        let home = temporary_home();
+        let workspace = home.join("workspace");
+        fs::create_dir(&workspace).expect("workspace creates");
+        let harness = create_host_harness(
+            &home,
+            &workspace,
+            AgentConfiguration::new(
+                "trusted system prompt",
+                ToolRegistry::default(),
+                Arc::new(NoHooks),
+            ),
+            ModelDescriptor {
+                provider: "fixture".into(),
+                model: "fixture-model".into(),
+                revision: None,
+            },
+            Arc::new(StopProvider),
+            ThinkingLevel::Off,
+            None,
+            AutomaticCompactionPolicy::disabled(),
+        )
+        .expect("host harness creates");
+        let snapshot = harness.snapshot().expect("session snapshot");
+        let directory = session_workspace_root(&home, &workspace)
+            .join(format!("{}.tea", snapshot.header().session_id));
+        let metadata = JsonValue::parse(
+            &fs::read_to_string(directory.join("meta.json")).expect("metadata cache reads"),
+        )
+        .expect("metadata cache is JSON");
+        let fields = metadata.as_object().expect("metadata cache is an object");
+
+        assert_eq!(
+            fields.get("through_seq").and_then(JsonValue::as_u64),
+            Some(snapshot.last_sequence().0)
+        );
+        assert_eq!(
+            fields.get("through_digest").and_then(JsonValue::as_str),
+            Some(snapshot.last_digest().to_hex().as_str())
+        );
+        drop(harness);
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn rebuild_host_session_metadata_replays_the_named_authoritative_prefix() {
+        let home = temporary_home();
+        let workspace = home.join("workspace");
+        fs::create_dir(&workspace).expect("workspace creates");
+        let harness = create_host_harness(
+            &home,
+            &workspace,
+            AgentConfiguration::new(
+                "trusted system prompt",
+                ToolRegistry::default(),
+                Arc::new(NoHooks),
+            ),
+            ModelDescriptor {
+                provider: "fixture".into(),
+                model: "fixture-model".into(),
+                revision: None,
+            },
+            Arc::new(StopProvider),
+            ThinkingLevel::Off,
+            None,
+            AutomaticCompactionPolicy::disabled(),
+        )
+        .expect("host harness creates");
+        let expected = harness.snapshot().expect("session snapshot");
+        let directory = session_workspace_root(&home, &workspace)
+            .join(format!("{}.tea", expected.header().session_id));
+        drop(harness);
+        fs::write(directory.join("meta.json"), "stale cache").expect("stale metadata writes");
+        fs::write(directory.join("HEAD"), "stale cache").expect("stale HEAD writes");
+
+        let (rebuilt, cache_warning) =
+            rebuild_host_session_metadata(&directory).expect("derived caches rebuild");
+        assert_eq!(cache_warning, None);
+        assert_eq!(rebuilt.last_sequence(), expected.last_sequence());
+        assert_eq!(rebuilt.last_digest(), expected.last_digest());
+        let metadata = JsonValue::parse(
+            &fs::read_to_string(directory.join("meta.json")).expect("metadata cache reads"),
+        )
+        .expect("metadata cache is JSON");
+        let fields = metadata.as_object().expect("metadata cache is an object");
+        assert_eq!(
+            fields.get("through_seq").and_then(JsonValue::as_u64),
+            Some(expected.last_sequence().0)
+        );
+        assert_eq!(
+            fields.get("through_digest").and_then(JsonValue::as_str),
+            Some(expected.last_digest().to_hex().as_str())
+        );
+        assert!(
+            JsonValue::parse(&fs::read_to_string(directory.join("HEAD")).expect("HEAD reads"))
+                .is_ok(),
+            "the same validated replay replaces the disposable active-head cache"
+        );
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn session_listing_ignores_foreign_metadata_identity() {
+        let home = temporary_home();
+        let workspace = home.join("workspace");
+        fs::create_dir(&workspace).expect("workspace creates");
+        let configuration = AgentConfiguration::new(
+            "trusted system prompt",
+            ToolRegistry::default(),
+            Arc::new(NoHooks),
+        );
+        let harness = create_host_harness(
+            &home,
+            &workspace,
+            configuration,
+            ModelDescriptor {
+                provider: "fixture".into(),
+                model: "fixture-model".into(),
+                revision: None,
+            },
+            Arc::new(StopProvider),
+            ThinkingLevel::Off,
+            None,
+            AutomaticCompactionPolicy::disabled(),
+        )
+        .expect("host harness creates");
+        let session_id = harness
+            .snapshot()
+            .expect("session snapshot")
+            .header()
+            .session_id
+            .to_string();
+        drop(harness);
+
+        let directory = session_workspace_root(&home, &workspace).join(format!("{session_id}.tea"));
+        fs::write(
+            directory.join("meta.json"),
+            format!(
+                r#"{{"active_lane":"main","created_at_ms":0,"header_digest":"{}","model":null,"session_id":"foreign-session","through_digest":"{}","through_seq":0,"version":{},"workspace":"{}"}}"#,
+                "0".repeat(64),
+                "0".repeat(64),
+                HOST_SESSION_METADATA_VERSION,
+                workspace.display(),
+            ),
+        )
+        .expect("foreign metadata cache writes");
+
+        let listed = list_host_sessions(&home, &workspace).expect("listing succeeds");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, session_id);
+        assert_eq!(listed[0].model, None);
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn session_listing_treats_corrupt_or_unknown_metadata_as_a_disposable_cache() {
+        let home = temporary_home();
+        let workspace = home.join("workspace");
+        fs::create_dir(&workspace).expect("workspace creates");
+        let model = ModelDescriptor {
+            provider: "fixture".into(),
+            model: "fixture-model".into(),
+            revision: None,
+        };
+        let harness = create_host_harness(
+            &home,
+            &workspace,
+            AgentConfiguration::new(
+                "trusted system prompt",
+                ToolRegistry::default(),
+                Arc::new(NoHooks),
+            ),
+            model,
+            Arc::new(StopProvider),
+            ThinkingLevel::Off,
+            None,
+            AutomaticCompactionPolicy::disabled(),
+        )
+        .expect("host harness creates");
+        let session_id = harness
+            .snapshot()
+            .expect("session snapshot")
+            .header()
+            .session_id
+            .to_string();
+        drop(harness);
+
+        let directory = session_workspace_root(&home, &workspace).join(format!("{session_id}.tea"));
+        let metadata_path = directory.join("meta.json");
+        let valid_metadata = fs::read_to_string(&metadata_path).expect("metadata cache reads");
+        fs::rename(
+            directory.join("session.jsonl"),
+            directory.join("session.jsonl.hidden"),
+        )
+        .expect("authoritative log is hidden from metadata corruption cases");
+
+        let foreign_identity = valid_metadata.replace(
+            &format!(r#""session_id":"{session_id}""#),
+            r#""session_id":"foreign-session""#,
+        );
+        let future_schema = valid_metadata.replace(
+            &format!(r#""version":{HOST_SESSION_METADATA_VERSION}"#),
+            &format!(r#""version":{}"#, HOST_SESSION_METADATA_VERSION + 1),
+        );
+        let cases = [
+            ("missing", None),
+            ("empty", Some(String::new())),
+            ("truncated", Some("{\"version\":".into())),
+            ("foreign identity", Some(foreign_identity)),
+            ("future schema", Some(future_schema)),
+        ];
+
+        for (name, metadata) in cases {
+            match metadata {
+                Some(metadata) => fs::write(&metadata_path, metadata)
+                    .unwrap_or_else(|error| panic!("{name} metadata cache writes: {error}")),
+                None => match fs::remove_file(&metadata_path) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(error) => panic!("{name} metadata cache removes: {error}"),
+                },
+            }
+
+            let listed = list_host_sessions(&home, &workspace)
+                .unwrap_or_else(|error| panic!("{name} metadata lists: {error}"));
+            assert_eq!(
+                listed.len(),
+                1,
+                "{name} metadata preserves the directory entry"
+            );
+            assert_eq!(
+                listed[0].id, session_id,
+                "{name} metadata cannot rename a session"
+            );
+            assert_eq!(
+                listed[0].model, None,
+                "{name} metadata cannot supply a trusted picker model"
+            );
+        }
         let _ = fs::remove_dir_all(home);
     }
 }

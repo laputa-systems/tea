@@ -28,10 +28,15 @@ pub use ids::{
     NormalizedPath, NormalizedPathError, OperationId, ProviderRequestId, RecordId, Sequence,
     SessionId, StableHookId, StepId, ToolInvocationId,
 };
-pub use jsonl::{DurabilityMode, JsonlSession, SessionExport, SessionExportError};
+pub use jsonl::{
+    DurabilityMode, JsonlSession, SessionExport, SessionExportError, SessionInspection,
+    SessionRepair,
+};
 pub use model::*;
 pub use reduction::{Corruption, LaneReduction, RecoveryPlan, reduce_lane};
-pub use store::{MemorySession, SessionError, SessionReader, SessionWriter};
+pub use store::{
+    MemorySession, SessionClock, SessionError, SessionReader, SessionWriter, SystemSessionClock,
+};
 pub use tea_protocol::JsonValue;
 pub use verification::{SessionVerification, SessionVerificationError, verify_session};
 

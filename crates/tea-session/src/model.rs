@@ -3,9 +3,21 @@ use crate::{
     HarnessRevisionId, HarnessSnapshotId, LaneId, ModelHarnessProfileId, OperationId,
     ProviderRequestId, RecordId, Sequence, SessionId, StableHookId, StepId,
 };
+#[cfg(test)]
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tea_protocol::JsonValue;
+
+#[cfg(test)]
+thread_local! {
+    static SESSION_SNAPSHOT_CLONE_COUNT: Cell<usize> = const { Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn take_session_snapshot_clone_count() -> usize {
+    SESSION_SNAPSHOT_CLONE_COUNT.with(|count| count.replace(0))
+}
 
 /// Stable JSON metadata attached to a durable value.
 ///
@@ -33,19 +45,36 @@ pub struct SessionHeader {
     pub metadata: Metadata,
     /// First durable lane. The initial implementation exposes only `main`.
     pub initial_lane: LaneId,
+    /// Integrity identity of this canonical v1 header. The JSONL wire codec
+    /// seals it before a header can be persisted or reduced.
+    pub digest: Digest,
 }
 
 impl SessionHeader {
     /// Construct a v1 session header with the required main lane.
     pub fn new(session_id: SessionId, workspace: impl Into<String>, metadata: Metadata) -> Self {
+        Self::new_at(session_id, workspace, metadata, system_time_ms())
+    }
+
+    /// Construct a v1 session header at an explicit durable creation time.
+    ///
+    /// Hosts that need reproducible fixtures should supply a clock value here
+    /// and pass the same clock to the session store for commit timestamps.
+    pub fn new_at(
+        session_id: SessionId,
+        workspace: impl Into<String>,
+        metadata: Metadata,
+        created_at_ms: u64,
+    ) -> Self {
         Self {
             kind: "session".into(),
             version: SESSION_FORMAT_VERSION,
             session_id,
-            created_at_ms: system_time_ms(),
+            created_at_ms,
             workspace: workspace.into(),
             metadata,
             initial_lane: LaneId::main(),
+            digest: Digest::zero(),
         }
     }
 }
@@ -1000,9 +1029,14 @@ pub struct StoredFact {
     pub fact: SessionFact,
 }
 
-/// One committed JSONL v1 mutation in exact global commit order.
+/// The narrow semantic mutation taxonomy interpreted by the pure reducer.
+///
+/// Sequence, timestamp, and integrity fields live only in `StoredMutation`'s
+/// durable envelope. The payload types retain convenient materialized values
+/// for existing domain consumers, but the JSONL wire codec never serializes
+/// those copies independently.
 #[derive(Clone, Debug, PartialEq)]
-pub enum StoredMutation {
+pub enum SessionMutation {
     /// A semantic branch append.
     Entry(StoredEntry),
     /// An operation WAL fact.
@@ -1013,44 +1047,145 @@ pub enum StoredMutation {
     Fact(StoredFact),
 }
 
+/// One committed JSONL v1 mutation and its integrity envelope.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StoredMutation {
+    /// Session-global commit sequence, allocated by the store.
+    pub seq: Sequence,
+    /// Store-owned wall-clock sample captured once for this commit.
+    pub timestamp_ms: u64,
+    /// Digest of the preceding committed prefix.
+    pub prev_digest: Digest,
+    /// Domain-separated digest of this committed record.
+    pub digest: Digest,
+    /// The one semantic mutation represented by this line.
+    pub mutation: SessionMutation,
+}
+
 impl StoredMutation {
     /// Return the session-global commit sequence.
     pub fn sequence(&self) -> Sequence {
-        match self {
-            Self::Entry(value) => value.header.seq,
-            Self::Record(value) => value.seq,
-            Self::Lane(value) => value.seq,
-            Self::Fact(value) => value.seq,
+        self.seq
+    }
+
+    /// Borrow this wire-boundary mutation without cloning its semantic payload.
+    ///
+    /// The pure reducer uses this while validating one prospective append so
+    /// a store need not clone the complete retained session merely to check a
+    /// transition before its single durable write.
+    pub(crate) fn borrowed(&self) -> StoredMutationRef<'_> {
+        let mutation = match &self.mutation {
+            SessionMutation::Entry(entry) => SessionMutationRef::Entry(entry),
+            SessionMutation::Record(record) => SessionMutationRef::Record(record),
+            SessionMutation::Lane(lane) => SessionMutationRef::Lane(lane),
+            SessionMutation::Fact(fact) => SessionMutationRef::Fact(fact),
+        };
+        StoredMutationRef {
+            seq: self.seq,
+            timestamp_ms: self.timestamp_ms,
+            prev_digest: self.prev_digest,
+            digest: self.digest,
+            mutation,
         }
     }
 }
 
-/// Generic on-disk envelope shared by entry/record/lane/fact line classes.
-#[derive(Clone, Debug, PartialEq)]
-pub struct LogEnvelope<T> {
-    /// Session-global commit sequence.
+/// Borrowed semantic payload for one mutation in a replayed snapshot.
+///
+/// `SessionSnapshot` owns each payload once in its typed entry, record, lane,
+/// or fact view. Ordered replay borrows that same payload through this enum so
+/// retaining an ordered envelope index does not duplicate potentially large
+/// message, tool-result, or custom-entry bytes in memory.
+#[derive(Clone, Copy, Debug)]
+pub enum SessionMutationRef<'a> {
+    /// A semantic branch append.
+    Entry(&'a StoredEntry),
+    /// An operation WAL fact.
+    Record(&'a StoredRecord),
+    /// A lane-topology fact.
+    Lane(&'a StoredLaneMutation),
+    /// A session-wide non-semantic fact.
+    Fact(&'a StoredFact),
+}
+
+/// Borrowed envelope and semantic payload in exact durable commit order.
+///
+/// This is the replay view of a `StoredMutation`; stores still construct and
+/// persist owned `StoredMutation` values at the wire boundary.
+#[derive(Clone, Copy, Debug)]
+pub struct StoredMutationRef<'a> {
+    /// Session-global sequence allocated by the store.
     pub seq: Sequence,
-    /// Storage-assigned timestamp.
+    /// Store-owned timestamp retained by the committed envelope.
     pub timestamp_ms: u64,
-    /// Versioned line payload.
-    pub payload: T,
+    /// Digest naming the preceding committed prefix.
+    pub prev_digest: Digest,
+    /// Digest naming this committed prefix.
+    pub digest: Digest,
+    /// Borrowed semantic payload retained by the typed snapshot view.
+    pub mutation: SessionMutationRef<'a>,
+}
+
+impl StoredMutationRef<'_> {
+    /// Return the session-global commit sequence.
+    pub fn sequence(&self) -> Sequence {
+        self.seq
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum MutationLocation {
+    Entry(usize),
+    Record(usize),
+    Lane(usize),
+    Fact(usize),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct StoredMutationEnvelope {
+    seq: Sequence,
+    timestamp_ms: u64,
+    prev_digest: Digest,
+    digest: Digest,
+    location: MutationLocation,
 }
 
 /// Fully replayed durable session state. It is a snapshot, not a mutable live pointer.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Debug, PartialEq)]
 pub struct SessionSnapshot {
     header: SessionHeader,
     entries: Vec<StoredEntry>,
     records: Vec<StoredRecord>,
     lane_mutations: Vec<StoredLaneMutation>,
     facts: Vec<StoredFact>,
-    timeline: Vec<StoredMutation>,
+    timeline: Vec<StoredMutationEnvelope>,
     last_sequence: Sequence,
+    last_digest: Digest,
+    main_harness_revision: Option<HarnessRevisionId>,
+}
+
+impl Clone for SessionSnapshot {
+    fn clone(&self) -> Self {
+        #[cfg(test)]
+        SESSION_SNAPSHOT_CLONE_COUNT.with(|count| count.set(count.get().saturating_add(1)));
+        Self {
+            header: self.header.clone(),
+            entries: self.entries.clone(),
+            records: self.records.clone(),
+            lane_mutations: self.lane_mutations.clone(),
+            facts: self.facts.clone(),
+            timeline: self.timeline.clone(),
+            last_sequence: self.last_sequence,
+            last_digest: self.last_digest,
+            main_harness_revision: self.main_harness_revision.clone(),
+        }
+    }
 }
 
 impl SessionSnapshot {
     /// Create an empty snapshot seeded with the header's initial lane.
     pub(crate) fn empty(header: SessionHeader) -> Self {
+        let last_digest = header.digest;
         Self {
             header,
             entries: Vec::new(),
@@ -1059,6 +1194,8 @@ impl SessionSnapshot {
             facts: Vec::new(),
             timeline: Vec::new(),
             last_sequence: Sequence(0),
+            last_digest,
+            main_harness_revision: None,
         }
     }
 
@@ -1087,9 +1224,14 @@ impl SessionSnapshot {
         &self.facts
     }
 
-    /// Borrow every mutation in exact session-global commit order.
-    pub fn mutations(&self) -> &[StoredMutation] {
-        &self.timeline
+    /// Iterate over every mutation in exact session-global commit order.
+    ///
+    /// The returned envelopes borrow the matching typed view rather than
+    /// retaining another owned copy of its semantic payload.
+    pub fn mutations(&self) -> impl ExactSizeIterator<Item = StoredMutationRef<'_>> + '_ {
+        self.timeline
+            .iter()
+            .map(|envelope| self.borrow_mutation(envelope))
     }
 
     /// Return the next sequence storage will allocate inside a successful commit.
@@ -1102,28 +1244,68 @@ impl SessionSnapshot {
         self.last_sequence
     }
 
-    pub(crate) fn push_entry(&mut self, entry: StoredEntry) {
-        self.last_sequence = entry.header.seq;
-        self.entries.push(entry.clone());
-        self.timeline.push(StoredMutation::Entry(entry));
+    /// Return the digest identifying the currently committed log prefix.
+    pub fn last_digest(&self) -> Digest {
+        self.last_digest
     }
 
-    pub(crate) fn push_record(&mut self, record: StoredRecord) {
-        self.last_sequence = record.seq;
-        self.records.push(record.clone());
-        self.timeline.push(StoredMutation::Record(record));
+    /// Return the revision last selected for the initial lane, if one exists.
+    ///
+    /// This is a derived index over committed entries. It exists so disposable
+    /// session caches can be refreshed without replaying the complete log.
+    pub fn active_main_harness_revision(&self) -> Option<&HarnessRevisionId> {
+        self.main_harness_revision.as_ref()
     }
 
-    pub(crate) fn push_lane_mutation(&mut self, mutation: StoredLaneMutation) {
-        self.last_sequence = mutation.seq;
-        self.lane_mutations.push(mutation.clone());
-        self.timeline.push(StoredMutation::Lane(mutation));
+    pub(crate) fn push_mutation(&mut self, stored: StoredMutation) {
+        self.last_sequence = stored.seq;
+        self.last_digest = stored.digest;
+        let location = match stored.mutation {
+            SessionMutation::Entry(entry) => {
+                if entry.lane_id == LaneId::main()
+                    && let SessionEntry::HarnessRevisionChanged(revision) = &entry.body
+                {
+                    self.main_harness_revision = Some(revision.revision_id.clone());
+                }
+                self.entries.push(entry);
+                MutationLocation::Entry(self.entries.len().saturating_sub(1))
+            }
+            SessionMutation::Record(record) => {
+                self.records.push(record);
+                MutationLocation::Record(self.records.len().saturating_sub(1))
+            }
+            SessionMutation::Lane(mutation) => {
+                self.lane_mutations.push(mutation);
+                MutationLocation::Lane(self.lane_mutations.len().saturating_sub(1))
+            }
+            SessionMutation::Fact(fact) => {
+                self.facts.push(fact);
+                MutationLocation::Fact(self.facts.len().saturating_sub(1))
+            }
+        };
+        self.timeline.push(StoredMutationEnvelope {
+            seq: stored.seq,
+            timestamp_ms: stored.timestamp_ms,
+            prev_digest: stored.prev_digest,
+            digest: stored.digest,
+            location,
+        });
     }
 
-    pub(crate) fn push_fact(&mut self, fact: StoredFact) {
-        self.last_sequence = fact.seq;
-        self.facts.push(fact.clone());
-        self.timeline.push(StoredMutation::Fact(fact));
+    fn borrow_mutation(&self, envelope: &StoredMutationEnvelope) -> StoredMutationRef<'_> {
+        let mutation = match envelope.location {
+            MutationLocation::Entry(index) => SessionMutationRef::Entry(&self.entries[index]),
+            MutationLocation::Record(index) => SessionMutationRef::Record(&self.records[index]),
+            MutationLocation::Lane(index) => SessionMutationRef::Lane(&self.lane_mutations[index]),
+            MutationLocation::Fact(index) => SessionMutationRef::Fact(&self.facts[index]),
+        };
+        StoredMutationRef {
+            seq: envelope.seq,
+            timestamp_ms: envelope.timestamp_ms,
+            prev_digest: envelope.prev_digest,
+            digest: envelope.digest,
+            mutation,
+        }
     }
 }
 
@@ -1154,8 +1336,7 @@ pub enum LaneStatus {
 }
 
 /// Reduced model/tool/harness configuration contributions.
-#[derive(Clone, Debug, Eq, PartialEq)]
-#[derive(Default)]
+#[derive(Clone, Debug, Eq, PartialEq, Default)]
 pub struct EffectiveLaneConfiguration {
     /// Most recent selected model descriptor.
     pub model: Option<ModelChangedEntry>,
@@ -1166,7 +1347,6 @@ pub struct EffectiveLaneConfiguration {
     /// Branch-derived active harness revision.
     pub harness_revision: Option<HarnessRevisionId>,
 }
-
 
 /// Reduced accepted queue state.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]

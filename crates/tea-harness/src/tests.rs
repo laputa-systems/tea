@@ -16,11 +16,12 @@ use tea_luau::tool_handler::{
 use tea_session::{
     ArtifactPolicy, ArtifactPolicyId, ArtifactStore, AssistantMessageEntry, AssistantToolCall,
     CompactionEntry, CoreRunId, Digest, EntryId, EpochFinishReason, EpochFinishedRecord, EpochId,
-    EpochStartedRecord, HarnessActivationRequestedRecord, HarnessRevisionChangedEntry, LaneId,
-    LaneRecord, MemoryArtifactStore, MemoryRetention, MemorySession, MemoryVisibility, OperationId,
-    OperationKind, OperationStartedRecord, PayloadRef, PluginMemoryEntry, ProvisionedEntry,
-    RecordId, SessionEntry, SessionFact, SessionHeader, SessionId, SessionWriter, StableHookId,
-    ToolReplayPolicy, ToolResultEntry, ToolStartedRecord, Usage,
+    EpochStartedRecord, HarnessActivationRequestedRecord, HarnessCatalogFact,
+    HarnessRevisionChangedEntry, LaneId, LaneRecord, MemoryArtifactStore, MemoryRetention,
+    MemorySession, MemoryVisibility, OperationId, OperationKind, OperationStartedRecord,
+    PayloadRef, PluginMemoryEntry, ProvisionedEntry, RecordId, SessionEntry, SessionFact,
+    SessionHeader, SessionId, SessionWriter, StableHookId, ToolReplayPolicy, ToolResultEntry,
+    ToolStartedRecord, Usage,
 };
 
 use crate::{
@@ -29,8 +30,9 @@ use crate::{
     HarnessFilePatch, HarnessIdentity, HarnessLineageError, HarnessManager, HarnessRepository,
     HarnessResourceLimits, HarnessSnapshotSpec, HarnessSurface, HarnessTreeLimits,
     ModelHarnessProfile, PluginBundleRef, PluginCapabilityBinding, PluginCapabilityCatalog,
-    PromptSectionDescriptor, ProviderLimits, SessionEvent, TeaEvent, ToolPresentationDescriptor,
-    derive_model_context, derive_model_context_with_patch, inspect_tool_schema_deviation,
+    PromptSectionDescriptor, ProviderLimits, RegistryOperation, SessionEvent, TeaEvent,
+    ToolPresentationDescriptor, derive_model_context, derive_model_context_with_patch,
+    inspect_tool_schema_deviation,
 };
 
 #[derive(Debug)]
@@ -918,6 +920,90 @@ fn recovery_executes_only_the_unresolved_suffix_after_a_committed_tool_result_pr
 }
 
 #[test]
+fn candidate_identity_includes_every_immutable_draft_field() {
+    let artifacts = Arc::new(MemoryArtifactStore::default());
+    let mut repository = HarnessRepository::new(artifacts);
+    let tree = repository
+        .stage_tree(
+            v1_prompt_plugin_sources("candidate identity fixture"),
+            &HarnessTreeLimits::default(),
+        )
+        .expect("source tree stages");
+    let plugin = PluginBundleRef {
+        plugin_id: "session.verify".into(),
+        tree_id: tree.id,
+        requested_capabilities: Default::default(),
+    };
+    let parent_snapshot = repository
+        .stage_snapshot(lineage_snapshot_spec(plugin.clone(), "parent prompt"))
+        .expect("parent snapshot stages");
+    let parent_revision = repository
+        .seed_revision(parent_snapshot.id, HarnessActor::Host, 1)
+        .expect("parent revision seeds");
+    let proposed_snapshot = repository
+        .stage_snapshot(HarnessSnapshotSpec {
+            hook_bundle_digest: Digest::from_bytes("candidate identity changed hook bundle"),
+            ..lineage_snapshot_spec(plugin, "parent prompt")
+        })
+        .expect("proposed snapshot stages");
+    let draft = HarnessCandidateDraft {
+        parent_revision_id: parent_revision.revision_id,
+        proposed_snapshot_id: proposed_snapshot.id,
+        actor: HarnessActor::Model,
+        operation_id: None,
+        tool_invocation_id: None,
+        hypothesis: CandidateHypothesis {
+            targeted_evidence: "base evidence".into(),
+            expected_effect: "base effect".into(),
+            regression_risk: "base risk".into(),
+        },
+        changed_paths: vec![
+            tea_session::NormalizedPath::new("plugins/session.verify/main.luau")
+                .expect("changed path is valid"),
+        ],
+        registry_operations: Vec::new(),
+        changed_surfaces: [HarnessSurface::Hooks].into_iter().collect(),
+        targeted_failures: Vec::new(),
+        evidence: Vec::new(),
+        expected_effects: Vec::new(),
+        regression_risks: Vec::new(),
+        capability_ceiling: Default::default(),
+    };
+    let baseline = repository
+        .stage_candidate(draft.clone())
+        .expect("baseline candidate stages");
+
+    let mut registry_change = draft.clone();
+    registry_change.registry_operations = vec![RegistryOperation::Add {
+        plugin_id: "candidate-identity-plugin".into(),
+    }];
+    let mut failure_change = draft.clone();
+    failure_change.targeted_failures = vec!["failure identity".into()];
+    let mut evidence_change = draft.clone();
+    evidence_change.evidence = vec!["evidence identity".into()];
+    let mut effect_change = draft.clone();
+    effect_change.expected_effects = vec!["effect identity".into()];
+    let mut risk_change = draft;
+    risk_change.regression_risks = vec!["risk identity".into()];
+
+    for (field, changed) in [
+        ("registry_operations", registry_change),
+        ("targeted_failures", failure_change),
+        ("evidence", evidence_change),
+        ("expected_effects", effect_change),
+        ("regression_risks", risk_change),
+    ] {
+        let candidate = repository
+            .stage_candidate(changed)
+            .unwrap_or_else(|error| panic!("{field} change stages a distinct candidate: {error}"));
+        assert_ne!(
+            candidate.candidate_id, baseline.candidate_id,
+            "{field} is part of immutable candidate identity"
+        );
+    }
+}
+
+#[test]
 fn large_tool_results_are_retained_before_a_utf8_safe_locator_projection_is_exposed() {
     let store = MemoryArtifactStore::default();
     let mut policy = ArtifactPolicy::default();
@@ -1090,6 +1176,65 @@ fn durable_after_tool_projection_keeps_raw_evidence_outside_model_context() {
         Ok::<(), crate::HarnessError>(())
     })
     .expect("post-tool policy may change only the model projection, never raw durable evidence");
+}
+
+#[test]
+fn redact_before_persist_uses_the_post_policy_tool_result_as_durable_evidence() {
+    smol::block_on(async {
+        let store = Arc::new(MemoryArtifactStore::default());
+        let provider = Arc::new(QueuedProvider {
+            streams: Mutex::new(VecDeque::from([
+                ModelStream {
+                    events: vec![
+                        ModelStreamEvent::ToolCall(tea_core::AgentToolCall {
+                            id: ToolCallId::new("redacted-evidence-call").expect("fixture call ID"),
+                            name: "raw_evidence".into(),
+                            arguments: SerializedJson::new("{}"),
+                        }),
+                        ModelStreamEvent::End(StopReason::ToolUse),
+                    ],
+                },
+                ModelStream {
+                    events: vec![ModelStreamEvent::End(StopReason::Stop)],
+                },
+            ])),
+        });
+        let mut tools = tea_core::tool::ToolRegistry::default();
+        tools.insert(Arc::new(RawEvidenceTool {
+            schema: tea_protocol::JsonValue::parse(r#"{"type":"object"}"#).expect("fixture schema"),
+        }));
+        let mut policy = ArtifactPolicy::default();
+        policy.redact_before_persist = true;
+        let template = CoreEpochTemplate::new(provider, tools)
+            .hooks(Arc::new(RedactingProjectionHook))
+            .artifact_policy(policy)?;
+        let (harness, _) = managed_harness("redacted-persistence-session", template, store);
+
+        harness.run_prompt("persist only redacted evidence").await?;
+        let snapshot = harness.snapshot()?;
+        let result = snapshot
+            .entries()
+            .iter()
+            .find_map(|entry| match &entry.body {
+                SessionEntry::ToolResult(result) if result.tool_name == "raw_evidence" => {
+                    Some(result)
+                }
+                _ => None,
+            })
+            .expect("durable tool result");
+        let tea_session::PayloadRef::Inline(full) = &result.full_result else {
+            panic!("small redacted evidence must remain inline for this fixture");
+        };
+
+        assert_eq!(
+            full.get("content")
+                .and_then(tea_protocol::JsonValue::as_str),
+            Some("redacted model projection"),
+            "a redaction-required policy must never retain the raw tool result"
+        );
+        Ok::<(), crate::HarnessError>(())
+    })
+    .expect("a redaction-required tool result persists only the post-policy evidence");
 }
 
 #[test]
@@ -1614,6 +1759,61 @@ fn harness_catalog_rebuilds_exact_immutable_lineage_from_artifacts() {
             .fingerprints,
         parent.fingerprints,
     );
+}
+
+#[test]
+fn harness_catalog_verification_returns_every_transitive_source_root() {
+    let store = Arc::new(MemoryArtifactStore::default());
+    let mut repository = HarnessRepository::new(store.clone());
+    let tree = repository
+        .stage_tree(
+            v1_prompt_plugin_sources("Verify retained source roots before export or collection."),
+            &HarnessTreeLimits::default(),
+        )
+        .expect("closed source tree stages");
+    repository
+        .stage_snapshot(lineage_snapshot_spec(
+            PluginBundleRef {
+                plugin_id: "session.verify".into(),
+                tree_id: tree.id,
+                requested_capabilities: Default::default(),
+            },
+            "trusted prefix",
+        ))
+        .expect("source-pinned snapshot stages");
+    let expected_roots = repository.artifact_roots();
+    let manifest = tea_protocol::JsonValue::object([
+        ("schema_version", tea_protocol::JsonValue::from(1_u64)),
+        (
+            "capability_ceiling",
+            tea_protocol::JsonValue::Array(Vec::new()),
+        ),
+        (
+            "repository",
+            repository
+                .catalog_json()
+                .expect("catalog encodes deterministically"),
+        ),
+    ])
+    .to_json_string()
+    .expect("catalog wrapper encodes canonically");
+    let descriptor = store
+        .put(
+            manifest.as_bytes(),
+            "application/vnd.tea.harness-catalog+json",
+        )
+        .expect("catalog object publishes");
+    let roots = crate::verify_harness_catalog(
+        &HarnessCatalogFact {
+            schema_version: 1,
+            artifact_id: descriptor.artifact_id,
+            byte_len: descriptor.byte_len,
+        },
+        store,
+    )
+    .expect("full immutable catalog verifies");
+
+    assert_eq!(roots, expected_roots);
 }
 
 #[test]
