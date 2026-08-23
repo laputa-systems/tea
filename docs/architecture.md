@@ -91,10 +91,23 @@ build or the `ModelProvider` contract. See
 `tea_core::harness` owns immutable source trees, snapshots, revisions, candidates,
 profiles, capability bindings, and the `HarnessResolver`. Resolving a revision produces
 a provider-independent `ResolvedHarness`: prompt, extension tools, hooks, and pinned
-policy values. `tea_core::runtime::SessionRuntime` owns session writes, recovery,
-activation, effects, artifacts, and event publication. It combines a `ResolvedHarness`
-with host-owned `RuntimeServices` (provider transport, trusted base tools, model
+policy values. `HarnessSeedBuilder` gives composition roots one explicit, provider-free
+way to create the initial source tree, snapshot, revision, and model-harness profile;
+it performs no discovery and creates no session.
+
+`tea_core::runtime::SessionRuntime` owns session writes, recovery, activation,
+effects, artifacts, and event publication. It combines a `ResolvedHarness` with
+host-owned `RuntimeServices` (provider transport, trusted base tools, model
 selection, and compactor) only to construct an epoch `Agent`.
+
+An embedding that already owns outer durability can instead call
+`RuntimeServices::prepare_hosted_epoch`. `HostedEpoch` uses the same agent-construction
+path and immutable harness fingerprints, but creates no Tea session, file, provider,
+capability binding, artifact tool, harness-authoring tool, task, or executor. The caller
+supplies its effect gate, external provenance, and any explicit epoch-local tools. Tea
+populates or validates snapshot, revision, profile, and provider-surface provenance.
+The stateless hosted path rejects resolved context or lifecycle policies because it has
+no durable port on which to execute them.
 
 The `tea-agent` crate is the explicit composition root: it selects `tea-providers`
 and `tea-luau::LuauExtensionEngine` and passes both through the narrow core ports.

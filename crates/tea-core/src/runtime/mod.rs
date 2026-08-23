@@ -1,4 +1,4 @@
-//! Durable session execution built from immutable harness revisions.
+//! Managed sessions and externally hosted epochs built from immutable harness revisions.
 
 #![allow(missing_docs)]
 
@@ -7,6 +7,7 @@ pub(crate) mod artifact_tools;
 pub(crate) mod context;
 pub(crate) mod events;
 pub(crate) mod harness_tool;
+mod hosted;
 pub(crate) mod lifecycle;
 pub(crate) mod services;
 pub(crate) mod session;
@@ -26,5 +27,6 @@ pub use events::{
     ArtifactEvent, DiagnosticCode, HarnessEvent, HarnessSnapshotView, LaneSnapshotView,
     SessionEvent, TeaEvent, TeaEventSubscription, ValidationStage,
 };
+pub use hosted::{HostedEpoch, HostedEpochInput};
 pub use services::RuntimeServices;
 pub use session::{DurableOperation, HarnessIdentity, SessionRuntime};

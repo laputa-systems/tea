@@ -28,6 +28,10 @@ catalog needed for reopen.
 **Durable harness** — `tea_core::runtime::SessionRuntime`. The only host execution
 surface for durable prompts, recovery, artifact verification, and collection.
 
+**Hosted epoch** — `tea_core::runtime::HostedEpoch`. One resolved immutable Tea
+agent epoch executed under a caller-owned durable authority. It shares standard
+harness construction and provenance, but owns no Tea session or recovery state.
+
 **Artifact** — Immutable content-addressed bytes stored outside the session
 stream and referenced by an artifact ID plus declared length.
 

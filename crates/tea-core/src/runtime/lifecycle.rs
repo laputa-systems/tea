@@ -45,6 +45,10 @@ impl PluginLifecycleRegistry {
         Ok(Self { policies })
     }
 
+    pub(crate) fn is_empty(&self) -> bool {
+        self.policies.is_empty()
+    }
+
     /// Evaluate state proposals before an operation record exists. The caller
     /// must append the returned map in the same durable operation-start
     /// record before it starts any core effect.

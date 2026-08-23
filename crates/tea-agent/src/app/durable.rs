@@ -16,8 +16,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tea_core::compaction::AutomaticCompactionPolicy;
 use tea_core::event::AgentEventKind;
 use tea_core::harness::{
-    HarnessActor, HarnessRepository, HarnessResolver, HarnessResourceLimits, HarnessSnapshotSpec,
-    ModelHarnessProfile, SelfExtensionMode, ToolPresentationDescriptor,
+    HarnessActor, HarnessRepository, HarnessResolver, HarnessResourceLimits,
+    HarnessRuntimePolicyDescriptors, HarnessSeedBuilder, ModelHarnessProfile, SelfExtensionMode,
+    ToolPresentationDescriptor,
     SELF_EXTENSION_MODE_METADATA_KEY,
 };
 use tea_core::runtime::{
@@ -87,7 +88,6 @@ pub(super) fn create_host_harness(
         compactor,
         automatic_compaction,
     );
-    let snapshot_spec = snapshot_spec(&configuration, &profile);
     let created_at_ms = now_ms()?;
 
     // Session identity is only an opaque directory/name key. A collision is
@@ -136,16 +136,27 @@ pub(super) fn create_host_harness(
         };
         let artifacts: Arc<dyn tea_session::ArtifactStore> =
             Arc::new(session.artifact_store().map_err(AppError::from)?);
-        let mut repository = HarnessRepository::with_extension_engine(
+        let seeded = HarnessSeedBuilder::new(
             Arc::clone(&artifacts),
             Arc::new(LuauExtensionEngine),
-        );
-        let snapshot = repository
-            .stage_snapshot(snapshot_spec.clone())
+            host_profile_digest(&configuration),
+            configuration.system_prompt.clone(),
+            profile.clone(),
+            SelfExtensionMode::Off,
+            HarnessResourceLimits::default(),
+            HarnessRuntimePolicyDescriptors {
+                hook_bundle_digest: Digest::from_bytes("tea-agent-openai-context-hook-v1"),
+                compaction_policy_digest: Digest::from_bytes("tea-agent-provider-compactor-v1"),
+                tool_projection_digest: Digest::from_bytes("tea-core-recoverable-projection-v1"),
+                failure_policy_digest: Digest::from_bytes("tea-core-tool-failure-policy-v1"),
+            },
+        )
+        .trusted_tool_presentations(tool_presentations(&configuration))
+        .seed(HarnessActor::Host, created_at_ms)
             .map_err(|error| AppError::Setup(error.to_string()))?;
-        let revision = repository
-            .seed_revision(snapshot.id.clone(), HarnessActor::Host, created_at_ms)
-            .map_err(|error| AppError::Setup(error.to_string()))?;
+        let repository = seeded.repository;
+        let snapshot = seeded.snapshot;
+        let revision = seeded.revision;
         let model_entry_id = EntryId::new(format!("initial-model-{}", nonce))
             .map_err(|error| AppError::Setup(error.to_string()))?;
         session.append_entry(
@@ -561,11 +572,8 @@ fn model_profile(model: &ModelDescriptor) -> Result<ModelHarnessProfile, AppErro
     .map_err(|error| AppError::Setup(error.to_string()))
 }
 
-fn snapshot_spec(
-    configuration: &AgentConfiguration,
-    profile: &ModelHarnessProfile,
-) -> HarnessSnapshotSpec {
-    let tools = configuration
+fn tool_presentations(configuration: &AgentConfiguration) -> Vec<ToolPresentationDescriptor> {
+    configuration
         .tools
         .definitions()
         .into_iter()
@@ -578,25 +586,7 @@ fn snapshot_spec(
                 ToolExecutionMode::Parallel => "parallel".into(),
             },
         })
-        .collect::<Vec<_>>();
-    HarnessSnapshotSpec {
-        base_profile_digest: host_profile_digest(configuration),
-        base_system_prompt: configuration.system_prompt.clone(),
-        model_harness_profile: profile.profile_id.clone(),
-        self_extension_addendum: None,
-        ordered_global_plugins: Vec::new(),
-        ordered_session_plugins: Vec::new(),
-        prompt_sections: Vec::new(),
-        plugin_prompt_sections: Vec::new(),
-        tool_presentations: tools,
-        plugin_tool_presentations: Vec::new(),
-        hook_bundle_digest: Digest::from_bytes("tea-agent-openai-context-hook-v1"),
-        capability_bindings: Vec::new(),
-        resource_limits: HarnessResourceLimits::default(),
-        compaction_policy_digest: Digest::from_bytes("tea-agent-provider-compactor-v1"),
-        tool_projection_digest: Digest::from_bytes("tea-core-recoverable-projection-v1"),
-        failure_policy_digest: Digest::from_bytes("tea-core-tool-failure-policy-v1"),
-    }
+        .collect()
 }
 
 fn host_profile_digest(configuration: &AgentConfiguration) -> Digest {

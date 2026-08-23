@@ -191,3 +191,11 @@ queue, hook, and terminal contracts, read [runtime semantics](semantics.md).
 For an optional capability-scoped Luau policy, start with
 [Luau ABI v1](luau-abi-v1.md); a scripting VM is not required for ordinary Rust
 agents.
+
+If another control plane already owns its session, first seed and resolve an
+immutable harness with `HarnessSeedBuilder` and `HarnessResolver`, then pass the
+`ResolvedHarness` to `RuntimeServices::prepare_hosted_epoch`. The returned
+`HostedEpoch` exposes the caller-driven `Agent`, normalized `RunProvenance`, and
+standard harness surface fingerprints without creating a Tea session or adding
+implicit tools. This is the integration boundary for external durable authorities;
+it is not a lightweight replacement for `SessionRuntime` recovery.

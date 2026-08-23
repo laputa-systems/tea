@@ -13,6 +13,13 @@ and output, tool input and output, and terminal diagnostics before persistence.
 It retains chronology, event kinds, cache evidence, compaction lifecycle, and
 durable provenance without retaining prompt or tool content.
 
+Externally hosted epochs use the same observer contract. The embedding subscribes
+`tea_core::trace::TraceObserver::new_with_provenance` to `HostedEpoch::agent()` and
+wraps its own `TraceSink` in `RedactingSink` before persistence. The hosted epoch's
+normalized provenance carries the exact snapshot, revision, model-harness profile,
+and provider-surface identity; Tea still owns no filesystem location or outer
+session record in this mode.
+
 At an epoch boundary the supervisor writes the complete redacted JSON Lines
 artifact to the session object store and appends SessionFact::TraceArtifact.
 The fact includes exact byte length plus operation, epoch, core run, revision,

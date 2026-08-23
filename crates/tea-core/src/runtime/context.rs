@@ -130,6 +130,10 @@ impl ContextPolicyRegistry {
         }
     }
 
+    pub(crate) fn is_empty(&self) -> bool {
+        self.policies.is_empty()
+    }
+
     fn derive_patch(&self, branch: &[StoredEntry]) -> Result<ContextProjectionPatch, HarnessError> {
         if self.policies.is_empty() {
             return Ok(ContextProjectionPatch::default());

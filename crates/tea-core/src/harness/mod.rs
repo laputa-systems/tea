@@ -9,6 +9,7 @@ pub mod lineage;
 pub mod mode;
 pub mod profile;
 pub mod resolver;
+mod seed;
 
 pub use capability::{CapabilityBindingError, PluginCapabilityBinding, PluginCapabilityCatalog};
 pub use error::HarnessError;
@@ -30,4 +31,8 @@ pub use profile::{
 pub use resolver::{
     HarnessApplyRequest, HarnessFilePatch, HarnessResolver, ResolvedHarness,
     verify_harness_catalog_with_extension_engine,
+};
+pub use seed::{
+    HarnessRuntimePolicyDescriptors, HarnessSeedBuilder, HarnessSeedExtension,
+    HarnessSeedExtensionScope, SeededHarness,
 };

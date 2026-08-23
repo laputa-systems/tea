@@ -210,6 +210,25 @@ impl LuaPolicy {
         &self.tools
     }
 
+    /// Return whether this policy contributes metadata-only context behavior.
+    ///
+    /// Embeddings use this to reject unsupported hosted policy surfaces
+    /// without treating an absent callback as an executable no-op port.
+    pub fn has_context_projection(&self) -> Result<bool, PolicyError> {
+        let runtime = self.runtime.lock().map_err(|_| PolicyError::Runtime {
+            message: "policy VM lock was poisoned".to_owned(),
+        })?;
+        Ok(runtime.context_projection.is_some())
+    }
+
+    /// Return whether this policy contributes durable lifecycle behavior.
+    pub fn has_resume_hooks(&self) -> Result<bool, PolicyError> {
+        let runtime = self.runtime.lock().map_err(|_| PolicyError::Runtime {
+            message: "policy VM lock was poisoned".to_owned(),
+        })?;
+        Ok(!runtime.resume_hooks.is_empty())
+    }
+
     /// Evaluate the optional pre-tool decision without granting the policy an effect.
     pub fn before_tool_call(&self, call: &ToolCall) -> Result<BeforeToolCall, PolicyError> {
         let runtime = self.runtime.lock().map_err(|_| PolicyError::Runtime {
