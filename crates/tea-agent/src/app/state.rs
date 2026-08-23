@@ -821,7 +821,7 @@ impl AppState {
             None,
             TranscriptEntry::Welcome {
                 text: format!(
-                    "𝒕ea v{} · Run /help for commands",
+                    "tea v{} · Run /help for commands",
                     env!("CARGO_PKG_VERSION")
                 ),
             },

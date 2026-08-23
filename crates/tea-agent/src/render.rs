@@ -1190,7 +1190,6 @@ mod tests {
         state.welcome_line();
         let grid = render(&state, &ProviderRegistry::new(), 80, 24);
         let regions = frame_for(&state, 80, 24);
-        assert_eq!(grid.get(0, 0).expect("welcome cell").symbol, '𝒕');
         assert_eq!(
             grid.get(regions.composer.x, regions.composer.y)
                 .expect("composer cell")
