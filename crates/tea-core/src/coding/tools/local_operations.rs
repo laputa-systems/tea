@@ -1,21 +1,29 @@
 //! Local filesystem and shell implementation of the coding operation contract.
 
 use super::contract::{
-    CodingOperations, CommandEnvironment, CommandOutput, DirectoryEntry, EntryMetadata, GrepMatch,
-    GrepOptions, OperationError, OperationFuture,
+    CodingOperations, CommandEnvironment, CommandOutput, ConditionalFileEdit, DirectoryEntry,
+    EditTransaction, EditTransactionOutcome, EntryMetadata, FileSnapshot, GrepMatch, GrepOptions,
+    OperationError, OperationFuture,
 };
 use super::search::{GlobMatcher, local_grep, walk_files};
 use crate::scheduler::CancellationToken;
 use crate::tool::{ToolUpdate, ToolUpdateSink};
 use std::fs::{self, File, OpenOptions};
-use std::io::Read;
+use std::io::{Read, Write};
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Mutex, OnceLock};
 
 static COMMAND_CAPTURE_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
+static EDIT_TRANSACTION_STAGE_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
+
+/// Local filesystem publication is serialized across adapter instances. This
+/// closes the check/publish race for the default host; remote adapters must
+/// provide an equivalent transaction boundary themselves.
+static LOCAL_EDIT_TRANSACTION_GUARD: OnceLock<Mutex<()>> = OnceLock::new();
 
 /// Standard local filesystem/process implementation.
 #[derive(Clone, Debug)]
@@ -34,6 +42,14 @@ impl CodingOperations for LocalCodingOperations {
         })
     }
 
+    fn commit_edit_transaction<'a>(
+        &'a self,
+        transaction: &'a EditTransaction,
+        cancellation: CancellationToken,
+    ) -> OperationFuture<'a, EditTransactionOutcome> {
+        Box::pin(async move { commit_local_edit_transaction(transaction, &cancellation) })
+    }
+
     fn create_dir_all<'a>(&'a self, path: &'a Path) -> OperationFuture<'a, ()> {
         Box::pin(async move {
             std::fs::create_dir_all(path).map_err(|error| OperationError::new(error.to_string()))
@@ -46,7 +62,52 @@ impl CodingOperations for LocalCodingOperations {
                 std::fs::metadata(path).map_err(|error| OperationError::new(error.to_string()))?;
             Ok(EntryMetadata {
                 is_directory: metadata.is_dir(),
+                is_regular_file: metadata.is_file(),
             })
+        })
+    }
+
+    fn read_file_snapshots<'a>(
+        &'a self,
+        paths: &'a [PathBuf],
+        max_total_bytes: usize,
+    ) -> OperationFuture<'a, Vec<FileSnapshot>> {
+        Box::pin(async move {
+            let mut snapshots = Vec::with_capacity(paths.len());
+            let mut declared_total_bytes = 0_usize;
+            let mut returned_total_bytes = 0_usize;
+            for path in paths {
+                let metadata = fs::metadata(path)
+                    .map_err(|error| OperationError::new(error.to_string()))?;
+                let is_regular_file = metadata.is_file();
+                if is_regular_file {
+                    declared_total_bytes = declared_total_bytes.saturating_add(
+                        usize::try_from(metadata.len()).unwrap_or(usize::MAX),
+                    );
+                    if declared_total_bytes > max_total_bytes {
+                        return Err(OperationError::new(format!(
+                            "complete edit snapshots exceed the {max_total_bytes} byte transaction limit",
+                        )));
+                    }
+                }
+                let content = if is_regular_file {
+                    fs::read(path).map_err(|error| OperationError::new(error.to_string()))?
+                } else {
+                    Vec::new()
+                };
+                returned_total_bytes = returned_total_bytes.saturating_add(content.len());
+                if returned_total_bytes > max_total_bytes {
+                    return Err(OperationError::new(format!(
+                        "complete edit snapshots exceed the {max_total_bytes} byte transaction limit",
+                    )));
+                }
+                snapshots.push(FileSnapshot {
+                    path: path.clone(),
+                    is_regular_file,
+                    content,
+                });
+            }
+            Ok(snapshots)
         })
     }
 
@@ -113,6 +174,196 @@ impl CodingOperations for LocalCodingOperations {
             )
         })
     }
+}
+
+/// Apply the local adapter's limited transaction protocol.
+///
+/// It provides validation atomicity: every conditional preimage is re-read and
+/// compared before any requested file is written. After that commit point,
+/// ordinary filesystem writes can fail or a process can crash between files;
+/// this implementation attempts rollback on an ordinary write error and emits
+/// `Indeterminate` if that rollback cannot be established. It does not claim
+/// crash atomicity, cross-process locking, or durable recovery receipts.
+fn commit_local_edit_transaction(
+    transaction: &EditTransaction,
+    cancellation: &CancellationToken,
+) -> Result<EditTransactionOutcome, OperationError> {
+    if cancellation.is_cancelled() {
+        return Err(OperationError::new("cancelled"));
+    }
+    if transaction.files.is_empty() {
+        return Ok(EditTransactionOutcome::RolledBack {
+            reason: "transaction contains no files".into(),
+        });
+    }
+    let _transaction_guard = LOCAL_EDIT_TRANSACTION_GUARD
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("local edit transaction guard mutex poisoned");
+    // This is the complete precondition phase. No target mutation can occur
+    // before all files are observed unchanged and cancellation is checked.
+    for edit in &transaction.files {
+        let metadata = fs::metadata(&edit.path)
+            .map_err(|error| OperationError::new(error.to_string()))?;
+        if !metadata.is_file() {
+            let outcome = EditTransactionOutcome::RolledBack {
+                reason: "a requested path is no longer an ordinary regular file; no files were written".into(),
+            };
+            return Ok(outcome);
+        }
+        let current = fs::read(&edit.path).map_err(|error| OperationError::new(error.to_string()))?;
+        if current != edit.expected_content {
+            let outcome = EditTransactionOutcome::RolledBack {
+                reason: "a file changed after its original snapshot; no files were written".into(),
+            };
+            return Ok(outcome);
+        }
+    }
+    if cancellation.is_cancelled() {
+        return Err(OperationError::new("cancelled"));
+    }
+
+    // Stage both publications and exact rollback bytes before the first target
+    // mutation. Unix publication uses same-directory rename replacement;
+    // platforms without replace-on-rename may briefly remove one pathname.
+    // The transaction does not claim a globally atomic multi-file view.
+    let mut staged = Vec::with_capacity(transaction.files.len());
+    for edit in &transaction.files {
+        match stage_local_edit(edit) {
+            Ok(value) => staged.push(value),
+            Err(error) => {
+                cleanup_staged(&staged);
+                let outcome = EditTransactionOutcome::RolledBack {
+                    reason: format!(
+                        "could not stage the transaction; no target files were changed: {}",
+                        crate::tool::truncate_middle(error.message(), 256),
+                    ),
+                };
+                return Ok(outcome);
+            }
+        }
+    }
+    if cancellation.is_cancelled() {
+        cleanup_staged(&staged);
+        return Err(OperationError::new("cancelled"));
+    }
+
+    // Commit has now been requested. Do not turn a later cancellation into an
+    // untruthful cancelled result: settle a receipt after publication.
+    for index in 0..staged.len() {
+        if let Err(error) = publish_staged_file(
+            &staged[index].replacement_path,
+            &staged[index].edit.path,
+        ) {
+            // Restore every target from a separately staged original, including
+            // the currently failing path. `rename` should not partially mutate
+            // a path on error, but recovery must not rely on that assumption.
+            let mut rollback_ok = true;
+            for entry in staged.iter().rev() {
+                if publish_staged_file(&entry.rollback_path, &entry.edit.path).is_err() {
+                    rollback_ok = false;
+                }
+            }
+            cleanup_staged(&staged);
+            let outcome = if rollback_ok {
+                EditTransactionOutcome::RolledBack {
+                    reason: format!(
+                        "a staged local publication failed and every published file was restored: {}",
+                        crate::tool::truncate_middle(&error.to_string(), 256),
+                    ),
+                }
+            } else {
+                EditTransactionOutcome::Indeterminate {
+                    reason: "a staged local publication failed and rollback could not be verified; inspect every requested file before retrying".into(),
+                }
+            };
+            return Ok(outcome);
+        }
+    }
+    cleanup_staged(&staged);
+    Ok(EditTransactionOutcome::Committed)
+}
+
+struct StagedLocalEdit<'a> {
+    edit: &'a ConditionalFileEdit,
+    replacement_path: PathBuf,
+    rollback_path: PathBuf,
+}
+
+fn stage_local_edit(edit: &ConditionalFileEdit) -> Result<StagedLocalEdit<'_>, OperationError> {
+    let permissions = fs::metadata(&edit.path)
+        .map_err(|error| OperationError::new(error.to_string()))?
+        .permissions();
+    let replacement_path = stage_local_file(&edit.path, "replacement", &edit.replacement_content, &permissions)?;
+    let rollback_path = match stage_local_file(&edit.path, "rollback", &edit.expected_content, &permissions) {
+        Ok(path) => path,
+        Err(error) => {
+            let _ = fs::remove_file(&replacement_path);
+            return Err(error);
+        }
+    };
+    Ok(StagedLocalEdit {
+        edit,
+        replacement_path,
+        rollback_path,
+    })
+}
+
+fn stage_local_file(
+    target: &Path,
+    kind: &str,
+    bytes: &[u8],
+    permissions: &fs::Permissions,
+) -> Result<PathBuf, OperationError> {
+    let parent = target.parent().ok_or_else(|| OperationError::new("target has no parent directory"))?;
+    let base = target.file_name().and_then(|name| name.to_str()).unwrap_or("edit-target");
+    for _ in 0..32 {
+        let sequence = EDIT_TRANSACTION_STAGE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let candidate = parent.join(format!(
+            ".tea-edit-v2-{}-{}-{}-{}",
+            std::process::id(), sequence, kind, base
+        ));
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        let mut file = match options.open(&candidate) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(OperationError::new(error.to_string())),
+        };
+        if let Err(error) = file.write_all(bytes).and_then(|_| file.sync_all()) {
+            let _ = fs::remove_file(&candidate);
+            return Err(OperationError::new(error.to_string()));
+        }
+        if let Err(error) = fs::set_permissions(&candidate, permissions.clone()) {
+            let _ = fs::remove_file(&candidate);
+            return Err(OperationError::new(error.to_string()));
+        }
+        return Ok(candidate);
+    }
+    Err(OperationError::new(
+        "cannot allocate a unique staged edit file after 32 attempts",
+    ))
+}
+
+fn cleanup_staged(staged: &[StagedLocalEdit<'_>]) {
+    for entry in staged {
+        let _ = fs::remove_file(&entry.replacement_path);
+        let _ = fs::remove_file(&entry.rollback_path);
+    }
+}
+
+fn publish_staged_file(staged: &Path, target: &Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        if let Err(error) = fs::remove_file(target)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            return Err(error);
+        }
+    }
+    fs::rename(staged, target)
 }
 
 /// Execute the local shell through the caller-owned tool future.

@@ -44,6 +44,12 @@ and Tea-home options. It creates a fresh durable session only when it needs one
 and writes the initial model, thinking, harness catalog, snapshot, and revision
 before a prompt can start.
 
+The terminal installs an application-owned `CodingOperations` adapter through
+`TeaCodingToolsV2::with_operations`. Filesystem and search calls run on
+Smol's blocking pool, while bash polls daemon-safe capture files there and
+delivers bounded output updates before settlement. Cancellation kills and
+reaps the shell; the core remains executor-agnostic.
+
 A one-shot prompt uses the same durable harness boundary as an interactive
 prompt:
 

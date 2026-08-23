@@ -419,6 +419,7 @@ fn assert_lifecycle_balance(events: &[tea_core::event::AgentEvent]) {
             | AgentEventKind::ProviderRequestSkipped { .. }
             | AgentEventKind::ToolFailureObserved { .. }
             | AgentEventKind::CompactionLifecycle { .. }
+            | AgentEventKind::PromptLayoutObserved { .. }
             | AgentEventKind::ProviderRequestObserved { .. } => {}
         }
     }

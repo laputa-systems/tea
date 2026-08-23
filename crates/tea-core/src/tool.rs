@@ -490,6 +490,23 @@ pub struct ToolContext {
     pub metadata: Option<SerializedJson>,
 }
 
+/// How the scheduler settles a started tool after run cancellation.
+///
+/// Most tools use [`Self::DropFuture`], preserving Tea's prompt cancellation
+/// behavior. A host-side transaction may opt into [`Self::AwaitFuture`] only
+/// when dropping its future after commit request could conceal a durable
+/// outcome. Such a tool must observe cancellation before its commit point and
+/// must eventually settle a receipt; this mode is trusted and can delay run
+/// cancellation if an adapter violates that contract.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum CancellationSettlementMode {
+    /// Drop a pending future and synthesize a cancelled tool result.
+    #[default]
+    DropFuture,
+    /// Keep polling a started future until it returns a terminal receipt.
+    AwaitFuture,
+}
+
 /// A registered executable capability.
 pub trait AgentTool: Send + Sync {
     /// Stable tool name used by assistant calls.
@@ -522,6 +539,12 @@ pub trait AgentTool: Send + Sync {
     /// composable by default.
     fn requires_exclusive_batch(&self) -> bool {
         false
+    }
+    /// Select how a started future settles after the enclosing run is
+    /// cancelled. This exceptional mode is intended for transactional host
+    /// boundaries and defaults to immediate future dropping.
+    fn cancellation_settlement_mode(&self) -> CancellationSettlementMode {
+        CancellationSettlementMode::DropFuture
     }
     /// Execute the call on the caller-owned executor.
     fn execute<'a>(

@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use tea_core::coding::{DefaultCodingTools, PiDefaultCodingProfile};
+use tea_core::coding::{TeaCodingToolsV2, TeaDefaultCodingProfileV2};
 use tea_core::agent::AgentConfiguration;
 use tea_providers::{openai::OpenAiContextHook, ModelDescriptor, ProviderRegistry};
 
@@ -11,9 +11,9 @@ use super::error::AppError;
 /// execution authority is the session-owned durable harness, which captures this configuration
 /// in a committed revision before starting an epoch.
 pub(super) fn host_configuration(
-    tools: DefaultCodingTools,
+    tools: TeaCodingToolsV2,
 ) -> Result<AgentConfiguration, AppError> {
-    let profile = PiDefaultCodingProfile::pinned_default()
+    let profile = TeaDefaultCodingProfileV2::pinned_default()
         .map_err(|error| AppError::Setup(error.to_string()))?;
     let registry = tools.registry();
     profile

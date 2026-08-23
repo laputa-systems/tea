@@ -30,6 +30,7 @@ pub struct AgentBuilder {
     observers: Vec<Arc<dyn EventObserver>>,
     steering_mode: QueueMode,
     follow_up_mode: QueueMode,
+    prompt_layout_ledger: Option<Arc<crate::measurement::PromptLayoutLedger>>,
 }
 
 impl std::fmt::Debug for AgentBuilder {
@@ -188,6 +189,18 @@ impl AgentBuilder {
         self
     }
 
+    /// Share a volatile prompt-layout ledger with other agents in one live
+    /// host session. The ledger emits only content-free evidence. A host that
+    /// shares it directly must serialize provider dispatch in that scope;
+    /// [`crate::runtime::SessionRuntime`] already enforces one active operation.
+    pub fn prompt_layout_ledger(
+        mut self,
+        ledger: Arc<crate::measurement::PromptLayoutLedger>,
+    ) -> Self {
+        self.prompt_layout_ledger = Some(ledger);
+        self
+    }
+
     /// Build an owned agent.
     pub fn build(self) -> Agent {
         let next_observer_id = self.observers.len() as u64;
@@ -216,6 +229,9 @@ impl AgentBuilder {
                 automatic_compaction: RwLock::new(self.automatic_compaction),
                 tool_result_projection: self.tool_result_projection,
                 tool_failure_circuit_breaker: self.tool_failure_circuit_breaker,
+                prompt_layout_ledger: self
+                    .prompt_layout_ledger
+                    .unwrap_or_else(|| Arc::new(crate::measurement::PromptLayoutLedger::default())),
                 observers: Mutex::new(
                     self.observers
                         .into_iter()

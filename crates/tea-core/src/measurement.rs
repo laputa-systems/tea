@@ -8,6 +8,154 @@
 
 use crate::scheduler::{AdapterRequestObservation, ModelRequest};
 use tea_protocol::JsonValue;
+use std::sync::Mutex;
+
+/// Opaque serving/cache scope.  Scope identity is equality-only: callers must
+/// not infer provider cache-key details from this value.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash)]
+pub struct PromptCacheScope(u64);
+
+impl PromptCacheScope {
+    /// Construct an opaque equality-only scope from a host-owned stable value.
+    pub const fn new(value: u64) -> Self {
+        Self(value)
+    }
+}
+
+/// Classification of continuity between the immediately preceding logical
+/// request and the current request.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PromptContinuity {
+    /// No predecessor is available (the first request in a live ledger).
+    FirstRequest,
+    /// The current logical request is an exact extension of its predecessor.
+    ExactExtension,
+    /// Prompt/tool/model serving-domain components changed.
+    DomainChanged,
+    /// The current request shares a prefix but is not an extension (for
+    /// example, context projection or annotation changed an earlier byte).
+    Rebased,
+    /// A predecessor exists but no logical bytes are shared.
+    Discontinuous,
+}
+
+/// Initial policy for continuity observations. Observe is the default; the
+/// stricter mode is available to hosts that can safely fail before dispatch.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum PromptLayoutPolicy {
+    /// Emit evidence without changing request execution.
+    #[default]
+    Observe,
+    /// Reject a request whose context rebases or becomes discontinuous.
+    RejectUnexpectedRebase,
+    /// Require exact append-only continuity after the first request.
+    RequireExactExtension,
+}
+
+/// Volatile request-layout state shared by one live session.
+///
+/// The predecessor request is retained only in process memory so exact byte
+/// comparisons can happen at the final core boundary. It is never persisted
+/// or exposed; the emitted measurement is content-free and suitable for
+/// joining continuity across fresh [`crate::Agent`] instances.
+#[derive(Debug)]
+pub struct PromptLayoutLedger {
+    previous: Mutex<Option<ModelRequest>>,
+    scope: PromptCacheScope,
+    policy: PromptLayoutPolicy,
+}
+
+impl Default for PromptLayoutLedger {
+    fn default() -> Self {
+        Self::new(PromptCacheScope::default())
+    }
+}
+
+impl PromptLayoutLedger {
+    /// Construct a ledger with an opaque serving/cache scope.
+    pub fn new(scope: PromptCacheScope) -> Self {
+        Self {
+            previous: Mutex::new(None),
+            scope,
+            policy: PromptLayoutPolicy::Observe,
+        }
+    }
+
+    /// Set the observe/reject policy for this volatile ledger.
+    pub fn policy(mut self, policy: PromptLayoutPolicy) -> Self {
+        self.policy = policy;
+        self
+    }
+
+    /// Return the configured continuity policy.
+    pub fn policy_value(&self) -> PromptLayoutPolicy {
+        self.policy
+    }
+
+    /// Return the opaque equality-only scope configured for this ledger.
+    pub fn scope(&self) -> PromptCacheScope {
+        self.scope
+    }
+
+    /// Observe one exact core [`ModelRequest`] immediately before provider
+    /// effect. A missing predecessor is explicit in `continuity` and leaves
+    /// prefix lengths unavailable rather than manufacturing zero evidence.
+    pub fn observe(&self, request: &ModelRequest) -> PromptCacheMeasurement {
+        let mut previous = self.previous.lock().expect("prompt layout ledger poisoned");
+        let measurement = self.measure_against(previous.as_ref(), request);
+        *previous = Some(request.clone());
+        measurement
+    }
+
+    /// Compare a request with the current predecessor without advancing the
+    /// ledger. Hosts use this to cross a pre-effect observation boundary
+    /// before committing a request as the next predecessor. The caller must
+    /// serialize the paired `measure`/`commit` sequence with other dispatches
+    /// that share this ledger; use [`Self::observe`] for one atomic diagnostic
+    /// observation when no intervening effect boundary is needed.
+    pub fn measure(&self, request: &ModelRequest) -> PromptCacheMeasurement {
+        let previous = self.previous.lock().expect("prompt layout ledger poisoned");
+        self.measure_against(previous.as_ref(), request)
+    }
+
+    fn measure_against(
+        &self,
+        previous: Option<&ModelRequest>,
+        request: &ModelRequest,
+    ) -> PromptCacheMeasurement {
+        let mut measurement = measure_request_layout(previous, request, None, None);
+        measurement.cache_scope = self.scope;
+        measurement.continuity = match previous {
+            None => PromptContinuity::FirstRequest,
+            Some(_) if measurement.cache_domain_changed => PromptContinuity::DomainChanged,
+            Some(_) if measurement.exact_context_extension => {
+                PromptContinuity::ExactExtension
+            }
+            Some(_) if measurement.common_context_prefix_bytes == 0 => {
+                PromptContinuity::Discontinuous
+            }
+            Some(_) => PromptContinuity::Rebased,
+        };
+        measurement.common_request_prefix_bytes = previous.map(|previous| {
+            common_prefix_len(
+                &canonical_request_surface_bytes(previous),
+                &canonical_request_surface_bytes(request),
+            )
+        });
+        measurement.context_prefix_bytes = previous.map(|_| measurement.common_context_prefix_bytes);
+        measurement
+    }
+
+    /// Commit a request after its observation/effect intent boundary succeeds.
+    pub fn commit(&self, request: &ModelRequest) {
+        *self.previous.lock().expect("prompt layout ledger poisoned") = Some(request.clone());
+    }
+
+    /// Forget the predecessor. The next observation is a first request.
+    pub fn clear(&self) {
+        *self.previous.lock().expect("prompt layout ledger poisoned") = None;
+    }
+}
 
 /// Content-free deterministic comparison of adjacent logical provider inputs.
 ///
@@ -59,6 +207,15 @@ pub enum CacheAccountingStatus {
 /// Byte-oriented comparison of one request with its predecessor.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PromptCacheMeasurement {
+    /// Opaque equality-only serving/cache scope for this request.
+    pub cache_scope: PromptCacheScope,
+    /// Whether a predecessor was available and how logical continuity joined.
+    pub continuity: PromptContinuity,
+    /// Common prefix of the complete canonical logical request surface.
+    pub common_request_prefix_bytes: Option<usize>,
+    /// Common prefix of converted contexts, unavailable for the first request
+    /// or a changed cache scope.
+    pub context_prefix_bytes: Option<usize>,
     /// Stable fingerprint for system prompt, ordered tools, model, and thinking level.
     pub cache_domain_fingerprint: u64,
     /// Whether the predecessor belongs to the same prompt/cache domain.
@@ -95,6 +252,9 @@ pub struct PromptCacheMeasurement {
     ///
     /// This is a request-layout proxy, not evidence that a provider cache was used.
     pub append_only_context: bool,
+    /// Same-domain context changed before the predecessor ended; this is the
+    /// cache impact to inspect for projection/annotation discontinuities.
+    pub context_projection_changed: bool,
     /// Optional byte count of the exact adapter-serialized request.
     pub adapter_serialized_request_bytes: Option<usize>,
     /// Optional adapter-defined cache-domain fingerprint.
@@ -124,10 +284,12 @@ pub fn measure_request_layout(
 ) -> PromptCacheMeasurement {
     let current_tools = tool_definition_bytes(current);
     let current_domain = cache_domain_fingerprint(current, &current_tools);
+    // Enforcement must not rely on a diagnostic fingerprint: even an
+    // extremely unlikely collision would turn a domain rewrite into a false
+    // cache-preserving result. Compare the complete core-owned components and
+    // retain the compact fingerprint only as content-free telemetry.
     let same_domain = previous
-        .map(|request| {
-            cache_domain_fingerprint(request, &tool_definition_bytes(request)) == current_domain
-        })
+        .map(|request| cache_domains_match(request, current, &current_tools))
         .unwrap_or(false);
     let common_context_prefix_bytes = previous
         .filter(|_| same_domain)
@@ -145,21 +307,24 @@ pub fn measure_request_layout(
     let mut changed_cache_domain_components = Vec::new();
     if let Some(previous) = previous {
         let previous_tools = tool_definition_bytes(previous);
-        if stable_fingerprint(previous.system_prompt.as_bytes())
-            != stable_fingerprint(current.system_prompt.as_bytes())
-        {
+        if previous.system_prompt != current.system_prompt {
             changed_cache_domain_components.push("system_prompt".into());
         }
-        if stable_fingerprint(&previous_tools) != stable_fingerprint(&current_tools) {
+        if previous_tools != current_tools {
             changed_cache_domain_components.push("tool_definitions".into());
         }
-        if tool_order_fingerprint(previous) != tool_order_fingerprint(current) {
+        if previous
+            .tools
+            .iter()
+            .map(|tool| &tool.name)
+            .ne(current.tools.iter().map(|tool| &tool.name))
+        {
             changed_cache_domain_components.push("tool_order".into());
         }
-        if model_fingerprint(previous) != model_fingerprint(current) {
+        if previous.model != current.model {
             changed_cache_domain_components.push("model".into());
         }
-        if thinking_fingerprint(previous) != thinking_fingerprint(current) {
+        if previous.thinking_level != current.thinking_level {
             changed_cache_domain_components.push("thinking".into());
         }
         compare_adapter_components(
@@ -169,6 +334,21 @@ pub fn measure_request_layout(
         );
     }
     PromptCacheMeasurement {
+        cache_scope: PromptCacheScope::default(),
+        continuity: match previous {
+            None => PromptContinuity::FirstRequest,
+            Some(_) if !same_domain => PromptContinuity::DomainChanged,
+            Some(_) if exact_context_extension => PromptContinuity::ExactExtension,
+            Some(_) if common_context_prefix_bytes == 0 => PromptContinuity::Discontinuous,
+            Some(_) => PromptContinuity::Rebased,
+        },
+        common_request_prefix_bytes: previous.map(|request| {
+            common_prefix_len(
+                &canonical_request_surface_bytes(request),
+                &canonical_request_surface_bytes(current),
+            )
+        }),
+        context_prefix_bytes: previous.map(|_| common_context_prefix_bytes),
         cache_domain_fingerprint: current_domain,
         cache_domain_changed: previous.is_some() && !same_domain,
         system_prompt_bytes: current.system_prompt.len(),
@@ -189,12 +369,22 @@ pub fn measure_request_layout(
         thinking_fingerprint: thinking_fingerprint(current),
         exact_context_extension,
         append_only_context: exact_context_extension,
+        context_projection_changed: previous.is_some()
+            && same_domain
+            && !exact_context_extension,
         adapter_serialized_request_bytes: current_adapter
             .and_then(|observation| observation.serialized_request_bytes),
         adapter_cache_domain_fingerprint: current_adapter
             .and_then(|observation| observation.cache_domain_fingerprint),
         changed_cache_domain_components,
     }
+}
+
+fn cache_domains_match(previous: &ModelRequest, current: &ModelRequest, current_tools: &[u8]) -> bool {
+    previous.system_prompt == current.system_prompt
+        && tool_definition_bytes(previous) == current_tools
+        && previous.model == current.model
+        && previous.thinking_level == current.thinking_level
 }
 
 fn cache_domain_fingerprint(request: &ModelRequest, tools: &[u8]) -> u64 {
@@ -293,7 +483,7 @@ fn tool_definition_bytes(request: &ModelRequest) -> Vec<u8> {
         .collect::<Vec<_>>();
     JsonValue::Array(definitions)
         .to_json_string()
-        .unwrap_or_default()
+        .expect("protocol JSON tool definitions are always encodable")
         .into_bytes()
 }
 
@@ -417,5 +607,41 @@ mod tests {
             evidence.common_prefix_bytes.saturating_add(3) / 4
         );
         assert_eq!(deterministic_request_prefix_evidence(None, &current), None);
+    }
+
+    #[test]
+    fn shared_ledger_marks_first_request_unavailable_then_exact_extension() {
+        let ledger = PromptLayoutLedger::default();
+        let first = ledger.observe(&request("[one]"));
+        assert_eq!(first.continuity, PromptContinuity::FirstRequest);
+        assert_eq!(first.common_request_prefix_bytes, None);
+        let second = ledger.observe(&request("[one][two]"));
+        assert_eq!(second.continuity, PromptContinuity::ExactExtension);
+        assert_eq!(second.context_prefix_bytes, Some("[one]".len()));
+        assert!(second.exact_context_extension);
+    }
+
+    #[test]
+    fn ledger_classifies_projection_annotation_discontinuity_as_rebase() {
+        let ledger = PromptLayoutLedger::default();
+        let _ = ledger.observe(&request("[stable] annotation=a"));
+        let measurement = ledger.observe(&request("[stable] annotation=b"));
+        assert_eq!(measurement.continuity, PromptContinuity::Rebased);
+        assert!(!measurement.exact_context_extension);
+        assert!(measurement.context_projection_changed);
+        assert!(measurement.common_context_prefix_bytes > 0);
+        assert!(measurement.common_context_prefix_bytes < "[stable] annotation=a".len());
+    }
+
+    #[test]
+    fn require_exact_extension_keeps_first_request_but_rejects_domain_changes() {
+        let ledger = PromptLayoutLedger::default().policy(PromptLayoutPolicy::RequireExactExtension);
+        let first = ledger.observe(&request("[one]"));
+        assert_eq!(first.continuity, PromptContinuity::FirstRequest);
+        let mut changed = request("[one][two]");
+        changed.system_prompt = "changed".into();
+        let domain_change = ledger.measure(&changed);
+        assert_eq!(domain_change.continuity, PromptContinuity::DomainChanged);
+        assert_eq!(ledger.policy_value(), PromptLayoutPolicy::RequireExactExtension);
     }
 }

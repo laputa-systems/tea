@@ -2,7 +2,8 @@
 //!
 //! Event construction is intentionally separate from state mutation.  The run loop must first
 //! settle state, then emit the corresponding event in this order:
-//! `agent_start → turn_start → message* / tool_execution* → model_turn_usage? → turn_end → agent_end`.
+//! `agent_start → turn_start → message* / prompt_layout_observed / tool_execution* →
+//! model_turn_usage? → turn_end → agent_end`.
 
 use crate::error::CoreError;
 use crate::scheduler::CancellationToken;
@@ -81,6 +82,15 @@ pub enum ProviderRequestSkipReason {
 #[allow(missing_docs)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AgentEventKind {
+    /// Content-free exact logical request-layout evidence emitted immediately
+    /// before the provider effect. This is a cacheability proxy, never a
+    /// provider cache-hit claim.
+    PromptLayoutObserved {
+        /// Model turn that owns the prepared request.
+        turn_id: TurnId,
+        /// Joined continuity evidence from the shared live-session ledger.
+        measurement: crate::measurement::PromptCacheMeasurement,
+    },
     /// One append-only, content-free compaction lifecycle record.
     CompactionLifecycle {
         /// Record joined by its stable compaction identity.

@@ -9,6 +9,36 @@ Prompt cache behavior has two different evidence levels:
    only evidence treated as an actual provider cache hit or write. A proxy prefix must never be
    presented as a hit.
 
+Each live `SessionRuntime` shares one volatile `PromptLayoutLedger` across the fresh core agents
+created for successive operations. The ledger compares the exact `ModelRequest` after context
+projection and hooks, immediately before the provider effect. Its predecessor is process-local
+and is never persisted; the `PromptLayoutObserved` lifecycle event contains only fingerprints,
+lengths, joined prefix evidence, changed components, and continuity classification. The first
+request is explicitly unavailable (`FirstRequest` with no prefix), while an append is
+`ExactExtension`; an annotation or projection that changes an earlier byte is `Rebased`. A
+provider/model/tool-domain transition is separately classified as `DomainChanged`.
+Reopening a runtime creates a fresh volatile ledger, so the first request after reopen is again
+unavailable rather than being joined to a prior process lifetime.
+
+The Luau policy plane cannot write, clear, or replace this ledger. Candidate hooks run first, and
+the kernel measures their final provider-facing result at the same request boundary used for
+dispatch. A self-modification that changes prompt-visible tools or instructions is therefore a
+`DomainChanged` transition; one that rewrites an earlier converted-context byte is `Rebased` or
+`Discontinuous`. Candidate code cannot suppress the lifecycle observation or opt itself out of a
+host-selected rejection policy.
+
+The ledger's scope is an opaque equality-only serving/cache scope. A scope or harness change is
+represented by changed component/domain evidence, not by inferring provider cache behavior. The
+initial policy is observe-only (`PromptLayoutPolicy::Observe`): hosts may warn on
+`Rebased`/`Discontinuous` evidence while provider usage remains the authority for hit/write
+claims. A host that needs same-domain layout enforcement can opt into
+`PromptLayoutPolicy::RejectUnexpectedRebase`; it rejects only `Rebased` and `Discontinuous`
+requests before provider dispatch. A stricter `PromptLayoutPolicy::RequireExactExtension` also
+rejects `DomainChanged` after the first request, while still allowing the first request and
+exact append-only extensions. Enforcement compares complete core-owned prompt, tool, model, and
+thinking components; compact fingerprints are telemetry only and are never trusted as equality
+proof.
+
 The baseline fixture in `crates/tea-core/tests/cache_friendliness.rs` drives three text
 turns through the real run loop and prints the measurements. On the current pinned profile it
 reports a stable prompt domain and a 100% common context prefix for both adjacent turns:

@@ -4,7 +4,7 @@ use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{sync_channel, Receiver, TryRecvError};
 use std::time::Duration;
-use tea_core::coding::DefaultCodingTools;
+use tea_core::coding::TeaCodingToolsV2;
 use tea_core::compaction::AutomaticCompactionPolicy;
 use tea_core::harness::HarnessError;
 use tea_core::runtime::{HarnessEvent, SessionEvent, TeaEvent, TeaEventSubscription};
@@ -18,6 +18,7 @@ use super::compaction::ProviderCompactor;
 use super::error::AppError;
 use super::host::host_configuration;
 use super::mock;
+use super::nonblocking_operations::NonblockingCodingOperations;
 use super::preferences::load_last_model;
 use super::state::{AppState, UiStatus};
 use std::sync::Arc;
@@ -135,7 +136,10 @@ impl App {
                 AppError::Setup(format!("cannot read current directory: {error}"))
             })?,
         };
-        let tools = DefaultCodingTools::new(&workspace)
+        let tools = TeaCodingToolsV2::with_operations(
+            &workspace,
+            Arc::new(NonblockingCodingOperations),
+        )
             .map_err(|error| AppError::Setup(format!("invalid --cwd: {error}")))?;
         self.workspace = Some(tools.workspace().as_path().to_path_buf());
         let configuration = if self.options.provider() == Some(OsStr::new(mock::PROVIDER_ID)) {

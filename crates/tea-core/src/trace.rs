@@ -41,8 +41,15 @@ struct TraceState<S> {
     pending_tools: BTreeMap<ToolCallId, Tool>,
     pending_cache_evidence: BTreeMap<u64, CacheEvidence>,
     last_committed_compaction: Option<String>,
+    pending_post_compaction_request: Option<PendingPostCompactionRequest>,
     end_reason: EndReason,
     error: Option<String>,
+}
+
+struct PendingPostCompactionRequest {
+    compaction_id: String,
+    turn_id: u64,
+    logical_cache_domain_fingerprint: u64,
 }
 
 struct PendingTurn {
@@ -80,6 +87,7 @@ impl<S: TraceSink> TraceObserver<S> {
                 pending_tools: BTreeMap::new(),
                 pending_cache_evidence: BTreeMap::new(),
                 last_committed_compaction: None,
+                pending_post_compaction_request: None,
                 end_reason: EndReason::Completed,
                 error: None,
             }),
@@ -120,6 +128,23 @@ impl<S: TraceSink> TraceObserver<S> {
     fn record(&self, event: &AgentEvent) {
         let mut state = self.state.lock().expect("trace observer mutex poisoned");
         match &event.kind {
+            AgentEventKind::PromptLayoutObserved {
+                turn_id,
+                measurement,
+            } => {
+                record_cache_evidence(
+                    &mut state,
+                    turn_id.0,
+                    evidence_from_prompt_layout(measurement),
+                );
+                if let Some(compaction_id) = state.last_committed_compaction.take() {
+                    state.pending_post_compaction_request = Some(PendingPostCompactionRequest {
+                        compaction_id,
+                        turn_id: turn_id.0,
+                        logical_cache_domain_fingerprint: measurement.cache_domain_fingerprint,
+                    });
+                }
+            }
             AgentEventKind::CompactionLifecycle { record } => {
                 let (compaction, committed) = trace_compaction(record);
                 if committed {
@@ -134,7 +159,28 @@ impl<S: TraceSink> TraceObserver<S> {
                 let mut evidence = evidence_from_request_observation(observation);
                 evidence.provider_surface_digest = self.provider_surface_digest.clone();
                 record_cache_evidence(&mut state, turn_id.0, evidence);
-                if let Some(compaction_id) = state.last_committed_compaction.take() {
+                if state
+                    .pending_post_compaction_request
+                    .as_ref()
+                    .is_some_and(|pending| pending.turn_id == turn_id.0)
+                {
+                    let pending = state
+                        .pending_post_compaction_request
+                        .take()
+                        .expect("matching pending post-compaction request exists");
+                    let mut compaction = Compaction::new(
+                        pending.compaction_id,
+                        CompactionStage::PostCompactionRequestObserved,
+                    );
+                    compaction.post_compaction_turn_index = Some(trace_turn_index(turn_id.0));
+                    compaction.serialized_request_bytes = observation.serialized_request_bytes;
+                    compaction.cache_domain_fingerprint = observation
+                        .cache_domain_fingerprint
+                        .or(Some(pending.logical_cache_domain_fingerprint));
+                    state.sink.append(TraceEvent::from(compaction));
+                } else if let Some(compaction_id) = state.last_committed_compaction.take() {
+                    // Compatibility for callers that emit only the adapter
+                    // observation and not the newer logical-layout event.
                     let mut compaction = Compaction::new(
                         compaction_id,
                         CompactionStage::PostCompactionRequestObserved,
@@ -168,6 +214,7 @@ impl<S: TraceSink> TraceObserver<S> {
                 state.pending_tools.clear();
                 state.pending_cache_evidence.clear();
                 state.last_committed_compaction = None;
+                state.pending_post_compaction_request = None;
                 state.end_reason = EndReason::Completed;
                 state.error = None;
                 state.sink.append(TraceEvent::from(
@@ -236,6 +283,7 @@ impl<S: TraceSink> TraceObserver<S> {
             } => state.error = Some(message.clone()),
             AgentEventKind::ToolFailureObserved { .. } => {}
             AgentEventKind::TurnEnd { turn_id, reason } => {
+                append_logical_post_compaction_request(&mut state, turn_id.0);
                 let pending = state.current_turn.take().unwrap_or(PendingTurn {
                     index: trace_turn_index(turn_id.0),
                     core_turn_id: turn_id.0,
@@ -265,6 +313,13 @@ impl<S: TraceSink> TraceObserver<S> {
                 record_cache_evidence(&mut state, accounting.turn_id.0, evidence);
             }
             AgentEventKind::AgentEnd { .. } => {
+                if let Some(turn_id) = state
+                    .pending_post_compaction_request
+                    .as_ref()
+                    .map(|pending| pending.turn_id)
+                {
+                    append_logical_post_compaction_request(&mut state, turn_id);
+                }
                 let reason = state.end_reason.clone();
                 let error = state.error.clone();
                 state.sink.append(TraceEvent::from(EpisodeEnd {
@@ -275,6 +330,30 @@ impl<S: TraceSink> TraceObserver<S> {
             }
         }
     }
+}
+
+fn append_logical_post_compaction_request<S>(state: &mut TraceState<S>, turn_id: u64)
+where
+    S: TraceSink,
+{
+    if !state
+        .pending_post_compaction_request
+        .as_ref()
+        .is_some_and(|pending| pending.turn_id == turn_id)
+    {
+        return;
+    }
+    let pending = state
+        .pending_post_compaction_request
+        .take()
+        .expect("matching pending post-compaction request exists");
+    let mut compaction = Compaction::new(
+        pending.compaction_id,
+        CompactionStage::PostCompactionRequestObserved,
+    );
+    compaction.post_compaction_turn_index = Some(trace_turn_index(turn_id));
+    compaction.cache_domain_fingerprint = Some(pending.logical_cache_domain_fingerprint);
+    state.sink.append(TraceEvent::from(compaction));
 }
 
 fn trace_provenance(provenance: RunProvenance) -> TraceProvenance {
@@ -302,6 +381,20 @@ fn evidence_from_request_observation(
         deterministic_common_prefix_bytes: observation.deterministic_common_prefix_bytes,
         deterministic_common_prefix_tokens_estimate: observation
             .deterministic_common_prefix_tokens_estimate,
+        ..CacheEvidence::default()
+    }
+}
+
+fn evidence_from_prompt_layout(
+    measurement: &crate::measurement::PromptCacheMeasurement,
+) -> CacheEvidence {
+    CacheEvidence {
+        deterministic_common_prefix_bytes: measurement
+            .common_request_prefix_bytes
+            .map(|value| value as u64),
+        deterministic_common_prefix_tokens_estimate: measurement
+            .common_request_prefix_bytes
+            .map(|value| value.saturating_add(3) as u64 / 4),
         ..CacheEvidence::default()
     }
 }
@@ -739,6 +832,16 @@ mod tests {
         observe(&observer, AgentEventKind::TurnStart { turn_id: TurnId(2) });
         observe(
             &observer,
+            AgentEventKind::PromptLayoutObserved {
+                turn_id: TurnId(2),
+                measurement: crate::measurement::measure_prompt_cacheability(
+                    None,
+                    &crate::scheduler::ModelRequest::default(),
+                ),
+            },
+        );
+        observe(
+            &observer,
             AgentEventKind::ProviderRequestObserved {
                 turn_id: TurnId(2),
                 observation: AdapterRequestObservation {
@@ -783,6 +886,7 @@ mod tests {
             );
             assert_eq!(compactions[2].post_compaction_turn_index, Some(1));
             assert_eq!(compactions[2].serialized_request_bytes, Some(321));
+            assert_eq!(compactions[2].cache_domain_fingerprint, Some(123));
         });
     }
 

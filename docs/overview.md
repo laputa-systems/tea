@@ -39,3 +39,4 @@ through the durable harness for every prompt.
 - [Provider adapters](provider-adapters.md)
 - [Compaction](compaction.md)
 - [Verification](verification.md)
+- [Prompt cache-friendliness](cache-friendliness.md) describes content-free logical continuity evidence.

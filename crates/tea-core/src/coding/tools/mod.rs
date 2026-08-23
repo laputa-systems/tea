@@ -9,6 +9,7 @@ pub(crate) mod find;
 pub(crate) mod grep;
 pub(crate) mod local_operations;
 pub(crate) mod ls;
+pub(crate) mod multiedit;
 pub(crate) mod read;
 pub(crate) mod schemas;
 pub(crate) mod search;
@@ -18,9 +19,10 @@ pub(crate) mod workspace;
 pub(crate) mod write;
 
 pub use contract::{
-    CodingOperations, CommandEnvironment, CommandOutput, DirectoryEntry, EntryMetadata, GrepMatch,
-    GrepOptions, OperationError, OperationFuture,
+    CodingOperations, CommandEnvironment, CommandOutput, ConditionalFileEdit, DirectoryEntry,
+    EditTransaction, EditTransactionOutcome, EntryMetadata, FileSnapshot, GrepMatch, GrepOptions,
+    OperationError, OperationFuture,
 };
-pub use factory::DefaultCodingTools;
+pub use factory::{DefaultCodingTools, TeaCodingToolsV2};
 pub use local_operations::LocalCodingOperations;
 pub use workspace::WorkspaceRoot;

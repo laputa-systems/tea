@@ -9,10 +9,16 @@ use crate::tool::{ToolDefinition, ToolRegistry};
 use std::collections::BTreeMap;
 use std::path::Path;
 use tea_protocol::JsonValue;
+use tea_session::{CanonicalHashWriter, Digest};
 
 const PINNED_DEFAULT_PROFILE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/profile/default-profile.json"
+));
+
+const TEA_DEFAULT_PROFILE_V2: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/profile/tea-default-profile-v2.json"
 ));
 
 /// Prompt and ordered tool specification for one agent profile.
@@ -163,6 +169,165 @@ impl PiDefaultCodingProfile {
         }
         Ok(())
     }
+}
+
+/// Tea's immutable v2 coding profile.
+///
+/// Pi v1 remains represented by [`PiDefaultCodingProfile`]. V2 intentionally
+/// uses the same familiar tool names but a different `edit` schema, so it is
+/// selected only with [`crate::coding::TeaCodingToolsV2`]. The checked-in
+/// capture fixes its profile identity and prompt; tool definitions are built
+/// from the versioned core schemas and verified against the executable v2
+/// factory in tests.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TeaDefaultCodingProfileV2 {
+    spec: ProfileSpec,
+    profile_id: String,
+    contract_digest: Digest,
+}
+
+impl TeaDefaultCodingProfileV2 {
+    /// Load the checked-in Tea v2 profile capture.
+    pub fn pinned_default() -> Result<Self, ProfileError> {
+        let capture = JsonValue::parse(TEA_DEFAULT_PROFILE_V2).map_err(|error| {
+            ProfileError::new(format!("invalid Tea v2 profile capture: {error}"))
+        })?;
+        let root = profile_object(&capture, "Tea v2 profile capture")?;
+        if profile_number(root, "format_version")? != 2
+            || profile_string(root, "kind")? != "tea_default_coding_profile"
+        {
+            return Err(ProfileError::new(
+                "Tea v2 profile capture has an unsupported format or kind",
+            ));
+        }
+        let profile_id = profile_string(root, "profile_id")?.to_owned();
+        let spec = ProfileSpec {
+            system_prompt: profile_string(root, "system_prompt")?.to_owned(),
+            tools: tea_v2_tool_definitions(),
+            tool_guidance: Vec::new(),
+        };
+        spec.validate()?;
+        let contract_digest = tea_v2_contract_digest(&profile_id, &spec);
+        let captured_digest = Digest::from_hex(profile_string(root, "contract_digest")?)
+            .map_err(|error| ProfileError::new(format!("invalid Tea v2 contract digest: {error}")))?;
+        if contract_digest != captured_digest {
+            return Err(ProfileError::new(format!(
+                "Tea v2 executable contract differs from its capture: expected {}, got {}",
+                captured_digest.to_hex(),
+                contract_digest.to_hex(),
+            )));
+        }
+        Ok(Self {
+            spec,
+            profile_id,
+            contract_digest,
+        })
+    }
+
+    /// Stable identity that distinguishes the v2 tool contract from Pi v1.
+    pub fn profile_id(&self) -> &str {
+        &self.profile_id
+    }
+
+    /// Digest of the captured prompt and ordered executable definitions.
+    pub fn contract_digest(&self) -> Digest {
+        self.contract_digest
+    }
+
+    /// Borrow the ordered executable-facing definition capture.
+    pub fn tool_definitions(&self) -> &[ToolDefinition] {
+        &self.spec.tools
+    }
+
+    /// Borrow the full profile specification.
+    pub fn spec(&self) -> &ProfileSpec {
+        &self.spec
+    }
+
+    /// Render the v2 prompt for an explicit workspace authority.
+    pub fn system_prompt_for_workspace(&self, workspace: &Path) -> String {
+        format!(
+            "{}\nCurrent working directory: {}",
+            self.spec.system_prompt,
+            workspace.to_string_lossy().replace('\\', "/")
+        )
+    }
+
+    /// Return active tool names in deterministic profile order.
+    pub fn active_tool_names(&self) -> impl Iterator<Item = &str> {
+        self.spec.tools.iter().map(|tool| tool.name.as_str())
+    }
+
+    /// Verify that every v2 definition has an executable registration.
+    pub fn validate_registry(&self, registry: &ToolRegistry) -> Result<(), ProfileError> {
+        for tool in &self.spec.tools {
+            if registry.get(&tool.name).is_none() {
+                return Err(ProfileError::new(format!(
+                    "Tea v2 profile tool is not registered: {}",
+                    tool.name
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
+fn tea_v2_contract_digest(profile_id: &str, spec: &ProfileSpec) -> Digest {
+    let mut writer = CanonicalHashWriter::new("tea-default-coding-profile-v2", 2, 1);
+    writer.string("profile_id", profile_id);
+    writer.string("system_prompt", &spec.system_prompt);
+    writer.u64("tool_count", spec.tools.len() as u64);
+    for (index, tool) in spec.tools.iter().enumerate() {
+        writer.u64("tool_index", index as u64);
+        writer.string("tool_name", &tool.name);
+        writer.string("tool_description", &tool.description);
+        writer.string(
+            "tool_schema",
+            &tool
+                .schema
+                .to_json_string()
+                .expect("protocol JSON tool definitions are always encodable"),
+        );
+        writer.string(
+            "tool_execution_mode",
+            match tool.execution_mode {
+                crate::tool::ToolExecutionMode::Sequential => "sequential",
+                crate::tool::ToolExecutionMode::Parallel => "parallel",
+            },
+        );
+    }
+    writer.finish()
+}
+
+fn tea_v2_tool_definitions() -> Vec<ToolDefinition> {
+    use crate::coding::tools::{multiedit, read, schemas};
+    use crate::tool::ToolExecutionMode;
+    vec![
+        ToolDefinition {
+            name: "read".into(),
+            description: read::read_v2_description().into(),
+            schema: schemas::read_v2_schema(),
+            execution_mode: ToolExecutionMode::Parallel,
+        },
+        ToolDefinition {
+            name: "bash".into(),
+            description: "Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to last 2000 lines or 50KB (whichever is hit first). If truncated, full output is saved to a temp file. Optionally provide a timeout in seconds.".into(),
+            schema: schemas::bash_schema(),
+            execution_mode: ToolExecutionMode::Parallel,
+        },
+        ToolDefinition {
+            name: "edit".into(),
+            description: multiedit::multiedit_v2_description().into(),
+            schema: schemas::edit_v2_schema(),
+            execution_mode: ToolExecutionMode::Parallel,
+        },
+        ToolDefinition {
+            name: "write".into(),
+            description: "Write content to a file. Creates the file if it doesn't exist, overwrites if it does. Automatically creates parent directories.".into(),
+            schema: schemas::write_schema(),
+            execution_mode: ToolExecutionMode::Parallel,
+        },
+    ]
 }
 
 /// A deliberately empty profile for applications that supply all prompt/tools themselves.

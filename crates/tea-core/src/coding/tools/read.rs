@@ -1,11 +1,11 @@
 //! The standard read tool.
 
 use super::arguments::{
-    check_cancelled, operation_failure, optional_positive_usize, parse_object, path_error,
-    result_ok, string_field, truncate_read_output,
+    check_cancelled, operation_failure, optional_bool, optional_positive_usize, parse_object,
+    path_error, result_ok, string_field, truncate_read_output,
 };
 use super::contract::CodingOperations;
-use super::schemas::read_schema;
+use super::schemas::{read_schema, read_v2_schema};
 use super::workspace::WorkspaceRoot;
 use crate::error::ToolError;
 use crate::tool::{AgentTool, ToolCall, ToolContext, ToolFuture, ToolUpdateSink};
@@ -15,11 +15,26 @@ use tea_protocol::JsonValue;
 pub(crate) struct ReadTool {
     root: WorkspaceRoot,
     operations: Arc<dyn CodingOperations>,
+    include_digest: bool,
 }
 
 impl ReadTool {
     pub(crate) fn new(root: WorkspaceRoot, operations: Arc<dyn CodingOperations>) -> Self {
-        Self { root, operations }
+        Self {
+            root,
+            operations,
+            include_digest: false,
+        }
+    }
+
+    /// Construct Tea v2's read surface, which can return a complete-file
+    /// BLAKE3 digest for an immediately following conditional edit.
+    pub(crate) fn tea_v2(root: WorkspaceRoot, operations: Arc<dyn CodingOperations>) -> Self {
+        Self {
+            root,
+            operations,
+            include_digest: true,
+        }
     }
 }
 
@@ -28,10 +43,18 @@ impl AgentTool for ReadTool {
         "read"
     }
     fn description(&self) -> &str {
-        "Read the contents of a file. Supports text files and images (jpg, png, gif, webp, bmp). Images are sent as attachments. For text files, output is truncated to 2000 lines or 50KB (whichever is hit first). Use offset/limit for large files. When you need the full file, continue with offset until complete."
+        if self.include_digest {
+            read_v2_description()
+        } else {
+            "Read the contents of a file. Supports text files and images (jpg, png, gif, webp, bmp). Images are sent as attachments. For text files, output is truncated to 2000 lines or 50KB (whichever is hit first). Use offset/limit for large files. When you need the full file, continue with offset until complete."
+        }
     }
     fn schema(&self) -> &JsonValue {
-        static_schema_read()
+        if self.include_digest {
+            static_schema_read_v2()
+        } else {
+            static_schema_read()
+        }
     }
     fn execute<'a>(
         &'a self,
@@ -39,11 +62,17 @@ impl AgentTool for ReadTool {
         context: ToolContext,
         _updates: ToolUpdateSink,
     ) -> ToolFuture<'a> {
+        let include_digest = self.include_digest;
         let args = match parse_object(self.name(), &call).and_then(|object| {
             Ok((
                 string_field(self.name(), &object, "path")?,
                 optional_positive_usize(self.name(), &object, "offset")?,
                 optional_positive_usize(self.name(), &object, "limit")?,
+                if include_digest {
+                    optional_bool(self.name(), &object, "includeDigest")?.unwrap_or(false)
+                } else {
+                    false
+                },
             ))
         }) {
             Ok(args) => args,
@@ -80,9 +109,24 @@ impl AgentTool for ReadTool {
             };
             let (output, truncated) = truncate_read_output(selected.as_bytes());
             let suffix = if truncated { "\n[truncated]" } else { "" };
-            Ok(result_ok(&call, format!("{}{}", output, suffix)))
+            let digest = args.3.then(|| tea_session::Digest::from_bytes(&bytes).to_hex());
+            let digest_suffix = digest
+                .as_deref()
+                .map(|digest| format!("\n[complete-file blake3: {digest}]"))
+                .unwrap_or_default();
+            Ok(result_ok(&call, format!("{}{}{}", output, suffix, digest_suffix)))
         })
     }
+}
+
+pub(crate) const fn read_v2_description() -> &'static str {
+    "Read the contents of a file. Supports text files and images (jpg, png, gif, webp, bmp). Images are sent as attachments. For text files, output is truncated to 2000 lines or 50KB (whichever is hit first). Use offset/limit for large files. Set includeDigest=true to receive the complete-file BLAKE3 digest for a conditional edit; the digest covers bytes even when displayed text is truncated."
+}
+
+fn static_schema_read_v2() -> &'static JsonValue {
+    use std::sync::OnceLock;
+    static VALUE: OnceLock<JsonValue> = OnceLock::new();
+    VALUE.get_or_init(read_v2_schema)
 }
 
 fn static_schema_read() -> &'static JsonValue {

@@ -12,6 +12,7 @@ mod error;
 mod host;
 mod input;
 mod mock;
+mod nonblocking_operations;
 mod persistence;
 mod picker;
 mod preferences;

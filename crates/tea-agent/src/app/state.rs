@@ -451,6 +451,7 @@ impl AppState {
                 }
             }
             AgentEventKind::CompactionLifecycle { .. }
+            | AgentEventKind::PromptLayoutObserved { .. }
             | AgentEventKind::ProviderRequestObserved { .. }
             | AgentEventKind::TurnStart { .. } => {}
         }

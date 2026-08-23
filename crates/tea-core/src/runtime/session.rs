@@ -156,6 +156,9 @@ pub struct SessionRuntime<S> {
     active_agent: Mutex<Option<Agent>>,
     /// Reasoning level applied to every future epoch in this session.
     thinking_level: Mutex<ThinkingLevel>,
+    /// Volatile request-layout predecessor shared by all fresh agents in this
+    /// live runtime, but deliberately replaced when the runtime is reopened.
+    prompt_layout_ledger: Arc<crate::measurement::PromptLayoutLedger>,
     /// Process-local live-event fanout. It never owns durable state.
     events: Arc<EventHub>,
     /// Serializes snapshot registration with post-commit publication so a UI
@@ -243,6 +246,10 @@ where
             active: AtomicBool::new(false),
             active_agent: Mutex::new(None),
             thinking_level: Mutex::new(runtime_services.thinking_level_value()),
+            prompt_layout_ledger: Arc::new(
+                crate::measurement::PromptLayoutLedger::new(runtime_services.prompt_layout_scope())
+                    .policy(runtime_services.prompt_layout_policy_value()),
+            ),
             events: Arc::new(EventHub::default()),
             publication: Mutex::new(()),
         })
@@ -380,6 +387,17 @@ where
             .map_err(|_| HarnessError::invalid_state("active core epoch mutex is poisoned"))?
             .clone();
         Ok(agent.map(|agent| agent.snapshot()))
+    }
+
+    /// Observe the current volatile prompt-layout predecessor without
+    /// changing it. This content-free diagnostic is intended for host tests
+    /// and reconnect health checks.
+    #[cfg(test)]
+    pub(crate) fn measure_prompt_layout(
+        &self,
+        request: &tea_core::scheduler::ModelRequest,
+    ) -> crate::measurement::PromptCacheMeasurement {
+        self.prompt_layout_ledger.measure(request)
     }
 
     /// Replace the reasoning level for future epochs and append the semantic change while idle.
@@ -787,7 +805,11 @@ where
             .thinking_level
             .lock()
             .map_err(|_| HarnessError::invalid_state("thinking level mutex is poisoned"))?;
-        let runtime_services = self.runtime_services.clone().thinking_level(thinking_level);
+        let runtime_services = self
+            .runtime_services
+            .clone()
+            .thinking_level(thinking_level)
+            .prompt_layout_ledger(Arc::clone(&self.prompt_layout_ledger));
         let messages = self.core_messages(&configuration, recovery.as_ref())?;
         let provider_surface_digest = configuration
             .harness_snapshot

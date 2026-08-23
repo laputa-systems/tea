@@ -16,7 +16,7 @@ use crate::event::{
 };
 use crate::hooks::{AfterToolCall, AgentLoopTurnUpdate, Replacement};
 use crate::scheduler::{
-    AdapterRequestObservation, CancellationToken, ModelEventStream, ModelRequest, ModelStreamEvent,
+    CancellationToken, ModelEventStream, ModelRequest, ModelStreamEvent,
 };
 use crate::state::{
     AgentMessage, AgentPhase, AgentToolCall, ModelDescriptor, RunId, RunPhase, RunSnapshot,
@@ -120,6 +120,7 @@ struct PendingToolExecution<'a> {
     source_index: usize,
     call: ToolCall,
     effect: EffectTicket,
+    cancellation_settlement_mode: crate::tool::CancellationSettlementMode,
     future: ToolFuture<'a>,
 }
 
@@ -503,7 +504,6 @@ impl RunHandle {
         let mut model_override = None::<ModelDescriptor>;
         let mut thinking_override = None::<ThinkingLevel>;
         let mut context_estimator = ContextEstimator::default();
-        let mut previous_request = None::<ModelRequest>;
         let mut completed_assistant_turn = false;
         let mut next_context = if self.skip_initial_steering {
             None
@@ -582,36 +582,52 @@ impl RunHandle {
                     .await?;
             }
             let turn_model = request.model.clone();
-            let request_observation = crate::measurement::deterministic_request_prefix_evidence(
-                previous_request.as_ref(),
-                &request,
-            );
+            let request_layout = agent.prompt_layout_ledger.measure(&request);
+            let request_continuity = request_layout.continuity;
             let provider = agent
                 .provider
                 .read()
                 .expect("agent provider lock poisoned")
                 .clone()
                 .ok_or(CoreError::MissingModelProvider)?;
+            self.emit(
+                &agent,
+                AgentEventKind::PromptLayoutObserved {
+                    turn_id,
+                    measurement: request_layout,
+                },
+            )
+            .await?;
+            if matches!(
+                agent.prompt_layout_ledger.policy_value(),
+                crate::measurement::PromptLayoutPolicy::RejectUnexpectedRebase
+            ) && matches!(
+                request_continuity,
+                crate::measurement::PromptContinuity::Rebased
+                    | crate::measurement::PromptContinuity::Discontinuous
+            ) || matches!(
+                agent.prompt_layout_ledger.policy_value(),
+                crate::measurement::PromptLayoutPolicy::RequireExactExtension
+            ) && matches!(
+                request_continuity,
+                crate::measurement::PromptContinuity::DomainChanged
+                    | crate::measurement::PromptContinuity::Rebased
+                    | crate::measurement::PromptContinuity::Discontinuous
+            ) {
+                return Err(CoreError::PromptLayoutRejected {
+                    continuity: request_continuity,
+                });
+            }
             let provider_effect = self
                 .begin_effect(EffectSubject::ProviderRequest {
                     request: request.clone(),
                 })
                 .await?;
-            self.emit(
-                &agent,
-                AgentEventKind::ProviderRequestObserved {
-                    turn_id,
-                    observation: AdapterRequestObservation {
-                        deterministic_common_prefix_bytes: request_observation
-                            .map(|evidence| evidence.common_prefix_bytes),
-                        deterministic_common_prefix_tokens_estimate: request_observation
-                            .map(|evidence| evidence.common_prefix_tokens_estimate),
-                        ..AdapterRequestObservation::default()
-                    },
-                },
-            )
-            .await?;
-            previous_request = Some(request.clone());
+            // The exact request has crossed the durable effect-intent and
+            // content-free observation boundary. Commit it immediately before
+            // transport dispatch so failed preparation never becomes a
+            // predecessor for the next logical request.
+            agent.prompt_layout_ledger.commit(&request);
             let mut stream = match provider.stream(request, self.cancellation.clone()).await {
                 Ok(stream) => stream,
                 Err(error) => {
@@ -2577,9 +2593,13 @@ async fn next_tool_step<'a>(
     call_id: &ToolCallId,
     cancellation: &CancellationToken,
     allow_one_poll_after_cancellation: bool,
+    cancellation_settlement_mode: crate::tool::CancellationSettlementMode,
 ) -> ToolStep {
     std::future::poll_fn(|context| {
-        if cancellation.is_cancelled() && !allow_one_poll_after_cancellation {
+        if cancellation.is_cancelled()
+            && !allow_one_poll_after_cancellation
+            && cancellation_settlement_mode == crate::tool::CancellationSettlementMode::DropFuture
+        {
             updates.close(call_id);
             return Poll::Ready(ToolStep::Completed {
                 result: Err(crate::error::ToolError::Cancelled {
@@ -2598,7 +2618,10 @@ async fn next_tool_step<'a>(
         if let Some(updates) = updates.take() {
             return Poll::Ready(ToolStep::Updates(updates));
         }
-        if cancellation.is_cancelled() && !allow_one_poll_after_cancellation {
+        if cancellation.is_cancelled()
+            && !allow_one_poll_after_cancellation
+            && cancellation_settlement_mode == crate::tool::CancellationSettlementMode::DropFuture
+        {
             updates.close(call_id);
             return Poll::Ready(ToolStep::Completed {
                 result: Err(crate::error::ToolError::Cancelled {
@@ -2618,7 +2641,10 @@ async fn next_tool_step<'a>(
             Poll::Pending => {
                 if let Some(updates) = updates.take() {
                     Poll::Ready(ToolStep::Updates(updates))
-                } else if cancellation.is_cancelled() {
+                } else if cancellation.is_cancelled()
+                    && cancellation_settlement_mode
+                        == crate::tool::CancellationSettlementMode::DropFuture
+                {
                     updates.close(call_id);
                     Poll::Ready(ToolStep::Completed {
                         result: Err(crate::error::ToolError::Cancelled {
@@ -2648,7 +2674,13 @@ async fn next_parallel_step<'a>(
         if let Some(updates) = updates.take() {
             return Poll::Ready(ParallelToolStep::Updates(updates));
         }
-        if cancellation.is_cancelled() && allowed_after_cancellation.is_empty() {
+        if cancellation.is_cancelled()
+            && allowed_after_cancellation.is_empty()
+            && !pending.iter().any(|pending_call| {
+                pending_call.cancellation_settlement_mode
+                    == crate::tool::CancellationSettlementMode::AwaitFuture
+            })
+        {
             return Poll::Ready(ParallelToolStep::Cancelled {
                 updates: Vec::new(),
             });
@@ -2658,7 +2690,13 @@ async fn next_parallel_step<'a>(
         if let Some(updates) = updates.take() {
             return Poll::Ready(ParallelToolStep::Updates(updates));
         }
-        if cancellation.is_cancelled() && allowed_after_cancellation.is_empty() {
+        if cancellation.is_cancelled()
+            && allowed_after_cancellation.is_empty()
+            && !pending.iter().any(|pending_call| {
+                pending_call.cancellation_settlement_mode
+                    == crate::tool::CancellationSettlementMode::AwaitFuture
+            })
+        {
             return Poll::Ready(ParallelToolStep::Cancelled {
                 updates: updates.take().unwrap_or_default(),
             });
@@ -2666,6 +2704,8 @@ async fn next_parallel_step<'a>(
         let mut index = 0;
         while index < pending.len() {
             if cancellation.is_cancelled()
+                && pending[index].cancellation_settlement_mode
+                    == crate::tool::CancellationSettlementMode::DropFuture
                 && !allowed_after_cancellation.remove(&pending[index].call.id)
             {
                 index = index.saturating_add(1);
@@ -2689,7 +2729,12 @@ async fn next_parallel_step<'a>(
             }
             index = index.saturating_add(1);
         }
-        if cancellation.is_cancelled() {
+        if cancellation.is_cancelled()
+            && !pending.iter().any(|pending_call| {
+                pending_call.cancellation_settlement_mode
+                    == crate::tool::CancellationSettlementMode::AwaitFuture
+            })
+        {
             return Poll::Ready(ParallelToolStep::Cancelled {
                 updates: updates.take().unwrap_or_default(),
             });

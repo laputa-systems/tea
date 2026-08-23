@@ -16,7 +16,10 @@ use crate::event::AgentEventKind;
 use crate::hooks::BeforeToolCall;
 use crate::schema_validation::validate_tool_arguments;
 use crate::state::{AgentMessage, AgentToolCall};
-use crate::tool::{AgentTool, AgentToolResult, ToolCall, ToolContext, ToolFuture, ToolUpdateSink};
+use crate::tool::{
+    AgentTool, AgentToolResult, CancellationSettlementMode, ToolCall, ToolContext, ToolFuture,
+    ToolUpdateSink,
+};
 use std::sync::Arc;
 use std::task::Poll;
 
@@ -200,6 +203,7 @@ impl RunHandle {
                     source_index: prepared_call.source_index,
                     call: prepared_call.call.clone(),
                     effect: effect.clone(),
+                    cancellation_settlement_mode: tool.cancellation_settlement_mode(),
                     future,
                 });
             }
@@ -255,6 +259,12 @@ impl RunHandle {
                         // a cancellation-unaware tool cannot hold the run.
                         let mut still_running = Vec::new();
                         for mut pending_call in std::mem::take(&mut pending) {
+                            if pending_call.cancellation_settlement_mode
+                                == CancellationSettlementMode::AwaitFuture
+                            {
+                                still_running.push(pending_call);
+                                continue;
+                            }
                             if update_call_ids.contains(&pending_call.call.id) {
                                 still_running.push(pending_call);
                                 continue;
@@ -367,6 +377,7 @@ impl RunHandle {
                 let updates = PendingToolUpdates::default();
                 let future = self.start_tool_future(&tool, call.clone(), updates.clone());
                 let mut future = future;
+                let cancellation_settlement_mode = tool.cancellation_settlement_mode();
                 // A tool can synchronously emit an update that cancels the
                 // run before returning its future. Preserve the update and
                 // allow one poll for its already-created completion.
@@ -374,8 +385,15 @@ impl RunHandle {
                     self.cancellation.is_cancelled() && updates.has_updates();
                 let execution = loop {
                     let allow = std::mem::take(&mut allow_one_poll_after_cancellation);
-                    match next_tool_step(&mut future, &updates, &call.id, &self.cancellation, allow)
-                        .await
+                    match next_tool_step(
+                        &mut future,
+                        &updates,
+                        &call.id,
+                        &self.cancellation,
+                        allow,
+                        cancellation_settlement_mode,
+                    )
+                    .await
                     {
                         ToolStep::Updates(updates) => {
                             self.emit_tool_updates(agent, updates).await?;

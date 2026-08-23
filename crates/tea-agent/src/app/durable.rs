@@ -553,7 +553,7 @@ fn model_profile(model: &ModelDescriptor) -> Result<ModelHarnessProfile, AppErro
         model.provider.clone(),
         model.model.clone(),
         model.revision.clone(),
-        "tea-terminal-host-v1",
+        "tea-terminal-host-v2",
         "tea-core-canonical-v1",
         "tea-provider-summary-v1",
         "tea-recoverable-projection-v1",
@@ -1072,7 +1072,7 @@ mod tests {
     use super::super::host::host_configuration;
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
-    use tea_core::coding::DefaultCodingTools;
+    use tea_core::coding::TeaCodingToolsV2;
     use tea_core::hooks::NoHooks;
     use tea_core::scheduler::{
         CancellationToken, ModelFuture, ModelRequest, ModelStream, ModelStreamEvent,
@@ -1186,7 +1186,7 @@ mod tests {
         let workspace = home.join("workspace");
         fs::create_dir(&workspace).expect("workspace creates");
         let configuration = host_configuration(
-            DefaultCodingTools::new(&workspace).expect("default tools configure"),
+            TeaCodingToolsV2::new(&workspace).expect("Tea v2 tools configure"),
         )
         .expect("durable host configuration assembles");
         let harness = create_host_harness(

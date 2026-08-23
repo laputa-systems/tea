@@ -39,6 +39,40 @@ pass it to `with_operations`. The standard shell adapter starts with an empty en
 must explicitly choose `CommandEnvironment::inherited()` or add variables. No factory consults
 ambient cwd, home, `.pi`, sessions, credentials, or resource discovery.
 
+## Tea terminal v2 profile
+
+`DefaultCodingTools` and `PiDefaultCodingProfile` remain the explicit legacy-parity pair: their
+names, prompt, schemas, and fixture identity do not change. The repository-owned Tea terminal
+instead composes `TeaCodingToolsV2` with `TeaDefaultCodingProfileV2` and records the durable host
+identity `tea-terminal-host-v2`. This prevents a durable epoch or cache artifact from confusing
+the v2 `edit` contract with Pi's single-file `edit` contract.
+
+V2 retains the model-facing name `edit`, but its sole request shape is `files[]`. Each entry names
+one existing UTF-8 regular file, optional `expectedDigest` is the complete-file BLAKE3 value
+returned by `read(includeDigest=true)`, and all replacements are matched against original
+snapshots. The tool rejects duplicate canonical targets, stale digests, non-unique or overlapping
+matches, and mixed assistant batches before requesting one host transaction. Its compact success
+result is `Applied R replacements in F files.`
+
+The local host serializes revalidation through staged publication. It guarantees that all
+preconditions are rechecked before the first target mutation, attempts to restore every target on
+an ordinary publication failure, and reports `Indeterminate` when it cannot establish rollback.
+It does not claim cross-process locking, cross-platform atomic visibility (Windows publication may
+briefly remove one pathname), crash-atomic multi-file visibility, or durable recovery after process
+loss. `CodingOperations::commit_edit_transaction` is therefore an explicit host
+boundary: unsupported adapters fail instead of degrading into a loop of `write_file` calls.
+`read_file_snapshots` similarly gives remote adapters one size-bounded batch-read boundary; its
+compatibility default is sequential, while the terminal adapter moves its local implementation to
+the blocking pool and rejects oversized files from metadata before allocating their contents. V2
+deliberately has replay semantics of `Never`: a provider tool-call ID is not a durable
+invocation identity, so neither the core nor the local adapter caches commit receipts. A future
+durable idempotency design must carry an invocation key through the host context and retain
+recovery evidence before it can replay a request.
+
+The checked-in `tea-default-profile-v2.json` also pins a contract digest over the profile ID,
+system prompt, ordered names, descriptions, schemas, and execution modes. Loading the profile
+fails closed if executable definitions drift without an explicit capture update.
+
 ## Core-owned profile fixture
 
 The following hashes identify the source material used to produce the core-owned profile fixture.

@@ -6,9 +6,10 @@
 pub mod profile;
 pub mod tools;
 
-pub use profile::{PiDefaultCodingProfile, ProfileSpec};
+pub use profile::{PiDefaultCodingProfile, ProfileSpec, TeaDefaultCodingProfileV2};
 pub use tools::{
-    CodingOperations, CommandEnvironment, CommandOutput, DefaultCodingTools, DirectoryEntry,
-    EntryMetadata, GrepMatch, GrepOptions, LocalCodingOperations, OperationError, OperationFuture,
-    WorkspaceRoot,
+    CodingOperations, CommandEnvironment, CommandOutput, ConditionalFileEdit, DefaultCodingTools,
+    DirectoryEntry, EditTransaction, EditTransactionOutcome, EntryMetadata, FileSnapshot,
+    GrepMatch, GrepOptions, LocalCodingOperations, OperationError, OperationFuture,
+    TeaCodingToolsV2, WorkspaceRoot,
 };

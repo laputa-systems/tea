@@ -49,6 +49,9 @@ pub(crate) struct AgentInner {
     pub(crate) tool_result_projection: crate::tool::ToolResultProjectionPolicy,
     /// Immutable circuit-breaker policy; streak state is allocated per run.
     pub(crate) tool_failure_circuit_breaker: crate::tool::ToolFailureCircuitBreaker,
+    /// Volatile prompt-layout continuity shared by host-created agents when
+    /// a live session spans multiple durable operations.
+    pub(crate) prompt_layout_ledger: Arc<crate::measurement::PromptLayoutLedger>,
     /// Awaited observers in registration order.
     pub(crate) observers: Mutex<Vec<ObserverRegistration>>,
     /// Monotonic process-local observer registrations.

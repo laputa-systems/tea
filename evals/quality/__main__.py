@@ -10,6 +10,7 @@ import sys
 from .coding_cases import CodingCaseError
 from .coding_runner import CodingRunError, prepare_cache, run_coding_cases
 from .compaction import CompactionQualityError, run_compaction_quality
+from .multiedit import MultiEditQualityError, grade_verified_record, write_multiedit_task
 from .suite import AdapterError, ContractError, inspect_environment, run_fast, run_rust_allocation_probe
 
 
@@ -27,6 +28,9 @@ def parser() -> argparse.ArgumentParser:
         help="replace the checked-in contract baseline; requires --reason",
     )
     compaction.add_argument("--reason", help="required audit reason for --update-baseline")
+    multiedit = sub.add_parser("multiedit-disabled", help="materialize or grade the hermetic disabled-tool multiedit eval")
+    multiedit.add_argument("--out", type=Path, required=True, help="write the public-only task and optional grade report")
+    multiedit.add_argument("--record", type=Path, help="runner-produced hidden-validator record to grade")
     sub.add_parser("inspect-environment", help="print the explicit core-evaluation surfaces")
     resources = sub.add_parser("resources", help="measure Rust allocations and peak RSS with Rustybench")
     resources.add_argument("--out", type=Path, help="write the JSON resource artifact to this file")
@@ -84,6 +88,22 @@ def main(argv: list[str] | None = None) -> int:
             )
             print(f"artifacts: {args.out}")
             return status
+        if args.command == "multiedit-disabled":
+            task = write_multiedit_task(args.out)
+            if args.record is None:
+                print(f"multiedit disabled-tool task: {task}")
+                return 0
+            try:
+                record = json.loads(args.record.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as error:
+                raise MultiEditQualityError(f"cannot read trusted runner record: {error}") from error
+            if not isinstance(record, dict):
+                raise MultiEditQualityError("trusted runner record must be a JSON object")
+            grade = grade_verified_record(record)
+            report = args.out / "grade.json"
+            report.write_text(json.dumps(grade, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            print(f"multiedit disabled-tool grade: {grade['total_score']}/100; artifacts: {args.out}")
+            return 0 if grade["passed"] else 1
         if args.command == "resources":
             result = run_rust_allocation_probe(args.out)
             print(json.dumps(result, indent=2, sort_keys=True))
@@ -138,6 +158,9 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     except CompactionQualityError as error:
         print(f"quality compaction error: {error}", file=sys.stderr)
+        return 2
+    except MultiEditQualityError as error:
+        print(f"quality multiedit error: {error}", file=sys.stderr)
         return 2
     return 2
 

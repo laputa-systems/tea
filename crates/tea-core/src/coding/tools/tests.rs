@@ -5,13 +5,115 @@ use crate::tool::{ToolCall, ToolContext, ToolUpdateSink};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::state::{SerializedJson, ToolCallId};
 
 static NEXT_WORKSPACE: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Debug, Default)]
+struct BatchProbeOperations {
+    snapshot_calls: AtomicUsize,
+    commit_calls: AtomicUsize,
+    committed: Mutex<Option<EditTransaction>>,
+}
+
+impl BatchProbeOperations {
+    fn fail<'a, T: Send + 'a>(&'a self, operation: &str) -> OperationFuture<'a, T> {
+        Box::pin(std::future::ready(Err(OperationError::new(format!(
+            "unexpected host operation: {operation}",
+        )))))
+    }
+}
+
+impl CodingOperations for BatchProbeOperations {
+    fn read_file<'a>(&'a self, _path: &'a Path) -> OperationFuture<'a, Vec<u8>> {
+        self.fail("read_file")
+    }
+
+    fn read_file_snapshots<'a>(
+        &'a self,
+        paths: &'a [PathBuf],
+        max_total_bytes: usize,
+    ) -> OperationFuture<'a, Vec<FileSnapshot>> {
+        self.snapshot_calls.fetch_add(1, Ordering::Relaxed);
+        Box::pin(async move {
+            let mut total = 0_usize;
+            let mut snapshots = Vec::with_capacity(paths.len());
+            for path in paths {
+                let content = fs::read(path).map_err(|error| OperationError::new(error.to_string()))?;
+                total = total.saturating_add(content.len());
+                if total > max_total_bytes {
+                    return Err(OperationError::new("snapshot limit exceeded"));
+                }
+                snapshots.push(FileSnapshot {
+                    path: path.clone(),
+                    is_regular_file: true,
+                    content,
+                });
+            }
+            Ok(snapshots)
+        })
+    }
+
+    fn write_file<'a>(&'a self, _path: &'a Path, _content: &'a [u8]) -> OperationFuture<'a, ()> {
+        self.fail("write_file")
+    }
+
+    fn commit_edit_transaction<'a>(
+        &'a self,
+        transaction: &'a EditTransaction,
+        _cancellation: CancellationToken,
+    ) -> OperationFuture<'a, EditTransactionOutcome> {
+        self.commit_calls.fetch_add(1, Ordering::Relaxed);
+        *self.committed.lock().expect("committed transaction mutex") = Some(transaction.clone());
+        Box::pin(std::future::ready(Ok(EditTransactionOutcome::Committed)))
+    }
+
+    fn create_dir_all<'a>(&'a self, _path: &'a Path) -> OperationFuture<'a, ()> {
+        self.fail("create_dir_all")
+    }
+
+    fn metadata<'a>(&'a self, _path: &'a Path) -> OperationFuture<'a, EntryMetadata> {
+        self.fail("metadata")
+    }
+
+    fn read_dir<'a>(&'a self, _path: &'a Path) -> OperationFuture<'a, Vec<DirectoryEntry>> {
+        self.fail("read_dir")
+    }
+
+    fn find_files<'a>(
+        &'a self,
+        _root: &'a Path,
+        _pattern: &'a str,
+        _limit: usize,
+    ) -> OperationFuture<'a, Vec<String>> {
+        self.fail("find_files")
+    }
+
+    fn grep_files<'a>(
+        &'a self,
+        _root: &'a Path,
+        _pattern: &'a str,
+        _options: GrepOptions,
+    ) -> OperationFuture<'a, Vec<GrepMatch>> {
+        self.fail("grep_files")
+    }
+
+    fn execute_command<'a>(
+        &'a self,
+        _command: &'a str,
+        _cwd: &'a Path,
+        _timeout_seconds: Option<f64>,
+        _environment: &'a CommandEnvironment,
+        _cancellation: CancellationToken,
+        _updates: ToolUpdateSink,
+    ) -> OperationFuture<'a, CommandOutput> {
+        self.fail("execute_command")
+    }
+}
 
 fn workspace() -> PathBuf {
     let path = std::env::temp_dir().join(format!(
@@ -167,6 +269,219 @@ fn default_tools_are_ordered_and_writable() {
         fs::read_to_string(root.join("src/a.txt")).unwrap(),
         "one\nTWO\n"
     );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn tea_v2_edit_applies_all_files_from_one_original_snapshot() {
+    let root = workspace();
+    fs::write(root.join("first.txt"), "before first\n").unwrap();
+    fs::write(root.join("second.txt"), "before second\n").unwrap();
+    let tools = crate::coding::TeaCodingToolsV2::new(&root).unwrap();
+
+    let result = smol::block_on(tools.edit().execute(
+        call(
+            "edit",
+            r#"{"files":[{"path":"first.txt","edits":[{"oldText":"before","newText":"after"}]},{"path":"second.txt","edits":[{"oldText":"before","newText":"after"}]}]}"#,
+        ),
+        context(),
+        ToolUpdateSink::disabled(),
+    ))
+    .expect("v2 transaction should commit");
+
+    assert_eq!(result.content, "Applied 2 replacements in 2 files.");
+    assert_eq!(fs::read_to_string(root.join("first.txt")).unwrap(), "after first\n");
+    assert_eq!(fs::read_to_string(root.join("second.txt")).unwrap(), "after second\n");
+    assert!(tools.edit().requires_exclusive_batch());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn tea_v2_edit_crosses_one_batch_read_and_one_transaction_boundary() {
+    let root = workspace();
+    fs::write(root.join("first.txt"), "before first\n").unwrap();
+    fs::write(root.join("second.txt"), "before second\n").unwrap();
+    let host = Arc::new(BatchProbeOperations::default());
+    let operations: Arc<dyn CodingOperations> = host.clone();
+    let tools = crate::coding::TeaCodingToolsV2::with_operations(&root, operations).unwrap();
+
+    let result = smol::block_on(tools.edit().execute(
+        call(
+            "edit",
+            r#"{"files":[{"path":"first.txt","edits":[{"oldText":"before","newText":"after"}]},{"path":"second.txt","edits":[{"oldText":"before","newText":"after"}]}]}"#,
+        ),
+        context(),
+        ToolUpdateSink::disabled(),
+    ))
+    .expect("batch probe transaction should commit");
+
+    assert_eq!(result.content, "Applied 2 replacements in 2 files.");
+    assert_eq!(host.snapshot_calls.load(Ordering::Relaxed), 1);
+    assert_eq!(host.commit_calls.load(Ordering::Relaxed), 1);
+    let committed = host
+        .committed
+        .lock()
+        .expect("committed transaction mutex")
+        .clone()
+        .expect("transaction was captured");
+    assert_eq!(committed.files.len(), 2);
+    assert_eq!(committed.files[0].replacement_content, b"after first\n");
+    assert_eq!(committed.files[1].replacement_content, b"after second\n");
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn tea_v2_edit_rejects_any_invalid_file_before_writing_another() {
+    let root = workspace();
+    fs::write(root.join("first.txt"), "before first\n").unwrap();
+    fs::write(root.join("second.txt"), "before second\n").unwrap();
+    let tools = crate::coding::TeaCodingToolsV2::new(&root).unwrap();
+
+    let error = smol::block_on(tools.edit().execute(
+        call(
+            "edit",
+            r#"{"files":[{"path":"first.txt","edits":[{"oldText":"before","newText":"after"}]},{"path":"second.txt","edits":[{"oldText":"missing","newText":"after"}]}]}"#,
+        ),
+        context(),
+        ToolUpdateSink::disabled(),
+    ))
+    .expect_err("a nonmatching file must reject the whole transaction");
+
+    assert!(matches!(error, ToolError::Execution { tool, .. } if tool == "edit"));
+    assert_eq!(fs::read_to_string(root.join("first.txt")).unwrap(), "before first\n");
+    assert_eq!(fs::read_to_string(root.join("second.txt")).unwrap(), "before second\n");
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn tea_v2_edit_rejects_duplicate_canonical_paths_and_stale_digests() {
+    let root = workspace();
+    fs::create_dir_all(root.join("nested")).unwrap();
+    fs::write(root.join("nested/file.txt"), "before\n").unwrap();
+    let tools = crate::coding::TeaCodingToolsV2::new(&root).unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(root.join("nested/file.txt"), root.join("alias.txt")).unwrap();
+    #[cfg(unix)]
+    let duplicate_alias = "alias.txt";
+    #[cfg(not(unix))]
+    let duplicate_alias = "nested/../nested/file.txt";
+
+    let duplicate = smol::block_on(tools.edit().execute(
+        call(
+            "edit",
+            &format!(
+                r#"{{"files":[{{"path":"nested/file.txt","edits":[{{"oldText":"before","newText":"after"}}]}},{{"path":"{duplicate_alias}","edits":[{{"oldText":"before","newText":"after"}}]}}]}}"#
+            ),
+        ),
+        context(),
+        ToolUpdateSink::disabled(),
+    ));
+    assert!(matches!(duplicate, Err(ToolError::InvalidArguments { tool, .. }) if tool == "edit"));
+
+    let stale = smol::block_on(tools.edit().execute(
+        call(
+            "edit",
+            r#"{"files":[{"path":"nested/file.txt","expectedDigest":"0000000000000000000000000000000000000000000000000000000000000000","edits":[{"oldText":"before","newText":"after"}]}]}"#,
+        ),
+        context(),
+        ToolUpdateSink::disabled(),
+    ));
+    assert!(matches!(stale, Err(ToolError::Execution { tool, .. }) if tool == "edit"));
+    assert_eq!(fs::read_to_string(root.join("nested/file.txt")).unwrap(), "before\n");
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn tea_v2_edit_rejects_overlap_non_utf8_non_regular_and_oversized_snapshots() {
+    let root = workspace();
+    fs::write(root.join("overlap.txt"), "abcdef\n").unwrap();
+    fs::write(root.join("binary.dat"), [0xff, 0xfe]).unwrap();
+    fs::create_dir(root.join("directory")).unwrap();
+    fs::write(root.join("oversized.txt"), vec![b'x'; 4 * 1024 * 1024 + 1]).unwrap();
+    let tools = crate::coding::TeaCodingToolsV2::new(&root).unwrap();
+
+    for arguments in [
+        r#"{"files":[{"path":"overlap.txt","edits":[{"oldText":"bcd","newText":"B"},{"oldText":"cde","newText":"C"}]}]}"#,
+        r#"{"files":[{"path":"binary.dat","edits":[{"oldText":"x","newText":"y"}]}]}"#,
+        r#"{"files":[{"path":"directory","edits":[{"oldText":"x","newText":"y"}]}]}"#,
+        r#"{"files":[{"path":"oversized.txt","edits":[{"oldText":"x","newText":"y"}]}]}"#,
+    ] {
+        let error = smol::block_on(tools.edit().execute(
+            call("edit", arguments),
+            context(),
+            ToolUpdateSink::disabled(),
+        ))
+        .expect_err("every invalid snapshot plan must be rejected");
+        assert!(matches!(error, ToolError::Execution { tool, .. } if tool == "edit"));
+    }
+
+    assert_eq!(fs::read_to_string(root.join("overlap.txt")).unwrap(), "abcdef\n");
+    assert_eq!(fs::read(root.join("binary.dat")).unwrap(), [0xff, 0xfe]);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn local_edit_transaction_revalidates_every_preimage_and_honors_precommit_cancellation() {
+    let root = workspace();
+    let first = root.join("first.txt");
+    let second = root.join("second.txt");
+    fs::write(&first, "first-original").unwrap();
+    fs::write(&second, "second-changed").unwrap();
+    let transaction = EditTransaction {
+        files: vec![
+            ConditionalFileEdit {
+                path: first.clone(),
+                expected_content: b"first-original".to_vec(),
+                replacement_content: b"first-replacement".to_vec(),
+            },
+            ConditionalFileEdit {
+                path: second.clone(),
+                expected_content: b"second-original".to_vec(),
+                replacement_content: b"second-replacement".to_vec(),
+            },
+        ],
+    };
+    let operations = LocalCodingOperations;
+    let stale = smol::block_on(
+        operations.commit_edit_transaction(&transaction, CancellationToken::new()),
+    )
+    .expect("stale precondition has a transaction outcome");
+    assert!(matches!(stale, EditTransactionOutcome::RolledBack { .. }));
+    assert_eq!(fs::read(&first).unwrap(), b"first-original");
+    assert_eq!(fs::read(&second).unwrap(), b"second-changed");
+
+    let cancellation = CancellationToken::new();
+    cancellation.cancel();
+    let cancelled = smol::block_on(operations.commit_edit_transaction(&transaction, cancellation))
+        .expect_err("precommit cancellation must not produce a commit receipt");
+    assert_eq!(cancelled, OperationError::new("cancelled"));
+    assert_eq!(fs::read(&first).unwrap(), b"first-original");
+    assert_eq!(fs::read(&second).unwrap(), b"second-changed");
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn tea_v2_profile_is_explicit_and_matches_the_v2_registry() {
+    let root = workspace();
+    let tools = crate::coding::TeaCodingToolsV2::new(&root).unwrap();
+    let profile = crate::coding::TeaDefaultCodingProfileV2::pinned_default().unwrap();
+    let registry = tools.registry();
+    profile.validate_registry(&registry).unwrap();
+    assert_eq!(profile.profile_id(), "tea-default-coding-profile/v2");
+    assert_eq!(
+        profile.contract_digest().to_hex(),
+        "a4dd43b61caddb4eef9f0af1541487ca0ccd9d7cd7d221ab18d8b547900833b3",
+    );
+    assert_eq!(
+        profile.active_tool_names().collect::<Vec<_>>(),
+        ["read", "bash", "edit", "write"]
+    );
+    let executable = tools
+        .coding_tools()
+        .iter()
+        .map(|tool| crate::tool::ToolDefinition::from_tool(tool.as_ref()))
+        .collect::<Vec<_>>();
+    assert_eq!(executable, profile.tool_definitions());
     fs::remove_dir_all(root).unwrap();
 }
 

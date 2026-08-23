@@ -3,6 +3,10 @@
 use std::sync::{Arc, Mutex};
 use tea_core::Agent;
 use tea_core::measurement::measure_prompt_cacheability;
+use tea_core::measurement::{PromptCacheScope, PromptLayoutLedger, PromptLayoutPolicy, PromptContinuity};
+use tea_core::hooks::{AfterToolCall, BeforeToolCall, ContextEnvelope, HookSet};
+use tea_core::error::HookError;
+use tea_core::tool::{AgentToolResult, ToolCall};
 use tea_core::scheduler::{
     CancellationToken, ModelFuture, ModelProvider, ModelRequest, ModelStream, ModelStreamEvent,
 };
@@ -11,6 +15,30 @@ use tea_core::state::{ModelDescriptor, StopReason, ThinkingLevel};
 #[derive(Clone, Default)]
 struct RecordingProvider {
     requests: Arc<Mutex<Vec<ModelRequest>>>,
+}
+
+struct RewritingHooks;
+
+impl HookSet for RewritingHooks {
+    fn before_tool_call(&self, _call: &ToolCall) -> Result<BeforeToolCall, HookError> {
+        Ok(BeforeToolCall::Allow)
+    }
+
+    fn after_tool_call(
+        &self,
+        _call: &ToolCall,
+        _result: &AgentToolResult,
+    ) -> Result<AfterToolCall, HookError> {
+        Ok(AfterToolCall::default())
+    }
+
+    fn transform_context(&self, context: ContextEnvelope) -> Result<ContextEnvelope, HookError> {
+        Ok(context)
+    }
+
+    fn convert_to_llm(&self, context: ContextEnvelope) -> Result<String, HookError> {
+        Ok(format!("rewritten:{}", context.messages.len()))
+    }
 }
 
 impl ModelProvider for RecordingProvider {
@@ -91,5 +119,98 @@ fn adjacent_text_turns_keep_the_prior_context_prefix() {
             .iter()
             .map(|measurement| measurement.common_context_prefix_ratio_millionths)
             .collect::<Vec<_>>(),
+    );
+}
+
+#[test]
+fn require_exact_extension_rejects_domain_change_before_provider_call() {
+    let provider = RecordingProvider::default();
+    let agent = Agent::builder()
+        .system_prompt("stable system prompt")
+        .model(ModelDescriptor {
+            provider: "fixture".into(),
+            model: "cache-policy".into(),
+            revision: None,
+        })
+        .thinking_level(ThinkingLevel::Off)
+        .prompt_layout_ledger(Arc::new(
+            PromptLayoutLedger::new(PromptCacheScope::new(7))
+                .policy(PromptLayoutPolicy::RequireExactExtension),
+        ))
+        .model_provider(Arc::new(provider.clone()))
+        .build();
+    smol::block_on(
+        agent
+            .start_prompt("first")
+            .expect("first run starts")
+            .drive(),
+    )
+    .expect("first run settles");
+    let mut configuration = agent.configuration();
+    configuration.system_prompt = "changed system prompt".into();
+    agent
+        .replace_configuration(configuration)
+        .expect("idle configuration replacement");
+    let error = smol::block_on(
+        agent
+            .start_prompt("second")
+            .expect("second run starts")
+            .drive(),
+    )
+    .expect_err("domain change is rejected before provider dispatch");
+    assert_eq!(
+        error,
+        tea_core::error::CoreError::PromptLayoutRejected {
+            continuity: PromptContinuity::DomainChanged,
+        }
+    );
+    assert_eq!(
+        provider
+            .requests
+            .lock()
+            .expect("recording provider mutex poisoned")
+            .len(),
+        1,
+    );
+}
+
+#[test]
+fn require_exact_extension_rejects_same_domain_rewrite_before_provider_call() {
+    let provider = RecordingProvider::default();
+    let agent = Agent::builder()
+        .system_prompt("stable system prompt")
+        .hooks(Arc::new(RewritingHooks))
+        .model(ModelDescriptor {
+            provider: "fixture".into(),
+            model: "cache-policy".into(),
+            revision: None,
+        })
+        .thinking_level(ThinkingLevel::Off)
+        .prompt_layout_ledger(Arc::new(
+            PromptLayoutLedger::default().policy(PromptLayoutPolicy::RequireExactExtension),
+        ))
+        .model_provider(Arc::new(provider.clone()))
+        .build();
+    for prompt in ["first", "second"] {
+        let run = agent.start_prompt(prompt).expect("run starts");
+        let result = smol::block_on(run.drive());
+        if prompt == "first" {
+            result.expect("first run settles");
+        } else {
+            assert_eq!(
+                result.expect_err("same-domain rewrite is rejected"),
+                tea_core::error::CoreError::PromptLayoutRejected {
+                    continuity: PromptContinuity::Rebased,
+                }
+            );
+        }
+    }
+    assert_eq!(
+        provider
+            .requests
+            .lock()
+            .expect("recording provider mutex poisoned")
+            .len(),
+        1,
     );
 }

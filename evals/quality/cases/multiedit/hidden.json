@@ -1,0 +1,8 @@
+{
+  "schema_version": "tea-multiedit-disabled-quality/v2",
+  "id": "multiedit-hidden-fixture/v1",
+  "expected_files": {
+    "lib/alpha.txt": "2954ba22f71d9d2274a8cec49c578cc3521c38ebdca6bfff3793cc1f9872ccba",
+    "lib/beta.txt": "51219104ce62163456a70a078e769bc3c494cda79ab7b0e88058c9bc978c5c61"
+  }
+}

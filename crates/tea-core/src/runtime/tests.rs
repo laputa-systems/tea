@@ -322,6 +322,69 @@ fn jsonl_runtime_reopens_the_persisted_no_extension_catalog() {
     reopened
         .verify_durable_state()
         .expect("reopened runtime verifies catalog and artifacts");
+    assert_eq!(
+        reopened
+            .measure_prompt_layout(&ModelRequest::default())
+            .continuity,
+        crate::measurement::PromptContinuity::FirstRequest,
+        "reopen starts a fresh volatile prompt-layout continuity ledger",
+    );
     drop(reopened);
     std::fs::remove_dir_all(&directory).expect("fixture JSONL directory removes");
+}
+
+#[test]
+fn live_runtime_joins_prompt_layout_across_fresh_operations() {
+    smol::block_on(async {
+        let provider = Arc::new(QueuedProvider {
+            streams: Mutex::new(VecDeque::from([
+                ModelStream {
+                    events: vec![
+                        ModelStreamEvent::TextDelta("first response".into()),
+                        ModelStreamEvent::End(StopReason::Stop),
+                    ],
+                },
+                ModelStream {
+                    events: vec![
+                        ModelStreamEvent::TextDelta("second response".into()),
+                        ModelStreamEvent::End(StopReason::Stop),
+                    ],
+                },
+            ])),
+        });
+        let store = Arc::new(MemoryArtifactStore::default());
+        let (runtime, _) = build_runtime("runtime-prompt-layout", provider, store.clone());
+        let first = runtime.run_prompt("first operation").await.expect("first settles");
+        let second = runtime
+            .run_prompt("second operation")
+            .await
+            .expect("second settles");
+        let snapshot = runtime.snapshot().expect("snapshot reads");
+        let traces = snapshot
+            .facts()
+            .iter()
+            .filter_map(|stored| match &stored.fact {
+                SessionFact::TraceArtifact(trace) if trace.operation_id == *first.id() => {
+                    Some((false, store.get(trace.artifact_id).expect("trace artifact reads")))
+                }
+                SessionFact::TraceArtifact(trace) if trace.operation_id == *second.id() => {
+                    Some((true, store.get(trace.artifact_id).expect("trace artifact reads")))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(traces.len(), 2);
+        let second_trace = traces
+            .iter()
+            .find(|(second, _)| *second)
+            .expect("second trace is present");
+        let second_trace = std::str::from_utf8(&second_trace.1).expect("trace UTF-8");
+        assert!(second_trace.contains("deterministic_common_prefix_bytes"));
+        let first_trace = traces
+            .iter()
+            .find(|(second, _)| !*second)
+            .expect("first trace is present");
+        let first_trace = std::str::from_utf8(&first_trace.1).expect("trace UTF-8");
+        assert!(!first_trace.contains("deterministic_common_prefix_bytes"));
+    });
 }

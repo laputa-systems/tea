@@ -54,6 +54,10 @@ pub enum CoreError {
     InvalidToolResultProjectionPolicy { message: String },
     /// A host-classified fatal or repeated retryable tool failure stopped the run.
     ToolCircuitBreaker { message: String },
+    /// Prompt-layout policy rejected a continuity transition before dispatch.
+    PromptLayoutRejected {
+        continuity: crate::measurement::PromptContinuity,
+    },
 }
 
 /// A state-machine transition was rejected.
@@ -106,6 +110,9 @@ impl fmt::Display for CoreError {
             | Self::InvalidToolResultProjectionPolicy { message } => f.write_str(message),
             Self::ToolCircuitBreaker { message } => {
                 write!(f, "tool circuit breaker stopped the run: {message}")
+            }
+            Self::PromptLayoutRejected { continuity } => {
+                write!(f, "prompt layout policy rejected {continuity:?} continuity")
             }
         }
     }

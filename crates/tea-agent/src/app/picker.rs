@@ -10,6 +10,7 @@ use super::durable::list_host_sessions;
 use super::error::AppError;
 use super::host::model_candidates;
 use super::mock;
+use super::nonblocking_operations::NonblockingCodingOperations;
 use super::preferences::save_last_model;
 use super::runtime::App;
 use super::state::{Picker, UiSurface};
@@ -333,7 +334,10 @@ impl App {
             .workspace
             .as_ref()
             .ok_or_else(|| AppError::Setup("workspace is not initialized".into()))?;
-        let tools = tea_core::coding::DefaultCodingTools::new(workspace)
+        let tools = tea_core::coding::TeaCodingToolsV2::with_operations(
+            workspace,
+            Arc::new(NonblockingCodingOperations),
+        )
             .map_err(|error| AppError::Setup(format!("invalid --cwd: {error}")))?;
         super::host::host_configuration(tools)
     }

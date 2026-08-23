@@ -2,6 +2,8 @@ use super::super::*;
 
 struct CancellingPendingParallelTool;
 
+struct CommitReceiptAfterCancellationTool;
+
 struct ExclusiveFixtureTool {
     calls: Arc<Mutex<u32>>,
     schema: tea_protocol::JsonValue,
@@ -107,6 +109,52 @@ impl AgentTool for CancellingPendingParallelTool {
     }
 }
 
+impl AgentTool for CommitReceiptAfterCancellationTool {
+    fn name(&self) -> &str {
+        "transactional"
+    }
+
+    fn description(&self) -> &str {
+        "fixture transaction that settles its commit receipt after cancellation"
+    }
+
+    fn schema(&self) -> &tea_protocol::JsonValue {
+        static SCHEMA: std::sync::OnceLock<tea_protocol::JsonValue> = std::sync::OnceLock::new();
+        SCHEMA.get_or_init(|| tea_protocol::JsonValue::parse(r#"{"type":"object"}"#).unwrap())
+    }
+
+    fn cancellation_settlement_mode(&self) -> crate::tool::CancellationSettlementMode {
+        crate::tool::CancellationSettlementMode::AwaitFuture
+    }
+
+    fn execute<'a>(
+        &'a self,
+        call: ToolCall,
+        context: ToolContext,
+        _updates: ToolUpdateSink,
+    ) -> ToolFuture<'a> {
+        let mut commit_requested = false;
+        Box::pin(std::future::poll_fn(move |task| {
+            if !commit_requested {
+                commit_requested = true;
+                context.cancellation.cancel();
+                task.waker().wake_by_ref();
+                return Poll::Pending;
+            }
+            Poll::Ready(Ok(AgentToolResult {
+                tool_call_id: call.id.clone(),
+                content: "commit receipt: committed".into(),
+                details: None,
+                usage: None,
+                added_tool_names: Vec::new(),
+                terminate: false,
+                is_error: false,
+                failure: None,
+            }))
+        }))
+    }
+}
+
 #[test]
 fn cancellation_drops_a_parallel_tool_that_never_settles() {
     smol::block_on(async {
@@ -147,6 +195,51 @@ fn cancellation_drops_a_parallel_tool_that_never_settles() {
         Ok::<(), CoreError>(())
     })
     .expect("parallel cancellation must settle the run");
+}
+
+#[test]
+fn await_future_settles_a_transaction_receipt_after_cancellation() {
+    smol::block_on(async {
+        let call_id = ToolCallId::new("transactional-cancel").expect("fixture call ID");
+        let provider = Arc::new(ScriptedProvider::new([
+            ModelStream {
+                events: vec![
+                    ModelStreamEvent::ToolCall(AgentToolCall {
+                        id: call_id.clone(),
+                        name: "transactional".into(),
+                        arguments: SerializedJson::new("{}"),
+                    }),
+                    ModelStreamEvent::End(StopReason::ToolUse),
+                ],
+            },
+            ModelStream {
+                events: vec![ModelStreamEvent::End(StopReason::Cancelled)],
+            },
+        ]));
+        let agent = Agent::builder()
+            .model_provider(provider)
+            .tool(Arc::new(CommitReceiptAfterCancellationTool))
+            .build();
+        let run = agent.start_prompt("settle the transaction receipt")?;
+
+        assert_eq!(run.drive().await, Err(CoreError::Cancelled));
+        let events = run.events();
+        let receipt_end = events
+            .iter()
+            .position(|event| matches!(
+                &event.kind,
+                AgentEventKind::ToolExecutionEnd { result, .. }
+                    if result.content == "commit receipt: committed" && !result.is_error
+            ))
+            .expect("transaction receipt must settle");
+        let agent_end = events
+            .iter()
+            .position(|event| matches!(event.kind, AgentEventKind::AgentEnd { .. }))
+            .expect("run ends after the receipt");
+        assert!(receipt_end < agent_end);
+        Ok::<(), CoreError>(())
+    })
+    .expect("transactional cancellation must settle its receipt");
 }
 
 #[test]

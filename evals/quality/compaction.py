@@ -214,7 +214,7 @@ def _run_target(target: str) -> dict[str, Any]:
         "tea-core",
     ]
     if target == "trace":
-        command.extend(("--features", "trace", "--lib", "trace::tests"))
+        command.extend(("--lib", "trace::tests"))
     else:
         command.extend(("--test", target))
     completed = subprocess.run(

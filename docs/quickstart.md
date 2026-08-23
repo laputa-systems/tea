@@ -143,26 +143,32 @@ let policy = AutomaticCompactionPolicy {
 # let _ = policy;
 ```
 
-## Add the pinned coding profile
+## Add Tea's default coding profile
 
 The default profile is optional. When selected, provide an existing workspace
-explicitly; it never infers a working directory or reads Pi configuration.
+explicitly; it never infers a working directory or reads ambient configuration.
 
 ```rust,no_run
-use tea_core::{Agent, DefaultCodingTools};
+use tea_core::Agent;
+use tea_core::coding::{TeaCodingToolsV2, TeaDefaultCodingProfileV2};
 
-let tools = DefaultCodingTools::new("/absolute/workspace")?;
+let tools = TeaCodingToolsV2::new("/absolute/workspace")?;
+let profile = TeaDefaultCodingProfileV2::pinned_default()?;
+let registry = tools.registry();
+profile.validate_registry(&registry)?;
 let agent = Agent::builder()
     // Also configure .model_provider(...) before running.
-    .pinned_default_coding_profile(tools)?
+    .system_prompt(profile.system_prompt_for_workspace(tools.workspace().as_path()))
+    .tools(registry)
     .build();
 # let _ = agent;
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-The active pinned tools are `read`, `bash`, `edit`, and `write`. The complete
-captured set also contains `grep`, `find`, and `ls`, and every operation is
-replaceable through `DefaultCodingTools::with_operations`. See the
+The active tools are `read`, `bash`, transactional multi-file `edit`, and
+`write`; every operation is replaceable through
+`TeaCodingToolsV2::with_operations`. `DefaultCodingTools` remains available
+only for explicit compatibility with the pinned Pi v1 profile. See the
 [default-profile guide](default-coding-profile.md) before granting a real
 filesystem or process capability.
 

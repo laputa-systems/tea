@@ -52,6 +52,26 @@ The resource probe uses the Rust-only
 `crates/tea-core/benches/quality_memory.rs`. Allocation and timing values
 are diagnostic and do not gate fixture results.
 
+## Disabled-tool multiedit design eval
+
+`python3 -m evals.quality multiedit-disabled --out <dir>` materializes a
+hermetic public task whose capability envelope contains only `read`, `bash`,
+legacy `edit`, and `write`; the proposed batch capability is unavailable. The
+copied task contains no reference schema or grader. A runner executes hidden
+filesystem, stale/overlap/escape/non-regular, fault-recovery, and cancellation
+checks and emits a trusted record bound to a hidden-case digest; pass that
+runner record via `--record` to grade a 70 correctness / 15 design-and-proof /
+15 efficiency rubric. The vector includes tool calls, turns, wall-clock,
+output tokens, remote round trips, and context bytes. A lower invocation count
+cannot compensate for stale, partial, escaping, overlapping, recovery, or
+cancellation failures, and a candidate must meet the contract/proof/limitations
+threshold independently of its efficiency score.
+
+The runner ID and case digest are mix-up guards, not cryptographic
+authentication. The evaluator must create the record outside the candidate
+workspace and must never pass the candidate's `evidence.json` directly to the
+grader.
+
 ## Live coding gate
 
 The coding tier is an explicit provider-opt-in check for three pinned
