@@ -93,8 +93,11 @@ def hidden_case() -> dict[str, Any]:
     if not isinstance(value, dict) or value.get("schema_version") != SCHEMA:
         raise MultiEditQualityError("hidden multiedit case has an unsupported schema")
     expected = value.get("expected_files")
+    initial = value.get("initial_files")
     if not isinstance(expected, dict) or not expected:
         raise MultiEditQualityError("hidden multiedit case requires expected_files")
+    if not isinstance(initial, dict) or set(initial) != set(expected):
+        raise MultiEditQualityError("hidden multiedit case requires matching initial_files")
     for relative, digest in expected.items():
         path = Path(relative) if isinstance(relative, str) else Path("/")
         if (
@@ -107,6 +110,8 @@ def hidden_case() -> dict[str, Any]:
             or any(character not in "0123456789abcdef" for character in digest)
         ):
             raise MultiEditQualityError("hidden multiedit case contains an unsafe path or digest")
+        if not isinstance(initial[relative], str):
+            raise MultiEditQualityError("hidden multiedit case initial file content must be UTF-8 text")
     return value
 
 

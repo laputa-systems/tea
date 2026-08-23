@@ -8,6 +8,7 @@ use super::contract::{
 use super::search::{GlobMatcher, local_grep, walk_files};
 use crate::scheduler::CancellationToken;
 use crate::tool::{ToolUpdate, ToolUpdateSink};
+use std::future::Future;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 #[cfg(unix)]
@@ -15,7 +16,8 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::task::{Context, Poll, Waker};
 
 static COMMAND_CAPTURE_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
 static EDIT_TRANSACTION_STAGE_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
@@ -26,20 +28,96 @@ static EDIT_TRANSACTION_STAGE_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
 static LOCAL_EDIT_TRANSACTION_GUARD: OnceLock<Mutex<()>> = OnceLock::new();
 
 /// Standard local filesystem/process implementation.
+///
+/// Each blocking operation starts on a standard-library worker thread when
+/// its future is first polled. This keeps the public default composition
+/// executor-neutral while allowing independent parallel tool calls to begin
+/// together. Callers that need a bounded/shared blocking pool can still
+/// provide their own [`CodingOperations`] through `with_operations`.
 #[derive(Clone, Debug)]
 pub struct LocalCodingOperations;
 
+struct BlockingOperationState<T> {
+    result: Option<Result<T, OperationError>>,
+    waker: Option<Waker>,
+    work: Option<Box<dyn FnOnce() -> Result<T, OperationError> + Send>>,
+}
+
+struct BlockingOperation<T> {
+    state: Arc<Mutex<BlockingOperationState<T>>>,
+}
+
+impl<T: Send + 'static> Future for BlockingOperation<T> {
+    type Output = Result<T, OperationError>;
+
+    fn poll(self: std::pin::Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        let work = {
+            let mut state = self.state.lock().expect("blocking operation state mutex poisoned");
+            if let Some(result) = state.result.take() {
+                return Poll::Ready(result);
+            }
+            state.waker = Some(context.waker().clone());
+            state.work.take()
+        };
+        if let Some(work) = work {
+            let worker_state = Arc::clone(&self.state);
+            let spawned = std::thread::Builder::new()
+                .name("tea-coding-operation".into())
+                .spawn(move || {
+                    let result = work();
+                    let waker = {
+                        let mut state = worker_state
+                            .lock()
+                            .expect("blocking operation state mutex poisoned");
+                        state.result = Some(result);
+                        state.waker.take()
+                    };
+                    if let Some(waker) = waker {
+                        waker.wake();
+                    }
+                });
+            if let Err(error) = spawned {
+                let waker = {
+                    let mut state = self.state.lock().expect("blocking operation state mutex poisoned");
+                    state.result = Some(Err(OperationError::new(format!(
+                        "cannot start local coding operation: {error}",
+                    ))));
+                    state.waker.take()
+                };
+                if let Some(waker) = waker {
+                    waker.wake();
+                }
+            }
+        }
+        Poll::Pending
+    }
+}
+
+fn blocking_operation<T: Send + 'static>(
+    work: impl FnOnce() -> Result<T, OperationError> + Send + 'static,
+) -> BlockingOperation<T> {
+    let state = Arc::new(Mutex::new(BlockingOperationState {
+        result: None,
+        waker: None,
+        work: Some(Box::new(work)),
+    }));
+    BlockingOperation { state }
+}
+
 impl CodingOperations for LocalCodingOperations {
     fn read_file<'a>(&'a self, path: &'a Path) -> OperationFuture<'a, Vec<u8>> {
-        Box::pin(async move {
+        let path = path.to_path_buf();
+        Box::pin(blocking_operation(move || {
             std::fs::read(path).map_err(|error| OperationError::new(error.to_string()))
-        })
+        }))
     }
 
     fn write_file<'a>(&'a self, path: &'a Path, content: &'a [u8]) -> OperationFuture<'a, ()> {
-        Box::pin(async move {
+        let path = path.to_path_buf();
+        let content = content.to_vec();
+        Box::pin(blocking_operation(move || {
             std::fs::write(path, content).map_err(|error| OperationError::new(error.to_string()))
-        })
+        }))
     }
 
     fn commit_edit_transaction<'a>(
@@ -47,24 +125,29 @@ impl CodingOperations for LocalCodingOperations {
         transaction: &'a EditTransaction,
         cancellation: CancellationToken,
     ) -> OperationFuture<'a, EditTransactionOutcome> {
-        Box::pin(async move { commit_local_edit_transaction(transaction, &cancellation) })
+        let transaction = transaction.clone();
+        Box::pin(blocking_operation(move || {
+            commit_local_edit_transaction(&transaction, &cancellation)
+        }))
     }
 
     fn create_dir_all<'a>(&'a self, path: &'a Path) -> OperationFuture<'a, ()> {
-        Box::pin(async move {
+        let path = path.to_path_buf();
+        Box::pin(blocking_operation(move || {
             std::fs::create_dir_all(path).map_err(|error| OperationError::new(error.to_string()))
-        })
+        }))
     }
 
     fn metadata<'a>(&'a self, path: &'a Path) -> OperationFuture<'a, EntryMetadata> {
-        Box::pin(async move {
+        let path = path.to_path_buf();
+        Box::pin(blocking_operation(move || {
             let metadata =
                 std::fs::metadata(path).map_err(|error| OperationError::new(error.to_string()))?;
             Ok(EntryMetadata {
                 is_directory: metadata.is_dir(),
                 is_regular_file: metadata.is_file(),
             })
-        })
+        }))
     }
 
     fn read_file_snapshots<'a>(
@@ -72,12 +155,13 @@ impl CodingOperations for LocalCodingOperations {
         paths: &'a [PathBuf],
         max_total_bytes: usize,
     ) -> OperationFuture<'a, Vec<FileSnapshot>> {
-        Box::pin(async move {
+        let paths = paths.to_vec();
+        Box::pin(blocking_operation(move || {
             let mut snapshots = Vec::with_capacity(paths.len());
             let mut declared_total_bytes = 0_usize;
             let mut returned_total_bytes = 0_usize;
             for path in paths {
-                let metadata = fs::metadata(path)
+                let metadata = fs::metadata(&path)
                     .map_err(|error| OperationError::new(error.to_string()))?;
                 let is_regular_file = metadata.is_file();
                 if is_regular_file {
@@ -91,7 +175,7 @@ impl CodingOperations for LocalCodingOperations {
                     }
                 }
                 let content = if is_regular_file {
-                    fs::read(path).map_err(|error| OperationError::new(error.to_string()))?
+                    fs::read(&path).map_err(|error| OperationError::new(error.to_string()))?
                 } else {
                     Vec::new()
                 };
@@ -108,11 +192,12 @@ impl CodingOperations for LocalCodingOperations {
                 });
             }
             Ok(snapshots)
-        })
+        }))
     }
 
     fn read_dir<'a>(&'a self, path: &'a Path) -> OperationFuture<'a, Vec<DirectoryEntry>> {
-        Box::pin(async move {
+        let path = path.to_path_buf();
+        Box::pin(blocking_operation(move || {
             let mut entries = Vec::new();
             for entry in
                 std::fs::read_dir(path).map_err(|error| OperationError::new(error.to_string()))?
@@ -127,7 +212,7 @@ impl CodingOperations for LocalCodingOperations {
                 });
             }
             Ok(entries)
-        })
+        }))
     }
 
     fn find_files<'a>(
@@ -136,13 +221,15 @@ impl CodingOperations for LocalCodingOperations {
         pattern: &'a str,
         limit: usize,
     ) -> OperationFuture<'a, Vec<String>> {
-        Box::pin(async move {
-            let matcher = GlobMatcher::new(pattern)?;
+        let root = root.to_path_buf();
+        let pattern = pattern.to_owned();
+        Box::pin(blocking_operation(move || {
+            let matcher = GlobMatcher::new(&pattern)?;
             let mut output = Vec::new();
-            walk_files(root, root, &matcher, limit, &mut output)?;
+            walk_files(&root, &root, &matcher, limit, &mut output)?;
             output.sort();
             Ok(output)
-        })
+        }))
     }
 
     fn grep_files<'a>(
@@ -151,7 +238,9 @@ impl CodingOperations for LocalCodingOperations {
         pattern: &'a str,
         options: GrepOptions,
     ) -> OperationFuture<'a, Vec<GrepMatch>> {
-        Box::pin(async move { local_grep(root, pattern, options) })
+        let root = root.to_path_buf();
+        let pattern = pattern.to_owned();
+        Box::pin(blocking_operation(move || local_grep(&root, &pattern, options)))
     }
 
     fn execute_command<'a>(
@@ -163,16 +252,19 @@ impl CodingOperations for LocalCodingOperations {
         cancellation: CancellationToken,
         updates: ToolUpdateSink,
     ) -> OperationFuture<'a, CommandOutput> {
-        Box::pin(async move {
+        let command = command.to_owned();
+        let cwd = cwd.to_path_buf();
+        let environment = environment.clone();
+        Box::pin(blocking_operation(move || {
             execute_local_command(
-                command,
-                cwd,
+                &command,
+                &cwd,
                 timeout_seconds,
-                environment,
+                &environment,
                 &cancellation,
                 updates,
             )
-        })
+        }))
     }
 }
 
@@ -505,4 +597,77 @@ fn read_command_capture(path: &Path) -> Result<Vec<u8>, OperationError> {
     file.read_to_end(&mut bytes)
         .map_err(|error| OperationError::new(format!("cannot read command capture: {error}")))?;
     Ok(bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn workspace() -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "tea-core-local-operations-{}",
+            COMMAND_CAPTURE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&path).expect("workspace creates");
+        path
+    }
+
+    #[test]
+    fn default_local_operations_begin_parallel_commands_before_either_completes() {
+        let root = workspace();
+        struct ReleaseGuard {
+            root: PathBuf,
+        }
+        impl Drop for ReleaseGuard {
+            fn drop(&mut self) {
+                let _ = fs::write(self.root.join("first.release"), b"");
+                let _ = fs::write(self.root.join("second.release"), b"");
+            }
+        }
+        let release_guard = ReleaseGuard { root: root.clone() };
+        let first_root = root.clone();
+        let second_root = root.clone();
+        let first = smol::spawn(async move {
+            LocalCodingOperations
+                .execute_command(
+                    "touch first.started; while [ ! -e first.release ]; do sleep 0.01; done; printf first-done",
+                    &first_root,
+                    None,
+                    &CommandEnvironment::empty(),
+                    CancellationToken::new(),
+                    ToolUpdateSink::disabled(),
+                )
+                .await
+        });
+        let second = smol::spawn(async move {
+            LocalCodingOperations
+                .execute_command(
+                    "touch second.started; while [ ! -e second.release ]; do sleep 0.01; done; printf second-done",
+                    &second_root,
+                    None,
+                    &CommandEnvironment::empty(),
+                    CancellationToken::new(),
+                    ToolUpdateSink::disabled(),
+                )
+                .await
+        });
+        let both_started = smol::block_on(async {
+            for _ in 0..200 {
+                if root.join("first.started").is_file() && root.join("second.started").is_file() {
+                    return true;
+                }
+                smol::Timer::after(Duration::from_millis(10)).await;
+            }
+            false
+        });
+        fs::write(root.join("first.release"), b"").expect("first command releases");
+        fs::write(root.join("second.release"), b"").expect("second command releases");
+        let (first, second) = smol::block_on(async { smol::future::zip(first, second).await });
+        assert!(both_started, "both commands must start before either is released");
+        assert_eq!(first.expect("first command").stdout, b"first-done");
+        assert_eq!(second.expect("second command").stdout, b"second-done");
+        drop(release_guard);
+        let _ = fs::remove_dir_all(root);
+    }
 }

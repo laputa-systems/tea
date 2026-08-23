@@ -229,7 +229,8 @@ impl TeaDefaultCodingProfileV2 {
         &self.profile_id
     }
 
-    /// Digest of the captured prompt and ordered executable definitions.
+    /// Digest of the captured prompt and ordered executable definitions,
+    /// including scheduling and transactional-settlement safety.
     pub fn contract_digest(&self) -> Digest {
         self.contract_digest
     }
@@ -273,7 +274,7 @@ impl TeaDefaultCodingProfileV2 {
 }
 
 fn tea_v2_contract_digest(profile_id: &str, spec: &ProfileSpec) -> Digest {
-    let mut writer = CanonicalHashWriter::new("tea-default-coding-profile-v2", 2, 1);
+    let mut writer = CanonicalHashWriter::new("tea-default-coding-profile-v2", 2, 2);
     writer.string("profile_id", profile_id);
     writer.string("system_prompt", &spec.system_prompt);
     writer.u64("tool_count", spec.tools.len() as u64);
@@ -295,37 +296,56 @@ fn tea_v2_contract_digest(profile_id: &str, spec: &ProfileSpec) -> Digest {
                 crate::tool::ToolExecutionMode::Parallel => "parallel",
             },
         );
+        writer.boolean(
+            "tool_requires_exclusive_batch",
+            tool.requires_exclusive_batch,
+        );
+        writer.string(
+            "tool_cancellation_settlement_mode",
+            match tool.cancellation_settlement_mode {
+                crate::tool::CancellationSettlementMode::DropFuture => "drop_future",
+                crate::tool::CancellationSettlementMode::AwaitFuture => "await_future",
+            },
+        );
     }
     writer.finish()
 }
 
 fn tea_v2_tool_definitions() -> Vec<ToolDefinition> {
     use crate::coding::tools::{multiedit, read, schemas};
-    use crate::tool::ToolExecutionMode;
+    use crate::tool::{CancellationSettlementMode, ToolExecutionMode};
     vec![
         ToolDefinition {
             name: "read".into(),
             description: read::read_v2_description().into(),
             schema: schemas::read_v2_schema(),
             execution_mode: ToolExecutionMode::Parallel,
+            requires_exclusive_batch: false,
+            cancellation_settlement_mode: CancellationSettlementMode::DropFuture,
         },
         ToolDefinition {
             name: "bash".into(),
             description: "Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to last 2000 lines or 50KB (whichever is hit first). If truncated, full output is saved to a temp file. Optionally provide a timeout in seconds.".into(),
             schema: schemas::bash_schema(),
             execution_mode: ToolExecutionMode::Parallel,
+            requires_exclusive_batch: false,
+            cancellation_settlement_mode: CancellationSettlementMode::DropFuture,
         },
         ToolDefinition {
             name: "edit".into(),
             description: multiedit::multiedit_v2_description().into(),
             schema: schemas::edit_v2_schema(),
             execution_mode: ToolExecutionMode::Parallel,
+            requires_exclusive_batch: true,
+            cancellation_settlement_mode: CancellationSettlementMode::AwaitFuture,
         },
         ToolDefinition {
             name: "write".into(),
             description: "Write content to a file. Creates the file if it doesn't exist, overwrites if it does. Automatically creates parent directories.".into(),
             schema: schemas::write_schema(),
             execution_mode: ToolExecutionMode::Parallel,
+            requires_exclusive_batch: false,
+            cancellation_settlement_mode: CancellationSettlementMode::DropFuture,
         },
     ]
 }
@@ -346,6 +366,8 @@ fn parse_profile_tools(value: &JsonValue) -> Result<Vec<ToolDefinition>, Profile
                 schema: profile_field(tool, "parameters")?.clone(),
                 // Pi's `Agent` default is parallel; definitions with no explicit mode inherit it.
                 execution_mode: crate::tool::ToolExecutionMode::Parallel,
+                requires_exclusive_batch: false,
+                cancellation_settlement_mode: crate::tool::CancellationSettlementMode::DropFuture,
             })
         })
         .collect()

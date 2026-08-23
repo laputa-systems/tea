@@ -590,7 +590,7 @@ fn tool_presentations(configuration: &AgentConfiguration) -> Vec<ToolPresentatio
 }
 
 fn host_profile_digest(configuration: &AgentConfiguration) -> Digest {
-    let mut writer = CanonicalHashWriter::new("tea-agent-host-profile", 1, 1);
+    let mut writer = CanonicalHashWriter::new("tea-agent-host-profile", 2, 1);
     writer.string("system_prompt", &configuration.system_prompt);
     let definitions = configuration.tools.definitions();
     writer.u64("tool_count", definitions.len() as u64);
@@ -609,6 +609,17 @@ fn host_profile_digest(configuration: &AgentConfiguration) -> Digest {
             match tool.execution_mode {
                 ToolExecutionMode::Sequential => "sequential",
                 ToolExecutionMode::Parallel => "parallel",
+            },
+        );
+        writer.boolean(
+            "tool_requires_exclusive_batch",
+            tool.requires_exclusive_batch,
+        );
+        writer.string(
+            "tool_cancellation_settlement_mode",
+            match tool.cancellation_settlement_mode {
+                tea_core::tool::CancellationSettlementMode::DropFuture => "drop_future",
+                tea_core::tool::CancellationSettlementMode::AwaitFuture => "await_future",
             },
         );
     }

@@ -57,15 +57,37 @@ are diagnostic and do not gate fixture results.
 `python3 -m evals.quality multiedit-disabled --out <dir>` materializes a
 hermetic public task whose capability envelope contains only `read`, `bash`,
 legacy `edit`, and `write`; the proposed batch capability is unavailable. The
-copied task contains no reference schema or grader. A runner executes hidden
-filesystem, stale/overlap/escape/non-regular, fault-recovery, and cancellation
-checks and emits a trusted record bound to a hidden-case digest; pass that
-runner record via `--record` to grade a 70 correctness / 15 design-and-proof /
-15 efficiency rubric. The vector includes tool calls, turns, wall-clock,
-output tokens, remote round trips, and context bytes. A lower invocation count
-cannot compensate for stale, partial, escaping, overlapping, recovery, or
-cancellation failures, and a candidate must meet the contract/proof/limitations
-threshold independently of its efficiency score.
+copied task contains no reference schema or grader. To run a candidate through
+the repository-owned runner instead of supplying a record:
+
+```sh
+PYTHONDONTWRITEBYTECODE=1 python3 -m evals.quality multiedit-disabled \
+  --out /tmp/tea-multiedit-disabled --run --command /path/to/candidate
+```
+
+For the ordinary hidden workspace and each stale/overlap/escape/non-regular,
+fault-recovery, and cancellation phase, the runner starts the candidate with a
+fresh workspace. It passes only `TEA_MULTIEDIT_TASK`,
+`TEA_MULTIEDIT_WORKSPACE`, `TEA_MULTIEDIT_PHASE`, and
+`TEA_MULTIEDIT_RESULT`; the result path must contain a JSON object naming the
+same phase. The runner owns the task copy, sanitized process environment,
+timeout/process-group cleanup, bounded output capture, initial files, workspace
+snapshots, adversarial observations, design-document rubric, and efficiency
+measurements. It writes `record.json` and `grade.json`; candidates never write
+either artifact or receive the hidden-case path.
+
+The runner deliberately does not claim an operating-system network sandbox: it
+passes no credentials or ambient home configuration, and a production CI
+deployment that needs network isolation must place this process in its own OS
+sandbox. The checked-in runner is still the authority for the evaluation record,
+not `evidence.json` or any candidate-supplied semantic boolean.
+
+The grade remains 70 correctness / 15 design-and-proof / 15 efficiency. The
+vector includes runner-observed phase count, wall-clock, bounded output, remote
+round trips, and public-task context bytes. A lower invocation count cannot
+compensate for stale, partial, escaping, overlapping, recovery, or cancellation
+failures, and a candidate must meet the contract/proof/limitations threshold
+independently of its efficiency score.
 
 The runner ID and case digest are mix-up guards, not cryptographic
 authentication. The evaluator must create the record outside the candidate

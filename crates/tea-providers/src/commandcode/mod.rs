@@ -397,6 +397,8 @@ mod tests {
                 )
                 .expect("tool schema"),
                 execution_mode: ToolExecutionMode::Parallel,
+                requires_exclusive_batch: false,
+                cancellation_settlement_mode: crate::tool::CancellationSettlementMode::DropFuture,
             }],
             model: Some(ModelDescriptor {
                 provider: "command-code".into(),

@@ -11,6 +11,7 @@ from .coding_cases import CodingCaseError
 from .coding_runner import CodingRunError, prepare_cache, run_coding_cases
 from .compaction import CompactionQualityError, run_compaction_quality
 from .multiedit import MultiEditQualityError, grade_verified_record, write_multiedit_task
+from .multiedit_runner import MultiEditRunError, run_multiedit
 from .suite import AdapterError, ContractError, inspect_environment, run_fast, run_rust_allocation_probe
 
 
@@ -31,6 +32,9 @@ def parser() -> argparse.ArgumentParser:
     multiedit = sub.add_parser("multiedit-disabled", help="materialize or grade the hermetic disabled-tool multiedit eval")
     multiedit.add_argument("--out", type=Path, required=True, help="write the public-only task and optional grade report")
     multiedit.add_argument("--record", type=Path, help="runner-produced hidden-validator record to grade")
+    multiedit.add_argument("--run", action="store_true", help="run a candidate through the repository-owned isolated runner")
+    multiedit.add_argument("--timeout-seconds", type=float, default=30.0, help="per-candidate-phase timeout for --run")
+    multiedit.add_argument("--command", nargs=argparse.REMAINDER, help="candidate command for --run; place this option last")
     sub.add_parser("inspect-environment", help="print the explicit core-evaluation surfaces")
     resources = sub.add_parser("resources", help="measure Rust allocations and peak RSS with Rustybench")
     resources.add_argument("--out", type=Path, help="write the JSON resource artifact to this file")
@@ -89,6 +93,19 @@ def main(argv: list[str] | None = None) -> int:
             print(f"artifacts: {args.out}")
             return status
         if args.command == "multiedit-disabled":
+            if args.run and args.record is not None:
+                raise MultiEditQualityError("multiedit-disabled accepts either --run or --record, not both")
+            if args.run:
+                record = run_multiedit(
+                    out=args.out,
+                    command=args.command or (),
+                    timeout_seconds=args.timeout_seconds,
+                )
+                grade = grade_verified_record(record)
+                report = args.out / "grade.json"
+                report.write_text(json.dumps(grade, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+                print(f"multiedit disabled-tool run: {grade['total_score']}/100; artifacts: {args.out}")
+                return 0 if grade["passed"] else 1
             task = write_multiedit_task(args.out)
             if args.record is None:
                 print(f"multiedit disabled-tool task: {task}")
@@ -159,7 +176,7 @@ def main(argv: list[str] | None = None) -> int:
     except CompactionQualityError as error:
         print(f"quality compaction error: {error}", file=sys.stderr)
         return 2
-    except MultiEditQualityError as error:
+    except (MultiEditQualityError, MultiEditRunError) as error:
         print(f"quality multiedit error: {error}", file=sys.stderr)
         return 2
     return 2

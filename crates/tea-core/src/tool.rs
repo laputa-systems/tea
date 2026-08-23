@@ -555,7 +555,13 @@ pub trait AgentTool: Send + Sync {
     ) -> ToolFuture<'a>;
 }
 
-/// Prompt-facing, non-executable description of a tool.
+/// Prompt-facing definition and scheduler safety contract for a tool.
+///
+/// The provider receives only the name, description, and schema. The remaining
+/// fields are deliberately retained beside that presentation because batch
+/// exclusivity and cancellation settlement change the effect contract even
+/// when no prompt-visible byte changes. Durable profile and recovery identity
+/// must therefore distinguish them.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ToolDefinition {
     /// Stable tool name.
@@ -566,6 +572,11 @@ pub struct ToolDefinition {
     pub schema: JsonValue,
     /// Scheduling mode.
     pub execution_mode: ToolExecutionMode,
+    /// Whether the scheduler must reject a mixed assistant batch before any
+    /// sibling capability begins.
+    pub requires_exclusive_batch: bool,
+    /// How a started capability settles after enclosing-run cancellation.
+    pub cancellation_settlement_mode: CancellationSettlementMode,
 }
 
 impl ToolDefinition {
@@ -576,6 +587,8 @@ impl ToolDefinition {
             description: tool.description().to_owned(),
             schema: tool.schema().clone(),
             execution_mode: tool.execution_mode(),
+            requires_exclusive_batch: tool.requires_exclusive_batch(),
+            cancellation_settlement_mode: tool.cancellation_settlement_mode(),
         }
     }
 

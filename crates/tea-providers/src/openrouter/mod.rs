@@ -1145,6 +1145,8 @@ data: [DONE]
                     description: "finish the assignment".into(),
                     schema: JsonValue::Object(std::collections::BTreeMap::new()),
                     execution_mode: ToolExecutionMode::Sequential,
+                    requires_exclusive_batch: false,
+                    cancellation_settlement_mode: crate::tool::CancellationSettlementMode::DropFuture,
                 }],
                 ..ModelRequest::default()
             },

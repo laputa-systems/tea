@@ -584,6 +584,7 @@ impl RunHandle {
             let turn_model = request.model.clone();
             let request_layout = agent.prompt_layout_ledger.measure(&request);
             let request_continuity = request_layout.continuity;
+            let expected_transition = agent.prompt_layout_ledger.take_expected_transition();
             let provider = agent
                 .provider
                 .read()
@@ -598,12 +599,12 @@ impl RunHandle {
                 },
             )
             .await?;
-            if matches!(
+            let rejected_by_policy = matches!(
                 agent.prompt_layout_ledger.policy_value(),
                 crate::measurement::PromptLayoutPolicy::RejectUnexpectedRebase
             ) && matches!(
                 request_continuity,
-                crate::measurement::PromptContinuity::Rebased
+                    crate::measurement::PromptContinuity::Rebased
                     | crate::measurement::PromptContinuity::Discontinuous
             ) || matches!(
                 agent.prompt_layout_ledger.policy_value(),
@@ -613,7 +614,8 @@ impl RunHandle {
                 crate::measurement::PromptContinuity::DomainChanged
                     | crate::measurement::PromptContinuity::Rebased
                     | crate::measurement::PromptContinuity::Discontinuous
-            ) {
+            );
+            if rejected_by_policy && expected_transition != Some(request_continuity) {
                 return Err(CoreError::PromptLayoutRejected {
                     continuity: request_continuity,
                 });
@@ -1721,6 +1723,13 @@ impl RunHandle {
             },
         )
         .await?;
+        // A committed automatic compaction is a kernel-owned context
+        // replacement. Permit exactly its expected rebase at the next
+        // provider boundary; hook-originated domain or discontinuity changes
+        // remain subject to the host-selected policy.
+        agent
+            .prompt_layout_ledger
+            .expect_next_transition(crate::measurement::ExpectedPromptLayoutTransition::Rebased);
         estimator.reset_after_compaction();
         let estimated_tokens_after = estimator.estimate(agent);
         let still_above = estimated_tokens_after >= policy.threshold_tokens();

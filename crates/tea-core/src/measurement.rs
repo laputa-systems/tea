@@ -39,6 +39,32 @@ pub enum PromptContinuity {
     Discontinuous,
 }
 
+/// A host-authorized non-append transition expected at exactly one upcoming
+/// provider boundary.
+///
+/// This deliberately excludes [`PromptContinuity::FirstRequest`] and
+/// [`PromptContinuity::ExactExtension`]: neither is rejected by a layout
+/// policy and therefore neither needs an exception.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExpectedPromptLayoutTransition {
+    /// A known prompt/tool/model serving-domain replacement.
+    DomainChanged,
+    /// A known replacement of earlier context bytes, such as compaction.
+    Rebased,
+    /// A known boundary with no common context bytes.
+    Discontinuous,
+}
+
+impl ExpectedPromptLayoutTransition {
+    const fn continuity(self) -> PromptContinuity {
+        match self {
+            Self::DomainChanged => PromptContinuity::DomainChanged,
+            Self::Rebased => PromptContinuity::Rebased,
+            Self::Discontinuous => PromptContinuity::Discontinuous,
+        }
+    }
+}
+
 /// Initial policy for continuity observations. Observe is the default; the
 /// stricter mode is available to hosts that can safely fail before dispatch.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -61,6 +87,10 @@ pub enum PromptLayoutPolicy {
 #[derive(Debug)]
 pub struct PromptLayoutLedger {
     previous: Mutex<Option<ModelRequest>>,
+    /// One host-authorized exception for the next request boundary. Candidate
+    /// hooks cannot obtain or set this permit; it is consumed before policy
+    /// enforcement so it cannot leak to a later request.
+    expected_transition: Mutex<Option<PromptContinuity>>,
     scope: PromptCacheScope,
     policy: PromptLayoutPolicy,
 }
@@ -76,6 +106,7 @@ impl PromptLayoutLedger {
     pub fn new(scope: PromptCacheScope) -> Self {
         Self {
             previous: Mutex::new(None),
+            expected_transition: Mutex::new(None),
             scope,
             policy: PromptLayoutPolicy::Observe,
         }
@@ -154,6 +185,33 @@ impl PromptLayoutLedger {
     /// Forget the predecessor. The next observation is a first request.
     pub fn clear(&self) {
         *self.previous.lock().expect("prompt layout ledger poisoned") = None;
+        *self
+            .expected_transition
+            .lock()
+            .expect("prompt layout ledger expected-transition mutex poisoned") = None;
+    }
+
+    /// Permit one named non-append transition at the next request boundary.
+    ///
+    /// This is a host-control-plane operation for a known lifecycle boundary,
+    /// such as a deliberate profile replacement or compaction. It does not
+    /// reset the predecessor, does not alter the measurement, and permits
+    /// only the named continuity class. The next measurement consumes it even
+    /// when the request takes a different path, so a candidate hook cannot
+    /// retain an exception for a later rewrite.
+    pub fn expect_next_transition(&self, transition: ExpectedPromptLayoutTransition) {
+        *self
+            .expected_transition
+            .lock()
+            .expect("prompt layout ledger expected-transition mutex poisoned") =
+            Some(transition.continuity());
+    }
+
+    pub(crate) fn take_expected_transition(&self) -> Option<PromptContinuity> {
+        self.expected_transition
+            .lock()
+            .expect("prompt layout ledger expected-transition mutex poisoned")
+            .take()
     }
 }
 

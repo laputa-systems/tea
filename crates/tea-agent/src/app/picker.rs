@@ -81,7 +81,12 @@ impl App {
         // event. Reap its terminal channel before judging the session boundary
         // so `/new` does not discard the user's explicit command as "active".
         self.reap_task();
-        if self.agent_is_active() && !self.state.session_projection_is_settled() {
+        // `try_recv` above can observe Empty immediately before the worker
+        // publishes terminal settlement. The receiver itself is ownership of
+        // that worker; retaining it is the only way to reap the result and
+        // preserve its final durable events. Never replace a session until it
+        // has been observed terminal and removed by `reap_task`.
+        if self.durable_task.is_some() || self.agent_is_active() {
             self.state.notice("new session requires an idle agent");
             return Ok(());
         }

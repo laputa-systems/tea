@@ -3,7 +3,10 @@
 use std::sync::{Arc, Mutex};
 use tea_core::Agent;
 use tea_core::measurement::measure_prompt_cacheability;
-use tea_core::measurement::{PromptCacheScope, PromptLayoutLedger, PromptLayoutPolicy, PromptContinuity};
+use tea_core::measurement::{
+    ExpectedPromptLayoutTransition, PromptCacheScope, PromptContinuity, PromptLayoutLedger,
+    PromptLayoutPolicy,
+};
 use tea_core::hooks::{AfterToolCall, BeforeToolCall, ContextEnvelope, HookSet};
 use tea_core::error::HookError;
 use tea_core::tool::{AgentToolResult, ToolCall};
@@ -171,6 +174,58 @@ fn require_exact_extension_rejects_domain_change_before_provider_call() {
             .expect("recording provider mutex poisoned")
             .len(),
         1,
+    );
+}
+
+#[test]
+fn explicit_host_domain_transition_permit_is_one_use_and_does_not_weaken_hook_rebases() {
+    let provider = RecordingProvider::default();
+    let agent = Agent::builder()
+        .system_prompt("stable system prompt")
+        .model(ModelDescriptor {
+            provider: "fixture".into(),
+            model: "cache-policy".into(),
+            revision: None,
+        })
+        .thinking_level(ThinkingLevel::Off)
+        .prompt_layout_ledger(Arc::new(
+            PromptLayoutLedger::default().policy(PromptLayoutPolicy::RequireExactExtension),
+        ))
+        .model_provider(Arc::new(provider.clone()))
+        .build();
+    smol::block_on(agent.start_prompt("first").expect("first run starts").drive())
+        .expect("first run settles");
+    let mut configuration = agent.configuration();
+    configuration.system_prompt = "host-selected next prompt".into();
+    agent
+        .replace_configuration(configuration)
+        .expect("idle configuration replacement");
+    agent
+        .expect_next_prompt_layout_transition(ExpectedPromptLayoutTransition::DomainChanged)
+        .expect("idle host may authorize its known transition");
+    smol::block_on(agent.start_prompt("second").expect("second run starts").drive())
+        .expect("one matching host transition is permitted");
+
+    let mut configuration = agent.configuration();
+    configuration.hooks = Arc::new(RewritingHooks);
+    agent
+        .replace_configuration(configuration)
+        .expect("idle hook replacement");
+    let error = smol::block_on(agent.start_prompt("third").expect("third run starts").drive())
+        .expect_err("a later hook rewrite has no remaining permit");
+    assert_eq!(
+        error,
+        tea_core::error::CoreError::PromptLayoutRejected {
+            continuity: PromptContinuity::Discontinuous,
+        }
+    );
+    assert_eq!(
+        provider
+            .requests
+            .lock()
+            .expect("recording provider mutex poisoned")
+            .len(),
+        2,
     );
 }
 

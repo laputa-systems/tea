@@ -381,6 +381,9 @@ fn evidence_from_request_observation(
         deterministic_common_prefix_bytes: observation.deterministic_common_prefix_bytes,
         deterministic_common_prefix_tokens_estimate: observation
             .deterministic_common_prefix_tokens_estimate,
+        serialized_request_bytes: observation.serialized_request_bytes.map(|value| value as u64),
+        adapter_cache_domain_fingerprint: observation.cache_domain_fingerprint,
+        adapter_cache_domain_components: observation.cache_domain_components.clone(),
         ..CacheEvidence::default()
     }
 }
@@ -389,6 +392,21 @@ fn evidence_from_prompt_layout(
     measurement: &crate::measurement::PromptCacheMeasurement,
 ) -> CacheEvidence {
     CacheEvidence {
+        continuity: Some(prompt_continuity_name(measurement.continuity).into()),
+        cache_domain_fingerprint: Some(measurement.cache_domain_fingerprint),
+        changed_cache_domain_components: measurement.changed_cache_domain_components.clone(),
+        context_bytes: Some(measurement.context_bytes as u64),
+        common_context_prefix_bytes: Some(measurement.common_context_prefix_bytes as u64),
+        common_context_prefix_ratio_millionths: Some(
+            measurement.common_context_prefix_ratio_millionths,
+        ),
+        context_projection_changed: Some(measurement.context_projection_changed),
+        context_fingerprint: Some(measurement.context_fingerprint),
+        system_prompt_fingerprint: Some(measurement.system_prompt_fingerprint),
+        tool_definition_fingerprint: Some(measurement.tool_definition_fingerprint),
+        tool_order_fingerprint: Some(measurement.tool_order_fingerprint),
+        model_fingerprint: Some(measurement.model_fingerprint),
+        thinking_fingerprint: Some(measurement.thinking_fingerprint),
         deterministic_common_prefix_bytes: measurement
             .common_request_prefix_bytes
             .map(|value| value as u64),
@@ -424,6 +442,45 @@ fn merge_cache_evidence(target: &mut Option<CacheEvidence>, update: CacheEvidenc
 }
 
 fn merge_cache_evidence_value(target: &mut CacheEvidence, update: CacheEvidence) {
+    if update.continuity.is_some() {
+        target.continuity = update.continuity;
+    }
+    if update.cache_domain_fingerprint.is_some() {
+        target.cache_domain_fingerprint = update.cache_domain_fingerprint;
+    }
+    if !update.changed_cache_domain_components.is_empty() {
+        target.changed_cache_domain_components = update.changed_cache_domain_components;
+    }
+    if update.context_bytes.is_some() {
+        target.context_bytes = update.context_bytes;
+    }
+    if update.common_context_prefix_bytes.is_some() {
+        target.common_context_prefix_bytes = update.common_context_prefix_bytes;
+    }
+    if update.common_context_prefix_ratio_millionths.is_some() {
+        target.common_context_prefix_ratio_millionths = update.common_context_prefix_ratio_millionths;
+    }
+    if update.context_projection_changed.is_some() {
+        target.context_projection_changed = update.context_projection_changed;
+    }
+    if update.context_fingerprint.is_some() {
+        target.context_fingerprint = update.context_fingerprint;
+    }
+    if update.system_prompt_fingerprint.is_some() {
+        target.system_prompt_fingerprint = update.system_prompt_fingerprint;
+    }
+    if update.tool_definition_fingerprint.is_some() {
+        target.tool_definition_fingerprint = update.tool_definition_fingerprint;
+    }
+    if update.tool_order_fingerprint.is_some() {
+        target.tool_order_fingerprint = update.tool_order_fingerprint;
+    }
+    if update.model_fingerprint.is_some() {
+        target.model_fingerprint = update.model_fingerprint;
+    }
+    if update.thinking_fingerprint.is_some() {
+        target.thinking_fingerprint = update.thinking_fingerprint;
+    }
     if update.deterministic_common_prefix_bytes.is_some() {
         target.deterministic_common_prefix_bytes = update.deterministic_common_prefix_bytes;
     }
@@ -437,19 +494,54 @@ fn merge_cache_evidence_value(target: &mut CacheEvidence, update: CacheEvidence)
     if update.provider_cache_write_tokens.is_some() {
         target.provider_cache_write_tokens = update.provider_cache_write_tokens;
     }
+    if update.serialized_request_bytes.is_some() {
+        target.serialized_request_bytes = update.serialized_request_bytes;
+    }
+    if update.adapter_cache_domain_fingerprint.is_some() {
+        target.adapter_cache_domain_fingerprint = update.adapter_cache_domain_fingerprint;
+    }
+    if !update.adapter_cache_domain_components.is_empty() {
+        target.adapter_cache_domain_components = update.adapter_cache_domain_components;
+    }
     if update.provider_surface_digest.is_some() {
         target.provider_surface_digest = update.provider_surface_digest;
     }
 }
 
 fn cache_evidence_is_empty(evidence: &CacheEvidence) -> bool {
-    evidence.deterministic_common_prefix_bytes.is_none()
+    evidence.continuity.is_none()
+        && evidence.cache_domain_fingerprint.is_none()
+        && evidence.changed_cache_domain_components.is_empty()
+        && evidence.context_bytes.is_none()
+        && evidence.common_context_prefix_bytes.is_none()
+        && evidence.common_context_prefix_ratio_millionths.is_none()
+        && evidence.context_projection_changed.is_none()
+        && evidence.context_fingerprint.is_none()
+        && evidence.system_prompt_fingerprint.is_none()
+        && evidence.tool_definition_fingerprint.is_none()
+        && evidence.tool_order_fingerprint.is_none()
+        && evidence.model_fingerprint.is_none()
+        && evidence.thinking_fingerprint.is_none()
+        && evidence.deterministic_common_prefix_bytes.is_none()
         && evidence
             .deterministic_common_prefix_tokens_estimate
             .is_none()
         && evidence.provider_cache_read_tokens.is_none()
         && evidence.provider_cache_write_tokens.is_none()
+        && evidence.serialized_request_bytes.is_none()
+        && evidence.adapter_cache_domain_fingerprint.is_none()
+        && evidence.adapter_cache_domain_components.is_empty()
         && evidence.provider_surface_digest.is_none()
+}
+
+fn prompt_continuity_name(continuity: crate::measurement::PromptContinuity) -> &'static str {
+    match continuity {
+        crate::measurement::PromptContinuity::FirstRequest => "first_request",
+        crate::measurement::PromptContinuity::ExactExtension => "exact_extension",
+        crate::measurement::PromptContinuity::DomainChanged => "domain_changed",
+        crate::measurement::PromptContinuity::Rebased => "rebased",
+        crate::measurement::PromptContinuity::Discontinuous => "discontinuous",
+    }
 }
 
 /// Translates a core lifecycle record into the additive V1 trace record.
@@ -887,6 +979,67 @@ mod tests {
             assert_eq!(compactions[2].post_compaction_turn_index, Some(1));
             assert_eq!(compactions[2].serialized_request_bytes, Some(321));
             assert_eq!(compactions[2].cache_domain_fingerprint, Some(123));
+        });
+    }
+
+    #[test]
+    fn trace_retains_content_free_logical_and_adapter_cache_diagnostics() {
+        let observer = TraceObserver::new("cache-diagnostics", Vec::<TraceEvent>::new());
+        let mut previous = crate::scheduler::ModelRequest::default();
+        previous.system_prompt = "stable".into();
+        previous.context = "retained annotation=a".into();
+        let mut current = previous.clone();
+        current.context = "retained annotation=b".into();
+        let measurement = crate::measurement::measure_prompt_cacheability(Some(&previous), &current);
+        let mut components = BTreeMap::new();
+        components.insert("provider_tools".into(), 41);
+
+        observe(&observer, AgentEventKind::AgentStart);
+        observe(
+            &observer,
+            AgentEventKind::PromptLayoutObserved {
+                turn_id: TurnId(1),
+                measurement,
+            },
+        );
+        observe(&observer, AgentEventKind::TurnStart { turn_id: TurnId(1) });
+        observe(
+            &observer,
+            AgentEventKind::ProviderRequestObserved {
+                turn_id: TurnId(1),
+                observation: AdapterRequestObservation {
+                    serialized_request_bytes: Some(987),
+                    cache_domain_fingerprint: Some(654),
+                    cache_domain_components: components,
+                    ..AdapterRequestObservation::default()
+                },
+            },
+        );
+        observe(
+            &observer,
+            AgentEventKind::TurnEnd {
+                turn_id: TurnId(1),
+                reason: StopReason::Stop,
+            },
+        );
+
+        observer.with_sink(|events| {
+            let TraceEvent::Turn(turn) = &events[1] else {
+                panic!("the completed turn follows the header");
+            };
+            let cache = turn.cache_evidence.as_ref().expect("cache evidence persists");
+            assert_eq!(cache.continuity.as_deref(), Some("rebased"));
+            assert_eq!(cache.context_projection_changed, Some(true));
+            assert!(cache.common_context_prefix_ratio_millionths.is_some());
+            assert!(cache.context_fingerprint.is_some());
+            assert!(cache.system_prompt_fingerprint.is_some());
+            assert!(cache.tool_definition_fingerprint.is_some());
+            assert_eq!(cache.serialized_request_bytes, Some(987));
+            assert_eq!(cache.adapter_cache_domain_fingerprint, Some(654));
+            assert_eq!(
+                cache.adapter_cache_domain_components.get("provider_tools"),
+                Some(&41)
+            );
         });
     }
 

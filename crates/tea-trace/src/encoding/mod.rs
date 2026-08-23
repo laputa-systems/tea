@@ -137,7 +137,8 @@ fn end_reason_name(reason: &EndReason) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Compaction, CompactionStage, EpisodeHeader, TraceEvent, Turn};
+    use crate::{CacheEvidence, Compaction, CompactionStage, EpisodeHeader, TraceEvent, Turn};
+    use std::collections::BTreeMap;
 
     #[test]
     fn json_lines_is_one_stable_escaped_object_per_record() {
@@ -193,5 +194,32 @@ mod tests {
         assert!(text.contains(r#""serialized_request_bytes":321"#));
         assert!(!text.contains("checkpoint"));
         assert!(!text.contains("prompt"));
+    }
+
+    #[test]
+    fn turn_cache_evidence_serializes_logical_and_adapter_diagnostics() {
+        let mut adapter_components = BTreeMap::new();
+        adapter_components.insert("provider_tools".into(), 19);
+        let evidence = CacheEvidence {
+            continuity: Some("rebased".into()),
+            changed_cache_domain_components: vec!["model".into()],
+            common_context_prefix_ratio_millionths: Some(875_000),
+            context_fingerprint: Some(71),
+            serialized_request_bytes: Some(321),
+            adapter_cache_domain_components: adapter_components,
+            ..CacheEvidence::default()
+        };
+        let mut sink = JsonLinesSink::new(Vec::new());
+        sink.append(TraceEvent::from(
+            Turn::new(0, "redacted").with_cache_evidence(evidence),
+        ))
+        .expect("in-memory write succeeds");
+        let text = String::from_utf8(sink.into_inner()).expect("JSON is UTF-8");
+        assert!(text.contains(r#""continuity":"rebased""#));
+        assert!(text.contains(r#""changed_cache_domain_components":["model"]"#));
+        assert!(text.contains(r#""common_context_prefix_ratio_millionths":875000"#));
+        assert!(text.contains(r#""context_fingerprint":71"#));
+        assert!(text.contains(r#""serialized_request_bytes":321"#));
+        assert!(text.contains(r#""adapter_cache_domain_components":{"provider_tools":19}"#));
     }
 }

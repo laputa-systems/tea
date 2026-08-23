@@ -13,6 +13,14 @@ and output, tool input and output, and terminal diagnostics before persistence.
 It retains chronology, event kinds, cache evidence, compaction lifecycle, and
 durable provenance without retaining prompt or tool content.
 
+Turn cache evidence retains content-free request diagnostics: logical continuity,
+changed domain-component names, converted-context sizes and prefix ratio, logical
+prompt/tool/model/thinking fingerprints, and safe adapter request-size/domain
+fingerprints. It never retains request bodies, tool arguments, headers, or
+credentials. This makes a post-run trace able to distinguish a projection rebase
+from a tool, model, or adapter-envelope transition without claiming a provider
+cache hit; provider-reported read/write tokens remain separate evidence.
+
 Externally hosted epochs use the same observer contract. The embedding subscribes
 `tea_core::trace::TraceObserver::new_with_provenance` to `HostedEpoch::agent()` and
 wraps its own `TraceSink` in `RedactingSink` before persistence. The hosted epoch's

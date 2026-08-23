@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -16,6 +17,7 @@ from .multiedit import (
     public_task,
     write_multiedit_task,
 )
+from .multiedit_runner import run_multiedit
 
 
 class MultiEditQualityTest(unittest.TestCase):
@@ -74,6 +76,43 @@ class MultiEditQualityTest(unittest.TestCase):
                 set(graded["efficiency_components"]),
                 {"tool_calls", "turns", "wall_clock_ms", "output_tokens", "remote_round_trips", "context_bytes"},
             )
+
+    def test_repository_runner_executes_candidate_and_derives_a_grade_record(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="tea-multiedit-quality-") as temporary:
+            root = Path(temporary)
+            candidate = root / "candidate.py"
+            candidate.write_text(
+                """import json
+import os
+from pathlib import Path
+
+phase = os.environ[\"TEA_MULTIEDIT_PHASE\"]
+workspace = Path(os.environ[\"TEA_MULTIEDIT_WORKSPACE\"])
+if phase == \"normal\":
+    (workspace / \"lib\" / \"alpha.txt\").write_text(\"after alpha\\n\", encoding=\"utf-8\")
+    (workspace / \"lib\" / \"beta.txt\").write_text(\"after beta\\n\", encoding=\"utf-8\")
+    Path(\"design.md\").write_text(
+        \"stale atomic cancellation proof test receipt limitations recovery\", encoding=\"utf-8\"
+    )
+receipt = {\"phase\": phase}
+if phase in {\"stale\", \"overlap_duplicate\", \"workspace_escape\", \"non_regular\"}:
+    receipt[\"outcome\"] = \"rejected\"
+elif phase == \"fault\":
+    receipt.update(outcome=\"rolled_back\", inspected_paths=[\"lib/alpha.txt\", \"lib/beta.txt\"])
+elif phase == \"cancel_before_commit\":
+    receipt[\"outcome\"] = \"cancelled\"
+elif phase == \"cancel_after_commit\":
+    receipt[\"receipt\"] = \"committed\"
+Path(os.environ[\"TEA_MULTIEDIT_RESULT\"]).write_text(json.dumps(receipt), encoding=\"utf-8\")
+""",
+                encoding="utf-8",
+            )
+            record = run_multiedit(out=root / "out", command=[sys.executable, str(candidate)])
+            graded = grade_verified_record(record)
+            self.assertTrue(graded["passed"])
+            self.assertTrue((root / "out" / "record.json").is_file())
+            self.assertFalse((root / "out" / "task" / "hidden.json").exists())
+            self.assertFalse((root / "out" / "runner-workspace" / "workspace" / "hidden.json").exists())
 
 
 def _record(root: Path) -> dict[str, object]:

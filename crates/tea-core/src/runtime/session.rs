@@ -2637,7 +2637,7 @@ fn all_tool_definition_schemas(
 }
 
 fn tool_definition_digest(tool: &dyn AgentTool) -> Result<Digest, HarnessError> {
-    let mut writer = CanonicalHashWriter::new("tea-tool-definition-v1", 1, 1);
+    let mut writer = CanonicalHashWriter::new("tea-tool-definition-v2", 2, 1);
     writer.string("name", tool.name());
     writer.string("description", tool.description());
     writer.string(
@@ -2652,6 +2652,14 @@ fn tool_definition_digest(tool: &dyn AgentTool) -> Result<Digest, HarnessError> 
         match tool.execution_mode() {
             tea_core::tool::ToolExecutionMode::Sequential => 1,
             tea_core::tool::ToolExecutionMode::Parallel => 2,
+        },
+    );
+    writer.boolean("requires_exclusive_batch", tool.requires_exclusive_batch());
+    writer.discriminant(
+        "cancellation_settlement_mode",
+        match tool.cancellation_settlement_mode() {
+            tea_core::tool::CancellationSettlementMode::DropFuture => 1,
+            tea_core::tool::CancellationSettlementMode::AwaitFuture => 2,
         },
     );
     Ok(writer.finish())

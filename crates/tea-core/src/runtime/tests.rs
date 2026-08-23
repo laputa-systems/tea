@@ -385,6 +385,7 @@ fn live_runtime_joins_prompt_layout_across_fresh_operations() {
             .find(|(second, _)| !*second)
             .expect("first trace is present");
         let first_trace = std::str::from_utf8(&first_trace.1).expect("trace UTF-8");
-        assert!(!first_trace.contains("deterministic_common_prefix_bytes"));
+        assert!(first_trace.contains(r#""continuity":"first_request""#));
+        assert!(first_trace.contains(r#""deterministic_common_prefix_bytes":null"#));
     });
 }

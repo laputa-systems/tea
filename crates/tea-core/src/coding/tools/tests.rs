@@ -470,11 +470,21 @@ fn tea_v2_profile_is_explicit_and_matches_the_v2_registry() {
     assert_eq!(profile.profile_id(), "tea-default-coding-profile/v2");
     assert_eq!(
         profile.contract_digest().to_hex(),
-        "a4dd43b61caddb4eef9f0af1541487ca0ccd9d7cd7d221ab18d8b547900833b3",
+        "68b6c36d4a49dd78d9a131e568c1137ab599ddd579426cfa60bbaca907204a29",
     );
     assert_eq!(
         profile.active_tool_names().collect::<Vec<_>>(),
         ["read", "bash", "edit", "write"]
+    );
+    let edit = profile
+        .tool_definitions()
+        .iter()
+        .find(|tool| tool.name == "edit")
+        .expect("v2 profile retains edit");
+    assert!(edit.requires_exclusive_batch);
+    assert_eq!(
+        edit.cancellation_settlement_mode,
+        crate::tool::CancellationSettlementMode::AwaitFuture
     );
     let executable = tools
         .coding_tools()

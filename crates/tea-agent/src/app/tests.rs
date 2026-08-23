@@ -145,6 +145,33 @@ fn cli_help_accepts_short_and_long_forms() {
 }
 
 #[test]
+fn new_reaps_a_completed_task_but_never_drops_a_pending_task_receiver() {
+    let options = CliOptions::parse(["tea"].map(OsString::from)).expect("test options parse");
+    let mut app = App::new(options);
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    app.durable_task = Some(receiver);
+
+    // The special `/new` path reaches `new_session`, but an empty receiver
+    // still owns a worker that can publish terminal durable effects.
+    app.dispatch_command("/new").expect("command dispatch succeeds");
+    assert!(app.durable_task.is_some(), "pending task ownership is retained");
+    assert_eq!(
+        app.state.footer_notice(),
+        Some(("new session requires an idle agent", false))
+    );
+
+    sender
+        .send(Ok(()))
+        .expect("test task completion is delivered");
+    app.dispatch_command("/new").expect("completed task is reaped first");
+    assert!(app.durable_task.is_none(), "terminal receiver is reaped");
+    assert_eq!(
+        app.state.footer_notice(),
+        Some(("new session will begin with the next prompt", false))
+    );
+}
+
+#[test]
 fn cli_parses_explicit_machine_session_commands() {
     assert_eq!(
         CliOptions::parse_command(
@@ -1224,6 +1251,8 @@ fn cache_friendly_compaction_appends_one_instruction_to_an_exact_source_prefix()
                                 tea_protocol::JsonValue::from("object"),
                             )]),
                             execution_mode: ToolExecutionMode::Parallel,
+                            requires_exclusive_batch: false,
+                            cancellation_settlement_mode: tea_core::tool::CancellationSettlementMode::DropFuture,
                         }],
                     }),
                 },

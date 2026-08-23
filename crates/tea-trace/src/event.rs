@@ -202,10 +202,42 @@ pub struct TraceProvenance {
 /// zeroes or inferred from a local fingerprint.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct CacheEvidence {
+    /// Core classification of continuity with the preceding request.
+    pub continuity: Option<String>,
+    /// Stable fingerprint of complete core-owned prompt/tool/model/thinking domain.
+    pub cache_domain_fingerprint: Option<u64>,
+    /// Named core-owned components that changed from the preceding request.
+    pub changed_cache_domain_components: Vec<String>,
+    /// Converted provider-context bytes in the current logical request.
+    pub context_bytes: Option<u64>,
+    /// Shared converted-context bytes with the preceding request.
+    pub common_context_prefix_bytes: Option<u64>,
+    /// Shared converted-context ratio, in millionths of predecessor bytes.
+    pub common_context_prefix_ratio_millionths: Option<u32>,
+    /// Whether same-domain context changed before its prior end.
+    pub context_projection_changed: Option<bool>,
+    /// Stable fingerprint of the converted provider context.
+    pub context_fingerprint: Option<u64>,
+    /// Stable fingerprint of the system prompt.
+    pub system_prompt_fingerprint: Option<u64>,
+    /// Stable fingerprint of the complete ordered tool definitions.
+    pub tool_definition_fingerprint: Option<u64>,
+    /// Stable fingerprint of exposed tool name order.
+    pub tool_order_fingerprint: Option<u64>,
+    /// Stable fingerprint of selected model identity.
+    pub model_fingerprint: Option<u64>,
+    /// Stable fingerprint of provider-neutral thinking configuration.
+    pub thinking_fingerprint: Option<u64>,
     pub deterministic_common_prefix_bytes: Option<u64>,
     pub deterministic_common_prefix_tokens_estimate: Option<u64>,
     pub provider_cache_read_tokens: Option<u64>,
     pub provider_cache_write_tokens: Option<u64>,
+    /// Exact adapter-serialized request bytes, when the adapter observed them.
+    pub serialized_request_bytes: Option<u64>,
+    /// Adapter-defined cache-domain fingerprint, when safely exposed.
+    pub adapter_cache_domain_fingerprint: Option<u64>,
+    /// Adapter-defined cache-relevant envelope component fingerprints.
+    pub adapter_cache_domain_components: BTreeMap<String, u64>,
     pub provider_surface_digest: Option<String>,
 }
 

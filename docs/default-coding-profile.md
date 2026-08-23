@@ -35,7 +35,9 @@ every operation rejects lexical, canonical, and symlink escapes. `coding_tools()
 captured active order (`read`, `bash`, `edit`, `write`), `all_tools()` returns all seven pinned
 factories, and `registry()` produces a replacement-friendly `ToolRegistry`. The local adapter is
 `LocalCodingOperations`, while remote, VM, policy, or test hosts implement `CodingOperations` and
-pass it to `with_operations`. The standard shell adapter starts with an empty environment; a host
+pass it to `with_operations`. The public local adapter moves each blocking filesystem or process
+operation to an executor-neutral worker thread, so parallel tool calls can overlap in the default
+composition; hosts that need bounded scheduling supply their own adapter. The standard shell adapter starts with an empty environment; a host
 must explicitly choose `CommandEnvironment::inherited()` or add variables. No factory consults
 ambient cwd, home, `.pi`, sessions, credentials, or resource discovery.
 
@@ -62,16 +64,17 @@ briefly remove one pathname), crash-atomic multi-file visibility, or durable rec
 loss. `CodingOperations::commit_edit_transaction` is therefore an explicit host
 boundary: unsupported adapters fail instead of degrading into a loop of `write_file` calls.
 `read_file_snapshots` similarly gives remote adapters one size-bounded batch-read boundary; its
-compatibility default is sequential, while the terminal adapter moves its local implementation to
-the blocking pool and rejects oversized files from metadata before allocating their contents. V2
+compatibility default is sequential, while local execution offloads its blocking operation and the
+terminal's bounded adapter rejects oversized files from metadata before allocating their contents. V2
 deliberately has replay semantics of `Never`: a provider tool-call ID is not a durable
 invocation identity, so neither the core nor the local adapter caches commit receipts. A future
 durable idempotency design must carry an invocation key through the host context and retain
 recovery evidence before it can replay a request.
 
 The checked-in `tea-default-profile-v2.json` also pins a contract digest over the profile ID,
-system prompt, ordered names, descriptions, schemas, and execution modes. Loading the profile
-fails closed if executable definitions drift without an explicit capture update.
+system prompt, ordered names, descriptions, schemas, execution modes, exclusive-batch policy,
+and cancellation-settlement mode. Loading the profile fails closed if executable definitions or
+the `edit` transaction-safety boundary drift without an explicit capture update.
 
 ## Core-owned profile fixture
 

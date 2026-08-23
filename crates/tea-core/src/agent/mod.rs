@@ -525,6 +525,26 @@ impl Agent {
         (*self.configuration_snapshot()).clone()
     }
 
+    /// Permit one expected prompt-layout transition at the next provider
+    /// request while the agent is idle.
+    ///
+    /// Hosts use this after an intentional configuration/profile transition
+    /// or an idle compaction that must rebase context. The permit is exact and
+    /// single-use: it does not weaken enforcement for a different continuity
+    /// class or for later Lua/hook rewrites.
+    pub fn expect_next_prompt_layout_transition(
+        &self,
+        transition: crate::measurement::ExpectedPromptLayoutTransition,
+    ) -> Result<(), CoreError> {
+        let state = self.inner.state.lock().expect("agent state mutex poisoned");
+        if let AgentPhase::Running(run_id) | AgentPhase::Cancelling(run_id) = state.phase {
+            return Err(CoreError::ActiveRun { run_id });
+        }
+        drop(state);
+        self.inner.prompt_layout_ledger.expect_next_transition(transition);
+        Ok(())
+    }
+
     /// Replace the automatic-compaction policy while the agent is idle.
     ///
     /// Hosts that select a model after constructing an agent can install the

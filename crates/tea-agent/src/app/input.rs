@@ -356,7 +356,8 @@ impl App {
         self.state.slash_completion = None;
         let mut words = input.split_whitespace();
         let command = words.next().unwrap_or_default();
-        if self.agent_is_active()
+        if command != "/new"
+            && self.agent_is_active()
             && commands::find(command).is_some_and(|spec| !spec.allowed_while_active)
         {
             self.state

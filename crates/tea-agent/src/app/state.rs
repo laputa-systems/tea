@@ -655,14 +655,6 @@ impl AppState {
         self.projection_generation
     }
 
-    /// Whether the semantic projection has already observed a terminal agent
-    /// state, even if the host task is finishing its final bookkeeping turn.
-    pub(super) fn session_projection_is_settled(&self) -> bool {
-        self.streaming_line.is_none()
-            && self.active_tool_lines.is_empty()
-            && !matches!(self.status, UiStatus::Active)
-    }
-
     /// Return the compact, event-derived telemetry lines for the fixed footer.
     pub(crate) fn footer_lines(&self, registry: &ProviderRegistry) -> [String; 2] {
         let selected = self.selected_model.as_ref();

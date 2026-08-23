@@ -37,7 +37,11 @@ requests before provider dispatch. A stricter `PromptLayoutPolicy::RequireExactE
 rejects `DomainChanged` after the first request, while still allowing the first request and
 exact append-only extensions. Enforcement compares complete core-owned prompt, tool, model, and
 thinking components; compact fingerprints are telemetry only and are never trusted as equality
-proof.
+proof. A host may call `Agent::expect_next_prompt_layout_transition` while idle to permit one
+specific expected `DomainChanged`, `Rebased`, or `Discontinuous` boundary. The permit is consumed
+at the next request and does not authorize another class, so a Lua hook cannot create a durable
+exception for its own future rewrite. The kernel grants the same one-use `Rebased` permit only
+after it commits automatic compaction.
 
 The baseline fixture in `crates/tea-core/tests/cache_friendliness.rs` drives three text
 turns through the real run loop and prints the measurements. On the current pinned profile it

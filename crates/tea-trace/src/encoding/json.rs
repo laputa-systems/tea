@@ -92,6 +92,61 @@ fn json_optional_cache_evidence(output: &mut String, evidence: Option<&CacheEvid
         return;
     };
     output.push('{');
+    json_field_optional_string(output, "continuity", evidence.continuity.as_deref());
+    output.push(',');
+    json_field_optional_number(
+        output,
+        "cache_domain_fingerprint",
+        evidence.cache_domain_fingerprint,
+    );
+    output.push(',');
+    json_field_name(output, "changed_cache_domain_components");
+    json_string_array(output, &evidence.changed_cache_domain_components);
+    output.push(',');
+    json_field_optional_number(output, "context_bytes", evidence.context_bytes);
+    output.push(',');
+    json_field_optional_number(
+        output,
+        "common_context_prefix_bytes",
+        evidence.common_context_prefix_bytes,
+    );
+    output.push(',');
+    json_field_optional_number(
+        output,
+        "common_context_prefix_ratio_millionths",
+        evidence.common_context_prefix_ratio_millionths.map(u64::from),
+    );
+    output.push(',');
+    json_field_optional_bool(
+        output,
+        "context_projection_changed",
+        evidence.context_projection_changed,
+    );
+    output.push(',');
+    json_field_optional_number(output, "context_fingerprint", evidence.context_fingerprint);
+    output.push(',');
+    json_field_optional_number(
+        output,
+        "system_prompt_fingerprint",
+        evidence.system_prompt_fingerprint,
+    );
+    output.push(',');
+    json_field_optional_number(
+        output,
+        "tool_definition_fingerprint",
+        evidence.tool_definition_fingerprint,
+    );
+    output.push(',');
+    json_field_optional_number(
+        output,
+        "tool_order_fingerprint",
+        evidence.tool_order_fingerprint,
+    );
+    output.push(',');
+    json_field_optional_number(output, "model_fingerprint", evidence.model_fingerprint);
+    output.push(',');
+    json_field_optional_number(output, "thinking_fingerprint", evidence.thinking_fingerprint);
+    output.push(',');
     json_field_optional_number(
         output,
         "deterministic_common_prefix_bytes",
@@ -115,6 +170,21 @@ fn json_optional_cache_evidence(output: &mut String, evidence: Option<&CacheEvid
         "provider_cache_write_tokens",
         evidence.provider_cache_write_tokens,
     );
+    output.push(',');
+    json_field_optional_number(
+        output,
+        "serialized_request_bytes",
+        evidence.serialized_request_bytes,
+    );
+    output.push(',');
+    json_field_optional_number(
+        output,
+        "adapter_cache_domain_fingerprint",
+        evidence.adapter_cache_domain_fingerprint,
+    );
+    output.push(',');
+    json_field_name(output, "adapter_cache_domain_components");
+    json_u64_map(output, &evidence.adapter_cache_domain_components);
     output.push(',');
     json_field_optional_string(
         output,
@@ -296,6 +366,14 @@ fn json_field_optional_number(output: &mut String, name: &str, value: Option<u64
     }
 }
 
+fn json_field_optional_bool(output: &mut String, name: &str, value: Option<bool>) {
+    json_field_name(output, name);
+    match value {
+        Some(value) => output.push_str(if value { "true" } else { "false" }),
+        None => output.push_str("null"),
+    }
+}
+
 fn json_map(output: &mut String, values: &BTreeMap<String, String>) {
     output.push('{');
     for (index, (key, value)) in values.iter().enumerate() {
@@ -305,6 +383,29 @@ fn json_map(output: &mut String, values: &BTreeMap<String, String>) {
         json_field_string(output, key, value);
     }
     output.push('}');
+}
+
+fn json_u64_map(output: &mut String, values: &BTreeMap<String, u64>) {
+    output.push('{');
+    for (index, (key, value)) in values.iter().enumerate() {
+        if index > 0 {
+            output.push(',');
+        }
+        json_field_name(output, key);
+        output.push_str(&value.to_string());
+    }
+    output.push('}');
+}
+
+fn json_string_array(output: &mut String, values: &[String]) {
+    output.push('[');
+    for (index, value) in values.iter().enumerate() {
+        if index > 0 {
+            output.push(',');
+        }
+        json_string(output, value);
+    }
+    output.push(']');
 }
 
 fn json_string(output: &mut String, value: &str) {
