@@ -9,8 +9,8 @@
 
 use super::*;
 use tea_session::{
-    ArtifactId, Digest, HarnessCandidateId, HarnessRevisionId, HarnessSnapshotId,
-    HarnessTreeId, ModelHarnessProfileId, NormalizedPath, OperationId,
+    ArtifactId, Digest, HarnessCandidateId, HarnessRevisionId, HarnessSnapshotId, HarnessTreeId,
+    ModelHarnessProfileId, NormalizedPath, OperationId,
 };
 
 const CATALOG_SCHEMA_VERSION: u64 = 1;
@@ -24,18 +24,10 @@ impl HarnessRepository {
     /// a candidate after a crash.
     pub(crate) fn catalog_json(&self) -> Result<JsonValue, HarnessLineageError> {
         Ok(JsonValue::object([
-            (
-                "schema_version",
-                JsonValue::from(CATALOG_SCHEMA_VERSION),
-            ),
+            ("schema_version", JsonValue::from(CATALOG_SCHEMA_VERSION)),
             (
                 "trees",
-                JsonValue::Array(
-                    self.trees
-                        .values()
-                        .map(encode_tree)
-                        .collect::<Vec<_>>(),
-                ),
+                JsonValue::Array(self.trees.values().map(encode_tree).collect::<Vec<_>>()),
             ),
             (
                 "snapshots",
@@ -76,7 +68,16 @@ impl HarnessRepository {
         artifacts: Arc<dyn ArtifactStore>,
         value: &JsonValue,
     ) -> Result<Self, HarnessLineageError> {
-        let object = required_object(value, &["schema_version", "trees", "snapshots", "revisions", "candidates"])?;
+        let object = required_object(
+            value,
+            &[
+                "schema_version",
+                "trees",
+                "snapshots",
+                "revisions",
+                "candidates",
+            ],
+        )?;
         if required_u64(object, "schema_version")? != CATALOG_SCHEMA_VERSION {
             return Err(invalid(format!(
                 "unsupported harness catalog schema version {}; expected {CATALOG_SCHEMA_VERSION}",
@@ -281,7 +282,9 @@ fn decode_tree(value: &JsonValue) -> Result<HarnessTree, HarnessLineageError> {
             media_type: required_string(file, "media_type")?.to_owned(),
         };
         if files.insert(path.clone(), next).is_some() {
-            return Err(invalid(format!("catalog tree {id} repeats source path {path}")));
+            return Err(invalid(format!(
+                "catalog tree {id} repeats source path {path}"
+            )));
         }
     }
     Ok(HarnessTree { id, files })
@@ -290,7 +293,10 @@ fn decode_tree(value: &JsonValue) -> Result<HarnessTree, HarnessLineageError> {
 fn encode_snapshot(snapshot: &HarnessSnapshotV1) -> JsonValue {
     JsonValue::object([
         ("id", string(&snapshot.id)),
-        ("schema_version", JsonValue::from(u64::from(snapshot.schema_version))),
+        (
+            "schema_version",
+            JsonValue::from(u64::from(snapshot.schema_version)),
+        ),
         (
             "luau_abi_version",
             JsonValue::from(u64::from(snapshot.luau_abi_version)),
@@ -303,12 +309,24 @@ fn encode_snapshot(snapshot: &HarnessSnapshotV1) -> JsonValue {
 fn decode_snapshot(value: &JsonValue) -> Result<HarnessSnapshotV1, HarnessLineageError> {
     let object = required_object(
         value,
-        &["id", "schema_version", "luau_abi_version", "spec", "fingerprints"],
+        &[
+            "id",
+            "schema_version",
+            "luau_abi_version",
+            "spec",
+            "fingerprints",
+        ],
     )?;
     Ok(HarnessSnapshotV1 {
         id: parse_snapshot_id(required_string(object, "id")?)?,
-        schema_version: parse_u16(required_u64(object, "schema_version")?, "snapshot schema version")?,
-        luau_abi_version: parse_u16(required_u64(object, "luau_abi_version")?, "Luau ABI version")?,
+        schema_version: parse_u16(
+            required_u64(object, "schema_version")?,
+            "snapshot schema version",
+        )?,
+        luau_abi_version: parse_u16(
+            required_u64(object, "luau_abi_version")?,
+            "Luau ABI version",
+        )?,
         spec: decode_snapshot_spec(required_value(object, "spec")?)?,
         fingerprints: decode_fingerprints(required_value(object, "fingerprints")?)?,
     })
@@ -331,15 +349,30 @@ fn encode_snapshot_spec(spec: &HarnessSnapshotSpec) -> JsonValue {
         ),
         (
             "ordered_global_plugins",
-            JsonValue::Array(spec.ordered_global_plugins.iter().map(encode_bundle).collect()),
+            JsonValue::Array(
+                spec.ordered_global_plugins
+                    .iter()
+                    .map(encode_bundle)
+                    .collect(),
+            ),
         ),
         (
             "ordered_session_plugins",
-            JsonValue::Array(spec.ordered_session_plugins.iter().map(encode_bundle).collect()),
+            JsonValue::Array(
+                spec.ordered_session_plugins
+                    .iter()
+                    .map(encode_bundle)
+                    .collect(),
+            ),
         ),
         (
             "prompt_sections",
-            JsonValue::Array(spec.prompt_sections.iter().map(encode_prompt_section).collect()),
+            JsonValue::Array(
+                spec.prompt_sections
+                    .iter()
+                    .map(encode_prompt_section)
+                    .collect(),
+            ),
         ),
         (
             "plugin_prompt_sections",
@@ -352,7 +385,12 @@ fn encode_snapshot_spec(spec: &HarnessSnapshotSpec) -> JsonValue {
         ),
         (
             "tool_presentations",
-            JsonValue::Array(spec.tool_presentations.iter().map(encode_tool_presentation).collect()),
+            JsonValue::Array(
+                spec.tool_presentations
+                    .iter()
+                    .map(encode_tool_presentation)
+                    .collect(),
+            ),
         ),
         (
             "plugin_tool_presentations",
@@ -376,7 +414,10 @@ fn encode_snapshot_spec(spec: &HarnessSnapshotSpec) -> JsonValue {
                     .collect(),
             ),
         ),
-        ("resource_limits", encode_resource_limits(&spec.resource_limits)),
+        (
+            "resource_limits",
+            encode_resource_limits(&spec.resource_limits),
+        ),
         (
             "compaction_policy_digest",
             JsonValue::String(spec.compaction_policy_digest.to_hex()),
@@ -418,7 +459,10 @@ fn decode_snapshot_spec(value: &JsonValue) -> Result<HarnessSnapshotSpec, Harnes
         base_profile_digest: parse_digest(required_string(object, "base_profile_digest")?)?,
         base_system_prompt: required_string(object, "base_system_prompt")?.to_owned(),
         model_harness_profile: parse_profile_id(required_string(object, "model_harness_profile")?)?,
-        self_extension_addendum: parse_optional_string(required_value(object, "self_extension_addendum")?)?,
+        self_extension_addendum: parse_optional_string(required_value(
+            object,
+            "self_extension_addendum",
+        )?)?,
         ordered_global_plugins: required_array(object, "ordered_global_plugins")?
             .iter()
             .map(decode_bundle)
@@ -449,7 +493,10 @@ fn decode_snapshot_spec(value: &JsonValue) -> Result<HarnessSnapshotSpec, Harnes
             .map(decode_capability_binding)
             .collect::<Result<Vec<_>, _>>()?,
         resource_limits: decode_resource_limits(required_value(object, "resource_limits")?)?,
-        compaction_policy_digest: parse_digest(required_string(object, "compaction_policy_digest")?)?,
+        compaction_policy_digest: parse_digest(required_string(
+            object,
+            "compaction_policy_digest",
+        )?)?,
         tool_projection_digest: parse_digest(required_string(object, "tool_projection_digest")?)?,
         failure_policy_digest: parse_digest(required_string(object, "failure_policy_digest")?)?,
     })
@@ -501,7 +548,9 @@ fn encode_prompt_section(section: &PromptSectionDescriptor) -> JsonValue {
     ])
 }
 
-fn decode_prompt_section(value: &JsonValue) -> Result<PromptSectionDescriptor, HarnessLineageError> {
+fn decode_prompt_section(
+    value: &JsonValue,
+) -> Result<PromptSectionDescriptor, HarnessLineageError> {
     let object = required_object(value, &["id", "content"])?;
     Ok(PromptSectionDescriptor {
         id: required_string(object, "id")?.to_owned(),
@@ -634,7 +683,9 @@ fn encode_fingerprints(value: &HarnessSurfaceFingerprints) -> JsonValue {
     ])
 }
 
-fn decode_fingerprints(value: &JsonValue) -> Result<HarnessSurfaceFingerprints, HarnessLineageError> {
+fn decode_fingerprints(
+    value: &JsonValue,
+) -> Result<HarnessSurfaceFingerprints, HarnessLineageError> {
     let object = required_object(
         value,
         &[
@@ -675,11 +726,14 @@ fn encode_revision(revision: &HarnessRevisionV1) -> JsonValue {
                 revision
                     .parent_revision_ids
                     .iter()
-                    .map(|id| string(id))
+                    .map(string)
                     .collect(),
             ),
         ),
-        ("actor", JsonValue::String(encode_actor(revision.actor).into())),
+        (
+            "actor",
+            JsonValue::String(encode_actor(revision.actor).into()),
+        ),
         (
             "reason",
             JsonValue::String(encode_revision_reason(&revision.reason).into()),
@@ -723,7 +777,10 @@ fn decode_revision(value: &JsonValue) -> Result<HarnessRevisionV1, HarnessLineag
             .collect::<Result<Vec<_>, _>>()?,
         actor: parse_actor(required_string(object, "actor")?)?,
         reason: parse_revision_reason(required_string(object, "reason")?)?,
-        candidate_id: parse_optional_id(required_value(object, "candidate_id")?, parse_candidate_id)?,
+        candidate_id: parse_optional_id(
+            required_value(object, "candidate_id")?,
+            parse_candidate_id,
+        )?,
         created_at_ms: required_u64(object, "created_at_ms")?,
     })
 }
@@ -732,7 +789,10 @@ fn encode_candidate(candidate: &HarnessCandidateV1) -> JsonValue {
     JsonValue::object([
         ("candidate_id", string(&candidate.candidate_id)),
         ("draft", encode_candidate_draft(&candidate.draft)),
-        ("validation", encode_candidate_validation(&candidate.validation)),
+        (
+            "validation",
+            encode_candidate_validation(&candidate.validation),
+        ),
     ])
 }
 
@@ -748,10 +808,7 @@ fn decode_candidate(value: &JsonValue) -> Result<HarnessCandidateV1, HarnessLine
 fn encode_candidate_draft(draft: &HarnessCandidateDraft) -> JsonValue {
     JsonValue::object([
         ("parent_revision_id", string(&draft.parent_revision_id)),
-        (
-            "proposed_snapshot_id",
-            string(&draft.proposed_snapshot_id),
-        ),
+        ("proposed_snapshot_id", string(&draft.proposed_snapshot_id)),
         ("actor", JsonValue::String(encode_actor(draft.actor).into())),
         (
             "operation_id",
@@ -871,14 +928,19 @@ fn decode_candidate_draft(value: &JsonValue) -> Result<HarnessCandidateDraft, Ha
             .ok_or_else(|| invalid("catalog capability ceiling names must be strings"))?
             .to_owned();
         if !capability_ceiling.insert(capability) {
-            return Err(invalid("catalog candidate repeats a capability ceiling name"));
+            return Err(invalid(
+                "catalog candidate repeats a capability ceiling name",
+            ));
         }
     }
     Ok(HarnessCandidateDraft {
         parent_revision_id: parse_revision_id(required_string(object, "parent_revision_id")?)?,
         proposed_snapshot_id: parse_snapshot_id(required_string(object, "proposed_snapshot_id")?)?,
         actor: parse_actor(required_string(object, "actor")?)?,
-        operation_id: parse_optional_id(required_value(object, "operation_id")?, parse_operation_id)?,
+        operation_id: parse_optional_id(
+            required_value(object, "operation_id")?,
+            parse_operation_id,
+        )?,
         tool_invocation_id: parse_optional_string(required_value(object, "tool_invocation_id")?)?,
         hypothesis: CandidateHypothesis {
             targeted_evidence: required_string(hypothesis, "targeted_evidence")?.to_owned(),
@@ -891,7 +953,9 @@ fn decode_candidate_draft(value: &JsonValue) -> Result<HarnessCandidateDraft, Ha
                 value
                     .as_str()
                     .ok_or_else(|| invalid("catalog changed paths must be strings"))
-                    .and_then(|path| NormalizedPath::new(path).map_err(|error| invalid(error.to_string())))
+                    .and_then(|path| {
+                        NormalizedPath::new(path).map_err(|error| invalid(error.to_string()))
+                    })
             })
             .collect::<Result<Vec<_>, _>>()?,
         registry_operations: required_array(object, "registry_operations")?
@@ -899,10 +963,19 @@ fn decode_candidate_draft(value: &JsonValue) -> Result<HarnessCandidateDraft, Ha
             .map(decode_registry_operation)
             .collect::<Result<Vec<_>, _>>()?,
         changed_surfaces,
-        targeted_failures: decode_string_array(required_array(object, "targeted_failures")?, "targeted failures")?,
+        targeted_failures: decode_string_array(
+            required_array(object, "targeted_failures")?,
+            "targeted failures",
+        )?,
         evidence: decode_string_array(required_array(object, "evidence")?, "evidence")?,
-        expected_effects: decode_string_array(required_array(object, "expected_effects")?, "expected effects")?,
-        regression_risks: decode_string_array(required_array(object, "regression_risks")?, "regression risks")?,
+        expected_effects: decode_string_array(
+            required_array(object, "expected_effects")?,
+            "expected effects",
+        )?,
+        regression_risks: decode_string_array(
+            required_array(object, "regression_risks")?,
+            "regression risks",
+        )?,
         capability_ceiling,
     })
 }
@@ -915,7 +988,9 @@ fn encode_candidate_validation(validation: &CandidateValidation) -> JsonValue {
     ])
 }
 
-fn decode_candidate_validation(value: &JsonValue) -> Result<CandidateValidation, HarnessLineageError> {
+fn decode_candidate_validation(
+    value: &JsonValue,
+) -> Result<CandidateValidation, HarnessLineageError> {
     let object = required_object(value, &["accepted", "is_noop", "diagnostics"])?;
     Ok(CandidateValidation {
         accepted: required_bool(object, "accepted")?,
@@ -943,7 +1018,9 @@ fn decode_registry_operation(value: &JsonValue) -> Result<RegistryOperation, Har
     match required_string(object, "operation")? {
         "add" => Ok(RegistryOperation::Add { plugin_id }),
         "remove" => Ok(RegistryOperation::Remove { plugin_id }),
-        other => Err(invalid(format!("catalog registry operation {other:?} is unknown"))),
+        other => Err(invalid(format!(
+            "catalog registry operation {other:?} is unknown"
+        ))),
     }
 }
 
@@ -979,7 +1056,9 @@ fn parse_revision_reason(value: &str) -> Result<HarnessRevisionReason, HarnessLi
         "candidate_activation" => Ok(HarnessRevisionReason::CandidateActivation),
         "global_rebase" => Ok(HarnessRevisionReason::GlobalRebase),
         "rollback" => Ok(HarnessRevisionReason::Rollback),
-        _ => Err(invalid(format!("unknown catalog revision reason {value:?}"))),
+        _ => Err(invalid(format!(
+            "unknown catalog revision reason {value:?}"
+        ))),
     }
 }
 
@@ -1004,7 +1083,9 @@ fn parse_surface(value: &str) -> Result<HarnessSurface, HarnessLineageError> {
         "compaction" => Ok(HarnessSurface::Compaction),
         "tool_projection" => Ok(HarnessSurface::ToolProjection),
         "failure_policy" => Ok(HarnessSurface::FailurePolicy),
-        _ => Err(invalid(format!("unknown catalog harness surface {value:?}"))),
+        _ => Err(invalid(format!(
+            "unknown catalog harness surface {value:?}"
+        ))),
     }
 }
 
@@ -1017,7 +1098,9 @@ fn required_object<'a>(
         .ok_or_else(|| invalid("catalog value must be a JSON object"))?;
     for field in fields {
         if !object.contains_key(*field) {
-            return Err(invalid(format!("catalog object is missing required field {field}")));
+            return Err(invalid(format!(
+                "catalog object is missing required field {field}"
+            )));
         }
     }
     for field in object.keys() {

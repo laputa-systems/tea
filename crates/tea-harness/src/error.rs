@@ -39,11 +39,16 @@ impl fmt::Display for HarnessError {
             Self::Corruption(error) => write!(formatter, "durable session corruption: {error}"),
             Self::Core(error) => write!(formatter, "core run error: {error}"),
             Self::Artifact(error) => write!(formatter, "artifact error: {error}"),
-            Self::Verification(error) => write!(formatter, "durable session verification failed: {error}"),
+            Self::Verification(error) => {
+                write!(formatter, "durable session verification failed: {error}")
+            }
             Self::Export(error) => write!(formatter, "durable session export failed: {error}"),
             Self::InvalidState { message } => formatter.write_str(message),
             Self::RecoveryRequired { plan } => {
-                write!(formatter, "durable prefix requires recovery before new work: {plan:?}")
+                write!(
+                    formatter,
+                    "durable prefix requires recovery before new work: {plan:?}"
+                )
             }
         }
     }

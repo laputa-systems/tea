@@ -1,7 +1,7 @@
 use crate::{
-    reduce_lane, Corruption, EntryHeader, LaneId, LaneMutation, LaneRecord, ProvisionedEntry,
-    Sequence, SessionFact, SessionHeader, SessionSnapshot, StoredEntry, StoredFact,
-    StoredLaneMutation, StoredRecord, SESSION_FORMAT_VERSION,
+    Corruption, EntryHeader, LaneId, LaneMutation, LaneRecord, ProvisionedEntry,
+    SESSION_FORMAT_VERSION, Sequence, SessionFact, SessionHeader, SessionSnapshot, StoredEntry,
+    StoredFact, StoredLaneMutation, StoredRecord, reduce_lane,
 };
 use std::fmt;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -20,7 +20,11 @@ pub enum SessionError {
     /// Another active writer owns the session.
     WriterBusy { path: String },
     /// A persisted format line is invalid.
-    Format { path: String, line: usize, message: String },
+    Format {
+        path: String,
+        line: usize,
+        message: String,
+    },
 }
 
 impl fmt::Display for SessionError {
@@ -29,13 +33,20 @@ impl fmt::Display for SessionError {
             Self::InvalidInput { message } => write!(formatter, "invalid session input: {message}"),
             Self::Corruption(error) => write!(formatter, "session corruption: {error}"),
             Self::Faulted { message } => write!(formatter, "session store is faulted: {message}"),
-            Self::Io { path, message } => write!(formatter, "session I/O failed at {path}: {message}"),
-            Self::WriterBusy { path } => write!(formatter, "session already has an active writer: {path}"),
+            Self::Io { path, message } => {
+                write!(formatter, "session I/O failed at {path}: {message}")
+            }
+            Self::WriterBusy { path } => {
+                write!(formatter, "session already has an active writer: {path}")
+            }
             Self::Format {
                 path,
                 line,
                 message,
-            } => write!(formatter, "invalid session format at {path} line {line}: {message}"),
+            } => write!(
+                formatter,
+                "invalid session format at {path} line {line}: {message}"
+            ),
         }
     }
 }

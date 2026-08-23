@@ -53,9 +53,7 @@ impl ArtifactPolicy {
         }
         if self.maximum_page_bytes == 0 || self.maximum_page_bytes > MAX_PAGE_BYTES {
             return Err(ArtifactError::InvalidRequest {
-                message: format!(
-                    "artifact page limit must be within 1..={MAX_PAGE_BYTES} bytes"
-                ),
+                message: format!("artifact page limit must be within 1..={MAX_PAGE_BYTES} bytes"),
             });
         }
         Ok(())
@@ -111,7 +109,10 @@ pub enum ArtifactError {
     /// A path entry violates the no-symlink/private-object contract.
     UnsafePath { path: String, message: String },
     /// Existing bytes disagree with their claimed content identity.
-    Corruption { artifact_id: ArtifactId, message: String },
+    Corruption {
+        artifact_id: ArtifactId,
+        message: String,
+    },
     /// Caller requested an invalid page/search bound.
     InvalidRequest { message: String },
     /// Filesystem or memory store failure.
@@ -121,14 +122,22 @@ pub enum ArtifactError {
 impl fmt::Display for ArtifactError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::NotFound { artifact_id } => write!(formatter, "artifact {artifact_id} was not found"),
-            Self::UnsafePath { path, message } => write!(formatter, "unsafe artifact path {path}: {message}"),
+            Self::NotFound { artifact_id } => {
+                write!(formatter, "artifact {artifact_id} was not found")
+            }
+            Self::UnsafePath { path, message } => {
+                write!(formatter, "unsafe artifact path {path}: {message}")
+            }
             Self::Corruption {
                 artifact_id,
                 message,
             } => write!(formatter, "artifact {artifact_id} is corrupt: {message}"),
-            Self::InvalidRequest { message } => write!(formatter, "invalid artifact request: {message}"),
-            Self::Io { path, message } => write!(formatter, "artifact I/O failed at {path}: {message}"),
+            Self::InvalidRequest { message } => {
+                write!(formatter, "invalid artifact request: {message}")
+            }
+            Self::Io { path, message } => {
+                write!(formatter, "artifact I/O failed at {path}: {message}")
+            }
         }
     }
 }
@@ -253,7 +262,7 @@ impl ArtifactStore for MemoryArtifactStore {
                 return Err(ArtifactError::Corruption {
                     artifact_id,
                     message: "existing object has different bytes for the same digest".into(),
-                })
+                });
             }
             Some(_) => {}
             None => {
@@ -357,8 +366,11 @@ impl ArtifactStore for FileArtifactStore {
                 use std::os::unix::fs::OpenOptionsExt as _;
                 options.mode(0o600);
             }
-            let mut file = options.open(&temporary).map_err(|error| io(&temporary, error))?;
-            file.write_all(bytes).map_err(|error| io(&temporary, error))?;
+            let mut file = options
+                .open(&temporary)
+                .map_err(|error| io(&temporary, error))?;
+            file.write_all(bytes)
+                .map_err(|error| io(&temporary, error))?;
             file.flush().map_err(|error| io(&temporary, error))?;
             file.sync_all().map_err(|error| io(&temporary, error))?;
             drop(file);
@@ -427,7 +439,8 @@ impl ArtifactStore for FileArtifactStore {
 
     fn inventory(&self) -> Result<Vec<ArtifactInventoryItem>, ArtifactError> {
         let object_root = self.root.join("blake3");
-        let root_metadata = fs::symlink_metadata(&object_root).map_err(|error| io(&object_root, error))?;
+        let root_metadata =
+            fs::symlink_metadata(&object_root).map_err(|error| io(&object_root, error))?;
         if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
             return Err(ArtifactError::UnsafePath {
                 path: object_root.display().to_string(),
@@ -440,7 +453,8 @@ impl ArtifactStore for FileArtifactStore {
             let bucket = bucket.map_err(|error| io(&object_root, error))?;
             let bucket_path = bucket.path();
             let bucket_name = bucket.file_name().to_string_lossy().into_owned();
-            let metadata = fs::symlink_metadata(&bucket_path).map_err(|error| io(&bucket_path, error))?;
+            let metadata =
+                fs::symlink_metadata(&bucket_path).map_err(|error| io(&bucket_path, error))?;
             if metadata.file_type().is_symlink() || !metadata.is_dir() {
                 return Err(ArtifactError::UnsafePath {
                     path: bucket_path.display().to_string(),
@@ -457,14 +471,17 @@ impl ArtifactStore for FileArtifactStore {
                 let entry = entry.map_err(|error| io(&bucket_path, error))?;
                 let path = entry.path();
                 let name = entry.file_name().to_string_lossy().into_owned();
-                let artifact_id = ArtifactId::from_hex(&name).map_err(|_| ArtifactError::UnsafePath {
-                    path: path.display().to_string(),
-                    message: "artifact filename must be a canonical BLAKE3 digest".into(),
-                })?;
-                if artifact_id.to_hex()[..2] != bucket_name || self.object_path(artifact_id) != path {
+                let artifact_id =
+                    ArtifactId::from_hex(&name).map_err(|_| ArtifactError::UnsafePath {
+                        path: path.display().to_string(),
+                        message: "artifact filename must be a canonical BLAKE3 digest".into(),
+                    })?;
+                if artifact_id.to_hex()[..2] != bucket_name || self.object_path(artifact_id) != path
+                {
                     return Err(ArtifactError::UnsafePath {
                         path: path.display().to_string(),
-                        message: "artifact path does not match its content-addressed identity".into(),
+                        message: "artifact path does not match its content-addressed identity"
+                            .into(),
                     });
                 }
                 let metadata = fs::symlink_metadata(&path).map_err(|error| io(&path, error))?;
@@ -519,7 +536,11 @@ fn validate_bound(maximum_bytes: usize) -> Result<(), ArtifactError> {
     Ok(())
 }
 
-fn verify_existing(path: &Path, artifact_id: ArtifactId, expected: &[u8]) -> Result<(), ArtifactError> {
+fn verify_existing(
+    path: &Path,
+    artifact_id: ArtifactId,
+    expected: &[u8],
+) -> Result<(), ArtifactError> {
     let metadata = fs::symlink_metadata(path).map_err(|error| io(path, error))?;
     if metadata.file_type().is_symlink() || !metadata.is_file() {
         return Err(ArtifactError::UnsafePath {
@@ -538,14 +559,13 @@ fn verify_existing(path: &Path, artifact_id: ArtifactId, expected: &[u8]) -> Res
 }
 
 fn ensure_directory(path: &Path) -> Result<(), ArtifactError> {
-    if let Ok(metadata) = fs::symlink_metadata(path) {
-        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+    if let Ok(metadata) = fs::symlink_metadata(path)
+        && (metadata.file_type().is_symlink() || !metadata.is_dir()) {
             return Err(ArtifactError::UnsafePath {
                 path: path.display().to_string(),
                 message: "artifact directory must be a real directory, not a symlink".into(),
             });
         }
-    }
     fs::create_dir_all(path).map_err(|error| io(path, error))?;
     let metadata = fs::symlink_metadata(path).map_err(|error| io(path, error))?;
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
@@ -557,7 +577,8 @@ fn ensure_directory(path: &Path) -> Result<(), ArtifactError> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(|error| io(path, error))?;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+            .map_err(|error| io(path, error))?;
     }
     Ok(())
 }
@@ -569,7 +590,14 @@ fn sync_directory(path: &Path) -> Result<(), ArtifactError> {
         // Some supported filesystems do not allow syncing directories. The
         // object file itself was already synced; preserve that successful
         // durable prefix rather than pretending this platform supports more.
-        Err(error) if matches!(error.kind(), std::io::ErrorKind::InvalidInput | std::io::ErrorKind::PermissionDenied) => Ok(()),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::InvalidInput | std::io::ErrorKind::PermissionDenied
+            ) =>
+        {
+            Ok(())
+        }
         Err(error) => Err(io(path, error)),
     }
 }

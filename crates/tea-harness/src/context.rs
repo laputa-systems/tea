@@ -9,13 +9,13 @@ use crate::lineage::LoadedPluginPolicy;
 use crate::{HarnessError, HarnessSnapshotV1};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
-use tea_core::state::{AgentMessage, AgentToolCall, MessageId, SerializedJson, StopReason, ToolCallId};
-use tea_luau::{
-    LuaPolicy, PolicyContextEntry, PolicyContextInput,
+use tea_core::state::{
+    AgentMessage, AgentToolCall, MessageId, SerializedJson, StopReason, ToolCallId,
 };
+use tea_luau::{LuaPolicy, PolicyContextEntry, PolicyContextInput};
 use tea_session::{
-    reduce_lane, EntryId, LaneId, MemoryVisibility, PayloadRef, SessionEntry, SessionReader,
-    SessionSnapshot, StoredEntry,
+    EntryId, LaneId, MemoryVisibility, PayloadRef, SessionEntry, SessionReader, SessionSnapshot,
+    StoredEntry, reduce_lane,
 };
 
 /// Explicit provider-facing context ceiling selected by the host profile.
@@ -141,13 +141,12 @@ impl ContextPolicyRegistry {
         let mut annotations = Vec::new();
         let mut requested_compaction_strategy = None;
         for binding in &self.policies {
-            let proposal = binding
-                .policy
-                .context_projection(&input)
-                .map_err(|error| HarnessError::invalid_state(format!(
+            let proposal = binding.policy.context_projection(&input).map_err(|error| {
+                HarnessError::invalid_state(format!(
                     "context policy {} rejected its bounded proposal: {error}",
                     binding.plugin_id,
-                )))?;
+                ))
+            })?;
             if !proposal.retain_entries.is_empty() {
                 let proposed = proposal
                     .retain_entries
@@ -230,7 +229,13 @@ pub fn derive_model_context(
     harness: &HarnessSnapshotV1,
     limits: ProviderLimits,
 ) -> Result<DerivedContext, HarnessError> {
-    derive_model_context_with_patch(session, lane, harness, limits, &ContextProjectionPatch::default())
+    derive_model_context_with_patch(
+        session,
+        lane,
+        harness,
+        limits,
+        &ContextProjectionPatch::default(),
+    )
 }
 
 /// Derive one context after validating a typed policy patch.
@@ -255,12 +260,7 @@ pub(crate) fn derive_snapshot_context_with_patch(
     patch: &ContextProjectionPatch,
 ) -> Result<DerivedContext, HarnessError> {
     derive_snapshot_context_with_patch_allowing_pending_tool_calls(
-        snapshot,
-        lane,
-        harness,
-        limits,
-        patch,
-        None,
+        snapshot, lane, harness, limits, patch, None,
     )
 }
 
@@ -334,7 +334,10 @@ fn derive_snapshot_context_with_patch_allowing_pending_tool_calls(
     for annotation in &patch.annotations {
         messages.push(AgentMessage::User {
             id: MessageId(messages.len() as u64 + 1),
-            content: format!("[Context annotation {}]\n{}", annotation.id, annotation.content),
+            content: format!(
+                "[Context annotation {}]\n{}",
+                annotation.id, annotation.content
+            ),
         });
     }
     let serialized_context = canonical_context_json_lines(&messages)?;
@@ -362,7 +365,9 @@ fn derive_snapshot_context_with_patch_allowing_pending_tool_calls(
 
 fn parse_context_entry_id(value: String) -> Result<EntryId, HarnessError> {
     EntryId::new(value).map_err(|error| {
-        HarnessError::invalid_state(format!("context policy returned an invalid entry ID: {error}"))
+        HarnessError::invalid_state(format!(
+            "context policy returned an invalid entry ID: {error}"
+        ))
     })
 }
 
@@ -427,7 +432,10 @@ fn context_entry_kind(entry: &SessionEntry) -> &'static str {
     }
 }
 
-fn branch_entries(snapshot: &SessionSnapshot, lane: &LaneId) -> Result<Vec<StoredEntry>, HarnessError> {
+fn branch_entries(
+    snapshot: &SessionSnapshot,
+    lane: &LaneId,
+) -> Result<Vec<StoredEntry>, HarnessError> {
     let reduction = reduce_lane(snapshot.clone(), lane.clone())?;
     let entries = snapshot
         .entries()
@@ -453,7 +461,10 @@ fn branch_entries(snapshot: &SessionSnapshot, lane: &LaneId) -> Result<Vec<Store
     Ok(chain)
 }
 
-fn validate_patch_shape(branch: &[StoredEntry], patch: &ContextProjectionPatch) -> Result<(), HarnessError> {
+fn validate_patch_shape(
+    branch: &[StoredEntry],
+    patch: &ContextProjectionPatch,
+) -> Result<(), HarnessError> {
     let known = branch
         .iter()
         .map(|entry| entry.header.id.clone())
@@ -566,8 +577,7 @@ fn default_visible_entries(branch: &[StoredEntry]) -> Result<BTreeSet<EntryId>, 
     let mut selected = branch
         .iter()
         .filter(|entry| {
-            entry.body.is_model_visible()
-                && !matches!(entry.body, SessionEntry::PluginMemory(_))
+            entry.body.is_model_visible() && !matches!(entry.body, SessionEntry::PluginMemory(_))
         })
         .map(|entry| entry.header.id.clone())
         .collect::<BTreeSet<_>>();
@@ -624,15 +634,19 @@ fn validate_compaction_range(
     let start_index = branch
         .iter()
         .position(|entry| &entry.header.id == start)
-        .ok_or_else(|| HarnessError::invalid_state(format!(
-            "compaction refers to covered start {start} outside its branch",
-        )))?;
+        .ok_or_else(|| {
+            HarnessError::invalid_state(format!(
+                "compaction refers to covered start {start} outside its branch",
+            ))
+        })?;
     let end_index = branch
         .iter()
         .position(|entry| &entry.header.id == end)
-        .ok_or_else(|| HarnessError::invalid_state(format!(
-            "compaction refers to covered end {end} outside its branch",
-        )))?;
+        .ok_or_else(|| {
+            HarnessError::invalid_state(format!(
+                "compaction refers to covered end {end} outside its branch",
+            ))
+        })?;
     if start_index > end_index || end_index >= compaction_index {
         return Err(HarnessError::invalid_state(
             "compaction coverage must be a nonempty earlier branch range",
@@ -651,7 +665,9 @@ fn validate_protected_context(
     selected: &BTreeSet<EntryId>,
     pending_tool_calls: &BTreeMap<EntryId, BTreeSet<String>>,
 ) -> Result<(), HarnessError> {
-    let first_user = branch.iter().find(|entry| matches!(entry.body, SessionEntry::UserMessage(_)));
+    let first_user = branch
+        .iter()
+        .find(|entry| matches!(entry.body, SessionEntry::UserMessage(_)));
     if let Some(first_user) = first_user
         && !selected.contains(&first_user.header.id)
     {
@@ -677,10 +693,9 @@ fn validate_protected_context(
     let result_calls = branch
         .iter()
         .filter_map(|entry| match &entry.body {
-            SessionEntry::ToolResult(result) => Some((
-                entry.header.id.clone(),
-                result.tool_call_id.clone(),
-            )),
+            SessionEntry::ToolResult(result) => {
+                Some((entry.header.id.clone(), result.tool_call_id.clone()))
+            }
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -690,7 +705,9 @@ fn validate_protected_context(
             continue;
         }
         for call_id in calls {
-            let paired = result_calls.iter().find(|(_, result_call)| result_call == call_id);
+            let paired = result_calls
+                .iter()
+                .find(|(_, result_call)| result_call == call_id);
             let Some((result_id, _)) = paired else {
                 if pending_tool_calls
                     .get(assistant_id)
@@ -810,7 +827,9 @@ fn message_for_entry(
             id,
             content: format!("[Branch summary]\n{}", entry.summary),
         })),
-        SessionEntry::PluginMemory(memory) if memory.visibility == MemoryVisibility::ModelVisible => {
+        SessionEntry::PluginMemory(memory)
+            if memory.visibility == MemoryVisibility::ModelVisible =>
+        {
             let PayloadRef::Inline(content) = &memory.content else {
                 return Err(HarnessError::invalid_state(format!(
                     "model-visible plugin memory {}:{} is artifact-backed and needs an explicit artifact reader projection",
@@ -823,9 +842,11 @@ fn message_for_entry(
                     "[Plugin memory {}:{}]\n{}",
                     memory.plugin_id,
                     memory.kind,
-                    content.to_json_string().map_err(|error| HarnessError::invalid_state(format!(
-                        "model-visible plugin memory cannot encode: {error}",
-                    )))?,
+                    content
+                        .to_json_string()
+                        .map_err(|error| HarnessError::invalid_state(format!(
+                            "model-visible plugin memory cannot encode: {error}",
+                        )))?,
                 ),
             }))
         }
@@ -863,18 +884,24 @@ fn validate_recovery_locator(result: &tea_session::ToolResultEntry) -> Result<()
     Ok(())
 }
 
-fn tool_projection_content(projection: &tea_protocol::JsonValue) -> Result<(String, Option<String>), HarnessError> {
+fn tool_projection_content(
+    projection: &tea_protocol::JsonValue,
+) -> Result<(String, Option<String>), HarnessError> {
     let content = projection
         .get("content")
         .and_then(tea_protocol::JsonValue::as_str)
-        .ok_or_else(|| HarnessError::invalid_state("tool-result model projection has no string content"))?
+        .ok_or_else(|| {
+            HarnessError::invalid_state("tool-result model projection has no string content")
+        })?
         .to_owned();
     let details = projection
         .get("details")
         .filter(|value| !value.is_null())
         .map(|value| {
             value.to_json_string().map_err(|error| {
-                HarnessError::invalid_state(format!("tool-result projection details cannot encode: {error}"))
+                HarnessError::invalid_state(format!(
+                    "tool-result projection details cannot encode: {error}"
+                ))
             })
         })
         .transpose()?;
@@ -1006,7 +1033,9 @@ fn canonical_message_json(message: &AgentMessage) -> Result<String, HarnessError
         }
     };
     value.to_json_string().map_err(|error| {
-        HarnessError::invalid_state(format!("derived context cannot encode canonically: {error}"))
+        HarnessError::invalid_state(format!(
+            "derived context cannot encode canonically: {error}"
+        ))
     })
 }
 
@@ -1027,14 +1056,8 @@ fn canonical_usage(usage: &tea_core::state::Usage) -> tea_protocol::JsonValue {
             .unwrap_or(JsonValue::Null)
     };
     object([
-        (
-            "cache_read_tokens",
-            number(usage.cache_read_tokens),
-        ),
-        (
-            "cache_write_tokens",
-            number(usage.cache_write_tokens),
-        ),
+        ("cache_read_tokens", number(usage.cache_read_tokens)),
+        ("cache_write_tokens", number(usage.cache_write_tokens)),
         (
             "cost",
             usage

@@ -88,11 +88,10 @@ fn zero_resource_limits_are_rejected_by_field() {
     ];
 
     for (field, limits) in cases {
-        let error =
-            match LuaPolicy::load_with_limits("return { prompt_sections = {} }", limits) {
-                Ok(_) => panic!("zero {field} must be rejected before VM setup"),
-                Err(error) => error,
-            };
+        let error = match LuaPolicy::load_with_limits("return { prompt_sections = {} }", limits) {
+            Ok(_) => panic!("zero {field} must be rejected before VM setup"),
+            Err(error) => error,
+        };
         assert_eq!(error, PolicyError::InvalidLimit { field });
     }
 }

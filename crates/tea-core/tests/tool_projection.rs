@@ -5,9 +5,8 @@ use tea_core::scheduler::{
 };
 use tea_core::state::{AgentToolCall, SerializedJson, StopReason, ToolCallId};
 use tea_core::tool::{
-    project_tool_result_as_text, truncate_middle, AgentTool, FailureSignature, ToolCall,
-    ToolContext, ToolFailure, ToolFuture, ToolResultProjectionPolicy, ToolUpdateSink,
-    AgentToolResult,
+    project_tool_result_as_text, truncate_middle, AgentTool, AgentToolResult, FailureSignature,
+    ToolCall, ToolContext, ToolFailure, ToolFuture, ToolResultProjectionPolicy, ToolUpdateSink,
 };
 use tea_core::{Agent, AgentMessage, CoreError};
 

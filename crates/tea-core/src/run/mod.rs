@@ -26,8 +26,8 @@ use crate::tool::{
     project_tool_result_as_text, AgentTool, AgentToolResult, ToolCall, ToolFuture, ToolUpdate,
 };
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::mpsc::TrySendError;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::TrySendError;
 use std::sync::{Arc, Mutex, Weak};
 use std::task::{Poll, Waker};
 
@@ -261,7 +261,10 @@ impl RunHandle {
             self.configuration.provenance.clone(),
             subject,
         );
-        self.configuration.effect_gate.before(action.clone()).await?;
+        self.configuration
+            .effect_gate
+            .before(action.clone())
+            .await?;
         Ok(EffectTicket { action })
     }
 
@@ -882,8 +885,13 @@ impl RunHandle {
         if has_more_tool_calls || !queued.is_empty() {
             let next_turn_id = TurnId(turn_id.0.saturating_add(1));
             self.advance_turn(next_turn_id)?;
-            self.emit(agent, AgentEventKind::TurnStart { turn_id: next_turn_id })
-                .await?;
+            self.emit(
+                agent,
+                AgentEventKind::TurnStart {
+                    turn_id: next_turn_id,
+                },
+            )
+            .await?;
             let context = self
                 .inject_queued_messages(agent, prepared_context, queued)
                 .await?;

@@ -2,10 +2,10 @@
 
 use std::fmt;
 use tea_core::tool::AgentToolResult;
+use tea_protocol::JsonValue;
 use tea_session::{
     ArtifactError, ArtifactId, ArtifactPolicy, ArtifactPolicyId, ArtifactStore, PayloadRef,
 };
-use tea_protocol::JsonValue;
 
 const TOOL_RESULT_MEDIA_TYPE: &str = "application/vnd.tea.tool-result+json";
 const PROJECTION_STRATEGY_ID: &str = "tea-recoverable-tool-result-v1";
@@ -49,9 +49,14 @@ impl fmt::Display for ToolResultRetentionError {
             Self::Policy { message } => write!(formatter, "invalid artifact policy: {message}"),
             Self::Artifact(error) => error.fmt(formatter),
             Self::InvalidDetails { message } => {
-                write!(formatter, "tool result details are not valid JSON: {message}")
+                write!(
+                    formatter,
+                    "tool result details are not valid JSON: {message}"
+                )
             }
-            Self::Encode { message } => write!(formatter, "cannot encode canonical tool result: {message}"),
+            Self::Encode { message } => {
+                write!(formatter, "cannot encode canonical tool result: {message}")
+            }
         }
     }
 }
@@ -92,11 +97,12 @@ pub fn retain_tool_result_with_projection(
     let raw_details = result_details(raw_result)?;
     let model_details = result_details(model_result)?;
     let full_value = full_value(raw_result, raw_details);
-    let canonical = full_value
-        .to_json_string()
-        .map_err(|error| ToolResultRetentionError::Encode {
-            message: error.to_string(),
-        })?;
+    let canonical =
+        full_value
+            .to_json_string()
+            .map_err(|error| ToolResultRetentionError::Encode {
+                message: error.to_string(),
+            })?;
     if canonical.len() <= policy.maximum_inline_bytes {
         return Ok(RetainedToolResult {
             full_result: PayloadRef::Inline(full_value),
@@ -214,7 +220,13 @@ fn artifact_projection(content: &str, artifact_id: ArtifactId) -> JsonValue {
             "[full tool result: tea-artifact://blake3/{artifact_id}; complete structured result is available with tea_artifact_read]"
         )
     };
-    let mut preview = String::with_capacity(locator.len().saturating_add(head_end).saturating_add(content.len().saturating_sub(tail_start)).saturating_add(2));
+    let mut preview = String::with_capacity(
+        locator
+            .len()
+            .saturating_add(head_end)
+            .saturating_add(content.len().saturating_sub(tail_start))
+            .saturating_add(2),
+    );
     preview.push_str(&locator);
     preview.push('\n');
     preview.push_str(&content[..head_end]);

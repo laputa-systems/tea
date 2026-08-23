@@ -15,13 +15,13 @@ impl Digest {
     /// Construct a digest from a canonical lowercase or uppercase hex string.
     pub fn from_hex(value: &str) -> Result<Self, DigestError> {
         if value.len() != 64 {
-            return Err(DigestError::WrongLength { actual: value.len() });
+            return Err(DigestError::WrongLength {
+                actual: value.len(),
+            });
         }
         let mut bytes = [0_u8; 32];
-        for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
-            let high = hex_value(pair[0]).ok_or(DigestError::InvalidHex {
-                index: index * 2,
-            })?;
+        for (index, pair) in value.as_bytes().as_chunks::<2>().0.iter().enumerate() {
+            let high = hex_value(pair[0]).ok_or(DigestError::InvalidHex { index: index * 2 })?;
             let low = hex_value(pair[1]).ok_or(DigestError::InvalidHex {
                 index: index * 2 + 1,
             })?;
@@ -48,7 +48,10 @@ impl Digest {
 
 impl fmt::Debug for Digest {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.debug_tuple("Digest").field(&self.to_hex()).finish()
+        formatter
+            .debug_tuple("Digest")
+            .field(&self.to_hex())
+            .finish()
     }
 }
 
@@ -71,9 +74,14 @@ impl fmt::Display for DigestError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::WrongLength { actual } => {
-                write!(formatter, "BLAKE3 digest must contain 64 hexadecimal characters, got {actual}")
+                write!(
+                    formatter,
+                    "BLAKE3 digest must contain 64 hexadecimal characters, got {actual}"
+                )
             }
-            Self::InvalidHex { index } => write!(formatter, "invalid hexadecimal character at index {index}"),
+            Self::InvalidHex { index } => {
+                write!(formatter, "invalid hexadecimal character at index {index}")
+            }
         }
     }
 }
@@ -214,9 +222,14 @@ impl fmt::Display for IdError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Empty => formatter.write_str("durable ID cannot be empty"),
-            Self::TooLong { actual } => write!(formatter, "durable ID exceeds 200 bytes ({actual})"),
+            Self::TooLong { actual } => {
+                write!(formatter, "durable ID exceeds 200 bytes ({actual})")
+            }
             Self::UnsafeCharacter { character } => {
-                write!(formatter, "durable ID contains unsafe character {character:?}")
+                write!(
+                    formatter,
+                    "durable ID contains unsafe character {character:?}"
+                )
             }
         }
     }
@@ -235,7 +248,10 @@ impl NormalizedPath {
         if value.is_empty() {
             return Err(NormalizedPathError::Empty);
         }
-        if value.starts_with('/') || value.starts_with('\\') || value.as_bytes().get(1) == Some(&b':') {
+        if value.starts_with('/')
+            || value.starts_with('\\')
+            || value.as_bytes().get(1) == Some(&b':')
+        {
             return Err(NormalizedPathError::Absolute { path: value });
         }
         if value.contains('\\') || value.bytes().any(|byte| byte == 0) {
@@ -286,9 +302,14 @@ impl fmt::Display for NormalizedPathError {
             Self::Empty => formatter.write_str("normalized path cannot be empty"),
             Self::Absolute { path } => write!(formatter, "path is absolute: {path:?}"),
             Self::TraversalOrEmpty { path } => {
-                write!(formatter, "path has an empty or traversal component: {path:?}")
+                write!(
+                    formatter,
+                    "path has an empty or traversal component: {path:?}"
+                )
             }
-            Self::UnsafeCharacter { path } => write!(formatter, "path has an unsafe character: {path:?}"),
+            Self::UnsafeCharacter { path } => {
+                write!(formatter, "path has an unsafe character: {path:?}")
+            }
         }
     }
 }
@@ -304,10 +325,10 @@ fn validate_id(value: &str) -> Result<(), IdError> {
             actual: value.len(),
         });
     }
-    if let Some(character) = value.chars().find(|character| {
-        character.is_control()
-            || matches!(character, '/' | '\\' | ':' | '\0')
-    }) {
+    if let Some(character) = value
+        .chars()
+        .find(|character| character.is_control() || matches!(character, '/' | '\\' | ':' | '\0'))
+    {
         return Err(IdError::UnsafeCharacter { character });
     }
     Ok(())

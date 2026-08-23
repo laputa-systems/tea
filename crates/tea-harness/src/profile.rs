@@ -8,9 +8,7 @@
 use crate::HarnessError;
 use std::collections::{BTreeMap, BTreeSet};
 use tea_protocol::JsonValue;
-use tea_session::{
-    ArtifactId, CanonicalHashWriter, Digest, ModelHarnessProfileId,
-};
+use tea_session::{ArtifactId, CanonicalHashWriter, Digest, ModelHarnessProfileId};
 
 const PROFILE_SCHEMA_VERSION: u16 = 1;
 const PROFILE_ABI_VERSION: u16 = 1;
@@ -61,7 +59,10 @@ impl ModelHarnessProfile {
         profile.validate_fields()?;
         let profile_id = ModelHarnessProfileId::new(profile.identity_digest().to_hex())
             .map_err(|error| HarnessError::invalid_state(error.to_string()))?;
-        Ok(Self { profile_id, ..profile })
+        Ok(Self {
+            profile_id,
+            ..profile
+        })
     }
 
     /// Recompute the identity and reject a forged or stale profile record.
@@ -92,8 +93,14 @@ impl ModelHarnessProfile {
         );
         writer.string("base_prompt_variant", &self.base_prompt_variant);
         writer.string("tool_presentation_variant", &self.tool_presentation_variant);
-        writer.string("default_compaction_strategy", &self.default_compaction_strategy);
-        writer.string("default_projection_strategy", &self.default_projection_strategy);
+        writer.string(
+            "default_compaction_strategy",
+            &self.default_compaction_strategy,
+        );
+        writer.string(
+            "default_projection_strategy",
+            &self.default_projection_strategy,
+        );
         writer.finish()
     }
 
@@ -102,7 +109,10 @@ impl ModelHarnessProfile {
             ("provider_family", self.provider_family.as_str()),
             ("requested_model", self.requested_model.as_str()),
             ("base_prompt_variant", self.base_prompt_variant.as_str()),
-            ("tool_presentation_variant", self.tool_presentation_variant.as_str()),
+            (
+                "tool_presentation_variant",
+                self.tool_presentation_variant.as_str(),
+            ),
             (
                 "default_compaction_strategy",
                 self.default_compaction_strategy.as_str(),
@@ -121,7 +131,9 @@ impl ModelHarnessProfile {
         if self
             .returned_model_revision
             .as_deref()
-            .is_some_and(|value| value.is_empty() || value.len() > 240 || value.chars().any(char::is_control))
+            .is_some_and(|value| {
+                value.is_empty() || value.len() > 240 || value.chars().any(char::is_control)
+            })
         {
             return Err(HarnessError::invalid_state(
                 "model-harness profile returned_model_revision must be bounded non-control text",
@@ -232,10 +244,7 @@ pub fn inspect_tool_schema_deviation(
         let Some(value) = arguments.get(field) else {
             continue;
         };
-        let Some(expected) = property_schema
-            .get("type")
-            .and_then(JsonValue::as_str)
-        else {
+        let Some(expected) = property_schema.get("type").and_then(JsonValue::as_str) else {
             continue;
         };
         let actual = json_kind_name(value);

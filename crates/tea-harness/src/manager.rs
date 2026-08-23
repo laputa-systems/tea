@@ -6,25 +6,25 @@
 //! a lane by itself.  The supervisor remains responsible for writing a
 //! `HarnessRevisionChanged` semantic entry at an epoch boundary.
 
-use crate::lineage::compose_system_prompt;
 use crate::context::ContextPolicyRegistry;
 use crate::lifecycle::PluginLifecycleRegistry;
+use crate::lineage::compose_system_prompt;
 use crate::{
     CandidateHypothesis, CoreEpochTemplate, HarnessActor, HarnessCandidateDraft,
     HarnessCandidateV1, HarnessError, HarnessIdentity, HarnessLineageError, HarnessRepository,
-    HarnessRevisionV1, HarnessSnapshotV1, HarnessSourceFile, HarnessSurface, HarnessTreeLimits, PluginBundleRef,
-    PluginCapabilityCatalog, RegistryOperation, SelfExtensionMode,
+    HarnessRevisionV1, HarnessSnapshotV1, HarnessSourceFile, HarnessSurface, HarnessTreeLimits,
+    PluginBundleRef, PluginCapabilityCatalog, RegistryOperation, SelfExtensionMode,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 use tea_core::tool::ToolRegistry;
 use tea_luau::tool_handler::{LuaToolHandler, ToolHandlerSpec};
 use tea_luau::{LuaPolicyHookSet, PolicyMemoryCollector};
+use tea_protocol::JsonValue;
 use tea_session::{
     ArtifactId, ArtifactStore, CanonicalHashWriter, HarnessCandidateId, HarnessCatalogFact,
     HarnessRevisionId, NormalizedPath, OperationId, SessionFact, SessionWriter,
 };
-use tea_protocol::JsonValue;
 
 /// Fixed artifact media type for immutable harness repository catalogs.
 pub(crate) const HARNESS_CATALOG_MEDIA_TYPE: &str = "application/vnd.tea.harness-catalog+json";
@@ -196,19 +196,18 @@ impl HarnessManager {
     ) -> Result<ResolvedHarnessConfiguration, HarnessError> {
         let (revision, snapshot, policies) = {
             let repository = self.lock_repository()?;
-            let revision = repository
-                .revision(revision_id)
-                .cloned()
-                .ok_or_else(|| HarnessError::invalid_state(format!(
-                    "unknown harness revision {revision_id}"
-                )))?;
+            let revision = repository.revision(revision_id).cloned().ok_or_else(|| {
+                HarnessError::invalid_state(format!("unknown harness revision {revision_id}"))
+            })?;
             let snapshot = repository
                 .snapshot(&revision.snapshot_id)
                 .cloned()
-                .ok_or_else(|| HarnessError::invalid_state(format!(
-                    "revision {revision_id} references missing snapshot {}",
-                    revision.snapshot_id
-                )))?;
+                .ok_or_else(|| {
+                    HarnessError::invalid_state(format!(
+                        "revision {revision_id} references missing snapshot {}",
+                        revision.snapshot_id
+                    ))
+                })?;
             let policies = repository
                 .load_plugin_policies(&snapshot)
                 .map_err(lineage_error)?;
@@ -274,10 +273,12 @@ impl HarnessManager {
                 })?;
                 let binding = resolved_bindings
                     .get(&(loaded.plugin.plugin_id.clone(), tool.capability.clone()))
-                    .ok_or_else(|| HarnessError::invalid_state(format!(
-                        "plugin {} tool {} requests unbound capability {}",
-                        loaded.plugin.plugin_id, tool.name, tool.capability,
-                    )))?;
+                    .ok_or_else(|| {
+                        HarnessError::invalid_state(format!(
+                            "plugin {} tool {} requests unbound capability {}",
+                            loaded.plugin.plugin_id, tool.name, tool.capability,
+                        ))
+                    })?;
                 if plugin_tools.get(&tool.name).is_some() {
                     return Err(HarnessError::invalid_state(format!(
                         "plugins declare duplicate executable tool {}",
@@ -296,10 +297,12 @@ impl HarnessManager {
                     binding.capabilities.clone(),
                     binding.handler_limits,
                 )
-                .map_err(|error| HarnessError::invalid_state(format!(
-                    "plugin {} tool {} could not bind its validated handler: {error}",
-                    loaded.plugin.plugin_id, tool.name,
-                )))?;
+                .map_err(|error| {
+                    HarnessError::invalid_state(format!(
+                        "plugin {} tool {} could not bind its validated handler: {error}",
+                        loaded.plugin.plugin_id, tool.name,
+                    ))
+                })?;
                 plugin_tools.insert(Arc::new(handler));
             }
         }
@@ -355,21 +358,23 @@ impl HarnessManager {
         let parent_revision = repository
             .revision(&request.base_revision_id)
             .cloned()
-            .ok_or_else(|| HarnessError::invalid_state(format!(
-                "harness apply base revision {} does not exist",
-                request.base_revision_id
-            )))?;
+            .ok_or_else(|| {
+                HarnessError::invalid_state(format!(
+                    "harness apply base revision {} does not exist",
+                    request.base_revision_id
+                ))
+            })?;
         let parent_snapshot = repository
             .snapshot(&parent_revision.snapshot_id)
             .cloned()
-            .ok_or_else(|| HarnessError::invalid_state(format!(
-                "harness apply base revision {} has no immutable snapshot",
-                request.base_revision_id
-            )))?;
-        let target_plugin_ids = apply_registry_operations(
-            &parent_snapshot,
-            &request.registry_operations,
-        )?;
+            .ok_or_else(|| {
+                HarnessError::invalid_state(format!(
+                    "harness apply base revision {} has no immutable snapshot",
+                    request.base_revision_id
+                ))
+            })?;
+        let target_plugin_ids =
+            apply_registry_operations(&parent_snapshot, &request.registry_operations)?;
         let global_plugin_ids = parent_snapshot
             .spec
             .ordered_global_plugins
@@ -447,9 +452,8 @@ impl HarnessManager {
                 .files
                 .iter()
                 .map(|patch| match patch {
-                    HarnessFilePatch::Upsert { path, .. } | HarnessFilePatch::Delete { path, .. } => {
-                        path.clone()
-                    }
+                    HarnessFilePatch::Upsert { path, .. }
+                    | HarnessFilePatch::Delete { path, .. } => path.clone(),
                 })
                 .collect(),
             registry_operations: request.registry_operations,
@@ -488,7 +492,9 @@ impl HarnessManager {
         self.lock_repository()?
             .candidate(candidate_id)
             .cloned()
-            .ok_or_else(|| HarnessError::invalid_state(format!("unknown harness candidate {candidate_id}")))
+            .ok_or_else(|| {
+                HarnessError::invalid_state(format!("unknown harness candidate {candidate_id}"))
+            })
     }
 
     /// Return a cloned immutable revision for status or durable activation.
@@ -499,7 +505,9 @@ impl HarnessManager {
         self.lock_repository()?
             .revision(revision_id)
             .cloned()
-            .ok_or_else(|| HarnessError::invalid_state(format!("unknown harness revision {revision_id}")))
+            .ok_or_else(|| {
+                HarnessError::invalid_state(format!("unknown harness revision {revision_id}"))
+            })
     }
 
     /// Return a cloned snapshot for read-only status and diffing.
@@ -508,16 +516,18 @@ impl HarnessManager {
         revision_id: &HarnessRevisionId,
     ) -> Result<HarnessSnapshotV1, HarnessError> {
         let repository = self.lock_repository()?;
-        let revision = repository
-            .revision(revision_id)
-            .ok_or_else(|| HarnessError::invalid_state(format!("unknown harness revision {revision_id}")))?;
+        let revision = repository.revision(revision_id).ok_or_else(|| {
+            HarnessError::invalid_state(format!("unknown harness revision {revision_id}"))
+        })?;
         repository
             .snapshot(&revision.snapshot_id)
             .cloned()
-            .ok_or_else(|| HarnessError::invalid_state(format!(
-                "revision {revision_id} references missing snapshot {}",
-                revision.snapshot_id
-            )))
+            .ok_or_else(|| {
+                HarnessError::invalid_state(format!(
+                    "revision {revision_id} references missing snapshot {}",
+                    revision.snapshot_id
+                ))
+            })
     }
 
     /// Return a cloned immutable snapshot by content identity for read-only
@@ -529,9 +539,9 @@ impl HarnessManager {
         self.lock_repository()?
             .snapshot(snapshot_id)
             .cloned()
-            .ok_or_else(|| HarnessError::invalid_state(format!(
-                "unknown harness snapshot {snapshot_id}",
-            )))
+            .ok_or_else(|| {
+                HarnessError::invalid_state(format!("unknown harness snapshot {snapshot_id}",))
+            })
     }
 
     /// Return immutable source-artifact roots retained by the session's
@@ -566,9 +576,11 @@ impl HarnessManager {
         let snapshot = snapshot_for_revision(&repository, revision_id)?;
         source_files_for_snapshot(&repository, snapshot)?
             .remove(path)
-            .ok_or_else(|| HarnessError::invalid_state(format!(
-                "revision {revision_id} does not contain immutable source {path}",
-            )))
+            .ok_or_else(|| {
+                HarnessError::invalid_state(format!(
+                    "revision {revision_id} does not contain immutable source {path}",
+                ))
+            })
     }
 
     /// Compare exact source object identities between two immutable revisions.
@@ -627,15 +639,19 @@ impl HarnessManager {
         let parent = repository
             .revision(&base_revision_id)
             .cloned()
-            .ok_or_else(|| HarnessError::invalid_state(format!(
-                "harness rollback base revision {base_revision_id} does not exist",
-            )))?;
+            .ok_or_else(|| {
+                HarnessError::invalid_state(format!(
+                    "harness rollback base revision {base_revision_id} does not exist",
+                ))
+            })?;
         let target = repository
             .revision(&target_revision_id)
             .cloned()
-            .ok_or_else(|| HarnessError::invalid_state(format!(
-                "harness rollback target revision {target_revision_id} does not exist",
-            )))?;
+            .ok_or_else(|| {
+                HarnessError::invalid_state(format!(
+                    "harness rollback target revision {target_revision_id} does not exist",
+                ))
+            })?;
         if base_revision_id == target_revision_id {
             return Err(HarnessError::invalid_state(
                 "harness rollback target must be an earlier immutable revision",
@@ -649,9 +665,11 @@ impl HarnessManager {
         let parent_snapshot = repository
             .snapshot(&parent.snapshot_id)
             .cloned()
-            .ok_or_else(|| HarnessError::invalid_state(format!(
-                "harness rollback base revision {base_revision_id} has no immutable snapshot",
-            )))?;
+            .ok_or_else(|| {
+                HarnessError::invalid_state(format!(
+                    "harness rollback base revision {base_revision_id} has no immutable snapshot",
+                ))
+            })?;
         let target_snapshot = repository
             .snapshot(&target.snapshot_id)
             .cloned()
@@ -697,9 +715,11 @@ impl HarnessManager {
         let bytes = self.catalog_bytes()?;
         let descriptor = artifacts
             .put(&bytes, HARNESS_CATALOG_MEDIA_TYPE)
-            .map_err(|error| HarnessError::invalid_state(format!(
-                "could not persist immutable harness catalog: {error}"
-            )))?;
+            .map_err(|error| {
+                HarnessError::invalid_state(format!(
+                    "could not persist immutable harness catalog: {error}"
+                ))
+            })?;
         let fact = HarnessCatalogFact {
             schema_version: HARNESS_CATALOG_SCHEMA_VERSION,
             artifact_id: descriptor.artifact_id,
@@ -730,33 +750,41 @@ impl HarnessManager {
                 fact.schema_version
             )));
         }
-        let bytes = artifacts
-            .get(fact.artifact_id)
-            .map_err(|error| HarnessError::invalid_state(format!(
+        let bytes = artifacts.get(fact.artifact_id).map_err(|error| {
+            HarnessError::invalid_state(format!(
                 "required harness catalog artifact {} is unavailable: {error}",
                 fact.artifact_id
-            )))?;
-        if bytes.len() as u64 != fact.byte_len || ArtifactId::from_bytes(&bytes) != fact.artifact_id {
+            ))
+        })?;
+        if bytes.len() as u64 != fact.byte_len || ArtifactId::from_bytes(&bytes) != fact.artifact_id
+        {
             return Err(HarnessError::invalid_state(
                 "harness catalog artifact does not match its durable descriptor",
             ));
         }
-        let value = JsonValue::parse(
-            std::str::from_utf8(&bytes).map_err(|_| {
-                HarnessError::invalid_state("harness catalog artifact is not valid UTF-8 JSON")
-            })?,
-        )
-        .map_err(|error| HarnessError::invalid_state(format!(
-            "harness catalog artifact is invalid JSON: {error}"
-        )))?;
+        let value = JsonValue::parse(std::str::from_utf8(&bytes).map_err(|_| {
+            HarnessError::invalid_state("harness catalog artifact is not valid UTF-8 JSON")
+        })?)
+        .map_err(|error| {
+            HarnessError::invalid_state(format!(
+                "harness catalog artifact is invalid JSON: {error}"
+            ))
+        })?;
         let object = value.as_object().ok_or_else(|| {
             HarnessError::invalid_state("harness catalog root must be a JSON object")
         })?;
-        require_catalog_fields(object, &["schema_version", "capability_ceiling", "repository"])?;
+        require_catalog_fields(
+            object,
+            &["schema_version", "capability_ceiling", "repository"],
+        )?;
         let schema_version = object
             .get("schema_version")
             .and_then(JsonValue::as_u64)
-            .ok_or_else(|| HarnessError::invalid_state("harness catalog schema_version must be an unsigned integer"))?;
+            .ok_or_else(|| {
+                HarnessError::invalid_state(
+                    "harness catalog schema_version must be an unsigned integer",
+                )
+            })?;
         if schema_version != u64::from(HARNESS_CATALOG_SCHEMA_VERSION) {
             return Err(HarnessError::invalid_state(format!(
                 "unsupported harness catalog payload version {schema_version}"
@@ -765,15 +793,16 @@ impl HarnessManager {
         let ceiling = object
             .get("capability_ceiling")
             .and_then(JsonValue::as_array)
-            .ok_or_else(|| HarnessError::invalid_state("harness catalog capability_ceiling must be an array"))?
+            .ok_or_else(|| {
+                HarnessError::invalid_state("harness catalog capability_ceiling must be an array")
+            })?
             .iter()
             .map(|value| {
-                value
-                    .as_str()
-                    .map(str::to_owned)
-                    .ok_or_else(|| HarnessError::invalid_state(
+                value.as_str().map(str::to_owned).ok_or_else(|| {
+                    HarnessError::invalid_state(
                         "harness catalog capability_ceiling must contain only strings",
-                    ))
+                    )
+                })
             })
             .collect::<Result<BTreeSet<_>, _>>()?;
         if ceiling != self.capability_ceiling {
@@ -783,7 +812,9 @@ impl HarnessManager {
         }
         let repository = HarnessRepository::from_catalog_json(
             artifacts,
-            object.get("repository").expect("required catalog field was checked"),
+            object
+                .get("repository")
+                .expect("required catalog field was checked"),
         )
         .map_err(lineage_error)?;
         *self.lock_repository()? = repository;
@@ -807,14 +838,22 @@ impl HarnessManager {
                         .collect(),
                 ),
             ),
-            ("repository", repository.catalog_json().map_err(lineage_error)?),
+            (
+                "repository",
+                repository.catalog_json().map_err(lineage_error)?,
+            ),
         ]);
-        payload.to_json_string().map(|text| text.into_bytes()).map_err(|error| {
-            HarnessError::invalid_state(format!("could not encode harness catalog: {error}"))
-        })
+        payload
+            .to_json_string()
+            .map(|text| text.into_bytes())
+            .map_err(|error| {
+                HarnessError::invalid_state(format!("could not encode harness catalog: {error}"))
+            })
     }
 
-    fn lock_repository(&self) -> Result<std::sync::MutexGuard<'_, HarnessRepository>, HarnessError> {
+    fn lock_repository(
+        &self,
+    ) -> Result<std::sync::MutexGuard<'_, HarnessRepository>, HarnessError> {
         self.repository
             .lock()
             .map_err(|_| HarnessError::invalid_state("harness lineage mutex is poisoned"))
@@ -912,7 +951,7 @@ fn collect_session_source_files(
                     return Err(HarnessError::invalid_state(format!(
                         "session plugin trees disagree about immutable source {}",
                         source.path
-                    )))
+                    )));
                 }
                 None => {
                     files.insert(source.path, next);
@@ -927,9 +966,9 @@ fn snapshot_for_revision<'a>(
     repository: &'a HarnessRepository,
     revision_id: &HarnessRevisionId,
 ) -> Result<&'a HarnessSnapshotV1, HarnessError> {
-    let revision = repository
-        .revision(revision_id)
-        .ok_or_else(|| HarnessError::invalid_state(format!("unknown harness revision {revision_id}")))?;
+    let revision = repository.revision(revision_id).ok_or_else(|| {
+        HarnessError::invalid_state(format!("unknown harness revision {revision_id}"))
+    })?;
     repository.snapshot(&revision.snapshot_id).ok_or_else(|| {
         HarnessError::invalid_state(format!(
             "revision {revision_id} references missing snapshot {}",
@@ -962,7 +1001,7 @@ fn source_files_for_snapshot(
                     return Err(HarnessError::invalid_state(format!(
                         "immutable snapshot has conflicting source identities for {}",
                         source.path,
-                    )))
+                    )));
                 }
                 None => {
                     files.insert(source.path.clone(), source);
@@ -1133,14 +1172,9 @@ fn changed_surfaces(
 /// Hosts use this when seeding a snapshot that already contains session
 /// plugins, and candidate application uses the same calculation so an exact
 /// source reapplication remains a detectable no-op.
-pub(crate) fn session_plugin_hook_digest(
-    spec: &crate::HarnessSnapshotSpec,
-) -> tea_session::Digest {
+pub(crate) fn session_plugin_hook_digest(spec: &crate::HarnessSnapshotSpec) -> tea_session::Digest {
     let mut writer = CanonicalHashWriter::new("tea-session-plugin-hooks-v1", 1, 2);
-    writer.u64(
-        "plugin_count",
-        spec.ordered_session_plugins.len() as u64,
-    );
+    writer.u64("plugin_count", spec.ordered_session_plugins.len() as u64);
     for plugin in &spec.ordered_session_plugins {
         writer.string("plugin_id", &plugin.plugin_id);
         writer.string("tree_id", plugin.tree_id.as_str());
@@ -1171,9 +1205,9 @@ fn plugin_id_from_path(path: &NormalizedPath) -> Option<&str> {
 fn validate_plugin_id(value: &str) -> Result<(), HarnessError> {
     if value.is_empty()
         || value.len() > 120
-        || value.bytes().any(|byte| {
-            !(byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
-        })
+        || value
+            .bytes()
+            .any(|byte| !(byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-')))
     {
         return Err(HarnessError::invalid_state(
             "plugin IDs must use the portable [A-Za-z0-9._-] spelling",

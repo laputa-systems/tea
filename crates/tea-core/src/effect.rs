@@ -372,8 +372,7 @@ impl fmt::Display for EffectGateError {
 impl std::error::Error for EffectGateError {}
 
 /// Caller-polled gate future.
-pub type EffectFuture<'a> =
-    Pin<Box<dyn Future<Output = Result<(), EffectGateError>> + Send + 'a>>;
+pub type EffectFuture<'a> = Pin<Box<dyn Future<Output = Result<(), EffectGateError>> + Send + 'a>>;
 
 /// Host-owned barrier around every core effect.
 ///
@@ -466,7 +465,10 @@ impl fmt::Display for ManualGateError {
         match self {
             Self::Closed => formatter.write_str("manual effect gate is closed"),
             Self::UnknownAction { expected, actual } => {
-                write!(formatter, "manual action {expected:?} is not pending (current: {actual:?})")
+                write!(
+                    formatter,
+                    "manual action {expected:?} is not pending (current: {actual:?})"
+                )
             }
             Self::AlreadyReleased { id } => {
                 write!(formatter, "manual action {id:?} has already been released")
@@ -538,7 +540,10 @@ impl ManualEffectGate {
     /// Synchronous form of [`Self::execute_action`] for non-async harnesses.
     pub fn release(&self, expected: ActionId) -> Result<ActionOutcome, ManualGateError> {
         let waker = {
-            let mut state = self.state.lock().expect("manual effect gate mutex poisoned");
+            let mut state = self
+                .state
+                .lock()
+                .expect("manual effect gate mutex poisoned");
             if state.closed {
                 return Err(ManualGateError::Closed);
             }
@@ -569,9 +574,15 @@ impl ManualEffectGate {
     /// Fail the currently parked operation and reject future releases.
     pub fn close(&self) {
         let (waker, waiters) = {
-            let mut state = self.state.lock().expect("manual effect gate mutex poisoned");
+            let mut state = self
+                .state
+                .lock()
+                .expect("manual effect gate mutex poisoned");
             state.closed = true;
-            let waker = state.pending.as_ref().and_then(|pending| pending.waker.clone());
+            let waker = state
+                .pending
+                .as_ref()
+                .and_then(|pending| pending.waker.clone());
             let waiters = std::mem::take(&mut state.waiting_for_slot);
             (waker, waiters)
         };
@@ -583,7 +594,12 @@ impl ManualEffectGate {
         }
     }
 
-    fn wait(&self, phase: EffectPhase, action: EffectAction, outcome: Option<EffectOutcome>) -> ManualGateWait {
+    fn wait(
+        &self,
+        phase: EffectPhase,
+        action: EffectAction,
+        outcome: Option<EffectOutcome>,
+    ) -> ManualGateWait {
         ManualGateWait {
             state: Arc::clone(&self.state),
             phase,
@@ -620,7 +636,10 @@ impl Future for ManualGateWait {
     type Output = Result<(), EffectGateError>;
 
     fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
-        let mut state = self.state.lock().expect("manual effect gate mutex poisoned");
+        let mut state = self
+            .state
+            .lock()
+            .expect("manual effect gate mutex poisoned");
         if state.closed {
             return Poll::Ready(Err(EffectGateError::new("manual effect gate is closed")));
         }

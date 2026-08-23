@@ -96,10 +96,25 @@ impl SessionEntry {
     pub fn artifact_references(&self) -> Vec<ArtifactId> {
         let mut references = Vec::new();
         match self {
-            Self::ToolResult(entry) => entry.full_result.artifact_id().into_iter().for_each(|id| references.push(id)),
-            Self::Compaction(entry) => entry.recovery_index_artifact.into_iter().for_each(|id| references.push(id)),
-            Self::PluginMemory(entry) => entry.content.artifact_id().into_iter().for_each(|id| references.push(id)),
-            Self::Custom(entry) => entry.payload.artifact_id().into_iter().for_each(|id| references.push(id)),
+            Self::ToolResult(entry) => entry
+                .full_result
+                .artifact_id()
+                .into_iter()
+                .for_each(|id| references.push(id)),
+            Self::Compaction(entry) => entry
+                .recovery_index_artifact
+                .into_iter()
+                .for_each(|id| references.push(id)),
+            Self::PluginMemory(entry) => entry
+                .content
+                .artifact_id()
+                .into_iter()
+                .for_each(|id| references.push(id)),
+            Self::Custom(entry) => entry
+                .payload
+                .artifact_id()
+                .into_iter()
+                .for_each(|id| references.push(id)),
             Self::UserMessage(_)
             | Self::AssistantMessage(_)
             | Self::BranchSummary(_)
@@ -873,7 +888,10 @@ pub enum SessionFact {
     /// One immutable, redacted core-run trace retained outside model context.
     TraceArtifact(TraceArtifactFact),
     /// A durable host-defined fact with no model projection.
-    Custom { type_name: String, payload: JsonValue },
+    Custom {
+        type_name: String,
+        payload: JsonValue,
+    },
 }
 
 /// One committed immutable harness-catalog manifest reference.
@@ -962,7 +980,9 @@ impl SessionFact {
     pub fn artifact_references(&self) -> Vec<ArtifactId> {
         match self {
             Self::HarnessCatalog(fact) => vec![fact.artifact_id],
-            Self::ToolSchemaDeviation(fact) => fact.raw_arguments.artifact_id().into_iter().collect(),
+            Self::ToolSchemaDeviation(fact) => {
+                fact.raw_arguments.artifact_id().into_iter().collect()
+            }
             Self::TraceArtifact(fact) => vec![fact.artifact_id],
             Self::Custom { .. } => Vec::new(),
         }
@@ -1135,6 +1155,7 @@ pub enum LaneStatus {
 
 /// Reduced model/tool/harness configuration contributions.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Default)]
 pub struct EffectiveLaneConfiguration {
     /// Most recent selected model descriptor.
     pub model: Option<ModelChangedEntry>,
@@ -1146,16 +1167,6 @@ pub struct EffectiveLaneConfiguration {
     pub harness_revision: Option<HarnessRevisionId>,
 }
 
-impl Default for EffectiveLaneConfiguration {
-    fn default() -> Self {
-        Self {
-            model: None,
-            thinking_level: None,
-            active_tool_names: Vec::new(),
-            harness_revision: None,
-        }
-    }
-}
 
 /// Reduced accepted queue state.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]

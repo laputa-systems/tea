@@ -2,8 +2,7 @@
 
 use super::{compaction_stage_name, end_reason_name, event_schema_version, event_type};
 use crate::event::{
-    CacheEvidence, Compaction, EpisodeEnd, EpisodeHeader, Tool, TraceEvent, TraceProvenance,
-    Turn,
+    CacheEvidence, Compaction, EpisodeEnd, EpisodeHeader, Tool, TraceEvent, TraceProvenance, Turn,
 };
 
 pub(super) fn write_cbor_event(output: &mut Vec<u8>, event: &TraceEvent) {
@@ -68,8 +67,14 @@ fn cbor_optional_provenance(output: &mut Vec<u8>, provenance: Option<&TraceProve
         ("operation_id", provenance.operation_id.as_deref()),
         ("epoch_id", provenance.epoch_id.as_deref()),
         ("core_run_id", provenance.core_run_id.as_deref()),
-        ("harness_snapshot_id", provenance.harness_snapshot_id.as_deref()),
-        ("harness_revision_id", provenance.harness_revision_id.as_deref()),
+        (
+            "harness_snapshot_id",
+            provenance.harness_snapshot_id.as_deref(),
+        ),
+        (
+            "harness_revision_id",
+            provenance.harness_revision_id.as_deref(),
+        ),
         (
             "model_harness_profile_id",
             provenance.model_harness_profile_id.as_deref(),
@@ -90,10 +95,7 @@ fn cbor_optional_cache_evidence(output: &mut Vec<u8>, evidence: Option<&CacheEvi
     cbor_text(output, "deterministic_common_prefix_bytes");
     cbor_optional_unsigned(output, evidence.deterministic_common_prefix_bytes);
     cbor_text(output, "deterministic_common_prefix_tokens_estimate");
-    cbor_optional_unsigned(
-        output,
-        evidence.deterministic_common_prefix_tokens_estimate,
-    );
+    cbor_optional_unsigned(output, evidence.deterministic_common_prefix_tokens_estimate);
     cbor_text(output, "provider_cache_read_tokens");
     cbor_optional_unsigned(output, evidence.provider_cache_read_tokens);
     cbor_text(output, "provider_cache_write_tokens");

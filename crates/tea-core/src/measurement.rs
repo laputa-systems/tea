@@ -325,7 +325,10 @@ fn canonical_request_surface_bytes(request: &ModelRequest) -> Vec<u8> {
         }
         None => bytes.push(0),
     }
-    append_length_delimited(&mut bytes, format!("{:?}", request.thinking_level).as_bytes());
+    append_length_delimited(
+        &mut bytes,
+        format!("{:?}", request.thinking_level).as_bytes(),
+    );
     // Context deliberately occupies the tail: an append-only context change
     // then preserves an equally append-only canonical request prefix.
     bytes.extend_from_slice(b"context\0");

@@ -2,12 +2,12 @@
 
 use crate::ids::*;
 use crate::model::*;
-use crate::store::{commit_time_ms, validate_snapshot, SessionError, SessionReader, SessionWriter};
+use crate::store::{SessionError, SessionReader, SessionWriter, commit_time_ms, validate_snapshot};
 use crate::{
-    verify_session, ArtifactError, ArtifactStore, JsonValue, LaneId, SessionVerification,
-    SessionVerificationError,
+    ArtifactError, ArtifactStore, JsonValue, LaneId, SessionVerification, SessionVerificationError,
+    verify_session,
 };
-use rustix::fs::{flock, FlockOperation};
+use rustix::fs::{FlockOperation, flock};
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -63,7 +63,9 @@ impl std::fmt::Display for SessionExportError {
         match self {
             Self::Session(error) => write!(formatter, "session export failed: {error}"),
             Self::Artifact(error) => write!(formatter, "session export artifact failed: {error}"),
-            Self::Verification(error) => write!(formatter, "session export verification failed: {error}"),
+            Self::Verification(error) => {
+                write!(formatter, "session export verification failed: {error}")
+            }
         }
     }
 }
@@ -124,11 +126,11 @@ impl JsonlSession {
         create_private_directory(&directory)?;
         create_layout(&directory)?;
         let session_path = directory.join("session.jsonl");
-        let encoded = encode_header(&header)
-            .to_json_string()
-            .map_err(|error| SessionError::InvalidInput {
+        let encoded = encode_header(&header).to_json_string().map_err(|error| {
+            SessionError::InvalidInput {
                 message: format!("session header cannot encode as JSON: {error}"),
-            })?;
+            }
+        })?;
         let mut options = OpenOptions::new();
         options.read(true).write(true).create_new(true);
         #[cfg(unix)]
@@ -136,7 +138,9 @@ impl JsonlSession {
             use std::os::unix::fs::OpenOptionsExt as _;
             options.mode(0o600);
         }
-        let mut file = options.open(&session_path).map_err(|error| io(&session_path, error))?;
+        let mut file = options
+            .open(&session_path)
+            .map_err(|error| io(&session_path, error))?;
         acquire_writer_lock(&file, &session_path)?;
         if let Err(error) = write_complete_line(&mut file, &encoded, durability, &session_path) {
             let _ = fs::remove_file(&session_path);
@@ -169,13 +173,14 @@ impl JsonlSession {
         ensure_regular_file(&session_path)?;
         let mut file = OpenOptions::new()
             .read(true)
-            .write(true)
+            
             .append(true)
             .open(&session_path)
             .map_err(|error| io(&session_path, error))?;
         acquire_writer_lock(&file, &session_path)?;
         let source = recover_complete_source(&mut file, &session_path, durability)?;
-        let source = truncate_malformed_final_json_line(&mut file, &session_path, source, durability)?;
+        let source =
+            truncate_malformed_final_json_line(&mut file, &session_path, source, durability)?;
         let snapshot = decode_snapshot(&session_path, &source)?;
         validate_snapshot(&snapshot)?;
         Ok(Self {
@@ -217,9 +222,12 @@ impl JsonlSession {
             .sync_data()
             .map_err(|error| io(&self.session_path, error))?;
         let snapshot = self.snapshot.clone();
-        let additional_roots = additional_roots.into_iter().collect::<std::collections::BTreeSet<_>>();
+        let additional_roots = additional_roots
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>();
         let source_store = self.artifact_store()?;
-        let verification = verify_session(&snapshot, &source_store, additional_roots.iter().copied())?;
+        let verification =
+            verify_session(&snapshot, &source_store, additional_roots.iter().copied())?;
 
         let destination = destination.as_ref().to_path_buf();
         if destination.exists() {
@@ -231,15 +239,18 @@ impl JsonlSession {
             }
             .into());
         }
-        let parent = destination.parent().ok_or_else(|| SessionError::InvalidInput {
-            message: "session export destination must have a parent directory".into(),
-        })?;
+        let parent = destination
+            .parent()
+            .ok_or_else(|| SessionError::InvalidInput {
+                message: "session export destination must have a parent directory".into(),
+            })?;
         ensure_export_parent(parent)?;
-        let name = destination.file_name().and_then(|name| name.to_str()).ok_or_else(|| {
-            SessionError::InvalidInput {
+        let name = destination
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| SessionError::InvalidInput {
                 message: "session export destination must have a UTF-8 file name".into(),
-            }
-        })?;
+            })?;
         let nonce = NEXT_EXPORT_DIRECTORY.fetch_add(1, Ordering::Relaxed);
         let temporary = parent.join(format!(
             ".{name}.export-{}-{nonce:016x}",
@@ -249,7 +260,11 @@ impl JsonlSession {
         let result = (|| {
             create_private_directory(&temporary)?;
             create_layout(&temporary)?;
-            copy_session_prefix(&self.session_path, &temporary.join("session.jsonl"), self.durability)?;
+            copy_session_prefix(
+                &self.session_path,
+                &temporary.join("session.jsonl"),
+                self.durability,
+            )?;
             write_head_cache(&temporary, snapshot.last_sequence(), self.durability)?;
 
             let destination_store = crate::FileArtifactStore::open(temporary.join("objects"))?;
@@ -257,14 +272,22 @@ impl JsonlSession {
                 let bytes = source_store.get(*artifact_id)?;
                 let copied = destination_store.put(&bytes, "application/octet-stream")?;
                 if copied.artifact_id != *artifact_id || copied.byte_len != bytes.len() as u64 {
-                    return Err(SessionVerificationError::Artifact(ArtifactError::Corruption {
-                        artifact_id: *artifact_id,
-                        message: "export destination returned a different immutable object identity".into(),
-                    })
-                    .into());
+                    return Err(
+                        SessionVerificationError::Artifact(ArtifactError::Corruption {
+                            artifact_id: *artifact_id,
+                            message:
+                                "export destination returned a different immutable object identity"
+                                    .into(),
+                        })
+                        .into(),
+                    );
                 }
             }
-            verify_session(&snapshot, &destination_store, additional_roots.iter().copied())?;
+            verify_session(
+                &snapshot,
+                &destination_store,
+                additional_roots.iter().copied(),
+            )?;
             fs::rename(&temporary, &destination).map_err(|error| io(&destination, error))?;
             if self.durability == DurabilityMode::Strict {
                 sync_directory(parent)?;
@@ -446,7 +469,11 @@ fn ensure_export_parent(path: &Path) -> Result<(), SessionError> {
     Ok(())
 }
 
-fn copy_session_prefix(source: &Path, destination: &Path, durability: DurabilityMode) -> Result<(), SessionError> {
+fn copy_session_prefix(
+    source: &Path,
+    destination: &Path,
+    durability: DurabilityMode,
+) -> Result<(), SessionError> {
     let source_metadata = fs::symlink_metadata(source).map_err(|error| io(source, error))?;
     if source_metadata.file_type().is_symlink() || !source_metadata.is_file() {
         return Err(SessionError::InvalidInput {
@@ -464,8 +491,12 @@ fn copy_session_prefix(source: &Path, destination: &Path, durability: Durability
         use std::os::unix::fs::OpenOptionsExt as _;
         options.mode(0o600);
     }
-    let mut output = options.open(destination).map_err(|error| io(destination, error))?;
-    output.write_all(&bytes).map_err(|error| io(destination, error))?;
+    let mut output = options
+        .open(destination)
+        .map_err(|error| io(destination, error))?;
+    output
+        .write_all(&bytes)
+        .map_err(|error| io(destination, error))?;
     output.flush().map_err(|error| io(destination, error))?;
     if durability == DurabilityMode::Strict {
         output.sync_data().map_err(|error| io(destination, error))?;
@@ -531,7 +562,8 @@ fn set_private_directory(path: &Path) -> Result<(), SessionError> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(|error| io(path, error))?;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+            .map_err(|error| io(path, error))?;
     }
     Ok(())
 }
@@ -554,7 +586,8 @@ fn write_complete_line(
     durability: DurabilityMode,
     path: &Path,
 ) -> Result<(), SessionError> {
-    file.write_all(json.as_bytes()).map_err(|error| io(path, error))?;
+    file.write_all(json.as_bytes())
+        .map_err(|error| io(path, error))?;
     file.write_all(b"\n").map_err(|error| io(path, error))?;
     file.flush().map_err(|error| io(path, error))?;
     if durability == DurabilityMode::Strict {
@@ -563,7 +596,11 @@ fn write_complete_line(
     Ok(())
 }
 
-fn write_head_cache(directory: &Path, sequence: Sequence, durability: DurabilityMode) -> Result<(), SessionError> {
+fn write_head_cache(
+    directory: &Path,
+    sequence: Sequence,
+    durability: DurabilityMode,
+) -> Result<(), SessionError> {
     let destination = directory.join("HEAD");
     let temporary = directory.join(".HEAD.tmp");
     let mut options = OpenOptions::new();
@@ -573,7 +610,9 @@ fn write_head_cache(directory: &Path, sequence: Sequence, durability: Durability
         use std::os::unix::fs::OpenOptionsExt as _;
         options.mode(0o600);
     }
-    let mut file = options.open(&temporary).map_err(|error| io(&temporary, error))?;
+    let mut file = options
+        .open(&temporary)
+        .map_err(|error| io(&temporary, error))?;
     file.write_all(sequence.0.to_string().as_bytes())
         .and_then(|_| file.write_all(b"\n"))
         .and_then(|_| file.flush())
@@ -610,9 +649,11 @@ fn recover_complete_source(
     path: &Path,
     durability: DurabilityMode,
 ) -> Result<String, SessionError> {
-    file.seek(SeekFrom::Start(0)).map_err(|error| io(path, error))?;
+    file.seek(SeekFrom::Start(0))
+        .map_err(|error| io(path, error))?;
     let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes).map_err(|error| io(path, error))?;
+    file.read_to_end(&mut bytes)
+        .map_err(|error| io(path, error))?;
     let original_len = bytes.len();
     let committed_len = match bytes.iter().rposition(|byte| *byte == b'\n') {
         Some(position) => position + 1,
@@ -620,7 +661,8 @@ fn recover_complete_source(
     };
     if committed_len != original_len {
         bytes.truncate(committed_len);
-        file.set_len(committed_len as u64).map_err(|error| io(path, error))?;
+        file.set_len(committed_len as u64)
+            .map_err(|error| io(path, error))?;
         if durability == DurabilityMode::Strict {
             file.sync_data().map_err(|error| io(path, error))?;
         }
@@ -655,7 +697,8 @@ fn truncate_malformed_final_json_line(
         return Ok(source);
     }
     let retained_len = previous_newline + 1;
-    file.set_len(retained_len as u64).map_err(|error| io(path, error))?;
+    file.set_len(retained_len as u64)
+        .map_err(|error| io(path, error))?;
     if durability == DurabilityMode::Strict {
         file.sync_data().map_err(|error| io(path, error))?;
     }
@@ -677,7 +720,8 @@ fn decode_snapshot(path: &Path, source: &str) -> Result<SessionSnapshot, Session
     for (offset, line) in lines.enumerate() {
         let line_number = offset + 2;
         let value = parse_line(path, line_number, line)?;
-        let mutation = decode_mutation(&value).map_err(|message| format_error(path, line_number, message))?;
+        let mutation =
+            decode_mutation(&value).map_err(|message| format_error(path, line_number, message))?;
         match mutation {
             StoredMutation::Entry(value) => snapshot.push_entry(value),
             StoredMutation::Record(value) => snapshot.push_record(value),
@@ -835,15 +879,27 @@ fn encode_entry(entry: &SessionEntry) -> JsonValue {
             ("content", JsonValue::String(entry.content.clone())),
             (
                 "tool_calls",
-                JsonValue::Array(entry.tool_calls.iter().map(encode_assistant_tool_call).collect()),
+                JsonValue::Array(
+                    entry
+                        .tool_calls
+                        .iter()
+                        .map(encode_assistant_tool_call)
+                        .collect(),
+                ),
             ),
             ("stop_reason", optional_string(entry.stop_reason.as_deref())),
-            ("error_message", optional_string(entry.error_message.as_deref())),
+            (
+                "error_message",
+                optional_string(entry.error_message.as_deref()),
+            ),
             ("metadata", JsonValue::Object(entry.metadata.clone())),
         ]),
         SessionEntry::ToolResult(entry) => JsonValue::object([
             ("type", JsonValue::String("tool_result".into())),
-            ("tool_call_id", JsonValue::String(entry.tool_call_id.clone())),
+            (
+                "tool_call_id",
+                JsonValue::String(entry.tool_call_id.clone()),
+            ),
             ("tool_name", JsonValue::String(entry.tool_name.clone())),
             ("full_result", encode_payload_ref(&entry.full_result)),
             ("model_projection", entry.model_projection.clone()),
@@ -854,7 +910,10 @@ fn encode_entry(entry: &SessionEntry) -> JsonValue {
                 "projection_strategy_id",
                 JsonValue::String(entry.projection_strategy_id.clone()),
             ),
-            ("artifact_policy_id", string_value(&entry.artifact_policy_id)),
+            (
+                "artifact_policy_id",
+                string_value(&entry.artifact_policy_id),
+            ),
         ]),
         SessionEntry::Compaction(entry) => JsonValue::object([
             ("type", JsonValue::String("compaction".into())),
@@ -894,7 +953,14 @@ fn encode_entry(entry: &SessionEntry) -> JsonValue {
             ("type", JsonValue::String("tool_activation_changed".into())),
             (
                 "active_tool_names",
-                JsonValue::Array(entry.active_tool_names.iter().cloned().map(JsonValue::String).collect()),
+                JsonValue::Array(
+                    entry
+                        .active_tool_names
+                        .iter()
+                        .cloned()
+                        .map(JsonValue::String)
+                        .collect(),
+                ),
             ),
         ]),
         SessionEntry::HarnessRevisionChanged(entry) => JsonValue::object([
@@ -910,10 +976,23 @@ fn encode_entry(entry: &SessionEntry) -> JsonValue {
             ("content", encode_payload_ref(&entry.content)),
             (
                 "provenance",
-                JsonValue::Array(entry.provenance.iter().cloned().map(JsonValue::String).collect()),
+                JsonValue::Array(
+                    entry
+                        .provenance
+                        .iter()
+                        .cloned()
+                        .map(JsonValue::String)
+                        .collect(),
+                ),
             ),
-            ("visibility", JsonValue::String(memory_visibility_name(entry.visibility).into())),
-            ("retention", JsonValue::String(memory_retention_name(entry.retention).into())),
+            (
+                "visibility",
+                JsonValue::String(memory_visibility_name(entry.visibility).into()),
+            ),
+            (
+                "retention",
+                JsonValue::String(memory_retention_name(entry.retention).into()),
+            ),
         ]),
         SessionEntry::Custom(entry) => JsonValue::object([
             ("type", JsonValue::String("custom".into())),
@@ -950,7 +1029,10 @@ fn decode_entry(value: &JsonValue) -> Result<SessionEntry, String> {
             terminate: required_bool(object, "terminate")?,
             usage: decode_usage(required_value(object, "usage")?)?,
             projection_strategy_id: required_string(object, "projection_strategy_id")?,
-            artifact_policy_id: parse_id!(ArtifactPolicyId, required_string(object, "artifact_policy_id")?),
+            artifact_policy_id: parse_id!(
+                ArtifactPolicyId,
+                required_string(object, "artifact_policy_id")?
+            ),
         })),
         "compaction" => Ok(SessionEntry::Compaction(CompactionEntry {
             covered_from: optional_id_of::<EntryId>(object, "covered_from")?,
@@ -959,7 +1041,10 @@ fn decode_entry(value: &JsonValue) -> Result<SessionEntry, String> {
             summary: required_string(object, "summary")?,
             strategy_id: required_string(object, "strategy_id")?,
             recovery_index_artifact: optional_artifact_of(object, "recovery_index_artifact")?,
-            harness_revision_id: optional_id_of::<HarnessRevisionId>(object, "harness_revision_id")?,
+            harness_revision_id: optional_id_of::<HarnessRevisionId>(
+                object,
+                "harness_revision_id",
+            )?,
         })),
         "branch_summary" => Ok(SessionEntry::BranchSummary(BranchSummaryEntry {
             summary: required_string(object, "summary")?,
@@ -973,14 +1058,18 @@ fn decode_entry(value: &JsonValue) -> Result<SessionEntry, String> {
         "thinking_changed" => Ok(SessionEntry::ThinkingChanged(ThinkingChangedEntry {
             level: required_string(object, "level")?,
         })),
-        "tool_activation_changed" => Ok(SessionEntry::ToolActivationChanged(ToolActivationChangedEntry {
-            active_tool_names: string_array(required_array(object, "active_tool_names")?)?,
-        })),
-        "harness_revision_changed" => Ok(SessionEntry::HarnessRevisionChanged(HarnessRevisionChangedEntry {
-            revision_id: parse_id!(HarnessRevisionId, required_string(object, "revision_id")?),
-            snapshot_id: parse_id!(HarnessSnapshotId, required_string(object, "snapshot_id")?),
-            rollback_from: optional_id_of::<HarnessRevisionId>(object, "rollback_from")?,
-        })),
+        "tool_activation_changed" => Ok(SessionEntry::ToolActivationChanged(
+            ToolActivationChangedEntry {
+                active_tool_names: string_array(required_array(object, "active_tool_names")?)?,
+            },
+        )),
+        "harness_revision_changed" => Ok(SessionEntry::HarnessRevisionChanged(
+            HarnessRevisionChangedEntry {
+                revision_id: parse_id!(HarnessRevisionId, required_string(object, "revision_id")?),
+                snapshot_id: parse_id!(HarnessSnapshotId, required_string(object, "snapshot_id")?),
+                rollback_from: optional_id_of::<HarnessRevisionId>(object, "rollback_from")?,
+            },
+        )),
         "plugin_memory" => Ok(SessionEntry::PluginMemory(PluginMemoryEntry {
             plugin_id: required_string(object, "plugin_id")?,
             kind: required_string(object, "kind")?,
@@ -1004,18 +1093,33 @@ fn encode_record(record: &LaneRecord) -> JsonValue {
             ("type", JsonValue::String("operation_started".into())),
             ("id", string_value(&record.id)),
             ("lane_id", string_value(&record.lane_id)),
-            ("source_leaf_id", optional_id(record.source_leaf_id.as_ref())),
+            (
+                "source_leaf_id",
+                optional_id(record.source_leaf_id.as_ref()),
+            ),
             ("operation_kind", encode_operation_kind(&record.kind)),
             (
                 "original_input",
-                JsonValue::Array(record.original_input.iter().map(encode_provisioned_entry).collect()),
+                JsonValue::Array(
+                    record
+                        .original_input
+                        .iter()
+                        .map(encode_provisioned_entry)
+                        .collect(),
+                ),
             ),
             (
                 "initial_harness_revision",
                 string_value(&record.initial_harness_revision),
             ),
-            ("model_harness_profile", string_value(&record.model_harness_profile)),
-            ("operation_resume_data", encode_hook_data(&record.operation_resume_data)),
+            (
+                "model_harness_profile",
+                string_value(&record.model_harness_profile),
+            ),
+            (
+                "operation_resume_data",
+                encode_hook_data(&record.operation_resume_data),
+            ),
         ]),
         LaneRecord::OperationFinished(record) => JsonValue::object([
             ("type", JsonValue::String("operation_finished".into())),
@@ -1031,26 +1135,50 @@ fn encode_record(record: &LaneRecord) -> JsonValue {
             ("type", JsonValue::String("epoch_started".into())),
             ("id", string_value(&record.id)),
             ("operation_id", string_value(&record.operation_id)),
-            ("epoch_index", JsonValue::from(u64::from(record.epoch_index))),
-            ("source_leaf_id", optional_id(record.source_leaf_id.as_ref())),
-            ("harness_revision_id", string_value(&record.harness_revision_id)),
-            ("harness_snapshot_id", string_value(&record.harness_snapshot_id)),
-            ("model_harness_profile", string_value(&record.model_harness_profile)),
+            (
+                "epoch_index",
+                JsonValue::from(u64::from(record.epoch_index)),
+            ),
+            (
+                "source_leaf_id",
+                optional_id(record.source_leaf_id.as_ref()),
+            ),
+            (
+                "harness_revision_id",
+                string_value(&record.harness_revision_id),
+            ),
+            (
+                "harness_snapshot_id",
+                string_value(&record.harness_snapshot_id),
+            ),
+            (
+                "model_harness_profile",
+                string_value(&record.model_harness_profile),
+            ),
             ("core_run_id", string_value(&record.core_run_id)),
-            ("epoch_resume_data", encode_hook_data(&record.epoch_resume_data)),
+            (
+                "epoch_resume_data",
+                encode_hook_data(&record.epoch_resume_data),
+            ),
         ]),
         LaneRecord::EpochFinished(record) => JsonValue::object([
             ("type", JsonValue::String("epoch_finished".into())),
             ("epoch_id", string_value(&record.epoch_id)),
             ("operation_id", string_value(&record.operation_id)),
-            ("reason", JsonValue::String(epoch_finish_reason_name(&record.reason).into())),
+            (
+                "reason",
+                JsonValue::String(epoch_finish_reason_name(&record.reason).into()),
+            ),
         ]),
         LaneRecord::StepAttempted(record) => JsonValue::object([
             ("type", JsonValue::String("step_attempted".into())),
             ("id", string_value(&record.id)),
             ("operation_id", string_value(&record.operation_id)),
             ("epoch_id", string_value(&record.epoch_id)),
-            ("step_kind", JsonValue::String(step_kind_name(record.kind).into())),
+            (
+                "step_kind",
+                JsonValue::String(step_kind_name(record.kind).into()),
+            ),
             ("attempt", JsonValue::from(u64::from(record.attempt))),
             ("result_entry_id", string_value(&record.result_entry_id)),
             ("reason", optional_string(record.reason.as_deref())),
@@ -1061,18 +1189,36 @@ fn encode_record(record: &LaneRecord) -> JsonValue {
             ("operation_id", string_value(&record.operation_id)),
             ("epoch_id", string_value(&record.epoch_id)),
             ("step_id", string_value(&record.step_id)),
-            ("physical_attempt", JsonValue::from(u64::from(record.physical_attempt))),
-            ("model_harness_profile", string_value(&record.model_harness_profile)),
-            ("request_surface_digest", digest_value(record.request_surface_digest)),
-            ("idempotency_key", optional_string(record.idempotency_key.as_deref())),
+            (
+                "physical_attempt",
+                JsonValue::from(u64::from(record.physical_attempt)),
+            ),
+            (
+                "model_harness_profile",
+                string_value(&record.model_harness_profile),
+            ),
+            (
+                "request_surface_digest",
+                digest_value(record.request_surface_digest),
+            ),
+            (
+                "idempotency_key",
+                optional_string(record.idempotency_key.as_deref()),
+            ),
         ]),
         LaneRecord::ProviderRequestSettled(record) => JsonValue::object([
             ("type", JsonValue::String("provider_request_settled".into())),
             ("request_id", string_value(&record.request_id)),
             ("operation_id", string_value(&record.operation_id)),
             ("outcome", record.outcome.clone()),
-            ("usage", optional_value(record.usage.as_ref().map(encode_usage))),
-            ("response_artifact", optional_artifact(record.response_artifact)),
+            (
+                "usage",
+                optional_value(record.usage.as_ref().map(encode_usage)),
+            ),
+            (
+                "response_artifact",
+                optional_artifact(record.response_artifact),
+            ),
             (
                 "classification",
                 JsonValue::String(provider_classification_name(&record.classification).into()),
@@ -1083,9 +1229,15 @@ fn encode_record(record: &LaneRecord) -> JsonValue {
             ("record_id", string_value(&record.record_id)),
             ("operation_id", string_value(&record.operation_id)),
             ("epoch_id", string_value(&record.epoch_id)),
-            ("assistant_entry_id", string_value(&record.assistant_entry_id)),
+            (
+                "assistant_entry_id",
+                string_value(&record.assistant_entry_id),
+            ),
             ("tool_index", JsonValue::from(u64::from(record.tool_index))),
-            ("tool_call_id", JsonValue::String(record.tool_call_id.clone())),
+            (
+                "tool_call_id",
+                JsonValue::String(record.tool_call_id.clone()),
+            ),
             ("tool_name", JsonValue::String(record.tool_name.clone())),
             ("effective_args", record.effective_args.clone()),
             ("result_entry_id", string_value(&record.result_entry_id)),
@@ -1093,19 +1245,34 @@ fn encode_record(record: &LaneRecord) -> JsonValue {
                 "replay_policy_at_start",
                 JsonValue::String(tool_replay_policy_name(record.replay_policy_at_start).into()),
             ),
-            ("tool_definition_digest", digest_value(record.tool_definition_digest)),
-            ("harness_revision_id", string_value(&record.harness_revision_id)),
-            ("idempotency_key", JsonValue::String(record.idempotency_key.clone())),
+            (
+                "tool_definition_digest",
+                digest_value(record.tool_definition_digest),
+            ),
+            (
+                "harness_revision_id",
+                string_value(&record.harness_revision_id),
+            ),
+            (
+                "idempotency_key",
+                JsonValue::String(record.idempotency_key.clone()),
+            ),
         ]),
         LaneRecord::QueueEnqueued(record) => JsonValue::object([
             ("type", JsonValue::String("queue_enqueued".into())),
             ("operation_id", string_value(&record.operation_id)),
-            ("queue_item_id", JsonValue::String(record.queue_item_id.clone())),
+            (
+                "queue_item_id",
+                JsonValue::String(record.queue_item_id.clone()),
+            ),
         ]),
         LaneRecord::QueueCancelled(record) => JsonValue::object([
             ("type", JsonValue::String("queue_cancelled".into())),
             ("operation_id", string_value(&record.operation_id)),
-            ("queue_item_id", JsonValue::String(record.queue_item_id.clone())),
+            (
+                "queue_item_id",
+                JsonValue::String(record.queue_item_id.clone()),
+            ),
         ]),
         LaneRecord::WriteDeferred(record) => JsonValue::object([
             ("type", JsonValue::String("write_deferred".into())),
@@ -1113,11 +1280,20 @@ fn encode_record(record: &LaneRecord) -> JsonValue {
             ("entry", encode_provisioned_entry(&record.entry)),
         ]),
         LaneRecord::HarnessActivationRequested(record) => JsonValue::object([
-            ("type", JsonValue::String("harness_activation_requested".into())),
+            (
+                "type",
+                JsonValue::String("harness_activation_requested".into()),
+            ),
             ("operation_id", string_value(&record.operation_id)),
             ("candidate_id", string_value(&record.candidate_id)),
-            ("parent_revision_id", string_value(&record.parent_revision_id)),
-            ("proposed_snapshot_id", string_value(&record.proposed_snapshot_id)),
+            (
+                "parent_revision_id",
+                string_value(&record.parent_revision_id),
+            ),
+            (
+                "proposed_snapshot_id",
+                string_value(&record.proposed_snapshot_id),
+            ),
             ("revision_entry_id", string_value(&record.revision_entry_id)),
         ]),
         LaneRecord::Usage(record) => JsonValue::object([
@@ -1149,7 +1325,10 @@ fn decode_record(value: &JsonValue) -> Result<LaneRecord, String> {
                 ModelHarnessProfileId,
                 required_string(object, "model_harness_profile")?
             ),
-            operation_resume_data: decode_hook_data(required_value(object, "operation_resume_data")?)?,
+            operation_resume_data: decode_hook_data(required_value(
+                object,
+                "operation_resume_data",
+            )?)?,
         })),
         "operation_finished" => Ok(LaneRecord::OperationFinished(OperationFinishedRecord {
             operation_id: parse_id!(OperationId, required_string(object, "operation_id")?),
@@ -1165,8 +1344,14 @@ fn decode_record(value: &JsonValue) -> Result<LaneRecord, String> {
             epoch_index: u32::try_from(required_u64(object, "epoch_index")?)
                 .map_err(|_| "epoch index exceeds u32".to_string())?,
             source_leaf_id: optional_id_of::<EntryId>(object, "source_leaf_id")?,
-            harness_revision_id: parse_id!(HarnessRevisionId, required_string(object, "harness_revision_id")?),
-            harness_snapshot_id: parse_id!(HarnessSnapshotId, required_string(object, "harness_snapshot_id")?),
+            harness_revision_id: parse_id!(
+                HarnessRevisionId,
+                required_string(object, "harness_revision_id")?
+            ),
+            harness_snapshot_id: parse_id!(
+                HarnessSnapshotId,
+                required_string(object, "harness_snapshot_id")?
+            ),
             model_harness_profile: parse_id!(
                 ModelHarnessProfileId,
                 required_string(object, "model_harness_profile")?
@@ -1201,7 +1386,10 @@ fn decode_record(value: &JsonValue) -> Result<LaneRecord, String> {
                     ModelHarnessProfileId,
                     required_string(object, "model_harness_profile")?
                 ),
-                request_surface_digest: parse_digest(required_string(object, "request_surface_digest")?)?,
+                request_surface_digest: parse_digest(required_string(
+                    object,
+                    "request_surface_digest",
+                )?)?,
                 idempotency_key: optional_string_of(object, "idempotency_key")?,
             },
         )),
@@ -1210,9 +1398,14 @@ fn decode_record(value: &JsonValue) -> Result<LaneRecord, String> {
                 request_id: parse_id!(ProviderRequestId, required_string(object, "request_id")?),
                 operation_id: parse_id!(OperationId, required_string(object, "operation_id")?),
                 outcome: required_value(object, "outcome")?.clone(),
-                usage: optional_value_of(object, "usage")?.map(decode_usage).transpose()?,
+                usage: optional_value_of(object, "usage")?
+                    .map(decode_usage)
+                    .transpose()?,
                 response_artifact: optional_artifact_of(object, "response_artifact")?,
-                classification: parse_provider_classification(&required_string(object, "classification")?)?,
+                classification: parse_provider_classification(&required_string(
+                    object,
+                    "classification",
+                )?)?,
             },
         )),
         "tool_started" => Ok(LaneRecord::ToolStarted(ToolStartedRecord {
@@ -1230,8 +1423,14 @@ fn decode_record(value: &JsonValue) -> Result<LaneRecord, String> {
                 object,
                 "replay_policy_at_start",
             )?)?,
-            tool_definition_digest: parse_digest(required_string(object, "tool_definition_digest")?)?,
-            harness_revision_id: parse_id!(HarnessRevisionId, required_string(object, "harness_revision_id")?),
+            tool_definition_digest: parse_digest(required_string(
+                object,
+                "tool_definition_digest",
+            )?)?,
+            harness_revision_id: parse_id!(
+                HarnessRevisionId,
+                required_string(object, "harness_revision_id")?
+            ),
             idempotency_key: required_string(object, "idempotency_key")?,
         })),
         "queue_enqueued" => Ok(LaneRecord::QueueEnqueued(QueueEnqueuedRecord {
@@ -1249,7 +1448,10 @@ fn decode_record(value: &JsonValue) -> Result<LaneRecord, String> {
         "harness_activation_requested" => Ok(LaneRecord::HarnessActivationRequested(
             HarnessActivationRequestedRecord {
                 operation_id: parse_id!(OperationId, required_string(object, "operation_id")?),
-                candidate_id: parse_id!(HarnessCandidateId, required_string(object, "candidate_id")?),
+                candidate_id: parse_id!(
+                    HarnessCandidateId,
+                    required_string(object, "candidate_id")?
+                ),
                 parent_revision_id: parse_id!(
                     HarnessRevisionId,
                     required_string(object, "parent_revision_id")?
@@ -1258,7 +1460,10 @@ fn decode_record(value: &JsonValue) -> Result<LaneRecord, String> {
                     HarnessSnapshotId,
                     required_string(object, "proposed_snapshot_id")?
                 ),
-                revision_entry_id: parse_id!(EntryId, required_string(object, "revision_entry_id")?),
+                revision_entry_id: parse_id!(
+                    EntryId,
+                    required_string(object, "revision_entry_id")?
+                ),
             },
         )),
         "usage" => Ok(LaneRecord::Usage(UsageRecord {
@@ -1298,7 +1503,10 @@ fn encode_fact(fact: &SessionFact) -> JsonValue {
     match fact {
         SessionFact::HarnessCatalog(fact) => JsonValue::object([
             ("type", JsonValue::String("harness_catalog".into())),
-            ("schema_version", JsonValue::from(u64::from(fact.schema_version))),
+            (
+                "schema_version",
+                JsonValue::from(u64::from(fact.schema_version)),
+            ),
             ("artifact_id", artifact_value(fact.artifact_id)),
             ("byte_len", JsonValue::from(fact.byte_len)),
         ]),
@@ -1313,7 +1521,10 @@ fn encode_fact(fact: &SessionFact) -> JsonValue {
                 "model_harness_profile",
                 string_value(&fact.model_harness_profile),
             ),
-            ("arguments_valid_json", JsonValue::Bool(fact.arguments_valid_json)),
+            (
+                "arguments_valid_json",
+                JsonValue::Bool(fact.arguments_valid_json),
+            ),
             (
                 "unknown_fields",
                 JsonValue::Array(
@@ -1353,7 +1564,10 @@ fn encode_fact(fact: &SessionFact) -> JsonValue {
         ]),
         SessionFact::TraceArtifact(fact) => JsonValue::object([
             ("type", JsonValue::String("trace_artifact".into())),
-            ("schema_version", JsonValue::from(u64::from(fact.schema_version))),
+            (
+                "schema_version",
+                JsonValue::from(u64::from(fact.schema_version)),
+            ),
             ("operation_id", string_value(&fact.operation_id)),
             ("epoch_id", string_value(&fact.epoch_id)),
             ("core_run_id", string_value(&fact.core_run_id)),
@@ -1400,7 +1614,7 @@ fn decode_fact(value: &JsonValue) -> Result<SessionFact, String> {
                         expected: required_string(mismatch, "expected")?,
                         actual: required_string(mismatch, "actual")?,
                     })
-            })
+                })
                 .collect::<Result<Vec<_>, String>>()?;
             Ok(SessionFact::ToolSchemaDeviation(ToolSchemaDeviationFact {
                 operation_id: parse_id!(OperationId, required_string(fields, "operation_id")?),
@@ -1550,12 +1764,7 @@ fn encode_hook_data(data: &BTreeMap<StableHookId, JsonValue>) -> JsonValue {
 fn decode_hook_data(value: &JsonValue) -> Result<BTreeMap<StableHookId, JsonValue>, String> {
     object(value)?
         .iter()
-        .map(|(key, value)| {
-            Ok((
-                parse_id!(StableHookId, key.clone()),
-                value.clone(),
-            ))
-        })
+        .map(|(key, value)| Ok((parse_id!(StableHookId, key.clone()), value.clone())))
         .collect()
 }
 
@@ -1580,8 +1789,12 @@ fn decode_operation_kind(value: &JsonValue) -> Result<OperationKind, String> {
 
 fn encode_operation_outcome(outcome: &OperationOutcome) -> JsonValue {
     match outcome {
-        OperationOutcome::Completed => JsonValue::object([("kind", JsonValue::String("completed".into()))]),
-        OperationOutcome::Aborted => JsonValue::object([("kind", JsonValue::String("aborted".into()))]),
+        OperationOutcome::Completed => {
+            JsonValue::object([("kind", JsonValue::String("completed".into()))])
+        }
+        OperationOutcome::Aborted => {
+            JsonValue::object([("kind", JsonValue::String("aborted".into()))])
+        }
         OperationOutcome::Failed { code } => JsonValue::object([
             ("kind", JsonValue::String("failed".into())),
             ("code", JsonValue::String(code.clone())),
@@ -1693,7 +1906,9 @@ fn parse_provider_classification(value: &str) -> Result<ProviderSettlementClassi
         "retryable" => Ok(ProviderSettlementClassification::Retryable),
         "discarded" => Ok(ProviderSettlementClassification::Discarded),
         "interrupted" => Ok(ProviderSettlementClassification::Interrupted),
-        _ => Err(format!("unknown provider settlement classification {value:?}")),
+        _ => Err(format!(
+            "unknown provider settlement classification {value:?}"
+        )),
     }
 }
 

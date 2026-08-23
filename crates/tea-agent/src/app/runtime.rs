@@ -88,11 +88,14 @@ impl App {
         }
         self.assemble_host()?;
         let harness = self.ensure_durable_harness()?;
-        let subscription = self
-            .durable_subscription
-            .take()
-            .ok_or_else(|| AppError::Setup("durable event subscription is not initialized".into()))?;
-        smol::block_on(super::durable::stream_host_prompt(harness, subscription, prompt))
+        let subscription = self.durable_subscription.take().ok_or_else(|| {
+            AppError::Setup("durable event subscription is not initialized".into())
+        })?;
+        smol::block_on(super::durable::stream_host_prompt(
+            harness,
+            subscription,
+            prompt,
+        ))
     }
 
     /// Borrow startup options.
@@ -211,9 +214,7 @@ impl App {
                         "harness candidate rejected at {stage:?} ({}) : {diagnostic}",
                         code.as_str()
                     )),
-                    Ok(TeaEvent::Harness(_)
-                    | TeaEvent::Session(_)
-                    | TeaEvent::Artifact(_)) => {}
+                    Ok(TeaEvent::Harness(_) | TeaEvent::Session(_) | TeaEvent::Artifact(_)) => {}
                     Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
                 }
             }
@@ -234,7 +235,9 @@ impl App {
                 }
                 Ok(Err(HarnessError::Core(CoreError::Cancelled))) => {
                     self.durable_task = None;
-                    self.restore_submitted_prompt("cancelled; prompt restored for explicit re-submit");
+                    self.restore_submitted_prompt(
+                        "cancelled; prompt restored for explicit re-submit",
+                    );
                 }
                 Ok(Err(error)) => {
                     self.durable_task = None;
@@ -244,7 +247,8 @@ impl App {
                 }
                 Err(TryRecvError::Disconnected) => {
                     self.durable_task = None;
-                    self.state.notice("durable operation task ended unexpectedly");
+                    self.state
+                        .notice("durable operation task ended unexpectedly");
                 }
                 Err(TryRecvError::Empty) => {}
             }
@@ -297,10 +301,7 @@ impl App {
     }
 
     /// Drive the one recovery plan derived from an opened durable session.
-    pub(super) fn spawn_durable_recovery(
-        &mut self,
-        harness: Arc<super::durable::HostHarness>,
-    ) {
+    pub(super) fn spawn_durable_recovery(&mut self, harness: Arc<super::durable::HostHarness>) {
         let (sender, receiver) = sync_channel(1);
         smol::spawn(async move {
             let _ = sender.send(harness.resume().await.map(|_| ()));
@@ -436,7 +437,6 @@ impl App {
         }
         Ok(())
     }
-
 }
 
 pub(super) fn os_text(value: &OsStr, flag: &str) -> Result<String, AppError> {

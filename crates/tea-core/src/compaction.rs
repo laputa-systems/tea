@@ -135,7 +135,6 @@ impl CompactionStrategy {
             prompt_fingerprint: Some(prompt_fingerprint),
         }
     }
-
 }
 
 /// Immutable identity and policy state for one attempted compaction.

@@ -1,8 +1,8 @@
 use crate::{
-    EffectiveLaneConfiguration, EntryId, EpochId, HarnessRevisionChangedEntry, LaneId,
-    LaneRecord, LaneState, LaneStatus, OperationId, PendingHarnessActivation, PendingQueues,
-    PendingWrite, ProvisionedEntry, Sequence, SessionEntry, SessionSnapshot, StepId, StepKind,
-    StoredEntry, StoredMutation, ToolReplayPolicy, ToolStartedRecord, Usage,
+    EffectiveLaneConfiguration, EntryId, EpochId, HarnessRevisionChangedEntry, LaneId, LaneRecord,
+    LaneState, LaneStatus, OperationId, PendingHarnessActivation, PendingQueues, PendingWrite,
+    ProvisionedEntry, Sequence, SessionEntry, SessionSnapshot, StepId, StepKind, StoredEntry,
+    StoredMutation, ToolReplayPolicy, ToolStartedRecord, Usage,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -156,13 +156,12 @@ pub fn reduce_lane(input: SessionSnapshot, lane: LaneId) -> Result<LaneReduction
                     if lane_leaves.contains_key(lane_id) {
                         return Err(Corruption::new(format!("duplicate lane ID {lane_id}")));
                     }
-                    if let Some(base_leaf_id) = base_leaf_id {
-                        if !entries.contains_key(base_leaf_id) {
+                    if let Some(base_leaf_id) = base_leaf_id
+                        && !entries.contains_key(base_leaf_id) {
                             return Err(Corruption::new(format!(
                                 "lane {lane_id} refers to missing base entry {base_leaf_id}"
                             )));
                         }
-                    }
                     lane_leaves.insert(lane_id.clone(), base_leaf_id.clone());
                 }
             },
@@ -185,22 +184,20 @@ pub fn reduce_lane(input: SessionSnapshot, lane: LaneId) -> Result<LaneReduction
                         stored.header.id
                     )));
                 }
-                if let Some(provisioned) = provisioned_entries.get(&stored.header.id) {
-                    if provisioned.body != stored.body {
+                if let Some(provisioned) = provisioned_entries.get(&stored.header.id)
+                    && provisioned.body != stored.body {
                         return Err(Corruption::new(format!(
                             "provisioned entry {} materialized with different content",
                             stored.header.id
                         )));
                     }
-                }
-                if let Some(parent_id) = &stored.header.parent_id {
-                    if !entries.contains_key(parent_id) {
+                if let Some(parent_id) = &stored.header.parent_id
+                    && !entries.contains_key(parent_id) {
                         return Err(Corruption::new(format!(
                             "entry {} refers to missing parent {parent_id}",
                             stored.header.id
                         )));
                     }
-                }
                 if let Some(operation_id) = active_operations.get(&stored.lane_id) {
                     operations
                         .get_mut(operation_id)
@@ -252,16 +249,17 @@ pub fn reduce_lane(input: SessionSnapshot, lane: LaneId) -> Result<LaneReduction
                                 return Err(Corruption::new(format!(
                                     "provisioned entry {} has conflicting content",
                                     provisioned.id
-                                )))
+                                )));
                             }
                             Some(_) => {
                                 return Err(Corruption::new(format!(
                                     "provisioned entry {} was accepted more than once",
                                     provisioned.id
-                                )))
+                                )));
                             }
                             None => {
-                                provisioned_entries.insert(provisioned.id.clone(), provisioned.clone());
+                                provisioned_entries
+                                    .insert(provisioned.id.clone(), provisioned.clone());
                             }
                         }
                     }
@@ -292,7 +290,7 @@ pub fn reduce_lane(input: SessionSnapshot, lane: LaneId) -> Result<LaneReduction
                             return Err(Corruption::new(format!(
                                 "operation {} was not active on its lane at finish",
                                 record.operation_id
-                            )))
+                            )));
                         }
                     }
                 }
@@ -313,7 +311,10 @@ pub fn reduce_lane(input: SessionSnapshot, lane: LaneId) -> Result<LaneReduction
                             record.id, record.epoch_index
                         )));
                     }
-                    if epochs.insert(record.id.clone(), record.operation_id.clone()).is_some() {
+                    if epochs
+                        .insert(record.id.clone(), record.operation_id.clone())
+                        .is_some()
+                    {
                         return Err(Corruption::new(format!("duplicate epoch ID {}", record.id)));
                     }
                     operation.epoch_ids.push(record.id.clone());
@@ -363,13 +364,13 @@ pub fn reduce_lane(input: SessionSnapshot, lane: LaneId) -> Result<LaneReduction
                             return Err(Corruption::new(format!(
                                 "step ID {} was attempted more than once",
                                 record.id
-                            )))
+                            )));
                         }
                         _ => {
                             return Err(Corruption::new(format!(
                                 "step {} has non-consecutive attempt {}",
                                 record.id, record.attempt
-                            )))
+                            )));
                         }
                     }
                 }
@@ -383,7 +384,10 @@ pub fn reduce_lane(input: SessionSnapshot, lane: LaneId) -> Result<LaneReduction
                             record.request_id
                         )));
                     }
-                    if provider_starts.insert(record.request_id.clone(), record.clone()).is_some() {
+                    if provider_starts
+                        .insert(record.request_id.clone(), record.clone())
+                        .is_some()
+                    {
                         return Err(Corruption::new(format!(
                             "duplicate provider request ID {}",
                             record.request_id
@@ -469,20 +473,24 @@ pub fn reduce_lane(input: SessionSnapshot, lane: LaneId) -> Result<LaneReduction
     }
 
     if input.last_sequence().0.saturating_add(1) != expected_sequence {
-        return Err(Corruption::new("snapshot last sequence disagrees with mutation timeline"));
+        return Err(Corruption::new(
+            "snapshot last sequence disagrees with mutation timeline",
+        ));
     }
     if !lane_leaves.contains_key(&lane) {
         return Err(Corruption::new(format!("unknown lane {lane}")));
     }
 
     validate_tool_results(&entries, &tool_starts)?;
-    let effective_configuration = derive_configuration(&entries, lane_leaves.get(&lane).cloned().flatten())?;
+    let effective_configuration =
+        derive_configuration(&entries, lane_leaves.get(&lane).cloned().flatten())?;
     let active_operation = active_operations.get(&lane).cloned();
     let pending_writes = deferred_writes
         .into_iter()
         .filter(|pending| !entries.contains_key(&pending.entry.id))
         .collect::<Vec<_>>();
-    let pending_harness_activation = unresolved_activation(&activation_requests, &entries, active_operation.as_ref())?;
+    let pending_harness_activation =
+        unresolved_activation(&activation_requests, &entries, active_operation.as_ref())?;
     let recovery_plan = derive_recovery_plan(
         &entries,
         &operations,
@@ -520,10 +528,14 @@ fn open_operation<'a>(
     id: &OperationId,
 ) -> Result<&'a OperationState, Corruption> {
     let Some(operation) = operations.get(id) else {
-        return Err(Corruption::new(format!("record refers to unknown operation {id}")));
+        return Err(Corruption::new(format!(
+            "record refers to unknown operation {id}"
+        )));
     };
     if operation.finished {
-        return Err(Corruption::new(format!("record follows terminal operation {id}")));
+        return Err(Corruption::new(format!(
+            "record follows terminal operation {id}"
+        )));
     }
     Ok(operation)
 }
@@ -533,10 +545,14 @@ fn open_operation_mut<'a>(
     id: &OperationId,
 ) -> Result<&'a mut OperationState, Corruption> {
     let Some(operation) = operations.get_mut(id) else {
-        return Err(Corruption::new(format!("record refers to unknown operation {id}")));
+        return Err(Corruption::new(format!(
+            "record refers to unknown operation {id}"
+        )));
     };
     if operation.finished {
-        return Err(Corruption::new(format!("record follows terminal operation {id}")));
+        return Err(Corruption::new(format!(
+            "record follows terminal operation {id}"
+        )));
     }
     Ok(operation)
 }
@@ -546,7 +562,10 @@ fn validate_tool_started(
     entries: &BTreeMap<EntryId, StoredEntry>,
     prior: &[(Sequence, ToolStartedRecord)],
 ) -> Result<(), Corruption> {
-    if record.tool_call_id.is_empty() || record.tool_name.is_empty() || record.idempotency_key.is_empty() {
+    if record.tool_call_id.is_empty()
+        || record.tool_name.is_empty()
+        || record.idempotency_key.is_empty()
+    {
         return Err(Corruption::new(format!(
             "tool intent {} has an empty durable identity field",
             record.record_id
@@ -577,7 +596,8 @@ fn validate_tool_started(
         )));
     }
     if prior.iter().any(|(_, prior)| {
-        prior.assistant_entry_id == record.assistant_entry_id && prior.tool_index == record.tool_index
+        prior.assistant_entry_id == record.assistant_entry_id
+            && prior.tool_index == record.tool_index
     }) {
         return Err(Corruption::new(format!(
             "tool invocation {}:{} was started more than once",
@@ -699,7 +719,10 @@ fn unresolved_activation(
         return Ok(None);
     };
     let mut pending = None;
-    for request in requests.iter().filter(|request| &request.operation_id == operation_id) {
+    for request in requests
+        .iter()
+        .filter(|request| &request.operation_id == operation_id)
+    {
         match entries.get(&request.revision_entry_id) {
             None => {
                 if pending.is_some() {
@@ -712,13 +735,16 @@ fn unresolved_activation(
                 });
             }
             Some(StoredEntry {
-                body: SessionEntry::HarnessRevisionChanged(HarnessRevisionChangedEntry {
-                    revision_id,
-                    snapshot_id,
-                    ..
-                }),
+                body:
+                    SessionEntry::HarnessRevisionChanged(HarnessRevisionChangedEntry {
+                        revision_id,
+                        snapshot_id,
+                        ..
+                    }),
                 ..
-            }) if revision_id == &request.parent_revision_id || snapshot_id != &request.proposed_snapshot_id => {
+            }) if revision_id == &request.parent_revision_id
+                || snapshot_id != &request.proposed_snapshot_id =>
+            {
                 return Err(Corruption::new(
                     "activation entry must name a new revision and the requested snapshot",
                 ));
@@ -730,7 +756,7 @@ fn unresolved_activation(
             Some(_) => {
                 return Err(Corruption::new(
                     "activation provisioned entry materialized with a different semantic type",
-                ))
+                ));
             }
         }
     }
@@ -774,13 +800,16 @@ fn derive_recovery_plan(
                 ToolReplayPolicy::Never => RecoveryPlan::SynthesizeInterruptedToolResult {
                     result_entry_id: tool.result_entry_id.clone(),
                 },
-                ToolReplayPolicy::Safe => RecoveryPlan::ReplayToolIfStillSafe { tool: tool.clone() },
+                ToolReplayPolicy::Safe => {
+                    RecoveryPlan::ReplayToolIfStillSafe { tool: tool.clone() }
+                }
             }));
         }
     }
 
     for request in provider_starts.values() {
-        if &request.operation_id == operation_id && !provider_settled.contains(&request.request_id) {
+        if &request.operation_id == operation_id && !provider_settled.contains(&request.request_id)
+        {
             return Ok(Some(RecoveryPlan::ReconcileProviderRequest {
                 request_id: request.request_id.clone(),
             }));

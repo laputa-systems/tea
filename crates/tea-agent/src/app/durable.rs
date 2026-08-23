@@ -30,10 +30,10 @@ use tea_harness::{
 };
 use tea_protocol::JsonValue;
 use tea_session::{
-    CanonicalHashWriter, Digest, DurabilityMode, EntryId,
-    HarnessRevisionChangedEntry, JsonlSession, LaneId, ModelChangedEntry, PayloadRef,
-    ProvisionedEntry, SessionEntry, SessionHeader, SessionId, SessionSnapshot, SessionWriter,
-    ThinkingChangedEntry, SESSION_FORMAT_VERSION,
+    CanonicalHashWriter, Digest, DurabilityMode, EntryId, HarnessRevisionChangedEntry,
+    JsonlSession, LaneId, ModelChangedEntry, PayloadRef, ProvisionedEntry, SessionEntry,
+    SessionHeader, SessionId, SessionSnapshot, SessionWriter, ThinkingChangedEntry,
+    SESSION_FORMAT_VERSION,
 };
 
 use super::compaction::ProviderCompactor;
@@ -96,8 +96,14 @@ pub(super) fn create_host_harness(
             SELF_EXTENSION_MODE_METADATA_KEY.into(),
             SelfExtensionMode::Off.metadata_value(),
         );
-        metadata.insert("tea.model.provider".into(), JsonValue::String(model.provider.clone()));
-        metadata.insert("tea.model.requested".into(), JsonValue::String(model.model.clone()));
+        metadata.insert(
+            "tea.model.provider".into(),
+            JsonValue::String(model.provider.clone()),
+        );
+        metadata.insert(
+            "tea.model.requested".into(),
+            JsonValue::String(model.model.clone()),
+        );
         if let Some(revision) = &model.revision {
             metadata.insert(
                 "tea.model.returned_revision".into(),
@@ -172,17 +178,9 @@ pub(super) fn create_host_harness(
             HarnessManager::new(repository, template, Default::default())
                 .self_extension_mode(SelfExtensionMode::Off),
         );
-        let identity = HarnessIdentity::new(
-            revision.revision_id,
-            snapshot.id,
-            profile.profile_id,
-        );
-        let harness = DurableHarness::new_with_artifact_store(
-            session,
-            manager,
-            identity,
-            artifacts,
-        )?;
+        let identity = HarnessIdentity::new(revision.revision_id, snapshot.id, profile.profile_id);
+        let harness =
+            DurableHarness::new_with_artifact_store(session, manager, identity, artifacts)?;
         return Ok(Arc::new(harness));
     }
 
@@ -265,8 +263,8 @@ pub(super) fn reopen_host_harness(
 ) -> Result<Arc<HostHarness>, AppError> {
     let session_id = SessionId::new(session_id.to_owned())
         .map_err(|error| AppError::Setup(error.to_string()))?;
-    let directory = session_workspace_root(tea_home, workspace)
-        .join(format!("{}.tea", session_id.as_str()));
+    let directory =
+        session_workspace_root(tea_home, workspace).join(format!("{}.tea", session_id.as_str()));
     let session = JsonlSession::open(&directory, DurabilityMode::Strict)?;
     let snapshot = session.snapshot()?;
     let header = host_session_header_from_snapshot(&snapshot)?;
@@ -304,8 +302,12 @@ pub(super) fn reopen_host_harness(
         automatic_compaction,
     );
     let manager = Arc::new(
-        HarnessManager::new(HarnessRepository::new(Arc::clone(&artifacts)), template, Default::default())
-            .self_extension_mode(header.self_extension_mode),
+        HarnessManager::new(
+            HarnessRepository::new(Arc::clone(&artifacts)),
+            template,
+            Default::default(),
+        )
+        .self_extension_mode(header.self_extension_mode),
     );
     let harness = DurableHarness::reopen_with_artifact_store(session, manager, artifacts)?;
     harness.verify_durable_state()?;
@@ -451,9 +453,9 @@ fn drain_prompt_events(subscription: &TeaEventSubscription) -> Result<(), AppErr
                 ..
             } = event.kind
             {
-                stdout
-                    .write_all(text.as_bytes())
-                    .map_err(|error| AppError::Setup(format!("could not write response: {error}")))?;
+                stdout.write_all(text.as_bytes()).map_err(|error| {
+                    AppError::Setup(format!("could not write response: {error}"))
+                })?;
                 wrote = true;
             }
         }
@@ -589,10 +591,16 @@ fn read_host_session_header(directory: &Path) -> Result<HostSessionHeader, AppEr
     let source = fs::read_to_string(&path)
         .map_err(|error| AppError::Setup(format!("could not read {}: {error}", path.display())))?;
     let line = source.lines().next().ok_or_else(|| {
-        AppError::Setup(format!("durable session {} has no header", directory.display()))
+        AppError::Setup(format!(
+            "durable session {} has no header",
+            directory.display()
+        ))
     })?;
     let value = JsonValue::parse(line).map_err(|error| {
-        AppError::Setup(format!("durable session header {} is invalid JSON: {error}", path.display()))
+        AppError::Setup(format!(
+            "durable session header {} is invalid JSON: {error}",
+            path.display()
+        ))
     })?;
     host_session_header_from_value(&value)
 }
@@ -612,14 +620,16 @@ fn host_session_header_from_snapshot(
 }
 
 fn host_session_header_from_value(value: &JsonValue) -> Result<HostSessionHeader, AppError> {
-    let object = value.as_object().ok_or_else(|| {
-        AppError::Setup("durable session header must be a JSON object".into())
-    })?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| AppError::Setup("durable session header must be a JSON object".into()))?;
     let kind = required_header_string(object, "kind")?;
     let version = object
         .get("version")
         .and_then(JsonValue::as_u64)
-        .ok_or_else(|| AppError::Setup("durable session header version must be an integer".into()))?;
+        .ok_or_else(|| {
+            AppError::Setup("durable session header version must be an integer".into())
+        })?;
     if kind != "session" || version != u64::from(SESSION_FORMAT_VERSION) {
         return Err(AppError::Setup("unsupported durable session format".into()));
     }
@@ -629,7 +639,9 @@ fn host_session_header_from_value(value: &JsonValue) -> Result<HostSessionHeader
     let metadata = object
         .get("metadata")
         .and_then(JsonValue::as_object)
-        .ok_or_else(|| AppError::Setup("durable session header metadata must be an object".into()))?;
+        .ok_or_else(|| {
+            AppError::Setup("durable session header metadata must be an object".into())
+        })?;
     host_session_metadata(session_id, workspace, metadata)
 }
 
@@ -789,8 +801,9 @@ fn ensure_private_directory(path: &Path) -> Result<(), AppError> {
             )));
         }
     }
-    let metadata = fs::symlink_metadata(path)
-        .map_err(|error| AppError::Setup(format!("could not inspect {}: {error}", path.display())))?;
+    let metadata = fs::symlink_metadata(path).map_err(|error| {
+        AppError::Setup(format!("could not inspect {}: {error}", path.display()))
+    })?;
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
         return Err(AppError::Setup(format!(
             "{} must be a real directory",
@@ -801,7 +814,10 @@ fn ensure_private_directory(path: &Path) -> Result<(), AppError> {
     {
         use std::os::unix::fs::PermissionsExt as _;
         fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(|error| {
-            AppError::Setup(format!("could not make {} private: {error}", path.display()))
+            AppError::Setup(format!(
+                "could not make {} private: {error}",
+                path.display()
+            ))
         })?;
     }
     Ok(())
@@ -809,11 +825,13 @@ fn ensure_private_directory(path: &Path) -> Result<(), AppError> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::host::host_configuration;
+    use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
     use tea_core::hooks::NoHooks;
-    use tea_core::scheduler::{CancellationToken, ModelFuture, ModelRequest, ModelStream, ModelStreamEvent};
+    use tea_core::scheduler::{
+        CancellationToken, ModelFuture, ModelRequest, ModelStream, ModelStreamEvent,
+    };
     use tea_core::state::StopReason;
     use tea_core::tool::ToolRegistry;
     use tea_core::DefaultCodingTools;
@@ -903,18 +921,18 @@ mod tests {
             .entries()
             .iter()
             .any(|entry| matches!(entry.body, SessionEntry::HarnessRevisionChanged(_))));
-        assert!(before.facts().iter().any(|fact| matches!(
-            fact.fact,
-            tea_session::SessionFact::HarnessCatalog(_)
-        )));
-        let operation = smol::block_on(harness.run_prompt("persisted prompt"))
-            .expect("durable prompt settles");
+        assert!(before
+            .facts()
+            .iter()
+            .any(|fact| matches!(fact.fact, tea_session::SessionFact::HarnessCatalog(_))));
+        let operation =
+            smol::block_on(harness.run_prompt("persisted prompt")).expect("durable prompt settles");
         assert!(operation.is_completed());
         let after = harness.snapshot().expect("completed session snapshot");
-        assert!(after.records().iter().any(|record| matches!(
-            record.record,
-            tea_session::LaneRecord::OperationStarted(_)
-        )));
+        assert!(after
+            .records()
+            .iter()
+            .any(|record| matches!(record.record, tea_session::LaneRecord::OperationStarted(_))));
         let _ = fs::remove_dir_all(home);
     }
 

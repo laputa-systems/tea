@@ -2,8 +2,7 @@
 
 use super::{compaction_stage_name, end_reason_name, event_schema_version, event_type};
 use crate::event::{
-    CacheEvidence, Compaction, EpisodeEnd, EpisodeHeader, Tool, TraceEvent, TraceProvenance,
-    Turn,
+    CacheEvidence, Compaction, EpisodeEnd, EpisodeHeader, Tool, TraceEvent, TraceProvenance, Turn,
 };
 use std::collections::BTreeMap;
 
@@ -64,8 +63,14 @@ fn json_optional_provenance(output: &mut String, provenance: Option<&TraceProven
         ("operation_id", provenance.operation_id.as_deref()),
         ("epoch_id", provenance.epoch_id.as_deref()),
         ("core_run_id", provenance.core_run_id.as_deref()),
-        ("harness_snapshot_id", provenance.harness_snapshot_id.as_deref()),
-        ("harness_revision_id", provenance.harness_revision_id.as_deref()),
+        (
+            "harness_snapshot_id",
+            provenance.harness_snapshot_id.as_deref(),
+        ),
+        (
+            "harness_revision_id",
+            provenance.harness_revision_id.as_deref(),
+        ),
         (
             "model_harness_profile_id",
             provenance.model_harness_profile_id.as_deref(),

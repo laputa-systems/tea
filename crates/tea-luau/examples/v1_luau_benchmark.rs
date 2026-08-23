@@ -156,7 +156,10 @@ fn isolated_policies() -> Result<(), String> {
     let verification_started = Instant::now();
     for (index, policy) in policies.iter().enumerate() {
         let expected = format!("isolated-policy-{index}");
-        let actual = policy.prompt_sections().first().map(|section| section.content.as_str());
+        let actual = policy
+            .prompt_sections()
+            .first()
+            .map(|section| section.content.as_str());
         if actual != Some(expected.as_str()) {
             return Err(format!(
                 "policy {index} observed {actual:?}, expected {expected:?}",

@@ -402,11 +402,11 @@ pub(super) fn parse_after_tool_output(value: Value) -> Result<PolicyAfterToolOut
                     }
                     fields.push(("annotations", annotations));
                 }
-                let details_json = JsonValue::object(fields).to_json_string().map_err(|error| {
-                    PolicyError::Contract {
+                let details_json = JsonValue::object(fields)
+                    .to_json_string()
+                    .map_err(|error| PolicyError::Contract {
                         message: format!("after_tool annotation payload cannot encode: {error}"),
-                    }
-                })?;
+                    })?;
                 Some(SerializedJson::new(details_json))
             } else {
                 None
@@ -414,12 +414,16 @@ pub(super) fn parse_after_tool_output(value: Value) -> Result<PolicyAfterToolOut
 
             Ok(PolicyAfterToolOutput {
                 projection: AfterToolCall {
-                    content: content.map(Replacement::Replace).unwrap_or(Replacement::Keep),
+                    content: content
+                        .map(Replacement::Replace)
+                        .unwrap_or(Replacement::Keep),
                     details: match details {
                         Some(details) => Replacement::Replace(Some(details)),
                         None => Replacement::Keep,
                     },
-                    is_error: is_error.map(Replacement::Replace).unwrap_or(Replacement::Keep),
+                    is_error: is_error
+                        .map(Replacement::Replace)
+                        .unwrap_or(Replacement::Keep),
                     // ABI v1 policies are deliberately unable to falsify raw
                     // usage, failures, or capability registrations.
                     failure: Replacement::Keep,
@@ -524,7 +528,10 @@ fn parse_context_entry_ids(table: &Table, field: &str) -> Result<Vec<String>, Po
 }
 
 fn parse_context_annotations(table: &Table) -> Result<Vec<PolicyContextAnnotation>, PolicyError> {
-    let Some(values) = table.get::<Option<Table>>("annotations").map_err(contract_error)? else {
+    let Some(values) = table
+        .get::<Option<Table>>("annotations")
+        .map_err(contract_error)?
+    else {
         return Ok(Vec::new());
     };
     require_dense_array(&values, "context_projection annotations")?;
@@ -619,7 +626,13 @@ const MAX_PLUGIN_MEMORY_PROVENANCE: usize = 32;
 fn parse_memory_proposal(table: &Table) -> Result<PolicyMemoryProposal, PolicyError> {
     require_only_fields(
         table,
-        &["kind", "content_json", "provenance", "visibility", "retention"],
+        &[
+            "kind",
+            "content_json",
+            "provenance",
+            "visibility",
+            "retention",
+        ],
         "after_tool memory proposal",
     )?;
     let kind: String = table.get("kind").map_err(contract_error)?;
@@ -642,7 +655,11 @@ fn parse_memory_proposal(table: &Table) -> Result<PolicyMemoryProposal, PolicyEr
     let content = JsonValue::parse(&content_json).map_err(|error| PolicyError::Contract {
         message: format!("after_tool memory content_json must be valid JSON: {error}"),
     })?;
-    let visibility = match table.get::<String>("visibility").map_err(contract_error)?.as_str() {
+    let visibility = match table
+        .get::<String>("visibility")
+        .map_err(contract_error)?
+        .as_str()
+    {
         "model_visible" => PolicyMemoryVisibility::ModelVisible,
         "external_only" => PolicyMemoryVisibility::ExternalOnly,
         value => {
@@ -653,7 +670,11 @@ fn parse_memory_proposal(table: &Table) -> Result<PolicyMemoryProposal, PolicyEr
             });
         }
     };
-    let retention = match table.get::<String>("retention").map_err(contract_error)?.as_str() {
+    let retention = match table
+        .get::<String>("retention")
+        .map_err(contract_error)?
+        .as_str()
+    {
         "session" => PolicyMemoryRetention::Session,
         "checkpoint" => PolicyMemoryRetention::Checkpoint,
         value => {
@@ -719,7 +740,10 @@ pub(super) fn policy_result_fields(
             message: format!("completed tool details are not valid JSON: {error}"),
         })?;
         fields.push(("details", value));
-        fields.push(("details_json", JsonValue::String(details.as_str().to_owned())));
+        fields.push((
+            "details_json",
+            JsonValue::String(details.as_str().to_owned()),
+        ));
     }
     Ok(fields)
 }
@@ -735,9 +759,11 @@ fn parse_serialized_json(
 }
 
 fn optional_string(table: &Table, name: &str) -> Result<Option<String>, PolicyError> {
-    let value = table.get::<Option<String>>(name).map_err(|error| PolicyError::Contract {
-        message: format!("{name} must be a string when declared: {error}"),
-    })?;
+    let value = table
+        .get::<Option<String>>(name)
+        .map_err(|error| PolicyError::Contract {
+            message: format!("{name} must be a string when declared: {error}"),
+        })?;
     if value.as_ref().is_some_and(|value| value.len() > 16 * 1024) {
         return Err(PolicyError::Contract {
             message: format!("{name} exceeds the 16384 byte ABI-v1 projection limit"),
@@ -747,16 +773,14 @@ fn optional_string(table: &Table, name: &str) -> Result<Option<String>, PolicyEr
 }
 
 fn optional_bool(table: &Table, name: &str) -> Result<Option<bool>, PolicyError> {
-    table.get::<Option<bool>>(name).map_err(|error| PolicyError::Contract {
-        message: format!("{name} must be a boolean when declared: {error}"),
-    })
+    table
+        .get::<Option<bool>>(name)
+        .map_err(|error| PolicyError::Contract {
+            message: format!("{name} must be a boolean when declared: {error}"),
+        })
 }
 
-fn require_only_fields(
-    table: &Table,
-    allowed: &[&str],
-    surface: &str,
-) -> Result<(), PolicyError> {
+fn require_only_fields(table: &Table, allowed: &[&str], surface: &str) -> Result<(), PolicyError> {
     for pair in table.pairs::<Value, Value>() {
         let (key, _) = pair.map_err(contract_error)?;
         let Value::String(key) = key else {

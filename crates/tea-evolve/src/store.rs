@@ -78,9 +78,15 @@ impl fmt::Display for EvolutionStoreError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Evolution(error) => write!(formatter, "evolution store rejected state: {error}"),
-            Self::Artifact(error) => write!(formatter, "evolution evidence artifact failed: {error}"),
-            Self::Io { path, message } => write!(formatter, "evolution store I/O failed at {path}: {message}"),
-            Self::Corruption { message } => write!(formatter, "evolution store is corrupt: {message}"),
+            Self::Artifact(error) => {
+                write!(formatter, "evolution evidence artifact failed: {error}")
+            }
+            Self::Io { path, message } => {
+                write!(formatter, "evolution store I/O failed at {path}: {message}")
+            }
+            Self::Corruption { message } => {
+                write!(formatter, "evolution store is corrupt: {message}")
+            }
         }
     }
 }
@@ -285,20 +291,20 @@ impl EvolutionStore {
             }
             .into());
         }
-        let proposal = next
-            .campaign
-            .proposals
-            .get(candidate_id)
-            .ok_or_else(|| EvolutionStoreError::Corruption {
+        let proposal = next.campaign.proposals.get(candidate_id).ok_or_else(|| {
+            EvolutionStoreError::Corruption {
                 message: "selected champion is absent from retained proposal lineage".into(),
-            })?;
+            }
+        })?;
         let pointer = GlobalProfilePointerV1 {
             profile: proposal.target_profile.clone(),
             experiment_id: next.campaign.lock.experiment_id.clone(),
             candidate_id: proposal.candidate_id.clone(),
             snapshot_id: proposal.proposed_snapshot_id.clone(),
         };
-        let previous = next.global_profiles.insert(pointer.profile.clone(), pointer.clone());
+        let previous = next
+            .global_profiles
+            .insert(pointer.profile.clone(), pointer.clone());
         let sequence = next.transitions.len() as u64 + 1;
         next.transitions.push(GlobalProfileTransitionV1 {
             sequence,
@@ -342,7 +348,8 @@ impl EvolutionStore {
         let restored = last.previous.clone();
         match &restored {
             Some(pointer) => {
-                next.global_profiles.insert(profile.clone(), pointer.clone());
+                next.global_profiles
+                    .insert(profile.clone(), pointer.clone());
             }
             None => {
                 next.global_profiles.remove(profile);
@@ -397,12 +404,15 @@ impl EvolutionStore {
                 use std::os::unix::fs::OpenOptionsExt as _;
                 options.mode(0o600);
             }
-            let mut file = options.open(&temporary).map_err(|error| io_error(&temporary, error))?;
+            let mut file = options
+                .open(&temporary)
+                .map_err(|error| io_error(&temporary, error))?;
             file.write_all(json.as_bytes())
                 .and_then(|_| file.write_all(b"\n"))
                 .and_then(|_| file.flush())
                 .map_err(|error| io_error(&temporary, error))?;
-            file.sync_all().map_err(|error| io_error(&temporary, error))?;
+            file.sync_all()
+                .map_err(|error| io_error(&temporary, error))?;
             drop(file);
             fs::rename(&temporary, &destination).map_err(|error| io_error(&destination, error))?;
             sync_directory(&self.root)?;
@@ -423,10 +433,8 @@ impl EvolutionStore {
             self.validate_signature_artifacts(signature)?;
         }
 
-        let mut reconstructed = Campaign::new(
-            state.campaign.lock.clone(),
-            state.campaign.policy.clone(),
-        )?;
+        let mut reconstructed =
+            Campaign::new(state.campaign.lock.clone(), state.campaign.policy.clone())?;
         for proposal in state.campaign.proposals.values() {
             ensure_proposal_signatures(proposal, &state.signatures)?;
             reconstructed.stage(proposal.clone())?;
@@ -451,7 +459,8 @@ impl EvolutionStore {
         for transition in &state.transitions {
             if transition.sequence != prior_sequence + 1 {
                 return Err(EvolutionStoreError::Corruption {
-                    message: "global profile transitions must have contiguous monotonic sequences".into(),
+                    message: "global profile transitions must have contiguous monotonic sequences"
+                        .into(),
                 });
             }
             prior_sequence = transition.sequence;
@@ -493,7 +502,8 @@ impl EvolutionStore {
         }
         if profiles != state.global_profiles {
             return Err(EvolutionStoreError::Corruption {
-                message: "stored global profile pointers do not match retained transition lineage".into(),
+                message: "stored global profile pointers do not match retained transition lineage"
+                    .into(),
             });
         }
         Ok(())
@@ -701,8 +711,14 @@ fn encode_lock(lock: &ExperimentLockV1) -> JsonValue {
         ),
         ("evolver_profile", lock.evolver_profile.as_str().into()),
         ("initial_harness", lock.initial_harness.as_str().into()),
-        ("task_manifest_digest", encode_digest(lock.task_manifest_digest)),
-        ("split_manifest_digest", encode_digest(lock.split_manifest_digest)),
+        (
+            "task_manifest_digest",
+            encode_digest(lock.task_manifest_digest),
+        ),
+        (
+            "split_manifest_digest",
+            encode_digest(lock.split_manifest_digest),
+        ),
         ("evaluator_digest", encode_digest(lock.evaluator_digest)),
         ("environment_digest", encode_digest(lock.environment_digest)),
         (
@@ -710,23 +726,35 @@ fn encode_lock(lock: &ExperimentLockV1) -> JsonValue {
             encode_digest(lock.capability_envelope_digest),
         ),
         ("search_budget", encode_search_budget(&lock.search_budget)),
-        ("serving_budget", encode_serving_budget(&lock.serving_budget)),
+        (
+            "serving_budget",
+            encode_serving_budget(&lock.serving_budget),
+        ),
         (
             "promotion_policy_digest",
             encode_digest(lock.promotion_policy_digest),
         ),
-        ("tea_build_identity", encode_build_identity(&lock.tea_build_identity)),
+        (
+            "tea_build_identity",
+            encode_build_identity(&lock.tea_build_identity),
+        ),
     ])
 }
 
 fn encode_search_budget(budget: &SearchBudget) -> JsonValue {
     JsonValue::object([
-        ("maximum_candidates", u64::from(budget.maximum_candidates).into()),
+        (
+            "maximum_candidates",
+            u64::from(budget.maximum_candidates).into(),
+        ),
         (
             "maximum_provider_requests",
             budget.maximum_provider_requests.into(),
         ),
-        ("maximum_artifact_bytes", budget.maximum_artifact_bytes.into()),
+        (
+            "maximum_artifact_bytes",
+            budget.maximum_artifact_bytes.into(),
+        ),
     ])
 }
 
@@ -798,7 +826,10 @@ fn encode_policy(policy: &PromotionPolicy) -> JsonValue {
 fn encode_failure_signature(signature: &FailureSignatureV1) -> JsonValue {
     JsonValue::object([
         ("id", signature.id.as_str().into()),
-        ("terminal_cause", encode_verifier_failure(&signature.terminal_cause)),
+        (
+            "terminal_cause",
+            encode_verifier_failure(&signature.terminal_cause),
+        ),
         (
             "causal_status",
             causal_status_name(signature.causal_status).into(),
@@ -835,15 +866,12 @@ fn encode_failure_signature(signature: &FailureSignatureV1) -> JsonValue {
 fn encode_verifier_failure(code: &VerifierFailureCode) -> JsonValue {
     match code {
         VerifierFailureCode::Contract => JsonValue::object([("kind", "contract".into())]),
-        VerifierFailureCode::TaskVerifier => {
-            JsonValue::object([("kind", "task_verifier".into())])
-        }
+        VerifierFailureCode::TaskVerifier => JsonValue::object([("kind", "task_verifier".into())]),
         VerifierFailureCode::Provider => JsonValue::object([("kind", "provider".into())]),
         VerifierFailureCode::Harness => JsonValue::object([("kind", "harness".into())]),
-        VerifierFailureCode::Other(value) => JsonValue::object([
-            ("kind", "other".into()),
-            ("value", value.clone().into()),
-        ]),
+        VerifierFailureCode::Other(value) => {
+            JsonValue::object([("kind", "other".into()), ("value", value.clone().into())])
+        }
     }
 }
 
@@ -949,7 +977,10 @@ fn encode_metrics(metrics: &CandidateMetrics) -> JsonValue {
             "serving_provider_requests_per_task",
             metrics.serving_provider_requests_per_task.into(),
         ),
-        ("serving_context_bytes", metrics.serving_context_bytes.into()),
+        (
+            "serving_context_bytes",
+            metrics.serving_context_bytes.into(),
+        ),
         ("plugin_source_bytes", metrics.plugin_source_bytes.into()),
     ])
 }
@@ -957,10 +988,7 @@ fn encode_metrics(metrics: &CandidateMetrics) -> JsonValue {
 fn encode_transition(transition: &GlobalProfileTransitionV1) -> JsonValue {
     JsonValue::object([
         ("sequence", transition.sequence.into()),
-        (
-            "action",
-            transition_action_name(transition.action).into(),
-        ),
+        ("action", transition_action_name(transition.action).into()),
         ("profile", transition.profile.as_str().into()),
         (
             "previous",
@@ -1026,12 +1054,16 @@ fn decode_state(input: &str) -> Result<StoreState, EvolutionStoreError> {
     for value in array(field(campaign_value, "proposals")?, "campaign proposals")? {
         campaign.stage(decode_proposal(value)?)?;
     }
-    for value in array(field(campaign_value, "evaluations")?, "campaign evaluations")? {
+    for value in array(
+        field(campaign_value, "evaluations")?,
+        "campaign evaluations",
+    )? {
         campaign.record_evaluation(decode_evaluation(value)?)?;
     }
     let champion = optional_string(field(campaign_value, "champion")?, "campaign champion")?;
     if let Some(champion) = champion {
-        let champion = HarnessCandidateId::new(champion).map_err(|error| corruption(error.to_string()))?;
+        let champion =
+            HarnessCandidateId::new(champion).map_err(|error| corruption(error.to_string()))?;
         campaign.select_champion(PromotionAuthority::Operator, &champion)?;
     }
 
@@ -1074,8 +1106,14 @@ fn decode_lock(value: &JsonValue) -> Result<ExperimentLockV1, EvolutionStoreErro
         target_profiles,
         model_harness_profile_id(field(object, "evolver_profile")?, "evolver profile")?,
         harness_snapshot_id(field(object, "initial_harness")?, "initial harness")?,
-        digest(field(object, "task_manifest_digest")?, "task manifest digest")?,
-        digest(field(object, "split_manifest_digest")?, "split manifest digest")?,
+        digest(
+            field(object, "task_manifest_digest")?,
+            "task manifest digest",
+        )?,
+        digest(
+            field(object, "split_manifest_digest")?,
+            "split manifest digest",
+        )?,
         digest(field(object, "evaluator_digest")?, "evaluator digest")?,
         digest(field(object, "environment_digest")?, "environment digest")?,
         digest(
@@ -1084,12 +1122,17 @@ fn decode_lock(value: &JsonValue) -> Result<ExperimentLockV1, EvolutionStoreErro
         )?,
         decode_search_budget(field(object, "search_budget")?)?,
         decode_serving_budget(field(object, "serving_budget")?)?,
-        digest(field(object, "promotion_policy_digest")?, "promotion policy digest")?,
+        digest(
+            field(object, "promotion_policy_digest")?,
+            "promotion policy digest",
+        )?,
         decode_build_identity(field(object, "tea_build_identity")?)?,
     )?;
     let claimed = experiment_id(field(object, "experiment_id")?, "experiment ID")?;
     if claimed != lock.experiment_id {
-        return Err(corruption("experiment lock ID does not match its frozen inputs"));
+        return Err(corruption(
+            "experiment lock ID does not match its frozen inputs",
+        ));
     }
     Ok(lock)
 }
@@ -1136,7 +1179,8 @@ fn decode_build_identity(value: &JsonValue) -> Result<BuildIdentity, EvolutionSt
             "tea dirty patch digest",
         )?,
         rust_version: string(field(object, "rust_version")?, "Rust version")?.to_owned(),
-        operating_system: string(field(object, "operating_system")?, "operating system")?.to_owned(),
+        operating_system: string(field(object, "operating_system")?, "operating system")?
+            .to_owned(),
         architecture: string(field(object, "architecture")?, "architecture")?.to_owned(),
         provider_adapter_version: string(
             field(object, "provider_adapter_version")?,
@@ -1149,7 +1193,8 @@ fn decode_build_identity(value: &JsonValue) -> Result<BuildIdentity, EvolutionSt
             "returned model revision",
         )?
         .map(str::to_owned),
-        workspace_commit: string(field(object, "workspace_commit")?, "workspace commit")?.to_owned(),
+        workspace_commit: string(field(object, "workspace_commit")?, "workspace commit")?
+            .to_owned(),
         workspace_dirty_patch_digest: optional_digest(
             field(object, "workspace_dirty_patch_digest")?,
             "workspace dirty patch digest",
@@ -1299,7 +1344,10 @@ fn decode_evaluation(value: &JsonValue) -> Result<CandidateEvaluationV1, Evoluti
     }
     Ok(CandidateEvaluationV1 {
         experiment_id: experiment_id(field(object, "experiment_id")?, "evaluation experiment ID")?,
-        candidate_id: harness_candidate_id(field(object, "candidate_id")?, "evaluation candidate ID")?,
+        candidate_id: harness_candidate_id(
+            field(object, "candidate_id")?,
+            "evaluation candidate ID",
+        )?,
         gates,
         metrics: decode_metrics(field(object, "metrics")?)?,
     })
@@ -1419,8 +1467,7 @@ fn number(value: &JsonValue, context: &str) -> Result<u64, EvolutionStoreError> 
 }
 
 fn u32_value(value: &JsonValue, context: &str) -> Result<u32, EvolutionStoreError> {
-    u32::try_from(number(value, context)?)
-        .map_err(|_| corruption(format!("{context} exceeds u32")))
+    u32::try_from(number(value, context)?).map_err(|_| corruption(format!("{context} exceeds u32")))
 }
 
 fn boolean(value: &JsonValue, context: &str) -> Result<bool, EvolutionStoreError> {
@@ -1433,7 +1480,10 @@ fn digest(value: &JsonValue, context: &str) -> Result<Digest, EvolutionStoreErro
     Digest::from_hex(string(value, context)?).map_err(|error| corruption(error.to_string()))
 }
 
-fn optional_digest(value: &JsonValue, context: &str) -> Result<Option<Digest>, EvolutionStoreError> {
+fn optional_digest(
+    value: &JsonValue,
+    context: &str,
+) -> Result<Option<Digest>, EvolutionStoreError> {
     if value.is_null() {
         Ok(None)
     } else {
@@ -1446,7 +1496,8 @@ fn artifact_id(value: &JsonValue, context: &str) -> Result<ArtifactId, Evolution
 }
 
 fn experiment_id(value: &JsonValue, context: &str) -> Result<ExperimentId, EvolutionStoreError> {
-    ExperimentId::new(string(value, context)?.to_owned()).map_err(|error| corruption(error.to_string()))
+    ExperimentId::new(string(value, context)?.to_owned())
+        .map_err(|error| corruption(error.to_string()))
 }
 
 fn failure_signature_id(
@@ -1511,7 +1562,9 @@ fn decode_failure_locus(value: &JsonValue) -> Result<FailureLocus, EvolutionStor
     }
 }
 
-fn decode_evidence_confidence(value: &JsonValue) -> Result<EvidenceConfidence, EvolutionStoreError> {
+fn decode_evidence_confidence(
+    value: &JsonValue,
+) -> Result<EvidenceConfidence, EvolutionStoreError> {
     match string(value, "evidence confidence")? {
         "low" => Ok(EvidenceConfidence::Low),
         "moderate" => Ok(EvidenceConfidence::Moderate),
@@ -1823,21 +1876,20 @@ mod tests {
             .register_failure_signature(signature.clone())
             .expect("trace-backed signature persists");
         store.stage(candidate).expect("candidate persists");
-        assert!(store
-            .record_evaluation(evaluation(&lock, candidate_id.clone(), 0))
-            .expect("rejected evaluation persists")
-            .is_promotable()
-            == false);
+        assert!(
+            store
+                .record_evaluation(evaluation(&lock, candidate_id.clone(), 0))
+                .expect("rejected evaluation persists")
+                .is_promotable()
+                == false
+        );
         drop(store);
 
         let reopened = EvolutionStore::open(&path, artifacts).expect("campaign reopens");
         assert!(reopened.campaign().proposals().contains_key(&candidate_id));
         assert!(reopened.failure_signatures().contains_key(&signature.id));
         assert_eq!(reopened.artifact_roots(), [trace].into_iter().collect());
-        assert!(matches!(
-            reopened.campaign().champion(),
-            None
-        ));
+        assert!(matches!(reopened.campaign().champion(), None));
         let _ = fs::remove_dir_all(path);
     }
 
@@ -1861,7 +1913,9 @@ mod tests {
             .expect("promotable evaluation persists");
         assert!(matches!(
             store.promote_global(PromotionAuthority::Operator, &candidate_id),
-            Err(EvolutionStoreError::Evolution(EvolutionError::PromotionDenied { .. }))
+            Err(EvolutionStoreError::Evolution(
+                EvolutionError::PromotionDenied { .. }
+            ))
         ));
         store
             .select_champion(PromotionAuthority::Operator, &candidate_id)
@@ -1899,7 +1953,9 @@ mod tests {
         let absent = ArtifactId::from_bytes("absent trace");
         assert!(matches!(
             store.register_failure_signature(signature(absent)),
-            Err(EvolutionStoreError::Artifact(ArtifactError::NotFound { .. }))
+            Err(EvolutionStoreError::Artifact(
+                ArtifactError::NotFound { .. }
+            ))
         ));
         assert!(store.failure_signatures().is_empty());
         let _ = fs::remove_dir_all(path);

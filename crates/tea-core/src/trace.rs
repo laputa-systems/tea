@@ -18,8 +18,8 @@ use crate::state::{AgentMessage, MessageId, StopReason, ToolCallId};
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 use tea_trace::{
-    CacheEvidence, Compaction, CompactionStage, EndReason, EpisodeEnd, EpisodeHeader,
-    IsolatedSink, Tool, TraceEvent, TraceProvenance, TraceSink, Turn,
+    CacheEvidence, Compaction, CompactionStage, EndReason, EpisodeEnd, EpisodeHeader, IsolatedSink,
+    Tool, TraceEvent, TraceProvenance, TraceSink, Turn,
 };
 
 /// An awaited core observer that records a compact linear trace episode.
@@ -351,7 +351,9 @@ fn merge_cache_evidence_value(target: &mut CacheEvidence, update: CacheEvidence)
 
 fn cache_evidence_is_empty(evidence: &CacheEvidence) -> bool {
     evidence.deterministic_common_prefix_bytes.is_none()
-        && evidence.deterministic_common_prefix_tokens_estimate.is_none()
+        && evidence
+            .deterministic_common_prefix_tokens_estimate
+            .is_none()
         && evidence.provider_cache_read_tokens.is_none()
         && evidence.provider_cache_write_tokens.is_none()
         && evidence.provider_surface_digest.is_none()

@@ -7,11 +7,11 @@ use super::{
     ToolStep,
 };
 use crate::agent::AgentInner;
-use crate::error::CoreError;
 use crate::effect::{
     DurableWriteRequest, EffectCompletion, EffectOutcome, EffectSubject, HookInvocation,
     ToolEffectOutcome,
 };
+use crate::error::CoreError;
 use crate::event::AgentEventKind;
 use crate::hooks::BeforeToolCall;
 use crate::schema_validation::validate_tool_arguments;
@@ -27,13 +27,16 @@ impl RunHandle {
         tool_calls: &[AgentToolCall],
     ) -> Result<ToolBatchOutcome, CoreError> {
         if tool_calls.len() > 1 {
-            let exclusive = tool_calls.iter().filter_map(|assistant_call| {
-                self.configuration
-                    .tools
-                    .get(&assistant_call.name)
-                    .filter(|tool| tool.requires_exclusive_batch())
-                    .map(|tool| tool.name().to_owned())
-            }).collect::<Vec<_>>();
+            let exclusive = tool_calls
+                .iter()
+                .filter_map(|assistant_call| {
+                    self.configuration
+                        .tools
+                        .get(&assistant_call.name)
+                        .filter(|tool| tool.requires_exclusive_batch())
+                        .map(|tool| tool.name().to_owned())
+                })
+                .collect::<Vec<_>>();
             if !exclusive.is_empty() {
                 return self
                     .reject_exclusive_tool_batch(agent, tool_calls, &exclusive)
@@ -75,8 +78,12 @@ impl RunHandle {
                 name: assistant_call.name.clone(),
                 arguments: assistant_call.arguments.clone(),
             };
-            self.append_tool_result_message(agent, call.clone(), error_tool_result(&call, &message))
-                .await?;
+            self.append_tool_result_message(
+                agent,
+                call.clone(),
+                error_tool_result(&call, &message),
+            )
+            .await?;
         }
         Ok(ToolBatchOutcome {
             all_terminate: false,
@@ -386,7 +393,8 @@ impl RunHandle {
                     }
                 };
                 self.flush_tool_updates(agent, &updates).await?;
-                self.finalize_executed_tool(agent, call, effect, execution).await
+                self.finalize_executed_tool(agent, call, effect, execution)
+                    .await
             }
         }
     }
@@ -406,7 +414,10 @@ impl RunHandle {
             return Ok(PreparedToolCall::Immediate {
                 result: error_tool_result(
                     call,
-                    format!("Tool {} received invalid JSON arguments: {error}", call.name),
+                    format!(
+                        "Tool {} received invalid JSON arguments: {error}",
+                        call.name
+                    ),
                 ),
                 terminate: false,
             });

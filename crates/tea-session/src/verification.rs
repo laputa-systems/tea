@@ -8,8 +8,8 @@
 //! crate must not take ownership of another state plane's manifest format.
 
 use crate::{
-    session_artifact_roots, ArtifactError, ArtifactId, ArtifactStore, Corruption, PayloadRef,
-    SessionEntry, SessionFact, SessionSnapshot,
+    ArtifactError, ArtifactId, ArtifactStore, Corruption, PayloadRef, SessionEntry, SessionFact,
+    SessionSnapshot, session_artifact_roots,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -54,7 +54,9 @@ impl fmt::Display for SessionVerificationError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Corruption(error) => write!(formatter, "session corruption: {error}"),
-            Self::Artifact(error) => write!(formatter, "session artifact verification failed: {error}"),
+            Self::Artifact(error) => {
+                write!(formatter, "session artifact verification failed: {error}")
+            }
             Self::LengthMismatch {
                 artifact_id,
                 expected,
@@ -109,10 +111,12 @@ pub fn verify_session(
     for artifact_id in &artifact_roots {
         let bytes = artifacts.get(*artifact_id)?;
         if ArtifactId::from_bytes(&bytes) != *artifact_id {
-            return Err(SessionVerificationError::Artifact(ArtifactError::Corruption {
-                artifact_id: *artifact_id,
-                message: "artifact bytes do not match the durable content identity".into(),
-            }));
+            return Err(SessionVerificationError::Artifact(
+                ArtifactError::Corruption {
+                    artifact_id: *artifact_id,
+                    message: "artifact bytes do not match the durable content identity".into(),
+                },
+            ));
         }
         let actual = bytes.len() as u64;
         if let Some(expected) = expected_lengths.get(artifact_id)

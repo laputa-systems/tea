@@ -51,7 +51,11 @@ impl Default for PolicyMemoryCollector {
 
 impl std::fmt::Debug for PolicyMemoryCollector {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let pending = self.pending.lock().map(|values| values.len()).unwrap_or_default();
+        let pending = self
+            .pending
+            .lock()
+            .map(|values| values.len())
+            .unwrap_or_default();
         formatter
             .debug_struct("PolicyMemoryCollector")
             .field("pending_calls", &pending)
@@ -212,7 +216,11 @@ impl HookSet for LuaPolicyHookSet {
         context: ContextEnvelope,
         cancellation: CancellationToken,
     ) -> HookFuture<'a, AfterToolCall> {
-        let policy_output = match self.policy.after_tool_output(call, result).map_err(after_hook_error) {
+        let policy_output = match self
+            .policy
+            .after_tool_output(call, result)
+            .map_err(after_hook_error)
+        {
             Ok(output) => output,
             Err(error) => return Box::pin(std::future::ready(Err(error))),
         };

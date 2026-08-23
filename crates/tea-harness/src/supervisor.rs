@@ -1,52 +1,47 @@
 //! Operation orchestration that binds core effects to the session WAL.
 
 use crate::artifact::{
-    projection_content, retain_direct_recovery_result_with_projection,
-    retain_tool_result_with_projection, RetainedToolResult,
+    RetainedToolResult, projection_content, retain_direct_recovery_result_with_projection,
+    retain_tool_result_with_projection,
 };
-use crate::artifact_tools::{stable_artifact_tools, STABLE_ARTIFACT_TOOL_NAMES};
-use crate::harness_tool::{stable_harness_tools, STABLE_HARNESS_TOOL_NAME};
+use crate::artifact_tools::{STABLE_ARTIFACT_TOOL_NAMES, stable_artifact_tools};
 use crate::context::derive_snapshot_context_with_policies;
 use crate::events::EventHub;
+use crate::harness_tool::{STABLE_HARNESS_TOOL_NAME, stable_harness_tools};
 use crate::{
     ArtifactEvent, CoreEpochTemplate, HarnessActor, HarnessError, HarnessEvent, HarnessManager,
-    ProviderLimits,
-    ResolvedHarnessConfiguration, HarnessSnapshotView, SessionEvent, TeaEvent,
+    HarnessSnapshotView, ProviderLimits, ResolvedHarnessConfiguration, SessionEvent, TeaEvent,
     TeaEventSubscription,
 };
-use std::convert::Infallible;
 use std::collections::{BTreeMap, BTreeSet};
+use std::convert::Infallible;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tea_core::effect::{
-    DurableWriteRequest, EffectAction, EffectCompletion, EffectFuture, EffectGate,
-    EffectGateError, EffectOutcome, EffectSubject, HookEffectOutcome, HookInvocation,
-    ProviderEffectOutcome, ProviderResponse, RunProvenance, ToolEffectOutcome,
+    DurableWriteRequest, EffectAction, EffectCompletion, EffectFuture, EffectGate, EffectGateError,
+    EffectOutcome, EffectSubject, HookEffectOutcome, HookInvocation, ProviderEffectOutcome,
+    ProviderResponse, RunProvenance, ToolEffectOutcome,
 };
-use tea_core::trace::TraceObserver;
-use tea_core::{Agent, AgentEvent, EventObserver, ObserverFuture};
 use tea_core::state::{
     AgentMessage, AgentToolCall, MessageId, SerializedJson, StopReason, ThinkingLevel, ToolCallId,
 };
-use tea_core::tool::{
-    AgentTool, AgentToolResult, ToolCall, ToolFailureDisposition, ToolRegistry,
-};
-use tea_luau::{
-    PolicyMemoryCollector, PolicyMemoryRetention, PolicyMemoryVisibility,
-};
-use tea_session::{
-    reduce_lane, ArtifactStore, CanonicalHashWriter, CoreRunId, Digest, EntryId,
-    EpochFinishReason, EpochFinishedRecord, EpochId, EpochStartedRecord, HarnessRevisionId,
-    HarnessSnapshotId, LaneId, LaneRecord, MemoryRetention, MemoryVisibility, ModelHarnessProfileId, OperationFinishedRecord,
-    OperationId, OperationKind, OperationOutcome, OperationStartedRecord,
-    ProviderRequestId, ProviderRequestSettledRecord, ProviderRequestStartedRecord,
-    ProviderSettlementClassification, ProvisionedEntry, RecoveryPlan, SessionEntry, SessionFact,
-    SessionSnapshot, SessionWriter, StepAttemptedRecord, StepId,
-    StepKind, ToolReplayPolicy, ToolResultEntry, ToolSchemaDeviationFact, ToolStartedRecord,
-    Usage, PayloadRef, PluginMemoryEntry, SchemaFieldMismatch, TraceArtifactFact,
-};
+use tea_core::tool::{AgentTool, AgentToolResult, ToolCall, ToolFailureDisposition, ToolRegistry};
+use tea_core::trace::TraceObserver;
+use tea_core::{Agent, AgentEvent, EventObserver, ObserverFuture};
+use tea_luau::{PolicyMemoryCollector, PolicyMemoryRetention, PolicyMemoryVisibility};
 use tea_protocol::JsonValue;
+use tea_session::{
+    ArtifactStore, CanonicalHashWriter, CoreRunId, Digest, EntryId, EpochFinishReason,
+    EpochFinishedRecord, EpochId, EpochStartedRecord, HarnessRevisionId, HarnessSnapshotId, LaneId,
+    LaneRecord, MemoryRetention, MemoryVisibility, ModelHarnessProfileId, OperationFinishedRecord,
+    OperationId, OperationKind, OperationOutcome, OperationStartedRecord, PayloadRef,
+    PluginMemoryEntry, ProviderRequestId, ProviderRequestSettledRecord,
+    ProviderRequestStartedRecord, ProviderSettlementClassification, ProvisionedEntry, RecoveryPlan,
+    SchemaFieldMismatch, SessionEntry, SessionFact, SessionSnapshot, SessionWriter,
+    StepAttemptedRecord, StepId, StepKind, ToolReplayPolicy, ToolResultEntry,
+    ToolSchemaDeviationFact, ToolStartedRecord, TraceArtifactFact, Usage, reduce_lane,
+};
 use tea_trace::{JsonLinesSink, RedactingSink, Redactor, TraceEvent, TraceSink};
 
 /// Exact immutable identity selected for an operation's core epochs.
@@ -344,12 +339,16 @@ where
     /// owns queue semantics; this host facade only prevents access before an
     /// epoch has been constructed or after it has settled.
     pub fn enqueue_steering(&self, content: impl Into<String>) -> Result<u64, HarnessError> {
-        self.active_agent()?.enqueue_steering(content).map_err(Into::into)
+        self.active_agent()?
+            .enqueue_steering(content)
+            .map_err(Into::into)
     }
 
     /// Queue a follow-up prompt for the current durable core epoch.
     pub fn enqueue_follow_up(&self, content: impl Into<String>) -> Result<u64, HarnessError> {
-        self.active_agent()?.enqueue_follow_up(content).map_err(Into::into)
+        self.active_agent()?
+            .enqueue_follow_up(content)
+            .map_err(Into::into)
     }
 
     /// Return a read-only core snapshot for the current epoch, when one is
@@ -466,8 +465,12 @@ where
     ///
     /// The operation-start record commits before this method starts a core
     /// epoch. A storage failure therefore cannot be mistaken for acceptance.
-    pub async fn run_prompt(&self, input: impl Into<String>) -> Result<DurableOperation, HarnessError> {
-        self.run_prompt_with_authoring_authorization(input, false).await
+    pub async fn run_prompt(
+        &self,
+        input: impl Into<String>,
+    ) -> Result<DurableOperation, HarnessError> {
+        self.run_prompt_with_authoring_authorization(input, false)
+            .await
     }
 
     /// Accept and drive a prompt that the trusted application has explicitly
@@ -479,7 +482,8 @@ where
         &self,
         input: impl Into<String>,
     ) -> Result<DurableOperation, HarnessError> {
-        self.run_prompt_with_authoring_authorization(input, true).await
+        self.run_prompt_with_authoring_authorization(input, true)
+            .await
     }
 
     async fn run_prompt_with_authoring_authorization(
@@ -514,7 +518,8 @@ where
                         let mut session = self.session_lock()?;
                         let mut sequence = None;
                         for entry in entries {
-                            sequence = Some(session.append_entry(&LaneId::main(), entry)?.header.seq);
+                            sequence =
+                                Some(session.append_entry(&LaneId::main(), entry)?.header.seq);
                         }
                         sequence
                     };
@@ -601,13 +606,17 @@ where
     fn claim_operation(&self) -> Result<OperationClaim<'_>, HarnessError> {
         self.active
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .map_err(|_| HarnessError::invalid_state("durable harness already has an active drive"))?;
+            .map_err(|_| {
+                HarnessError::invalid_state("durable harness already has an active drive")
+            })?;
         Ok(OperationClaim {
             active: &self.active,
         })
     }
 
-    fn active_recovery(&self) -> Result<(OperationId, RecoveryPlan, SessionSnapshot), HarnessError> {
+    fn active_recovery(
+        &self,
+    ) -> Result<(OperationId, RecoveryPlan, SessionSnapshot), HarnessError> {
         let snapshot = self.snapshot()?;
         let reduction = reduce_lane(snapshot.clone(), LaneId::main())?;
         let operation_id = reduction.lane_state.active_operation.ok_or_else(|| {
@@ -638,7 +647,9 @@ where
             if reduction.lane_state.active_operation.is_some() {
                 return Err(HarnessError::RecoveryRequired {
                     plan: reduction.recovery_plan.ok_or_else(|| {
-                        HarnessError::invalid_state("main lane has an open operation without a recovery plan")
+                        HarnessError::invalid_state(
+                            "main lane has an open operation without a recovery plan",
+                        )
                     })?,
                 });
             }
@@ -719,14 +730,10 @@ where
             provider_surface_digest,
         )?;
         let host_tools = self.host_tools_for_configuration(&configuration, &operation_id)?;
-        let tool_definition_digests = all_tool_definition_digests(
-            &configuration.template,
-            &host_tools,
-        )?;
-        let tool_definition_schemas = all_tool_definition_schemas(
-            &configuration.template,
-            &host_tools,
-        )?;
+        let tool_definition_digests =
+            all_tool_definition_digests(&configuration.template, &host_tools)?;
+        let tool_definition_schemas =
+            all_tool_definition_schemas(&configuration.template, &host_tools)?;
         let replay_safe_host_tools = replay_safe_host_tools(&host_tools);
         let recovery_assistant_entry = recovery
             .as_ref()
@@ -751,9 +758,10 @@ where
             replay_tool_starts,
         )));
         let gate: Arc<dyn EffectGate> = Arc::new(DurableEffectGate { runtime });
-        let agent = configuration
-            .template
-            .build_agent_with_tools(gate, provenance.clone(), host_tools)?;
+        let agent =
+            configuration
+                .template
+                .build_agent_with_tools(gate, provenance.clone(), host_tools)?;
         let trace_capture = TraceCaptureSink::default();
         let trace_episode_id = format!(
             "tea-core-run-v1:{}",
@@ -805,7 +813,8 @@ where
                         &epoch_id,
                         EpochFinishReason::ActivationPending,
                     )?;
-                    let revision = self.activate_pending_harness(&operation_id, &pending.request)?;
+                    let revision =
+                        self.activate_pending_harness(&operation_id, &pending.request)?;
                     self.publish_event(TeaEvent::Harness(HarnessEvent::RolloverStarted {
                         lane_id: LaneId::main(),
                         operation_id: operation_id.clone(),
@@ -882,12 +891,11 @@ where
                     "operation {operation_id} is not active on main"
                 )));
             }
-            if let Some(plan) = &reduction.recovery_plan {
-                if !matches!(&plan, RecoveryPlan::StartEpoch { operation_id: plan_operation } if plan_operation == operation_id)
+            if let Some(plan) = &reduction.recovery_plan
+                && !matches!(&plan, RecoveryPlan::StartEpoch { operation_id: plan_operation } if plan_operation == operation_id)
                 {
                     return Err(HarnessError::RecoveryRequired { plan: plan.clone() });
                 }
-            }
             let configuration = self.configuration_for_reduction(&reduction)?;
             let epoch_index = snapshot
                 .records()
@@ -904,11 +912,9 @@ where
                 [operation_id.as_str(), &epoch_index.to_string()],
             ))
             .map_err(|error| HarnessError::invalid_state(error.to_string()))?;
-            let core_run_id = CoreRunId::new(durable_identifier(
-                "core-run",
-                [epoch_id.as_str(), "v1"],
-            ))
-            .map_err(|error| HarnessError::invalid_state(error.to_string()))?;
+            let core_run_id =
+                CoreRunId::new(durable_identifier("core-run", [epoch_id.as_str(), "v1"]))
+                    .map_err(|error| HarnessError::invalid_state(error.to_string()))?;
             let epoch_resume_data = configuration.lifecycle.before_epoch()?;
             let revision_id = configuration.identity.revision_id.clone();
             let snapshot_id = configuration.identity.snapshot_id.clone();
@@ -955,10 +961,11 @@ where
         )?;
         let (sequence, reduction) = {
             let mut session = self.session_lock()?;
-            let stored = session.append_record(LaneRecord::OperationFinished(OperationFinishedRecord {
-                operation_id: operation_id.clone(),
-                outcome: outcome.clone(),
-            }))?;
+            let stored =
+                session.append_record(LaneRecord::OperationFinished(OperationFinishedRecord {
+                    operation_id: operation_id.clone(),
+                    outcome: outcome.clone(),
+                }))?;
             let snapshot = session.snapshot()?;
             (stored.seq, reduce_lane(snapshot, LaneId::main())?)
         };
@@ -985,11 +992,12 @@ where
         epoch_id: &EpochId,
         reason: EpochFinishReason,
     ) -> Result<(), HarnessError> {
-        self.session_lock()?.append_record(LaneRecord::EpochFinished(EpochFinishedRecord {
-            epoch_id: epoch_id.clone(),
-            operation_id: operation_id.clone(),
-            reason,
-        }))?;
+        self.session_lock()?
+            .append_record(LaneRecord::EpochFinished(EpochFinishedRecord {
+                epoch_id: epoch_id.clone(),
+                operation_id: operation_id.clone(),
+                reason,
+            }))?;
         Ok(())
     }
 
@@ -1074,18 +1082,26 @@ where
                 &LaneId::main(),
                 ProvisionedEntry {
                     id: request.revision_entry_id.clone(),
-                    body: SessionEntry::HarnessRevisionChanged(tea_session::HarnessRevisionChangedEntry {
-                        revision_id: revision.revision_id.clone(),
-                        snapshot_id: revision.snapshot_id.clone(),
-                        rollback_from: matches!(revision.reason, crate::HarnessRevisionReason::Rollback)
+                    body: SessionEntry::HarnessRevisionChanged(
+                        tea_session::HarnessRevisionChangedEntry {
+                            revision_id: revision.revision_id.clone(),
+                            snapshot_id: revision.snapshot_id.clone(),
+                            rollback_from: matches!(
+                                revision.reason,
+                                crate::HarnessRevisionReason::Rollback
+                            )
                             .then(|| request.parent_revision_id.clone()),
-                    }),
+                        },
+                    ),
                 },
             )?;
         }
         let post_activation = reduce_lane(self.snapshot()?, LaneId::main())?;
         if post_activation.pending_harness_activation.is_some()
-            || post_activation.effective_configuration.harness_revision.as_ref()
+            || post_activation
+                .effective_configuration
+                .harness_revision
+                .as_ref()
                 == Some(&request.parent_revision_id)
         {
             return Err(HarnessError::invalid_state(
@@ -1209,19 +1225,22 @@ where
         };
         let mut session = self.session_lock()?;
         let snapshot = session.snapshot()?;
-        let existing = snapshot.facts().iter().find_map(|stored| match &stored.fact {
-            SessionFact::TraceArtifact(existing)
-                if existing.operation_id == fact.operation_id
-                    && existing.epoch_id == fact.epoch_id
-                    && existing.core_run_id == fact.core_run_id =>
-            {
-                Some(existing)
-            }
-            SessionFact::HarnessCatalog(_)
-            | SessionFact::ToolSchemaDeviation(_)
-            | SessionFact::Custom { .. } => None,
-            SessionFact::TraceArtifact(_) => None,
-        });
+        let existing = snapshot
+            .facts()
+            .iter()
+            .find_map(|stored| match &stored.fact {
+                SessionFact::TraceArtifact(existing)
+                    if existing.operation_id == fact.operation_id
+                        && existing.epoch_id == fact.epoch_id
+                        && existing.core_run_id == fact.core_run_id =>
+                {
+                    Some(existing)
+                }
+                SessionFact::HarnessCatalog(_)
+                | SessionFact::ToolSchemaDeviation(_)
+                | SessionFact::Custom { .. } => None,
+                SessionFact::TraceArtifact(_) => None,
+            });
         if let Some(existing) = existing {
             if existing == &fact {
                 return Ok(());
@@ -1242,21 +1261,16 @@ where
     ) -> Result<Vec<AgentMessage>, HarnessError> {
         let snapshot = self.snapshot()?;
         if let Some(harness_snapshot) = &configuration.harness_snapshot {
-            let limits = ProviderLimits::new(
-                harness_snapshot.spec.resource_limits.provider_surface_bytes,
-            )?;
+            let limits =
+                ProviderLimits::new(harness_snapshot.spec.resource_limits.provider_surface_bytes)?;
             return Ok(derive_snapshot_context_with_policies(
                 &snapshot,
                 LaneId::main(),
                 harness_snapshot,
                 limits,
                 &configuration.context_policies,
-                recovery.map(|recovery| {
-                    (
-                        &recovery.assistant_entry_id,
-                        recovery.tool_calls.as_slice(),
-                    )
-                }),
+                recovery
+                    .map(|recovery| (&recovery.assistant_entry_id, recovery.tool_calls.as_slice())),
             )?
             .messages);
         }
@@ -1287,10 +1301,15 @@ where
                 ))
             })?;
         let epoch = open_epoch(snapshot, &operation_id).and_then(|epoch_id| {
-            snapshot.records().iter().find_map(|stored| match &stored.record {
-                LaneRecord::EpochStarted(record) if record.id == epoch_id => Some(record.clone()),
-                _ => None,
-            })
+            snapshot
+                .records()
+                .iter()
+                .find_map(|stored| match &stored.record {
+                    LaneRecord::EpochStarted(record) if record.id == epoch_id => {
+                        Some(record.clone())
+                    }
+                    _ => None,
+                })
         });
         let configuration = match &epoch {
             Some(epoch) => {
@@ -1325,23 +1344,18 @@ where
             .is_ok_and(|configuration| {
                 self.host_tools_for_configuration(&configuration, &tool.operation_id)
                     .and_then(|host_tools| {
-                        let definitions = all_tool_definition_digests(
-                            &configuration.template,
-                            &host_tools,
-                        )?;
+                        let definitions =
+                            all_tool_definition_digests(&configuration.template, &host_tools)?;
                         let current = definitions.get(&tool.tool_name).ok_or_else(|| {
                             HarnessError::invalid_state(format!(
                                 "recovery tool {} is no longer declared",
                                 tool.tool_name,
                             ))
                         })?;
-                        Ok(
-                            (configuration.template.is_replay_safe(&tool.tool_name)
-                                || replay_safe_host_tools(&host_tools)
-                                    .contains(&tool.tool_name))
-                                && tool.harness_revision_id == *configuration.identity.revision_id()
-                                && current == &tool.tool_definition_digest,
-                        )
+                        Ok((configuration.template.is_replay_safe(&tool.tool_name)
+                            || replay_safe_host_tools(&host_tools).contains(&tool.tool_name))
+                            && tool.harness_revision_id == *configuration.identity.revision_id()
+                            && current == &tool.tool_definition_digest)
                     })
                     .unwrap_or(false)
             })
@@ -1367,7 +1381,9 @@ where
                 )
             })?;
         let tool_call_id = ToolCallId::new(started.tool_call_id.clone()).map_err(|error| {
-            HarnessError::invalid_state(format!("stored tool invocation has invalid call ID: {error}"))
+            HarnessError::invalid_state(format!(
+                "stored tool invocation has invalid call ID: {error}"
+            ))
         })?;
         let result = AgentToolResult {
             tool_call_id,
@@ -1408,9 +1424,7 @@ where
             .active_harness_revision
             .as_ref()
             .ok_or_else(|| {
-                HarnessError::invalid_state(
-                    "durable lane has no committed active harness revision",
-                )
+                HarnessError::invalid_state("durable lane has no committed active harness revision")
             })?;
         self.manager.resolve_revision(revision_id)
     }
@@ -1434,9 +1448,11 @@ where
                 LaneRecord::EpochStarted(record) if &record.id == epoch_id => Some(record),
                 _ => None,
             })
-            .ok_or_else(|| HarnessError::invalid_state(format!(
-                "epoch {epoch_id} has no durable start record",
-            )))?;
+            .ok_or_else(|| {
+                HarnessError::invalid_state(
+                    format!("epoch {epoch_id} has no durable start record",),
+                )
+            })?;
         let configuration = self.configuration_for_revision(&started.harness_revision_id)?;
         if configuration.identity.snapshot_id() != &started.harness_snapshot_id
             || configuration.identity.profile_id() != &started.model_harness_profile
@@ -1481,15 +1497,17 @@ fn validate_reserved_host_tool_names(template: &CoreEpochTemplate) -> Result<(),
     Ok(())
 }
 
-fn latest_harness_catalog(
-    snapshot: &SessionSnapshot,
-) -> Option<&tea_session::HarnessCatalogFact> {
-    snapshot.facts().iter().rev().find_map(|stored| match &stored.fact {
-        SessionFact::HarnessCatalog(catalog) => Some(catalog),
-        SessionFact::ToolSchemaDeviation(_)
-        | SessionFact::TraceArtifact(_)
-        | SessionFact::Custom { .. } => None,
-    })
+fn latest_harness_catalog(snapshot: &SessionSnapshot) -> Option<&tea_session::HarnessCatalogFact> {
+    snapshot
+        .facts()
+        .iter()
+        .rev()
+        .find_map(|stored| match &stored.fact {
+            SessionFact::HarnessCatalog(catalog) => Some(catalog),
+            SessionFact::ToolSchemaDeviation(_)
+            | SessionFact::TraceArtifact(_)
+            | SessionFact::Custom { .. } => None,
+        })
 }
 
 fn merge_tool_registries(
@@ -1739,7 +1757,9 @@ where
         self.ensure_healthy()?;
         match action.subject() {
             EffectSubject::DurableWrite { write } => self.before_durable_write(write),
-            EffectSubject::ProviderRequest { request } => self.before_provider(action.id(), request),
+            EffectSubject::ProviderRequest { request } => {
+                self.before_provider(action.id(), request)
+            }
             EffectSubject::ToolExecution { call } => self.before_tool(action.id(), call),
             EffectSubject::HookInvocation { hook } => {
                 self.append_hook_fact(action.id(), hook, "started", None)
@@ -1789,10 +1809,7 @@ where
         }
     }
 
-    fn before_durable_write(
-        &mut self,
-        write: &DurableWriteRequest,
-    ) -> Result<(), EffectGateError> {
+    fn before_durable_write(&mut self, write: &DurableWriteRequest) -> Result<(), EffectGateError> {
         match write {
             DurableWriteRequest::ToolResult { call, result } => {
                 // Immediate schema/policy failures have no ToolExecution
@@ -1800,13 +1817,9 @@ where
                 // were already persisted by `after_tool` before the core can
                 // emit their end event; this call verifies that exact durable
                 // entry instead of writing a second result.
-                if result
-                    .failure
-                    .as_ref()
-                    .is_some_and(|failure| {
-                        failure.disposition() == ToolFailureDisposition::InvalidArguments
-                    })
-                {
+                if result.failure.as_ref().is_some_and(|failure| {
+                    failure.disposition() == ToolFailureDisposition::InvalidArguments
+                }) {
                     self.persist_tool_schema_deviation(call)?;
                 }
                 self.persist_tool_result(call, result, result)
@@ -1844,11 +1857,9 @@ where
             [step_id.as_str(), "1"],
         ))
         .map_err(|error| self.fault(error.to_string()))?;
-        let result_entry_id = EntryId::new(durable_identifier(
-            "entry-assistant",
-            [step_id.as_str()],
-        ))
-        .map_err(|error| self.fault(error.to_string()))?;
+        let result_entry_id =
+            EntryId::new(durable_identifier("entry-assistant", [step_id.as_str()]))
+                .map_err(|error| self.fault(error.to_string()))?;
         let operation_id = self.operation_id.clone();
         let epoch_id = self.epoch_id.clone();
         let profile_id = self.identity.profile_id.clone();
@@ -1863,16 +1874,18 @@ where
                 result_entry_id: result_entry_id.clone(),
                 reason: None,
             }))?;
-            session.append_record(LaneRecord::ProviderRequestStarted(ProviderRequestStartedRecord {
-                request_id: request_id.clone(),
-                operation_id,
-                epoch_id,
-                step_id,
-                physical_attempt: 1,
-                model_harness_profile: profile_id,
-                request_surface_digest,
-                idempotency_key: None,
-            }))?;
+            session.append_record(LaneRecord::ProviderRequestStarted(
+                ProviderRequestStartedRecord {
+                    request_id: request_id.clone(),
+                    operation_id,
+                    epoch_id,
+                    step_id,
+                    physical_attempt: 1,
+                    model_harness_profile: profile_id,
+                    request_surface_digest,
+                    idempotency_key: None,
+                },
+            ))?;
             Ok(())
         })?;
         if self
@@ -1952,20 +1965,20 @@ where
             ProviderEffectOutcome::Failed { message } => {
                 let operation_id = self.operation_id.clone();
                 self.mutate(|session| {
-                session.append_record(LaneRecord::ProviderRequestSettled(
-                    ProviderRequestSettledRecord {
-                        request_id: pending.request_id,
-                        operation_id,
-                        outcome: JsonValue::object([
-                            ("status", JsonValue::String("interrupted".into())),
-                            ("message", JsonValue::String(message)),
-                        ]),
-                        usage: None,
-                        response_artifact: None,
-                        classification: ProviderSettlementClassification::Interrupted,
-                    },
-                ))?;
-                Ok(())
+                    session.append_record(LaneRecord::ProviderRequestSettled(
+                        ProviderRequestSettledRecord {
+                            request_id: pending.request_id,
+                            operation_id,
+                            outcome: JsonValue::object([
+                                ("status", JsonValue::String("interrupted".into())),
+                                ("message", JsonValue::String(message)),
+                            ]),
+                            usage: None,
+                            response_artifact: None,
+                            classification: ProviderSettlementClassification::Interrupted,
+                        },
+                    ))?;
+                    Ok(())
                 })
             }
         }
@@ -2006,16 +2019,19 @@ where
             })
             .map(|(index, _)| index as u32)
             .ok_or_else(|| self.fault("tool execution does not match a remaining durable call"))?;
-        let effective_args = JsonValue::parse(call.arguments.as_str())
-            .map_err(|error| self.fault(format!("tool arguments cannot enter durable WAL: {error}")))?;
+        let effective_args = JsonValue::parse(call.arguments.as_str()).map_err(|error| {
+            self.fault(format!("tool arguments cannot enter durable WAL: {error}"))
+        })?;
         let definition_digest = self
             .tool_definition_digests
             .get(&call.name)
             .cloned()
-            .ok_or_else(|| self.fault(format!(
-                "durable tool intent names unknown executable tool {}",
-                call.name,
-            )))?;
+            .ok_or_else(|| {
+                self.fault(format!(
+                    "durable tool intent names unknown executable tool {}",
+                    call.name,
+                ))
+            })?;
         let result_entry_id = EntryId::new(durable_identifier(
             "entry-tool-result",
             [assistant_entry_id.as_str(), &tool_index.to_string()],
@@ -2144,9 +2160,7 @@ where
         let tool_index = assistant
             .tool_calls
             .iter()
-            .position(|candidate| {
-                candidate.id == call.id.as_str() && candidate.name == call.name
-            })
+            .position(|candidate| candidate.id == call.id.as_str() && candidate.name == call.name)
             .ok_or_else(|| self.fault("durable tool result does not match its source call"))?
             as u32;
         let result_entry_id = EntryId::new(durable_identifier(
@@ -2198,11 +2212,12 @@ where
             Ok(())
         })?;
         if let Some((artifact_id, byte_len, policy_id)) = retained_artifact {
-            self.events.publish(TeaEvent::Artifact(ArtifactEvent::Retained {
-                artifact_id,
-                byte_len,
-                policy_id,
-            }));
+            self.events
+                .publish(TeaEvent::Artifact(ArtifactEvent::Retained {
+                    artifact_id,
+                    byte_len,
+                    policy_id,
+                }));
         }
         Ok(())
     }
@@ -2218,10 +2233,9 @@ where
                 "schema-deviation raw argument capture requires an installed host redactor when the artifact policy requires redaction",
             ));
         }
-        let assistant_entry_id = self
-            .last_assistant_entry
-            .clone()
-            .ok_or_else(|| self.fault("schema-deviation evidence has no durable assistant entry"))?;
+        let assistant_entry_id = self.last_assistant_entry.clone().ok_or_else(|| {
+            self.fault("schema-deviation evidence has no durable assistant entry")
+        })?;
         // Clone the canonical declaration before a fallible durable write.
         // `self.fault` needs mutable access to the epoch, so retaining a map
         // borrow across the artifact write would otherwise make the fault
@@ -2301,11 +2315,12 @@ where
                 session.append_fact(SessionFact::ToolSchemaDeviation(fact))?;
                 Ok(())
             })?;
-            self.events.publish(TeaEvent::Artifact(ArtifactEvent::Retained {
-                artifact_id: descriptor.artifact_id,
-                byte_len: descriptor.byte_len,
-                policy_id: self.template.artifact_policy_config().policy_id.clone(),
-            }));
+            self.events
+                .publish(TeaEvent::Artifact(ArtifactEvent::Retained {
+                    artifact_id: descriptor.artifact_id,
+                    byte_len: descriptor.byte_len,
+                    policy_id: self.template.artifact_policy_config().policy_id.clone(),
+                }));
         }
         Ok(())
     }
@@ -2322,7 +2337,11 @@ where
         let proposals = self
             .memory_collector
             .take_for_call(call.id.as_str())
-            .map_err(|error| self.fault(format!("cannot consume post-tool memory proposals: {error}")))?;
+            .map_err(|error| {
+                self.fault(format!(
+                    "cannot consume post-tool memory proposals: {error}"
+                ))
+            })?;
         if proposals.is_empty() {
             return Ok(());
         }
@@ -2391,7 +2410,10 @@ where
         outcome: Option<&HookEffectOutcome>,
     ) -> Result<(), EffectGateError> {
         let mut fields = vec![
-            ("operation_id", JsonValue::String(self.operation_id.to_string())),
+            (
+                "operation_id",
+                JsonValue::String(self.operation_id.to_string()),
+            ),
             ("epoch_id", JsonValue::String(self.epoch_id.to_string())),
             ("effect_id", JsonValue::String(action_id.0.to_string())),
             ("phase", JsonValue::String(phase.into())),
@@ -2438,7 +2460,10 @@ where
     }
 }
 
-pub(crate) fn durable_identifier<'a>(kind: &str, values: impl IntoIterator<Item = &'a str>) -> String {
+pub(crate) fn durable_identifier<'a>(
+    kind: &str,
+    values: impl IntoIterator<Item = &'a str>,
+) -> String {
     let mut writer = CanonicalHashWriter::new("tea-harness-durable-id-v1", 1, 1);
     writer.string("kind", kind);
     let values = values.into_iter().collect::<Vec<_>>();
@@ -2460,7 +2485,10 @@ fn provider_request_digest(request: &tea_core::scheduler::ModelRequest) -> Diges
     let mut writer = CanonicalHashWriter::new("tea-provider-request-surface-v1", 1, 1);
     writer.string("system_prompt", &request.system_prompt);
     writer.string("context", &request.context);
-    writer.discriminant("thinking_level", thinking_discriminant(request.thinking_level));
+    writer.discriminant(
+        "thinking_level",
+        thinking_discriminant(request.thinking_level),
+    );
     match &request.model {
         Some(model) => {
             writer.boolean("has_model", true);
@@ -2527,7 +2555,10 @@ fn all_tool_definition_schemas(
             let tool = registry
                 .get(name)
                 .expect("registered executable tool remains present");
-            if schemas.insert(name.to_owned(), tool.schema().clone()).is_some() {
+            if schemas
+                .insert(name.to_owned(), tool.schema().clone())
+                .is_some()
+            {
                 return Err(HarnessError::invalid_state(format!(
                     "immutable template and stable host tools both declare {name}",
                 )));
@@ -2558,7 +2589,9 @@ fn tool_definition_digest(tool: &dyn AgentTool) -> Result<Digest, HarnessError> 
     Ok(writer.finish())
 }
 
-fn assistant_entry(response: &ProviderResponse) -> Result<tea_session::AssistantMessageEntry, EffectGateError> {
+fn assistant_entry(
+    response: &ProviderResponse,
+) -> Result<tea_session::AssistantMessageEntry, EffectGateError> {
     let tool_calls = response
         .tool_calls
         .iter()
@@ -2599,7 +2632,11 @@ fn tool_result_entry(
         terminate: model_result.terminate,
         // Usage describes the already completed capability effect and stays
         // attached to raw evidence rather than a policy's model projection.
-        usage: raw_result.usage.as_ref().map(core_usage).unwrap_or_default(),
+        usage: raw_result
+            .usage
+            .as_ref()
+            .map(core_usage)
+            .unwrap_or_default(),
         projection_strategy_id: retained.projection_strategy_id,
         artifact_policy_id: retained.artifact_policy_id,
     })
@@ -2619,10 +2656,9 @@ fn plugin_memory_entry(
             "post-tool memory proposal has an invalid plugin ID or kind",
         ));
     }
-    let encoded = proposal
-        .content
-        .to_json_string()
-        .map_err(|error| EffectGateError::new(format!("cannot encode post-tool memory: {error}")))?;
+    let encoded = proposal.content.to_json_string().map_err(|error| {
+        EffectGateError::new(format!("cannot encode post-tool memory: {error}"))
+    })?;
     if encoded.len() > 16 * 1024 {
         return Err(EffectGateError::new(
             "post-tool memory proposal exceeds the 16384 byte inline limit",
@@ -2630,9 +2666,7 @@ fn plugin_memory_entry(
     }
     if proposal.provenance.len() > 32
         || proposal.provenance.iter().any(|value| {
-            value.is_empty()
-                || value.len() > 200
-                || value.chars().any(char::is_control)
+            value.is_empty() || value.len() > 200 || value.chars().any(char::is_control)
         })
     {
         return Err(EffectGateError::new(
@@ -2669,7 +2703,9 @@ fn persisted_tool_result_matches(
     tool_name: &str,
 ) -> Result<(), String> {
     let SessionEntry::ToolResult(stored) = &entry.body else {
-        return Err("durable tool-result identity was materialized with another semantic type".into());
+        return Err(
+            "durable tool-result identity was materialized with another semantic type".into(),
+        );
     };
     if stored.tool_call_id != model_result.tool_call_id.as_str()
         || stored.tool_name != tool_name
@@ -2677,8 +2713,7 @@ fn persisted_tool_result_matches(
         || stored.terminate != model_result.terminate
     {
         return Err(
-            "durable tool-result identity was materialized with a different tool settlement"
-                .into(),
+            "durable tool-result identity was materialized with a different tool settlement".into(),
         );
     }
     Ok(())
@@ -2702,7 +2737,10 @@ fn provider_outcome_json(response: &ProviderResponse) -> JsonValue {
             "stop_reason",
             JsonValue::String(stop_reason_label(response.stop_reason).into()),
         ),
-        ("context_overflow", JsonValue::Bool(response.context_overflow)),
+        (
+            "context_overflow",
+            JsonValue::Bool(response.context_overflow),
+        ),
     ])
 }
 
@@ -2795,7 +2833,11 @@ fn derive_core_messages(
     lane: &LaneId,
 ) -> Result<Vec<AgentMessage>, HarnessError> {
     let mut messages = Vec::new();
-    for entry in snapshot.entries().iter().filter(|entry| &entry.lane_id == lane) {
+    for entry in snapshot
+        .entries()
+        .iter()
+        .filter(|entry| &entry.lane_id == lane)
+    {
         let message_id = MessageId(messages.len() as u64 + 1);
         match &entry.body {
             SessionEntry::UserMessage(user) => messages.push(AgentMessage::User {
@@ -2842,11 +2884,13 @@ fn derive_core_messages(
                     .map_err(|error| HarnessError::invalid_state(error.to_string()))?;
                 messages.push(AgentMessage::ToolResult {
                     id: message_id,
-                    tool_call_id: ToolCallId::new(result.tool_call_id.clone()).map_err(|error| {
-                        HarnessError::invalid_state(format!(
-                            "durable tool-result call ID is invalid: {error}"
-                        ))
-                    })?,
+                    tool_call_id: ToolCallId::new(result.tool_call_id.clone()).map_err(
+                        |error| {
+                            HarnessError::invalid_state(format!(
+                                "durable tool-result call ID is invalid: {error}"
+                            ))
+                        },
+                    )?,
                     tool_name: result.tool_name.clone(),
                     content,
                     details: details.map(SerializedJson::new),
@@ -2900,7 +2944,7 @@ fn derive_core_messages(
                 return Err(HarnessError::invalid_state(format!(
                     "model-visible durable entry {} requires a harness context derivation policy",
                     entry.header.id
-                )))
+                )));
             }
             SessionEntry::PluginMemory(_) | SessionEntry::Custom(_) => {}
         }
@@ -2919,14 +2963,18 @@ fn open_epoch(snapshot: &SessionSnapshot, operation_id: &OperationId) -> Option<
             _ => None,
         })
         .collect::<BTreeSet<_>>();
-    snapshot.records().iter().rev().find_map(|stored| match &stored.record {
-        LaneRecord::EpochStarted(record)
-            if &record.operation_id == operation_id && !finished.contains(&record.id) =>
-        {
-            Some(record.id.clone())
-        }
-        _ => None,
-    })
+    snapshot
+        .records()
+        .iter()
+        .rev()
+        .find_map(|stored| match &stored.record {
+            LaneRecord::EpochStarted(record)
+                if &record.operation_id == operation_id && !finished.contains(&record.id) =>
+            {
+                Some(record.id.clone())
+            }
+            _ => None,
+        })
 }
 
 /// Return only the unresolved source-order suffix of the final assistant tool
@@ -2944,7 +2992,8 @@ fn recovery_tool_calls(
         .ok_or_else(|| {
             HarnessError::invalid_state("recovery assistant entry is missing or has the wrong type")
         })?;
-    let SessionEntry::AssistantMessage(assistant) = &snapshot.entries()[assistant_index].body else {
+    let SessionEntry::AssistantMessage(assistant) = &snapshot.entries()[assistant_index].body
+    else {
         return Err(HarnessError::invalid_state(
             "recovery assistant entry is missing or has the wrong type",
         ));
@@ -2958,9 +3007,9 @@ fn recovery_tool_calls(
         .collect::<Vec<_>>();
     let mut first_missing = None;
     for (index, call) in assistant.tool_calls.iter().enumerate() {
-        let result = trailing_results.iter().find(|result| {
-            result.tool_call_id == call.id && result.tool_name == call.name
-        });
+        let result = trailing_results
+            .iter()
+            .find(|result| result.tool_call_id == call.id && result.tool_name == call.name);
         match (first_missing, result) {
             (None, Some(_)) => {}
             (None, None) => first_missing = Some(index),
@@ -2968,7 +3017,7 @@ fn recovery_tool_calls(
             (Some(_), Some(_)) => {
                 return Err(HarnessError::invalid_state(
                     "durable recovered tool results are not a source-order prefix",
-                ))
+                ));
             }
         }
     }
@@ -2987,11 +3036,13 @@ fn recovery_tool_calls(
                     ))
                 })?,
                 name: call.name.clone(),
-                arguments: SerializedJson::new(call.arguments.to_json_string().map_err(|error| {
-                    HarnessError::invalid_state(format!(
-                        "recovery assistant arguments cannot encode: {error}"
-                    ))
-                })?),
+                arguments: SerializedJson::new(call.arguments.to_json_string().map_err(
+                    |error| {
+                        HarnessError::invalid_state(format!(
+                            "recovery assistant arguments cannot encode: {error}"
+                        ))
+                    },
+                )?),
             })
         })
         .collect()

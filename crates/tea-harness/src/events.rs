@@ -8,12 +8,12 @@
 
 use crate::{HarnessError, HarnessSurface};
 use std::collections::BTreeSet;
-use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
 use std::sync::Mutex;
+use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
 use tea_core::AgentEvent;
 use tea_session::{
-    reduce_lane, ArtifactId, HarnessCandidateId, HarnessRevisionId, HarnessSnapshotId, LaneId,
-    LaneMutation, ModelHarnessProfileId, OperationId, Sequence, SessionId, SessionSnapshot,
+    ArtifactId, HarnessCandidateId, HarnessRevisionId, HarnessSnapshotId, LaneId, LaneMutation,
+    ModelHarnessProfileId, OperationId, Sequence, SessionId, SessionSnapshot, reduce_lane,
 };
 
 const SUBSCRIBER_BUFFER: usize = 256;

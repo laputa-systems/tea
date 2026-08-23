@@ -21,8 +21,10 @@ pub const SELF_EXTENSION_V1_CONCISE: &str = "Session harness self-extension\n\nY
 
 /// Trusted session-level policy for exposing self-extension capabilities.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Default)]
 pub enum SelfExtensionMode {
     /// No authoring prompt or `tea_harness` model capability.
+    #[default]
     Off,
     /// The model may author only in response to an explicit user request.
     Author,
@@ -30,11 +32,6 @@ pub enum SelfExtensionMode {
     Adaptive,
 }
 
-impl Default for SelfExtensionMode {
-    fn default() -> Self {
-        Self::Off
-    }
-}
 
 impl SelfExtensionMode {
     /// Stable durable spelling suitable for session metadata and diagnostics.

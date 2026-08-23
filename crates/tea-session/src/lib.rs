@@ -18,21 +18,22 @@ pub use artifact::{
     ArtifactPolicy, ArtifactStore, FileArtifactStore, MemoryArtifactStore,
 };
 pub use gc::{
-    apply_artifact_gc, plan_artifact_gc, session_artifact_roots, ArtifactGcPlan, ArtifactGcReport,
-    ArtifactQuota, ArtifactQuotaStatus,
+    ArtifactGcPlan, ArtifactGcReport, ArtifactQuota, ArtifactQuotaStatus, apply_artifact_gc,
+    plan_artifact_gc, session_artifact_roots,
+};
+pub use ids::{
+    ArtifactId, ArtifactPolicyId, CanonicalHashWriter, CoreRunId, Digest, DigestError, EntryId,
+    EpochId, ExperimentId, FailureSignatureId, HarnessCandidateId, HarnessRevisionId,
+    HarnessSnapshotId, HarnessTreeId, IdError, IdGenerator, LaneId, ModelHarnessProfileId,
+    NormalizedPath, NormalizedPathError, OperationId, ProviderRequestId, RecordId, Sequence,
+    SessionId, StableHookId, StepId, ToolInvocationId,
 };
 pub use jsonl::{DurabilityMode, JsonlSession, SessionExport, SessionExportError};
-pub use ids::{
-    ArtifactId, ArtifactPolicyId, CanonicalHashWriter, CoreRunId, Digest, DigestError, EntryId, EpochId, ExperimentId,
-    FailureSignatureId, HarnessCandidateId, HarnessRevisionId, HarnessSnapshotId, HarnessTreeId,
-    IdError, IdGenerator, LaneId, ModelHarnessProfileId, NormalizedPath, NormalizedPathError, OperationId, ProviderRequestId,
-    RecordId, Sequence, SessionId, StableHookId, StepId, ToolInvocationId,
-};
 pub use model::*;
-pub use reduction::{reduce_lane, Corruption, LaneReduction, RecoveryPlan};
+pub use reduction::{Corruption, LaneReduction, RecoveryPlan, reduce_lane};
 pub use store::{MemorySession, SessionError, SessionReader, SessionWriter};
-pub use verification::{verify_session, SessionVerification, SessionVerificationError};
 pub use tea_protocol::JsonValue;
+pub use verification::{SessionVerification, SessionVerificationError, verify_session};
 
 #[cfg(test)]
 mod tests;

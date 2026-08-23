@@ -28,7 +28,13 @@ fn memory_append_assigns_commit_sequence_and_lane_parent() {
     assert_eq!(first.header.parent_id, None);
     assert_eq!(second.header.seq, Sequence(2));
     assert_eq!(second.header.parent_id, Some(first.header.id));
-    assert_eq!(session.snapshot().expect("snapshot succeeds").next_sequence(), Sequence(3));
+    assert_eq!(
+        session
+            .snapshot()
+            .expect("snapshot succeeds")
+            .next_sequence(),
+        Sequence(3)
+    );
 }
 
 #[test]
@@ -87,8 +93,7 @@ fn jsonl_round_trips_a_harness_catalog_fact_and_pins_its_manifest() {
             .expect("catalog manifest reference persists");
     }
 
-    let reopened = JsonlSession::open(&directory, DurabilityMode::Strict)
-        .expect("session reopens");
+    let reopened = JsonlSession::open(&directory, DurabilityMode::Strict).expect("session reopens");
     let snapshot = reopened.snapshot().expect("snapshot succeeds");
     let fact = snapshot
         .facts()
@@ -181,12 +186,8 @@ fn session_export_copies_only_verified_reachable_objects_and_reopens_as_the_same
             }))
             .expect("catalog fact persists");
         let snapshot = session.snapshot().expect("source snapshot");
-        let verification = verify_session(
-            &snapshot,
-            &store,
-            [transitive.artifact_id],
-        )
-        .expect("source prefix and all roots verify");
+        let verification = verify_session(&snapshot, &store, [transitive.artifact_id])
+            .expect("source prefix and all roots verify");
         assert_eq!(verification.artifact_count, 3);
         assert!(!verification.artifact_roots.contains(&orphan.artifact_id));
 
@@ -207,11 +208,19 @@ fn session_export_copies_only_verified_reachable_objects_and_reopens_as_the_same
     let exported = JsonlSession::open(&export_directory, DurabilityMode::Strict)
         .expect("exported session reopens");
     assert_eq!(exported.snapshot().expect("export snapshot"), snapshot);
-    let store = exported.artifact_store().expect("export object store opens");
+    let store = exported
+        .artifact_store()
+        .expect("export object store opens");
     for artifact_id in [retained, catalog, transitive] {
-        assert!(store.get(artifact_id).is_ok(), "reachable object {artifact_id} copied");
+        assert!(
+            store.get(artifact_id).is_ok(),
+            "reachable object {artifact_id} copied"
+        );
     }
-    assert!(matches!(store.get(orphan), Err(ArtifactError::NotFound { .. })));
+    assert!(matches!(
+        store.get(orphan),
+        Err(ArtifactError::NotFound { .. })
+    ));
     drop(exported);
     let _ = std::fs::remove_dir_all(&directory);
     let _ = std::fs::remove_dir_all(&export_directory);
@@ -290,7 +299,8 @@ fn reducer_derives_interrupted_tool_recovery_without_replaying_never_policy() {
             source_leaf_id: None,
             harness_revision_id: HarnessRevisionId::new("revision-1").expect("valid revision ID"),
             harness_snapshot_id: HarnessSnapshotId::new("snapshot-1").expect("valid snapshot ID"),
-            model_harness_profile: ModelHarnessProfileId::new("profile-1").expect("valid profile ID"),
+            model_harness_profile: ModelHarnessProfileId::new("profile-1")
+                .expect("valid profile ID"),
             core_run_id: CoreRunId::new("core-run-1").expect("valid core run ID"),
             epoch_resume_data: std::collections::BTreeMap::new(),
         }))
@@ -323,8 +333,8 @@ fn reducer_derives_interrupted_tool_recovery_without_replaying_never_policy() {
         )))
         .expect("tool intent is durable");
 
-    let reduction = reduce_lane(session.snapshot().expect("snapshot succeeds"), lane)
-        .expect("prefix is valid");
+    let reduction =
+        reduce_lane(session.snapshot().expect("snapshot succeeds"), lane).expect("prefix is valid");
     assert_eq!(
         reduction.recovery_plan,
         Some(RecoveryPlan::SynthesizeInterruptedToolResult {
@@ -369,9 +379,12 @@ fn jsonl_reopen_preserves_tool_intent_and_derives_the_same_recovery_plan() {
                 operation_id: operation_id.clone(),
                 epoch_index: 0,
                 source_leaf_id: None,
-                harness_revision_id: HarnessRevisionId::new("jsonl-revision").expect("valid revision ID"),
-                harness_snapshot_id: HarnessSnapshotId::new("jsonl-snapshot").expect("valid snapshot ID"),
-                model_harness_profile: ModelHarnessProfileId::new("jsonl-profile").expect("valid profile ID"),
+                harness_revision_id: HarnessRevisionId::new("jsonl-revision")
+                    .expect("valid revision ID"),
+                harness_snapshot_id: HarnessSnapshotId::new("jsonl-snapshot")
+                    .expect("valid snapshot ID"),
+                model_harness_profile: ModelHarnessProfileId::new("jsonl-profile")
+                    .expect("valid profile ID"),
                 core_run_id: CoreRunId::new("jsonl-core-run").expect("valid core run ID"),
                 epoch_resume_data: std::collections::BTreeMap::new(),
             }))
@@ -382,7 +395,11 @@ fn jsonl_reopen_preserves_tool_intent_and_derives_the_same_recovery_plan() {
                 ProvisionedEntry::assistant(
                     assistant_id.clone(),
                     "",
-                    vec![AssistantToolCall::new("call-jsonl", "write", JsonValue::Null)],
+                    vec![AssistantToolCall::new(
+                        "call-jsonl",
+                        "write",
+                        JsonValue::Null,
+                    )],
                 ),
             )
             .expect("assistant entry persists");
@@ -428,7 +445,10 @@ fn jsonl_v1_truncates_an_uncommitted_torn_tail_without_losing_the_durable_prefix
         session
             .append_entry(
                 &LaneId::main(),
-                ProvisionedEntry::user(EntryId::new("entry-jsonl").expect("valid entry ID"), "durable"),
+                ProvisionedEntry::user(
+                    EntryId::new("entry-jsonl").expect("valid entry ID"),
+                    "durable",
+                ),
             )
             .expect("entry append is durable");
     }
@@ -443,7 +463,14 @@ fn jsonl_v1_truncates_an_uncommitted_torn_tail_without_losing_the_durable_prefix
 
     let reopened = JsonlSession::open(&directory, DurabilityMode::Strict)
         .expect("torn final line is discarded on open");
-    assert_eq!(reopened.snapshot().expect("snapshot succeeds").entries().len(), 1);
+    assert_eq!(
+        reopened
+            .snapshot()
+            .expect("snapshot succeeds")
+            .entries()
+            .len(),
+        1
+    );
     let bytes = std::fs::read(&path).expect("session file reads");
     assert_eq!(bytes.last(), Some(&b'\n'));
     drop(reopened);
@@ -499,7 +526,10 @@ fn rejected_jsonl_mutation_does_not_poison_the_preceding_durable_prefix() {
         HarnessRevisionId::new("revision-invalid").expect("valid revision ID"),
         "idempotency",
     ));
-    assert!(matches!(session.append_record(invalid), Err(SessionError::Corruption(_))));
+    assert!(matches!(
+        session.append_record(invalid),
+        Err(SessionError::Corruption(_))
+    ));
     drop(session);
 
     let reopened = JsonlSession::open(&directory, DurabilityMode::Strict)
@@ -513,10 +543,20 @@ fn rejected_jsonl_mutation_does_not_poison_the_preceding_durable_prefix() {
 #[test]
 fn artifact_stores_deduplicate_exact_bytes_and_return_bounded_direct_pages() {
     let store = MemoryArtifactStore::default();
-    let first = store.put("one two one".as_bytes(), "text/plain").expect("first object persists");
-    let second = store.put("one two one".as_bytes(), "text/plain").expect("duplicate object persists idempotently");
+    let first = store
+        .put("one two one".as_bytes(), "text/plain")
+        .expect("first object persists");
+    let second = store
+        .put("one two one".as_bytes(), "text/plain")
+        .expect("duplicate object persists idempotently");
     assert_eq!(first.artifact_id, second.artifact_id);
-    assert_eq!(store.read_page(first.artifact_id, 4, 3).expect("page reads").bytes, b"two");
+    assert_eq!(
+        store
+            .read_page(first.artifact_id, 4, 3)
+            .expect("page reads")
+            .bytes,
+        b"two"
+    );
     assert_eq!(
         store
             .search_literal(first.artifact_id, b"one", 10, 0)
@@ -588,7 +628,9 @@ fn artifact_gc_keeps_session_roots_and_removes_only_reviewed_unreferenced_object
     assert_eq!(report.removed, plan.unreferenced);
     assert!(report.quota_status.is_within_limit());
     assert_eq!(
-        store.get(retained.artifact_id).expect("reachable root survives"),
+        store
+            .get(retained.artifact_id)
+            .expect("reachable root survives"),
         b"reachable durable evidence"
     );
     assert!(matches!(
@@ -626,15 +668,23 @@ fn temporary_session_directory(label: &str) -> std::path::PathBuf {
     ))
 }
 
-fn append_parent_chain<S: SessionWriter>(session: &mut S) -> Result<Vec<StoredEntry>, SessionError> {
+fn append_parent_chain<S: SessionWriter>(
+    session: &mut S,
+) -> Result<Vec<StoredEntry>, SessionError> {
     let lane = LaneId::main();
     let first = session.append_entry(
         &lane,
-        ProvisionedEntry::user(EntryId::new("conformance-one").expect("valid entry ID"), "one"),
+        ProvisionedEntry::user(
+            EntryId::new("conformance-one").expect("valid entry ID"),
+            "one",
+        ),
     )?;
     let second = session.append_entry(
         &lane,
-        ProvisionedEntry::user(EntryId::new("conformance-two").expect("valid entry ID"), "two"),
+        ProvisionedEntry::user(
+            EntryId::new("conformance-two").expect("valid entry ID"),
+            "two",
+        ),
     )?;
     Ok(vec![first, second])
 }

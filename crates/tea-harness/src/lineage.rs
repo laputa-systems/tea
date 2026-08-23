@@ -8,16 +8,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::sync::Arc;
-use tea_session::{
-    ArtifactId, ArtifactStore, CanonicalHashWriter, Digest, HarnessCandidateId,
-    HarnessRevisionId, HarnessSnapshotId, HarnessTreeId, ModelHarnessProfileId, NormalizedPath,
-    OperationId,
-};
-use tea_luau::bundle::{
-    Bundle, BundleManifest, CapabilityName, ModulePath, BUNDLE_ABI_VERSION,
-};
+use tea_luau::bundle::{BUNDLE_ABI_VERSION, Bundle, BundleManifest, CapabilityName, ModulePath};
 use tea_luau::{LuaPolicy, PolicyLimits};
 use tea_protocol::JsonValue;
+use tea_session::{
+    ArtifactId, ArtifactStore, CanonicalHashWriter, Digest, HarnessCandidateId, HarnessRevisionId,
+    HarnessSnapshotId, HarnessTreeId, ModelHarnessProfileId, NormalizedPath, OperationId,
+};
 
 mod catalog;
 
@@ -413,10 +410,16 @@ pub enum HarnessLineageError {
 impl fmt::Display for HarnessLineageError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Invalid { message } => write!(formatter, "invalid harness lineage input: {message}"),
-            Self::Artifact { message } => write!(formatter, "harness source artifact error: {message}"),
+            Self::Invalid { message } => {
+                write!(formatter, "invalid harness lineage input: {message}")
+            }
+            Self::Artifact { message } => {
+                write!(formatter, "harness source artifact error: {message}")
+            }
             Self::NotFound { kind, id } => write!(formatter, "unknown {kind} {id}"),
-            Self::InvalidActivation { message } => write!(formatter, "invalid harness activation: {message}"),
+            Self::InvalidActivation { message } => {
+                write!(formatter, "invalid harness activation: {message}")
+            }
         }
     }
 }
@@ -494,12 +497,11 @@ impl HarnessRepository {
                     message: format!("source tree repeats canonical path {path}"),
                 });
             }
-            let descriptor = self
-                .artifacts
-                .put(&bytes, &media_type)
-                .map_err(|error| HarnessLineageError::Artifact {
+            let descriptor = self.artifacts.put(&bytes, &media_type).map_err(|error| {
+                HarnessLineageError::Artifact {
                     message: error.to_string(),
-                })?;
+                }
+            })?;
             staged.insert(
                 path.clone(),
                 HarnessTreeFile {
@@ -516,12 +518,15 @@ impl HarnessRepository {
             });
         }
         let id = tree_id(&staged)?;
-        let tree = HarnessTree { id: id.clone(), files: staged };
+        let tree = HarnessTree {
+            id: id.clone(),
+            files: staged,
+        };
         match self.trees.get(&id) {
             Some(existing) if existing != &tree => {
                 return Err(HarnessLineageError::Invalid {
                     message: "tree digest collision with different immutable metadata".into(),
-                })
+                });
             }
             Some(_) => {}
             None => {
@@ -551,7 +556,7 @@ impl HarnessRepository {
             Some(existing) if existing != &snapshot => {
                 return Err(HarnessLineageError::Invalid {
                     message: "snapshot digest collision with different immutable metadata".into(),
-                })
+                });
             }
             Some(_) => {}
             None => {
@@ -597,7 +602,7 @@ impl HarnessRepository {
             Some(existing) if existing != &candidate => {
                 return Err(HarnessLineageError::Invalid {
                     message: "candidate digest collision with different immutable metadata".into(),
-                })
+                });
             }
             Some(_) => {}
             None => {
@@ -675,10 +680,13 @@ impl HarnessRepository {
         &self,
         id: &HarnessTreeId,
     ) -> Result<Vec<HarnessSourceFile>, HarnessLineageError> {
-        let tree = self.trees.get(id).ok_or_else(|| HarnessLineageError::NotFound {
-            kind: "harness tree",
-            id: id.to_string(),
-        })?;
+        let tree = self
+            .trees
+            .get(id)
+            .ok_or_else(|| HarnessLineageError::NotFound {
+                kind: "harness tree",
+                id: id.to_string(),
+            })?;
         tree.files
             .values()
             .map(|file| {
@@ -700,10 +708,13 @@ impl HarnessRepository {
         tree_id: &HarnessTreeId,
         plugin_id: &str,
     ) -> Result<BTreeSet<String>, HarnessLineageError> {
-        let tree = self.trees.get(tree_id).ok_or_else(|| HarnessLineageError::NotFound {
-            kind: "harness tree",
-            id: tree_id.to_string(),
-        })?;
+        let tree = self
+            .trees
+            .get(tree_id)
+            .ok_or_else(|| HarnessLineageError::NotFound {
+                kind: "harness tree",
+                id: tree_id.to_string(),
+            })?;
         let manifest_path = format!("plugins/{plugin_id}/manifest.json");
         let file = tree
             .files
@@ -816,25 +827,40 @@ impl HarnessRepository {
         Ok(revision)
     }
 
-    fn require_snapshot(&self, id: &HarnessSnapshotId) -> Result<&HarnessSnapshotV1, HarnessLineageError> {
-        self.snapshots.get(id).ok_or_else(|| HarnessLineageError::NotFound {
-            kind: "harness snapshot",
-            id: id.to_string(),
-        })
+    fn require_snapshot(
+        &self,
+        id: &HarnessSnapshotId,
+    ) -> Result<&HarnessSnapshotV1, HarnessLineageError> {
+        self.snapshots
+            .get(id)
+            .ok_or_else(|| HarnessLineageError::NotFound {
+                kind: "harness snapshot",
+                id: id.to_string(),
+            })
     }
 
-    fn require_revision(&self, id: &HarnessRevisionId) -> Result<&HarnessRevisionV1, HarnessLineageError> {
-        self.revisions.get(id).ok_or_else(|| HarnessLineageError::NotFound {
-            kind: "harness revision",
-            id: id.to_string(),
-        })
+    fn require_revision(
+        &self,
+        id: &HarnessRevisionId,
+    ) -> Result<&HarnessRevisionV1, HarnessLineageError> {
+        self.revisions
+            .get(id)
+            .ok_or_else(|| HarnessLineageError::NotFound {
+                kind: "harness revision",
+                id: id.to_string(),
+            })
     }
 
-    fn require_candidate(&self, id: &HarnessCandidateId) -> Result<&HarnessCandidateV1, HarnessLineageError> {
-        self.candidates.get(id).ok_or_else(|| HarnessLineageError::NotFound {
-            kind: "harness candidate",
-            id: id.to_string(),
-        })
+    fn require_candidate(
+        &self,
+        id: &HarnessCandidateId,
+    ) -> Result<&HarnessCandidateV1, HarnessLineageError> {
+        self.candidates
+            .get(id)
+            .ok_or_else(|| HarnessLineageError::NotFound {
+                kind: "harness candidate",
+                id: id.to_string(),
+            })
     }
 
     fn snapshot_is_ancestor(
@@ -916,9 +942,12 @@ fn validate_snapshot_spec(
                 message: format!("tool {} has an unknown execution mode", tool.name),
             });
         }
-        let _ = tool.schema.to_json_string().map_err(|error| HarnessLineageError::Invalid {
-            message: format!("tool {} schema cannot encode: {error}", tool.name),
-        })?;
+        let _ = tool
+            .schema
+            .to_json_string()
+            .map_err(|error| HarnessLineageError::Invalid {
+                message: format!("tool {} schema cannot encode: {error}", tool.name),
+            })?;
     }
     let mut bindings = BTreeSet::new();
     for binding in &spec.capability_bindings {
@@ -1014,10 +1043,12 @@ fn collect_plugin_surfaces(
                 message: format!("plugin {} is registered more than once", bundle.plugin_id),
             });
         }
-        let tree = trees.get(&bundle.tree_id).ok_or_else(|| HarnessLineageError::NotFound {
-            kind: "plugin source tree",
-            id: bundle.tree_id.to_string(),
-        })?;
+        let tree = trees
+            .get(&bundle.tree_id)
+            .ok_or_else(|| HarnessLineageError::NotFound {
+                kind: "plugin source tree",
+                id: bundle.tree_id.to_string(),
+            })?;
         let policy = validate_plugin_bundle(tree, bundle, spec, artifacts)?;
         for section in policy.prompt_sections() {
             surfaces.prompt_sections.push(PromptSectionDescriptor {
@@ -1041,18 +1072,23 @@ fn collect_plugin_surfaces(
             }
             if is_reserved_tool_name(&tool.name) {
                 return Err(HarnessLineageError::Invalid {
-                    message: format!("plugin {} declares host-reserved tool {}", bundle.plugin_id, tool.name),
+                    message: format!(
+                        "plugin {} declares host-reserved tool {}",
+                        bundle.plugin_id, tool.name
+                    ),
                 });
             }
-            surfaces.tool_presentations.push(ToolPresentationDescriptor {
-                name: tool.name.clone(),
-                description: tool.description.clone(),
-                schema: tool.schema.clone(),
-                execution_mode: match tool.execution_mode {
-                    tea_core::tool::ToolExecutionMode::Sequential => "sequential".into(),
-                    tea_core::tool::ToolExecutionMode::Parallel => "parallel".into(),
-                },
-            });
+            surfaces
+                .tool_presentations
+                .push(ToolPresentationDescriptor {
+                    name: tool.name.clone(),
+                    description: tool.description.clone(),
+                    schema: tool.schema.clone(),
+                    execution_mode: match tool.execution_mode {
+                        tea_core::tool::ToolExecutionMode::Sequential => "sequential".into(),
+                        tea_core::tool::ToolExecutionMode::Parallel => "parallel".into(),
+                    },
+                });
         }
     }
     Ok(surfaces)
@@ -1080,9 +1116,10 @@ fn validate_plugin_bundle(
             message: format!("plugin {} is missing manifest.json", bundle.plugin_id),
         })?;
     let manifest_bytes = load_tree_file(artifacts, manifest_file)?;
-    let manifest_text = std::str::from_utf8(&manifest_bytes).map_err(|_| HarnessLineageError::Invalid {
-        message: format!("plugin {} manifest.json is not UTF-8", bundle.plugin_id),
-    })?;
+    let manifest_text =
+        std::str::from_utf8(&manifest_bytes).map_err(|_| HarnessLineageError::Invalid {
+            message: format!("plugin {} manifest.json is not UTF-8", bundle.plugin_id),
+        })?;
     let manifest = parse_plugin_manifest(manifest_text, &bundle.plugin_id)?;
     if manifest.requested_capabilities != bundle.requested_capabilities {
         return Err(HarnessLineageError::Invalid {
@@ -1098,7 +1135,11 @@ fn validate_plugin_bundle(
         .iter()
         .map(|module| format!("{prefix}{module}"))
         .collect::<BTreeSet<_>>();
-    for file in tree.files.values().filter(|file| file.path.as_str().starts_with(&prefix)) {
+    for file in tree
+        .files
+        .values()
+        .filter(|file| file.path.as_str().starts_with(&prefix))
+    {
         if file.path.as_str() != manifest_path && !declared_paths.contains(file.path.as_str()) {
             return Err(HarnessLineageError::Invalid {
                 message: format!(
@@ -1109,11 +1150,13 @@ fn validate_plugin_bundle(
         }
     }
 
-    let limits = manifest.resource_limits.unwrap_or_else(|| PluginResourceLimits {
-        source_bytes: snapshot.resource_limits.source_bytes,
-        memory_bytes: snapshot.resource_limits.memory_bytes,
-        instruction_checks: snapshot.resource_limits.instruction_checks,
-    });
+    let limits = manifest
+        .resource_limits
+        .unwrap_or(PluginResourceLimits {
+            source_bytes: snapshot.resource_limits.source_bytes,
+            memory_bytes: snapshot.resource_limits.memory_bytes,
+            instruction_checks: snapshot.resource_limits.instruction_checks,
+        });
     if limits.source_bytes > snapshot.resource_limits.source_bytes
         || limits.memory_bytes > snapshot.resource_limits.memory_bytes
         || limits.instruction_checks > snapshot.resource_limits.instruction_checks
@@ -1133,7 +1176,10 @@ fn validate_plugin_bundle(
             .values()
             .find(|file| file.path.as_str() == path)
             .ok_or_else(|| HarnessLineageError::Invalid {
-                message: format!("plugin {} is missing declared module {module}", bundle.plugin_id),
+                message: format!(
+                    "plugin {} is missing declared module {module}",
+                    bundle.plugin_id
+                ),
             })?;
         let bytes = load_tree_file(artifacts, file)?;
         let source = String::from_utf8(bytes).map_err(|_| HarnessLineageError::Invalid {
@@ -1147,11 +1193,17 @@ fn validate_plugin_bundle(
         manifest.requested_capabilities.iter().map(String::as_str),
     )
     .map_err(|error| HarnessLineageError::Invalid {
-        message: format!("plugin {} has an invalid closed manifest: {error}", bundle.plugin_id),
+        message: format!(
+            "plugin {} has an invalid closed manifest: {error}",
+            bundle.plugin_id
+        ),
     })?;
     let bundle = Bundle::from_sources(luau_manifest, sources).map_err(|error| {
         HarnessLineageError::Invalid {
-            message: format!("plugin {} has an invalid source bundle: {error}", bundle.plugin_id),
+            message: format!(
+                "plugin {} has an invalid source bundle: {error}",
+                bundle.plugin_id
+            ),
         }
     })?;
     LuaPolicy::load_bundle_with_limits(
@@ -1190,9 +1242,11 @@ fn parse_plugin_manifest(
     let value = JsonValue::parse(source).map_err(|error| HarnessLineageError::Invalid {
         message: format!("plugin {expected_plugin_id} manifest.json is invalid JSON: {error}"),
     })?;
-    let object = value.as_object().ok_or_else(|| HarnessLineageError::Invalid {
-        message: format!("plugin {expected_plugin_id} manifest.json must be an object"),
-    })?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| HarnessLineageError::Invalid {
+            message: format!("plugin {expected_plugin_id} manifest.json must be an object"),
+        })?;
     for key in object.keys() {
         if !matches!(
             key.as_str(),
@@ -1218,7 +1272,9 @@ fn parse_plugin_manifest(
     let abi_version = required_u64(object, "abi_version", expected_plugin_id)? as u32;
     if abi_version != BUNDLE_ABI_VERSION {
         return Err(HarnessLineageError::Invalid {
-            message: format!("plugin {expected_plugin_id} manifest selects unsupported ABI {abi_version}"),
+            message: format!(
+                "plugin {expected_plugin_id} manifest selects unsupported ABI {abi_version}"
+            ),
         });
     }
     let plugin_id = required_string(object, "id", expected_plugin_id)?;
@@ -1228,9 +1284,10 @@ fn parse_plugin_manifest(
         });
     }
     let entrypoint = required_string(object, "entrypoint", expected_plugin_id)?;
-    let entrypoint_path = ModulePath::new(&entrypoint).map_err(|error| HarnessLineageError::Invalid {
-        message: format!("plugin {expected_plugin_id} has invalid entrypoint: {error}"),
-    })?;
+    let entrypoint_path =
+        ModulePath::new(&entrypoint).map_err(|error| HarnessLineageError::Invalid {
+            message: format!("plugin {expected_plugin_id} has invalid entrypoint: {error}"),
+        })?;
     if !entrypoint_path.as_str().ends_with(".luau") {
         return Err(HarnessLineageError::Invalid {
             message: format!("plugin {expected_plugin_id} entrypoint must end in .luau"),
@@ -1284,12 +1341,17 @@ fn parse_plugin_manifest(
         let capability = value.as_str().ok_or_else(|| HarnessLineageError::Invalid {
             message: format!("plugin {expected_plugin_id} capability names must be strings"),
         })?;
-        let parsed = CapabilityName::new(capability).map_err(|error| HarnessLineageError::Invalid {
-            message: format!("plugin {expected_plugin_id} has invalid capability {capability:?}: {error}"),
-        })?;
+        let parsed =
+            CapabilityName::new(capability).map_err(|error| HarnessLineageError::Invalid {
+                message: format!(
+                    "plugin {expected_plugin_id} has invalid capability {capability:?}: {error}"
+                ),
+            })?;
         if !requested_capabilities.insert(parsed.as_str().to_owned()) {
             return Err(HarnessLineageError::Invalid {
-                message: format!("plugin {expected_plugin_id} repeats requested capability {capability}"),
+                message: format!(
+                    "plugin {expected_plugin_id} repeats requested capability {capability}"
+                ),
             });
         }
     }
@@ -1317,7 +1379,9 @@ fn required_string(
         .map(str::to_owned)
         .filter(|value| !value.is_empty())
         .ok_or_else(|| HarnessLineageError::Invalid {
-            message: format!("plugin {plugin_id} manifest field {field} must be a non-empty string"),
+            message: format!(
+                "plugin {plugin_id} manifest field {field} must be a non-empty string"
+            ),
         })
 }
 
@@ -1330,7 +1394,9 @@ fn required_u64(
         .get(field)
         .and_then(JsonValue::as_u64)
         .ok_or_else(|| HarnessLineageError::Invalid {
-            message: format!("plugin {plugin_id} manifest field {field} must be an unsigned integer"),
+            message: format!(
+                "plugin {plugin_id} manifest field {field} must be an unsigned integer"
+            ),
         })
 }
 
@@ -1338,11 +1404,16 @@ fn parse_plugin_resource_limits(
     value: &JsonValue,
     plugin_id: &str,
 ) -> Result<PluginResourceLimits, HarnessLineageError> {
-    let object = value.as_object().ok_or_else(|| HarnessLineageError::Invalid {
-        message: format!("plugin {plugin_id} resource_limits must be an object"),
-    })?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| HarnessLineageError::Invalid {
+            message: format!("plugin {plugin_id} resource_limits must be an object"),
+        })?;
     for key in object.keys() {
-        if !matches!(key.as_str(), "source_bytes" | "memory_bytes" | "instruction_checks") {
+        if !matches!(
+            key.as_str(),
+            "source_bytes" | "memory_bytes" | "instruction_checks"
+        ) {
             return Err(HarnessLineageError::Invalid {
                 message: format!("plugin {plugin_id} resource_limits has unknown field {key}"),
             });
@@ -1367,12 +1438,17 @@ fn load_tree_file(
     artifacts: &dyn ArtifactStore,
     file: &HarnessTreeFile,
 ) -> Result<Vec<u8>, HarnessLineageError> {
-    let bytes = artifacts.get(file.artifact_id).map_err(|error| HarnessLineageError::Artifact {
-        message: error.to_string(),
-    })?;
+    let bytes = artifacts
+        .get(file.artifact_id)
+        .map_err(|error| HarnessLineageError::Artifact {
+            message: error.to_string(),
+        })?;
     if bytes.len() as u64 != file.byte_len || ArtifactId::from_bytes(&bytes) != file.artifact_id {
         return Err(HarnessLineageError::Invalid {
-            message: format!("harness source object {} does not match immutable tree metadata", file.path),
+            message: format!(
+                "harness source object {} does not match immutable tree metadata",
+                file.path
+            ),
         });
     }
     Ok(bytes)
@@ -1396,7 +1472,9 @@ fn validate_candidate(
         || draft.hypothesis.expected_effect.is_empty()
         || draft.hypothesis.regression_risk.is_empty()
     {
-        diagnostics.push("candidate hypothesis must name evidence, expected effect, and regression risk".into());
+        diagnostics.push(
+            "candidate hypothesis must name evidence, expected effect, and regression risk".into(),
+        );
     }
     let mut paths = BTreeSet::new();
     for path in &draft.changed_paths {
@@ -1431,10 +1509,11 @@ fn validate_candidate(
         .ordered_session_plugins
         .iter()
         .flat_map(|bundle| {
-            bundle.requested_capabilities.iter().filter_map(|capability| {
-                (!bound_capabilities.contains(&(bundle.plugin_id.as_str(), capability.as_str())))
-                    .then(|| format!("{}.{}", bundle.plugin_id, capability))
-            })
+            bundle
+                .requested_capabilities
+                .iter()
+                .filter(|&capability| !bound_capabilities
+                        .contains(&(bundle.plugin_id.as_str(), capability.as_str()))).map(|capability| format!("{}.{}", bundle.plugin_id, capability))
         })
         .collect::<Vec<_>>();
     if !unbound.is_empty() {
@@ -1444,14 +1523,13 @@ fn validate_candidate(
         ));
     }
     for bundle in &snapshot.spec.ordered_session_plugins {
-        if let Some(tree) = trees.get(&bundle.tree_id) {
-            if !tree_has_plugin_layout(tree, &bundle.plugin_id) {
+        if let Some(tree) = trees.get(&bundle.tree_id)
+            && !tree_has_plugin_layout(tree, &bundle.plugin_id) {
                 diagnostics.push(format!(
                     "plugin {} tree does not contain the required closed source layout",
                     bundle.plugin_id
                 ));
             }
-        }
     }
     if draft.changed_surfaces.is_empty() && parent.snapshot_id != draft.proposed_snapshot_id {
         diagnostics.push("non-noop candidate must name at least one changed surface".into());
@@ -1474,14 +1552,20 @@ fn tree_has_plugin_layout(tree: &HarnessTree, plugin_id: &str) -> bool {
         && tree.files.keys().any(|path| path.as_str() == entrypoint)
 }
 
-fn fingerprints(spec: &HarnessSnapshotSpec) -> Result<HarnessSurfaceFingerprints, HarnessLineageError> {
+fn fingerprints(
+    spec: &HarnessSnapshotSpec,
+) -> Result<HarnessSurfaceFingerprints, HarnessLineageError> {
     let prompt = compose_system_prompt(spec);
     let system_prompt_digest = Digest::from_bytes(prompt.as_bytes());
     let ordered_tool_definitions_digest = digest_tools(&all_tool_presentations(spec))?;
     let capability_bindings_digest = digest_capabilities(&spec.capability_bindings);
-    let mut provider = CanonicalHashWriter::new("tea-harness-provider-surface-v1", 1, LUAU_ABI_VERSION);
+    let mut provider =
+        CanonicalHashWriter::new("tea-harness-provider-surface-v1", 1, LUAU_ABI_VERSION);
     provider.bytes("system_prompt_digest", system_prompt_digest.as_bytes());
-    provider.bytes("tool_definitions_digest", ordered_tool_definitions_digest.as_bytes());
+    provider.bytes(
+        "tool_definitions_digest",
+        ordered_tool_definitions_digest.as_bytes(),
+    );
     Ok(HarnessSurfaceFingerprints {
         system_prompt_digest,
         ordered_tool_definitions_digest,
@@ -1498,7 +1582,11 @@ pub(crate) fn compose_system_prompt(spec: &HarnessSnapshotSpec) -> String {
     if let Some(addendum) = &spec.self_extension_addendum {
         sections.push(addendum.as_str());
     }
-    sections.extend(spec.prompt_sections.iter().map(|section| section.content.as_str()));
+    sections.extend(
+        spec.prompt_sections
+            .iter()
+            .map(|section| section.content.as_str()),
+    );
     sections.extend(
         spec.plugin_prompt_sections
             .iter()
@@ -1516,7 +1604,8 @@ fn all_tool_presentations(spec: &HarnessSnapshotSpec) -> Vec<ToolPresentationDes
 }
 
 fn digest_tools(tools: &[ToolPresentationDescriptor]) -> Result<Digest, HarnessLineageError> {
-    let mut writer = CanonicalHashWriter::new("tea-harness-tool-presentations-v1", 1, LUAU_ABI_VERSION);
+    let mut writer =
+        CanonicalHashWriter::new("tea-harness-tool-presentations-v1", 1, LUAU_ABI_VERSION);
     writer.u64("tool_count", tools.len() as u64);
     for tool in tools {
         writer.string("name", &tool.name);
@@ -1524,16 +1613,20 @@ fn digest_tools(tools: &[ToolPresentationDescriptor]) -> Result<Digest, HarnessL
         writer.string("execution_mode", &tool.execution_mode);
         writer.string(
             "schema",
-            &tool.schema.to_json_string().map_err(|error| HarnessLineageError::Invalid {
-                message: format!("tool {} schema cannot encode: {error}", tool.name),
-            })?,
+            &tool
+                .schema
+                .to_json_string()
+                .map_err(|error| HarnessLineageError::Invalid {
+                    message: format!("tool {} schema cannot encode: {error}", tool.name),
+                })?,
         );
     }
     Ok(writer.finish())
 }
 
 fn digest_capabilities(bindings: &[CapabilityBindingRef]) -> Digest {
-    let mut writer = CanonicalHashWriter::new("tea-harness-capability-bindings-v1", 1, LUAU_ABI_VERSION);
+    let mut writer =
+        CanonicalHashWriter::new("tea-harness-capability-bindings-v1", 1, LUAU_ABI_VERSION);
     writer.u64("binding_count", bindings.len() as u64);
     for binding in bindings {
         writer.string("plugin_id", &binding.plugin_id);
@@ -1544,7 +1637,9 @@ fn digest_capabilities(bindings: &[CapabilityBindingRef]) -> Digest {
     writer.finish()
 }
 
-fn tree_id(files: &BTreeMap<NormalizedPath, HarnessTreeFile>) -> Result<HarnessTreeId, HarnessLineageError> {
+fn tree_id(
+    files: &BTreeMap<NormalizedPath, HarnessTreeFile>,
+) -> Result<HarnessTreeId, HarnessLineageError> {
     let mut writer = CanonicalHashWriter::new("tea-harness-tree-v1", 1, LUAU_ABI_VERSION);
     writer.u64("file_count", files.len() as u64);
     for file in files.values() {
@@ -1564,7 +1659,11 @@ fn snapshot_id(
     spec: &HarnessSnapshotSpec,
     fingerprints: &HarnessSurfaceFingerprints,
 ) -> Result<HarnessSnapshotId, HarnessLineageError> {
-    let mut writer = CanonicalHashWriter::new("tea-harness-snapshot-v1", SNAPSHOT_SCHEMA_VERSION, LUAU_ABI_VERSION);
+    let mut writer = CanonicalHashWriter::new(
+        "tea-harness-snapshot-v1",
+        SNAPSHOT_SCHEMA_VERSION,
+        LUAU_ABI_VERSION,
+    );
     writer.bytes("base_profile_digest", spec.base_profile_digest.as_bytes());
     writer.string("model_harness_profile", spec.model_harness_profile.as_str());
     writer.string("system_prompt", &compose_system_prompt(spec));
@@ -1572,16 +1671,37 @@ fn snapshot_id(
     write_prompt_sections(&mut writer, "plugin", &spec.plugin_prompt_sections);
     write_bundles(&mut writer, "global", &spec.ordered_global_plugins);
     write_bundles(&mut writer, "session", &spec.ordered_session_plugins);
-    writer.bytes("provider_surface_digest", fingerprints.provider_surface_digest.as_bytes());
+    writer.bytes(
+        "provider_surface_digest",
+        fingerprints.provider_surface_digest.as_bytes(),
+    );
     writer.bytes("hook_bundle_digest", spec.hook_bundle_digest.as_bytes());
-    writer.bytes("capability_bindings_digest", fingerprints.capability_bindings_digest.as_bytes());
-    writer.bytes("compaction_policy_digest", spec.compaction_policy_digest.as_bytes());
-    writer.bytes("tool_projection_digest", spec.tool_projection_digest.as_bytes());
-    writer.bytes("failure_policy_digest", spec.failure_policy_digest.as_bytes());
+    writer.bytes(
+        "capability_bindings_digest",
+        fingerprints.capability_bindings_digest.as_bytes(),
+    );
+    writer.bytes(
+        "compaction_policy_digest",
+        spec.compaction_policy_digest.as_bytes(),
+    );
+    writer.bytes(
+        "tool_projection_digest",
+        spec.tool_projection_digest.as_bytes(),
+    );
+    writer.bytes(
+        "failure_policy_digest",
+        spec.failure_policy_digest.as_bytes(),
+    );
     writer.u64("source_bytes", spec.resource_limits.source_bytes as u64);
     writer.u64("memory_bytes", spec.resource_limits.memory_bytes as u64);
-    writer.u64("instruction_checks", spec.resource_limits.instruction_checks as u64);
-    writer.u64("provider_surface_bytes", spec.resource_limits.provider_surface_bytes as u64);
+    writer.u64(
+        "instruction_checks",
+        spec.resource_limits.instruction_checks as u64,
+    );
+    writer.u64(
+        "provider_surface_bytes",
+        spec.resource_limits.provider_surface_bytes as u64,
+    );
     HarnessSnapshotId::new(format!("harness-snapshot-{}", writer.finish().to_hex())).map_err(
         |error| HarnessLineageError::Invalid {
             message: error.to_string(),
@@ -1594,7 +1714,10 @@ fn write_prompt_sections(
     namespace: &str,
     sections: &[PromptSectionDescriptor],
 ) {
-    writer.u64(&format!("{namespace}_prompt_section_count"), sections.len() as u64);
+    writer.u64(
+        &format!("{namespace}_prompt_section_count"),
+        sections.len() as u64,
+    );
     for section in sections {
         writer.string(&format!("{namespace}_prompt_section_id"), &section.id);
         writer.string(
@@ -1716,9 +1839,9 @@ fn validate_plugin_id(value: &str) -> Result<(), HarnessLineageError> {
 fn validate_label(value: &str, kind: &str) -> Result<(), HarnessLineageError> {
     if value.is_empty()
         || value.len() > 120
-        || value.bytes().any(|byte| {
-            !(byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
-        })
+        || value
+            .bytes()
+            .any(|byte| !(byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-')))
     {
         return Err(HarnessLineageError::Invalid {
             message: format!("{kind} must use the portable [A-Za-z0-9._-] spelling"),

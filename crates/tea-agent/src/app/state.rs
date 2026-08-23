@@ -9,8 +9,8 @@ use tea_core::state::{AgentMessage, ToolCallId};
 use tea_core::{AgentEvent, ModelDescriptor, Usage};
 
 use super::commands;
-use super::host::{model_candidates, overlay_lines};
 use super::durable::DurableSessionSummary;
+use super::host::{model_candidates, overlay_lines};
 
 /// Typed transcript entry contract for presentation consumers.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -213,7 +213,9 @@ impl AppState {
                 message,
                 text_delta,
             } => {
-                if let (tea_core::AgentMessage::Assistant { .. }, Some(delta)) = (message, text_delta) {
+                if let (tea_core::AgentMessage::Assistant { .. }, Some(delta)) =
+                    (message, text_delta)
+                {
                     if let Some(index) = self.streaming_line {
                         if let Some(TranscriptEntry::Assistant { text, .. }) =
                             self.transcript.get_mut(index)

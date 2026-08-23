@@ -4,15 +4,15 @@
 //! `tea-core` mechanism. Its public API is intentionally introduced through
 //! executable vertical slices rather than a broad placeholder surface.
 
-mod error;
-mod events;
-mod capability;
-mod context;
 mod artifact;
 mod artifact_tools;
+mod capability;
+mod context;
+mod error;
+mod events;
 mod harness_tool;
-mod lineage;
 mod lifecycle;
+mod lineage;
 mod manager;
 mod mode;
 mod profile;
@@ -20,12 +20,12 @@ mod supervisor;
 mod template;
 
 pub use artifact::{
-    retain_tool_result_with_projection, RetainedToolResult, ToolResultRetentionError,
+    RetainedToolResult, ToolResultRetentionError, retain_tool_result_with_projection,
 };
 pub use capability::{CapabilityBindingError, PluginCapabilityBinding, PluginCapabilityCatalog};
 pub use context::{
-    derive_model_context, derive_model_context_with_patch, ContextAnnotation,
-    ContextProjectionPatch, DerivedContext, ProviderLimits,
+    ContextAnnotation, ContextProjectionPatch, DerivedContext, ProviderLimits,
+    derive_model_context, derive_model_context_with_patch,
 };
 pub use error::HarnessError;
 pub use events::{
@@ -36,19 +36,19 @@ pub use lineage::{
     CandidateHypothesis, CandidateValidation, CapabilityBindingRef, HarnessActor,
     HarnessCandidateDraft, HarnessCandidateV1, HarnessLineageError, HarnessRepository,
     HarnessResourceLimits, HarnessRevisionReason, HarnessRevisionV1, HarnessSnapshotSpec,
-    HarnessSnapshotV1, HarnessSurface, HarnessSurfaceFingerprints, HarnessTree,
-    HarnessSourceFile, HarnessTreeFile, HarnessTreeLimits, PluginBundleRef, PromptSectionDescriptor,
+    HarnessSnapshotV1, HarnessSourceFile, HarnessSurface, HarnessSurfaceFingerprints, HarnessTree,
+    HarnessTreeFile, HarnessTreeLimits, PluginBundleRef, PromptSectionDescriptor,
     RegistryOperation, ToolPresentationDescriptor,
 };
 pub use manager::{
     HarnessApplyRequest, HarnessFilePatch, HarnessManager, ResolvedHarnessConfiguration,
 };
 pub use mode::{
-    SelfExtensionMode, AUTHORING_AUTHORIZATION_METADATA_KEY, SELF_EXTENSION_MODE_METADATA_KEY,
-    SELF_EXTENSION_V1_CONCISE,
+    AUTHORING_AUTHORIZATION_METADATA_KEY, SELF_EXTENSION_MODE_METADATA_KEY,
+    SELF_EXTENSION_V1_CONCISE, SelfExtensionMode,
 };
 pub use profile::{
-    inspect_tool_schema_deviation, FieldMismatch, ModelHarnessProfile, ToolSchemaDeviation,
+    FieldMismatch, ModelHarnessProfile, ToolSchemaDeviation, inspect_tool_schema_deviation,
 };
 pub use supervisor::{DurableHarness, DurableOperation, HarnessIdentity};
 pub use template::CoreEpochTemplate;

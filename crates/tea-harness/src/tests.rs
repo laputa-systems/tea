@@ -1,37 +1,36 @@
 use std::collections::VecDeque;
 use std::sync::mpsc::TryRecvError;
 use std::sync::{Arc, Mutex};
-use tea_core::tool::{
-    AgentTool, AgentToolResult, ToolCall, ToolContext, ToolFuture, ToolUpdateSink,
-};
 use tea_core::hooks::{AfterToolCall, BeforeToolCall, ContextEnvelope, HookSet, Replacement};
 use tea_core::scheduler::{
     CancellationToken, ModelFuture, ModelProvider, ModelRequest, ModelStream, ModelStreamEvent,
 };
 use tea_core::state::{SerializedJson, StopReason, ToolCallId};
+use tea_core::tool::{
+    AgentTool, AgentToolResult, ToolCall, ToolContext, ToolFuture, ToolUpdateSink,
+};
 use tea_luau::tool_handler::{
     CapabilityError, CapabilityFuture, CapabilityRequest, CapabilityResponse, HandlerLimits,
     LuauCapability,
 };
 use tea_session::{
-    ArtifactPolicyId, AssistantMessageEntry, AssistantToolCall, CoreRunId, Digest, EntryId,
-    CompactionEntry, EpochFinishReason, EpochFinishedRecord, EpochId, EpochStartedRecord,
-    HarnessActivationRequestedRecord, HarnessRevisionChangedEntry, LaneId,
-    LaneRecord, MemoryRetention, MemorySession, MemoryVisibility, OperationId, OperationKind, OperationStartedRecord, PayloadRef,
-    PluginMemoryEntry,
-    ProvisionedEntry, RecordId,
-    ArtifactPolicy, ArtifactStore, MemoryArtifactStore, SessionEntry, SessionFact, SessionHeader, SessionId,
-    SessionWriter, StableHookId, ToolReplayPolicy, ToolResultEntry, ToolStartedRecord, Usage,
+    ArtifactPolicy, ArtifactPolicyId, ArtifactStore, AssistantMessageEntry, AssistantToolCall,
+    CompactionEntry, CoreRunId, Digest, EntryId, EpochFinishReason, EpochFinishedRecord, EpochId,
+    EpochStartedRecord, HarnessActivationRequestedRecord, HarnessRevisionChangedEntry, LaneId,
+    LaneRecord, MemoryArtifactStore, MemoryRetention, MemorySession, MemoryVisibility, OperationId,
+    OperationKind, OperationStartedRecord, PayloadRef, PluginMemoryEntry, ProvisionedEntry,
+    RecordId, SessionEntry, SessionFact, SessionHeader, SessionId, SessionWriter, StableHookId,
+    ToolReplayPolicy, ToolResultEntry, ToolStartedRecord, Usage,
 };
 
 use crate::{
-    CandidateHypothesis, HarnessActor, HarnessCandidateDraft, HarnessRepository,
-    HarnessLineageError, HarnessResourceLimits, HarnessSurface, HarnessTreeLimits, PluginBundleRef,
-    PromptSectionDescriptor, ToolPresentationDescriptor, CoreEpochTemplate, DurableHarness,
-    HarnessApplyRequest, HarnessFilePatch, HarnessIdentity, HarnessManager, HarnessSnapshotSpec,
-    CapabilityBindingRef, PluginCapabilityBinding, PluginCapabilityCatalog, ContextProjectionPatch,
-    ProviderLimits, derive_model_context, derive_model_context_with_patch,
-    ArtifactEvent, ModelHarnessProfile, inspect_tool_schema_deviation, SessionEvent, TeaEvent,
+    ArtifactEvent, CandidateHypothesis, CapabilityBindingRef, ContextProjectionPatch,
+    CoreEpochTemplate, DurableHarness, HarnessActor, HarnessApplyRequest, HarnessCandidateDraft,
+    HarnessFilePatch, HarnessIdentity, HarnessLineageError, HarnessManager, HarnessRepository,
+    HarnessResourceLimits, HarnessSnapshotSpec, HarnessSurface, HarnessTreeLimits,
+    ModelHarnessProfile, PluginBundleRef, PluginCapabilityBinding, PluginCapabilityCatalog,
+    PromptSectionDescriptor, ProviderLimits, SessionEvent, TeaEvent, ToolPresentationDescriptor,
+    derive_model_context, derive_model_context_with_patch, inspect_tool_schema_deviation,
 };
 
 #[derive(Debug)]
@@ -173,8 +172,7 @@ fn durable_harness_records_provider_and_tool_intents_before_real_effects() {
                 ModelStream {
                     events: vec![
                         ModelStreamEvent::ToolCall(tea_core::AgentToolCall {
-                            id: ToolCallId::new("durable-tool-call")
-                                .expect("fixture call ID"),
+                            id: ToolCallId::new("durable-tool-call").expect("fixture call ID"),
                             name: "record".into(),
                             arguments: SerializedJson::new("{}"),
                         }),
@@ -194,8 +192,7 @@ fn durable_harness_records_provider_and_tool_intents_before_real_effects() {
         let mut tools = tea_core::tool::ToolRegistry::default();
         tools.insert(Arc::new(RecordingTool {
             trace: Arc::clone(&trace),
-            schema: tea_protocol::JsonValue::parse(r#"{"type":"object"}"#)
-                .expect("fixture schema"),
+            schema: tea_protocol::JsonValue::parse(r#"{"type":"object"}"#).expect("fixture schema"),
             harness: Arc::clone(&harness_probe),
             saw_durable_intent: Arc::clone(&tool_intents),
         }));
@@ -225,19 +222,32 @@ fn durable_harness_records_provider_and_tool_intents_before_real_effects() {
                 .count(),
             1
         );
-        assert!(snapshot.records().iter().any(|record| {
-            matches!(record.record, LaneRecord::ProviderRequestStarted(_))
-        }));
-        assert!(snapshot
-            .records()
-            .iter()
-            .any(|record| matches!(record.record, LaneRecord::ToolStarted(_))));
+        assert!(
+            snapshot
+                .records()
+                .iter()
+                .any(|record| { matches!(record.record, LaneRecord::ProviderRequestStarted(_)) })
+        );
+        assert!(
+            snapshot
+                .records()
+                .iter()
+                .any(|record| matches!(record.record, LaneRecord::ToolStarted(_)))
+        );
         assert_eq!(
             *trace.lock().expect("trace mutex"),
             vec!["provider", "tool", "provider"]
         );
-        assert_eq!(*provider_intents.lock().expect("provider intent probe mutex"), vec![true, true]);
-        assert_eq!(*tool_intents.lock().expect("tool intent probe mutex"), vec![true]);
+        assert_eq!(
+            *provider_intents
+                .lock()
+                .expect("provider intent probe mutex"),
+            vec![true, true]
+        );
+        assert_eq!(
+            *tool_intents.lock().expect("tool intent probe mutex"),
+            vec![true]
+        );
 
         Ok::<(), crate::HarnessError>(())
     })
@@ -279,13 +289,13 @@ fn completed_epoch_retains_a_redacted_trace_with_exact_durable_provenance() {
             .expect("completed durable epoch must retain a trace fact");
         assert_eq!(trace.schema_version, tea_trace::TRACE_SCHEMA_VERSION);
         assert_eq!(trace.operation_id, *operation.id());
-        assert_eq!(trace.epoch_id.to_string().starts_with("epoch-"), true);
+        assert!(trace.epoch_id.to_string().starts_with("epoch-"));
         assert_eq!(trace.harness_revision_id, identity.revision_id().clone());
         assert_eq!(trace.harness_snapshot_id, identity.snapshot_id().clone());
         assert_eq!(trace.model_harness_profile, identity.profile_id().clone());
 
-        let text = String::from_utf8(store.get(trace.artifact_id)?)
-            .expect("trace JSON Lines is UTF-8");
+        let text =
+            String::from_utf8(store.get(trace.artifact_id)?).expect("trace JSON Lines is UTF-8");
         assert!(text.contains(r#""type":"episode_header""#));
         assert!(text.contains(&format!(r#""operation_id":"{}""#, operation.id())));
         assert!(text.contains(&format!(r#""epoch_id":"{}""#, trace.epoch_id)));
@@ -336,17 +346,29 @@ fn application_events_follow_an_atomic_snapshot_and_never_replay_on_reconnect() 
             .iter()
             .filter(|event| matches!(event, TeaEvent::Session(_)))
             .collect::<Vec<_>>();
-        assert!(events.iter().any(|event| matches!(event, TeaEvent::Agent(_))));
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, TeaEvent::Agent(_)))
+        );
         assert_eq!(session_events.len(), 3);
-        let TeaEvent::Session(SessionEvent::OperationAccepted { operation_id, .. }) = session_events[0] else {
+        let TeaEvent::Session(SessionEvent::OperationAccepted { operation_id, .. }) =
+            session_events[0]
+        else {
             panic!("first durable application event must accept the operation");
         };
         assert_eq!(operation_id, operation.id());
-        let TeaEvent::Session(SessionEvent::EpochStarted { operation_id, .. }) = session_events[1] else {
+        let TeaEvent::Session(SessionEvent::EpochStarted { operation_id, .. }) = session_events[1]
+        else {
             panic!("second durable application event must start the epoch");
         };
         assert_eq!(operation_id, operation.id());
-        let TeaEvent::Session(SessionEvent::OperationFinished { operation_id, outcome, .. }) = session_events[2] else {
+        let TeaEvent::Session(SessionEvent::OperationFinished {
+            operation_id,
+            outcome,
+            ..
+        }) = session_events[2]
+        else {
             panic!("last durable application event must finish the operation");
         };
         assert_eq!(operation_id, operation.id());
@@ -638,7 +660,8 @@ fn recovery_never_replays_an_ambiguous_non_replayable_tool() {
             ),
             store.clone(),
         );
-        let operation_id = OperationId::new("operation-crash-fixture").expect("fixture operation ID");
+        let operation_id =
+            OperationId::new("operation-crash-fixture").expect("fixture operation ID");
         let input_entry_id = EntryId::new("entry-crash-input").expect("fixture input entry ID");
         let assistant_entry_id =
             EntryId::new("entry-crash-assistant").expect("fixture assistant entry ID");
@@ -696,12 +719,7 @@ fn recovery_never_replays_an_ambiguous_non_replayable_tool() {
             "tool-invocation-crash-fixture",
         )))?;
 
-        let harness = DurableHarness::new_with_artifact_store(
-            session,
-            manager,
-            identity,
-            store,
-        )?;
+        let harness = DurableHarness::new_with_artifact_store(session, manager, identity, store)?;
 
         let operation = harness.resume().await?;
         let snapshot = harness.snapshot()?;
@@ -720,11 +738,13 @@ fn recovery_never_replays_an_ambiguous_non_replayable_tool() {
         assert!(operation.is_completed());
         assert_eq!(*tool_calls.lock().expect("tool call mutex"), 0);
         assert_eq!(*provider_calls.lock().expect("provider call mutex"), 1);
-        assert!(full_result
-            .get("content")
-            .and_then(tea_protocol::JsonValue::as_str)
-            .expect("synthesized content")
-            .contains("cannot prove"));
+        assert!(
+            full_result
+                .get("content")
+                .and_then(tea_protocol::JsonValue::as_str)
+                .expect("synthesized content")
+                .contains("cannot prove")
+        );
         assert_eq!(
             snapshot
                 .records()
@@ -733,10 +753,12 @@ fn recovery_never_replays_an_ambiguous_non_replayable_tool() {
                 .count(),
             1,
         );
-        assert!(snapshot
-            .records()
-            .iter()
-            .any(|record| matches!(record.record, LaneRecord::OperationFinished(_))));
+        assert!(
+            snapshot
+                .records()
+                .iter()
+                .any(|record| matches!(record.record, LaneRecord::OperationFinished(_)))
+        );
 
         Ok::<(), crate::HarnessError>(())
     })
@@ -765,8 +787,8 @@ fn recovery_executes_only_the_unresolved_suffix_after_a_committed_tool_result_pr
             ),
             store.clone(),
         );
-        let operation_id = OperationId::new("operation-partial-fixture")
-            .expect("fixture operation ID");
+        let operation_id =
+            OperationId::new("operation-partial-fixture").expect("fixture operation ID");
         let input_entry_id = EntryId::new("entry-partial-input").expect("fixture input entry ID");
         let assistant_entry_id =
             EntryId::new("entry-partial-assistant").expect("fixture assistant entry ID");
@@ -804,16 +826,16 @@ fn recovery_executes_only_the_unresolved_suffix_after_a_committed_tool_result_pr
                 body: SessionEntry::AssistantMessage(AssistantMessageEntry {
                     content: String::new(),
                     tool_calls: vec![
-                    AssistantToolCall::new(
-                        "partial-first-call",
-                        "record",
-                        tea_protocol::JsonValue::parse("{}").expect("fixture arguments"),
-                    ),
-                    AssistantToolCall::new(
-                        "partial-second-call",
-                        "record",
-                        tea_protocol::JsonValue::parse("{}").expect("fixture arguments"),
-                    ),
+                        AssistantToolCall::new(
+                            "partial-first-call",
+                            "record",
+                            tea_protocol::JsonValue::parse("{}").expect("fixture arguments"),
+                        ),
+                        AssistantToolCall::new(
+                            "partial-second-call",
+                            "record",
+                            tea_protocol::JsonValue::parse("{}").expect("fixture arguments"),
+                        ),
                     ],
                     stop_reason: Some("tool_use".into()),
                     error_message: None,
@@ -844,7 +866,10 @@ fn recovery_executes_only_the_unresolved_suffix_after_a_committed_tool_result_pr
                     tool_call_id: "partial-first-call".into(),
                     tool_name: "record".into(),
                     full_result: PayloadRef::Inline(tea_protocol::JsonValue::object([
-                        ("content", tea_protocol::JsonValue::String("first result".into())),
+                        (
+                            "content",
+                            tea_protocol::JsonValue::String("first result".into()),
+                        ),
                         ("details", tea_protocol::JsonValue::Null),
                         ("failure", tea_protocol::JsonValue::Null),
                     ])),
@@ -862,12 +887,7 @@ fn recovery_executes_only_the_unresolved_suffix_after_a_committed_tool_result_pr
             },
         )?;
 
-        let harness = DurableHarness::new_with_artifact_store(
-            session,
-            manager,
-            identity,
-            store,
-        )?;
+        let harness = DurableHarness::new_with_artifact_store(session, manager, identity, store)?;
 
         let operation = harness.resume().await?;
         let snapshot = harness.snapshot()?;
@@ -923,7 +943,9 @@ fn large_tool_results_are_retained_before_a_utf8_safe_locator_projection_is_expo
     else {
         panic!("large canonical result must spill to an immutable artifact");
     };
-    let full = store.get(artifact_id).expect("complete artifact is readable");
+    let full = store
+        .get(artifact_id)
+        .expect("complete artifact is readable");
     let projection = retained
         .model_projection
         .get("content")
@@ -932,7 +954,11 @@ fn large_tool_results_are_retained_before_a_utf8_safe_locator_projection_is_expo
 
     assert_eq!(byte_len, full.len() as u64);
     assert_eq!(media_type, "application/vnd.tea.tool-result+json");
-    assert!(String::from_utf8(full).expect("canonical artifact is UTF-8").contains("needle"));
+    assert!(
+        String::from_utf8(full)
+            .expect("canonical artifact is UTF-8")
+            .contains("needle")
+    );
     assert!(projection.starts_with("[full tool result: tea-artifact://blake3/"));
     assert!(projection.contains("preview omits bytes"));
     assert!(projection.contains('α'));
@@ -968,11 +994,7 @@ fn durable_harness_persists_a_large_tool_result_before_continuing_with_its_proje
                 .expect("fixture tool schema"),
         }));
         let template = CoreEpochTemplate::new(provider, tools).artifact_policy(policy)?;
-        let (harness, _) = managed_harness(
-            "artifact-harness-session",
-            template,
-            store.clone(),
-        );
+        let (harness, _) = managed_harness("artifact-harness-session", template, store.clone());
 
         harness.run_prompt("make a large result").await?;
         let snapshot = harness.snapshot()?;
@@ -993,11 +1015,13 @@ fn durable_harness_persists_a_large_tool_result_before_continuing_with_its_proje
             .and_then(tea_protocol::JsonValue::as_str)
             .expect("model projection content");
 
-        assert!(store
-            .get(artifact_id)
-            .expect("complete retained result")
-            .windows(b"needle".len())
-            .any(|window| window == b"needle"));
+        assert!(
+            store
+                .get(artifact_id)
+                .expect("complete retained result")
+                .windows(b"needle".len())
+                .any(|window| window == b"needle")
+        );
         assert!(projection.starts_with("[full tool result: tea-artifact://blake3/"));
         Ok::<(), crate::HarnessError>(())
     })
@@ -1027,23 +1051,23 @@ fn durable_after_tool_projection_keeps_raw_evidence_outside_model_context() {
         });
         let mut tools = tea_core::tool::ToolRegistry::default();
         tools.insert(Arc::new(RawEvidenceTool {
-            schema: tea_protocol::JsonValue::parse(r#"{"type":"object"}"#)
-                .expect("fixture schema"),
+            schema: tea_protocol::JsonValue::parse(r#"{"type":"object"}"#).expect("fixture schema"),
         }));
-        let template = CoreEpochTemplate::new(provider, tools).hooks(Arc::new(RedactingProjectionHook));
-        let (harness, _) = managed_harness(
-            "raw-projection-session",
-            template,
-            store,
-        );
+        let template =
+            CoreEpochTemplate::new(provider, tools).hooks(Arc::new(RedactingProjectionHook));
+        let (harness, _) = managed_harness("raw-projection-session", template, store);
 
-        harness.run_prompt("redact this tool result for the model").await?;
+        harness
+            .run_prompt("redact this tool result for the model")
+            .await?;
         let snapshot = harness.snapshot()?;
         let result = snapshot
             .entries()
             .iter()
             .find_map(|entry| match &entry.body {
-                SessionEntry::ToolResult(result) if result.tool_name == "raw_evidence" => Some(result),
+                SessionEntry::ToolResult(result) if result.tool_name == "raw_evidence" => {
+                    Some(result)
+                }
                 _ => None,
             })
             .expect("durable tool result");
@@ -1052,7 +1076,8 @@ fn durable_after_tool_projection_keeps_raw_evidence_outside_model_context() {
         };
 
         assert_eq!(
-            full.get("content").and_then(tea_protocol::JsonValue::as_str),
+            full.get("content")
+                .and_then(tea_protocol::JsonValue::as_str),
             Some("raw evidence: token=secret-fixture"),
         );
         assert_eq!(
@@ -1105,10 +1130,14 @@ fn stable_artifact_tools_return_bounded_pages_without_creating_a_second_locator(
         let result = tools
             .get("tea_artifact_read")
             .expect("stable artifact reader")
-            .execute(call, ToolContext {
-                cancellation: CancellationToken::new(),
-                metadata: None,
-            }, ToolUpdateSink::disabled())
+            .execute(
+                call,
+                ToolContext {
+                    cancellation: CancellationToken::new(),
+                    metadata: None,
+                },
+                ToolUpdateSink::disabled(),
+            )
             .await
             .expect("artifact page reads");
         assert!(result.content.contains("needle"));
@@ -1122,10 +1151,14 @@ fn stable_artifact_tools_return_bounded_pages_without_creating_a_second_locator(
         let history = tools
             .get("tea_history_search")
             .expect("stable history reader")
-            .execute(history_call, ToolContext {
-                cancellation: CancellationToken::new(),
-                metadata: None,
-            }, ToolUpdateSink::disabled())
+            .execute(
+                history_call,
+                ToolContext {
+                    cancellation: CancellationToken::new(),
+                    metadata: None,
+                },
+                ToolUpdateSink::disabled(),
+            )
             .await
             .expect("history search reads");
         assert!(history.content.contains("artifact-tools-history"));
@@ -1176,8 +1209,7 @@ fn immutable_harness_lineage_stages_candidates_without_mutating_the_active_revis
         })
         .expect("hook-only snapshot");
     assert_eq!(
-        parent.fingerprints.provider_surface_digest,
-        hook_only.fingerprints.provider_surface_digest,
+        parent.fingerprints.provider_surface_digest, hook_only.fingerprints.provider_surface_digest,
         "hook-only edits must not claim a provider surface change",
     );
     assert_ne!(parent.id, hook_only.id);
@@ -1220,7 +1252,10 @@ fn immutable_harness_lineage_stages_candidates_without_mutating_the_active_revis
         .activate_candidate(&candidate.candidate_id, HarnessActor::Host, 20)
         .expect("only an accepted candidate can activate");
     assert_eq!(activated.snapshot_id, hook_only.id);
-    assert_eq!(activated.parent_revision_ids, vec![parent_revision.revision_id.clone()]);
+    assert_eq!(
+        activated.parent_revision_ids,
+        vec![parent_revision.revision_id.clone()]
+    );
     let rollback = repository
         .rollback(
             &activated.revision_id,
@@ -1301,68 +1336,71 @@ fn capability_expansion_candidate_is_retained_for_manual_review_but_never_activa
             &HarnessTreeLimits::default(),
         )
         .expect("closed expansion plugin tree stages");
-        let expansion_plugin = PluginBundleRef {
-            plugin_id: "session.expansion".into(),
-            tree_id: tree.id,
-            requested_capabilities: ["fixture.new_authority".into()].into_iter().collect(),
-        };
-        let mut base_spec = lineage_snapshot_spec(expansion_plugin.clone(), "trusted prefix");
-        base_spec.ordered_session_plugins.clear();
-        base_spec.plugin_prompt_sections.clear();
-        base_spec.plugin_tool_presentations.clear();
-        let parent = repository
-            .stage_snapshot(base_spec)
-            .expect("capability-neutral parent snapshot stages");
-        let parent_revision = repository
-            .seed_revision(parent.id.clone(), HarnessActor::Host, 1)
-            .expect("capability-neutral parent can activate");
-        let requested = repository
-            .stage_snapshot(lineage_snapshot_spec(expansion_plugin, "trusted prefix"))
-            .expect("unbound candidate source remains inspectable in immutable lineage");
-        let candidate = repository
-            .stage_candidate(HarnessCandidateDraft {
-                parent_revision_id: parent_revision.revision_id,
-                proposed_snapshot_id: requested.id,
-                actor: HarnessActor::Model,
-                operation_id: None,
-                tool_invocation_id: Some("capability-expansion-fixture".into()),
-                hypothesis: CandidateHypothesis {
-                    targeted_evidence: "a model requested a capability beyond the frozen session ceiling".into(),
-                    expected_effect: "manual review can inspect the exact closed source".into(),
-                    regression_risk: "automatic activation could grant new authority".into(),
-                },
-                changed_paths: vec![
-                    tea_session::NormalizedPath::new("plugins/session.expansion/main.luau")
-                        .expect("fixture path"),
-                ],
-                registry_operations: vec![crate::RegistryOperation::Add {
-                    plugin_id: "session.expansion".into(),
-                }],
-                changed_surfaces: [HarnessSurface::CapabilityBindings]
-                    .into_iter()
-                    .collect(),
-                targeted_failures: vec!["authority-expansion".into()],
-                evidence: Vec::new(),
-                expected_effects: vec!["manual-review".into()],
-                regression_risks: vec!["ambient-authority".into()],
-                capability_ceiling: Default::default(),
-            })
-            .expect("rejected candidate itself remains durable lineage data");
-        assert!(!candidate.validation.accepted);
-        assert!(candidate
+    let expansion_plugin = PluginBundleRef {
+        plugin_id: "session.expansion".into(),
+        tree_id: tree.id,
+        requested_capabilities: ["fixture.new_authority".into()].into_iter().collect(),
+    };
+    let mut base_spec = lineage_snapshot_spec(expansion_plugin.clone(), "trusted prefix");
+    base_spec.ordered_session_plugins.clear();
+    base_spec.plugin_prompt_sections.clear();
+    base_spec.plugin_tool_presentations.clear();
+    let parent = repository
+        .stage_snapshot(base_spec)
+        .expect("capability-neutral parent snapshot stages");
+    let parent_revision = repository
+        .seed_revision(parent.id.clone(), HarnessActor::Host, 1)
+        .expect("capability-neutral parent can activate");
+    let requested = repository
+        .stage_snapshot(lineage_snapshot_spec(expansion_plugin, "trusted prefix"))
+        .expect("unbound candidate source remains inspectable in immutable lineage");
+    let candidate = repository
+        .stage_candidate(HarnessCandidateDraft {
+            parent_revision_id: parent_revision.revision_id,
+            proposed_snapshot_id: requested.id,
+            actor: HarnessActor::Model,
+            operation_id: None,
+            tool_invocation_id: Some("capability-expansion-fixture".into()),
+            hypothesis: CandidateHypothesis {
+                targeted_evidence:
+                    "a model requested a capability beyond the frozen session ceiling".into(),
+                expected_effect: "manual review can inspect the exact closed source".into(),
+                regression_risk: "automatic activation could grant new authority".into(),
+            },
+            changed_paths: vec![
+                tea_session::NormalizedPath::new("plugins/session.expansion/main.luau")
+                    .expect("fixture path"),
+            ],
+            registry_operations: vec![crate::RegistryOperation::Add {
+                plugin_id: "session.expansion".into(),
+            }],
+            changed_surfaces: [HarnessSurface::CapabilityBindings].into_iter().collect(),
+            targeted_failures: vec!["authority-expansion".into()],
+            evidence: Vec::new(),
+            expected_effects: vec!["manual-review".into()],
+            regression_risks: vec!["ambient-authority".into()],
+            capability_ceiling: Default::default(),
+        })
+        .expect("rejected candidate itself remains durable lineage data");
+    assert!(!candidate.validation.accepted);
+    assert!(
+        candidate
             .validation
             .diagnostics
             .iter()
-            .any(|diagnostic| diagnostic.contains("outside its frozen ceiling")));
-        assert!(candidate
+            .any(|diagnostic| diagnostic.contains("outside its frozen ceiling"))
+    );
+    assert!(
+        candidate
             .validation
             .diagnostics
             .iter()
-            .any(|diagnostic| diagnostic.contains("without an immutable host binding")));
-        assert!(matches!(
-            repository.activate_candidate(&candidate.candidate_id, HarnessActor::Host, 2),
-            Err(HarnessLineageError::InvalidActivation { .. })
-        ));
+            .any(|diagnostic| diagnostic.contains("without an immutable host binding"))
+    );
+    assert!(matches!(
+        repository.activate_candidate(&candidate.candidate_id, HarnessActor::Host, 2),
+        Err(HarnessLineageError::InvalidActivation { .. })
+    ));
 }
 
 #[test]
@@ -1412,8 +1450,7 @@ fn source_derived_v1_prompt_sections_are_snapshotted_into_the_provider_surface()
 
     assert_ne!(first.id, second.id);
     assert_ne!(
-        first.fingerprints.provider_surface_digest,
-        second.fingerprints.provider_surface_digest,
+        first.fingerprints.provider_surface_digest, second.fingerprints.provider_surface_digest,
         "a source-owned prompt change must invalidate the exact provider surface",
     );
 }
@@ -1476,10 +1513,12 @@ fn manager_apply_stages_a_closed_source_patch_as_an_inactive_candidate() {
 
     assert!(candidate.validation.accepted);
     assert_ne!(candidate.draft.proposed_snapshot_id, parent.id);
-    assert!(candidate
-        .draft
-        .changed_surfaces
-        .contains(&HarnessSurface::SystemPrompt));
+    assert!(
+        candidate
+            .draft
+            .changed_surfaces
+            .contains(&HarnessSurface::SystemPrompt)
+    );
     assert_eq!(
         proposed.spec.plugin_prompt_sections[0].content,
         "Run the targeted check.",
@@ -1637,7 +1676,8 @@ fn managed_harness_rebuilds_its_catalog_before_resolving_a_reopened_revision() {
         }),
         tea_core::tool::ToolRegistry::default(),
     );
-    let original_manager = HarnessManager::new(repository, base_template.clone(), Default::default());
+    let original_manager =
+        HarnessManager::new(repository, base_template.clone(), Default::default());
     let mut session = MemorySession::create(SessionHeader::new(
         SessionId::new("catalog-reopen-session").expect("fixture session ID"),
         "fixture-workspace",
@@ -1667,12 +1707,11 @@ fn managed_harness_rebuilds_its_catalog_before_resolving_a_reopened_revision() {
         base_template,
         Default::default(),
     ));
-    let _harness = DurableHarness::reopen_with_artifact_store(
-        session,
-        Arc::clone(&reopened_manager),
-        store,
-    )
-    .expect("reopened managed harness rebuilds catalog before resolving the active revision");
+    let _harness =
+        DurableHarness::reopen_with_artifact_store(session, Arc::clone(&reopened_manager), store)
+            .expect(
+                "reopened managed harness rebuilds catalog before resolving the active revision",
+            );
 
     assert_eq!(
         reopened_manager
@@ -2303,9 +2342,18 @@ fn off_mode_has_no_authoring_prompt_or_control_tool_overhead() {
             .expect("one provider request")
             .clone();
 
-        assert!(!request.system_prompt.contains(crate::SELF_EXTENSION_V1_CONCISE));
+        assert!(
+            !request
+                .system_prompt
+                .contains(crate::SELF_EXTENSION_V1_CONCISE)
+        );
         assert!(!request.tools.iter().any(|tool| tool.name == "tea_harness"));
-        assert!(request.tools.iter().any(|tool| tool.name == "tea_artifact_read"));
+        assert!(
+            request
+                .tools
+                .iter()
+                .any(|tool| tool.name == "tea_artifact_read")
+        );
         Ok::<(), crate::HarnessError>(())
     })
     .expect("off mode must not add self-extension prompt or tool surface");
@@ -2968,7 +3016,9 @@ fn model_profiles_have_content_identities_and_record_schema_deviation_evidence()
         "recoverable-tool-v1",
     )
     .expect("profile is valid");
-    profile.verify_identity().expect("profile identity is content-derived");
+    profile
+        .verify_identity()
+        .expect("profile identity is content-derived");
     let changed_profile = ModelHarnessProfile::new(
         "openai-compatible",
         "fixture-model-2",
@@ -2989,8 +3039,7 @@ fn model_profiles_have_content_identities_and_record_schema_deviation_evidence()
         profile.profile_id.clone(),
         "read_file",
         &schema,
-        &tea_protocol::JsonValue::parse(r#"{"path":7,"unexpected":true}"#)
-            .expect("arguments"),
+        &tea_protocol::JsonValue::parse(r#"{"path":7,"unexpected":true}"#).expect("arguments"),
         tea_session::ArtifactId::from_bytes("raw tool arguments"),
     )
     .expect("deviation inspection")
@@ -3121,7 +3170,10 @@ fn context_derivation_walks_the_branch_applies_compaction_and_preserves_protecte
     let memory_id = EntryId::new("context-plugin-memory").expect("entry ID");
 
     session
-        .append_entry(&lane, ProvisionedEntry::user(user_id.clone(), "solve the durable task"))
+        .append_entry(
+            &lane,
+            ProvisionedEntry::user(user_id.clone(), "solve the durable task"),
+        )
         .expect("root user persists");
     session
         .append_entry(
@@ -3212,9 +3264,11 @@ fn context_derivation_walks_the_branch_applies_compaction_and_preserves_protecte
     assert!(!before_tail.included_entries.contains(&memory_id));
     assert!(!before_tail.included_entries.contains(&assistant_id));
     assert!(!before_tail.included_entries.contains(&result_id));
-    assert!(before_tail
-        .serialized_context
-        .contains("Compaction summary"));
+    assert!(
+        before_tail
+            .serialized_context
+            .contains("Compaction summary")
+    );
 
     let with_selected_memory = derive_model_context_with_patch(
         &session,
@@ -3231,7 +3285,10 @@ fn context_derivation_walks_the_branch_applies_compaction_and_preserves_protecte
 
     let tail_id = EntryId::new("context-tail-user").expect("entry ID");
     session
-        .append_entry(&lane, ProvisionedEntry::user(tail_id.clone(), "continue from the summary"))
+        .append_entry(
+            &lane,
+            ProvisionedEntry::user(tail_id.clone(), "continue from the summary"),
+        )
         .expect("tail persists");
     let after_tail = derive_model_context(
         &session,
@@ -3240,7 +3297,11 @@ fn context_derivation_walks_the_branch_applies_compaction_and_preserves_protecte
         ProviderLimits::new(64 * 1024).expect("provider limit"),
     )
     .expect("context derives after append");
-    assert!(after_tail.serialized_context.starts_with(&before_tail.serialized_context));
+    assert!(
+        after_tail
+            .serialized_context
+            .starts_with(&before_tail.serialized_context)
+    );
     assert!(after_tail.included_entries.contains(&tail_id));
 
     let root_removal = derive_model_context_with_patch(
@@ -3254,9 +3315,7 @@ fn context_derivation_walks_the_branch_applies_compaction_and_preserves_protecte
         },
     )
     .expect_err("original user task is protected");
-    assert!(root_removal
-        .to_string()
-        .contains("original user task"));
+    assert!(root_removal.to_string().contains("original user task"));
 
     let split_pair = derive_model_context_with_patch(
         &session,
@@ -3289,8 +3348,7 @@ fn lineage_snapshot_spec(plugin: PluginBundleRef, prompt: &str) -> HarnessSnapsh
         tool_presentations: vec![ToolPresentationDescriptor {
             name: "verify".into(),
             description: "verify a selected target".into(),
-            schema: tea_protocol::JsonValue::parse(r#"{"type":"object"}"#)
-                .expect("fixture schema"),
+            schema: tea_protocol::JsonValue::parse(r#"{"type":"object"}"#).expect("fixture schema"),
             execution_mode: "parallel".into(),
         }],
         plugin_tool_presentations: Vec::new(),
@@ -3376,19 +3434,13 @@ fn managed_harness(
     store: Arc<MemoryArtifactStore>,
 ) -> (DurableHarness<MemorySession>, HarnessIdentity) {
     let (session, manager, identity) = staged_managed_session(session_id, template, store.clone());
-    let harness = DurableHarness::new_with_artifact_store(
-        session,
-        manager,
-        identity.clone(),
-        store,
-    )
-    .expect("fixture durable harness creates");
+    let harness =
+        DurableHarness::new_with_artifact_store(session, manager, identity.clone(), store)
+            .expect("fixture durable harness creates");
     (harness, identity)
 }
 
-fn v1_prompt_plugin_sources(
-    content: &str,
-) -> [(tea_session::NormalizedPath, Vec<u8>, String); 2] {
+fn v1_prompt_plugin_sources(content: &str) -> [(tea_session::NormalizedPath, Vec<u8>, String); 2] {
     [
         (
             tea_session::NormalizedPath::new("plugins/session.verify/manifest.json")

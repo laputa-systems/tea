@@ -6,8 +6,8 @@
 //! it only to rebuild process-local VM state from those already committed
 //! values.
 
-use crate::lineage::LoadedPluginPolicy;
 use crate::HarnessError;
+use crate::lineage::LoadedPluginPolicy;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use tea_luau::LuaPolicy;
@@ -30,9 +30,7 @@ struct PluginLifecyclePolicy {
 impl PluginLifecycleRegistry {
     /// Preserve only process-local policy VMs from source-pinned resolution;
     /// all durable identities remain `StableHookId`s at the session boundary.
-    pub(crate) fn from_loaded(
-        policies: &[LoadedPluginPolicy],
-    ) -> Result<Self, HarnessError> {
+    pub(crate) fn from_loaded(policies: &[LoadedPluginPolicy]) -> Result<Self, HarnessError> {
         let policies = policies
             .iter()
             .map(|loaded| {
@@ -62,9 +60,7 @@ impl PluginLifecycleRegistry {
     /// Evaluate state proposals before an epoch record exists. The caller
     /// must append the returned map in the same durable epoch-start record
     /// before it starts a provider or tool effect.
-    pub(crate) fn before_epoch(
-        &self,
-    ) -> Result<BTreeMap<StableHookId, JsonValue>, HarnessError> {
+    pub(crate) fn before_epoch(&self) -> Result<BTreeMap<StableHookId, JsonValue>, HarnessError> {
         self.collect_state("before_epoch", |policy| policy.before_epoch_resume_data())
     }
 

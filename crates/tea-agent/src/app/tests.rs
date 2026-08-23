@@ -8,8 +8,8 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tea_core::compaction::{
-    AutomaticCompactionReason, AutomaticCompactionRequest, CompactionContext,
-    Compactor, OverflowRecovery, ProviderContext,
+    AutomaticCompactionReason, AutomaticCompactionRequest, CompactionContext, Compactor,
+    OverflowRecovery, ProviderContext,
 };
 use tea_core::scheduler::{
     CancellationToken, ModelFuture, ModelProvider, ModelRequest, ModelStream, ModelStreamEvent,
@@ -101,7 +101,12 @@ fn cli_rejects_ambiguous_and_unknown_inputs() {
     ));
     assert!(matches!(
         CliOptions::parse(
-            ["tea", "--compaction-strategy", "tool_free_replay_summary_v1"].map(OsString::from)
+            [
+                "tea",
+                "--compaction-strategy",
+                "tool_free_replay_summary_v1"
+            ]
+            .map(OsString::from)
         ),
         Err(CliError::UnknownOption(_))
     ));
@@ -234,9 +239,7 @@ fn selected_model_is_saved_and_restored_without_starting_the_picker() {
     assert!(tea_home.join("last-model.json").is_file());
 
     let mut second = App::new(options);
-    second
-        .assemble_host()
-        .expect("second host should assemble");
+    second.assemble_host().expect("second host should assemble");
 
     assert_eq!(second.state().surface(), UiSurface::None);
     assert_eq!(

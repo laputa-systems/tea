@@ -137,7 +137,10 @@ fn effect_gate_commits_intent_before_provider_and_tool_effects() {
             }))
             .build();
 
-        agent.start_prompt("exercise durable boundary")?.drive().await?;
+        agent
+            .start_prompt("exercise durable boundary")?
+            .drive()
+            .await?;
 
         assert_eq!(
             *trace.lock().expect("effect order trace mutex"),
@@ -186,11 +189,14 @@ fn manual_effect_gate_parks_the_real_run_before_each_provider_and_tool_boundary(
         .effect_gate(gate.clone())
         .tool(Arc::new(OrderedTool {
             trace: Arc::clone(&trace),
-            schema: tea_protocol::JsonValue::parse(r#"{"type":"object"}"#)
-                .expect("fixture schema"),
+            schema: tea_protocol::JsonValue::parse(r#"{"type":"object"}"#).expect("fixture schema"),
         }))
         .build();
-    let run = Arc::new(agent.start_prompt("drive one effect at a time").expect("run starts"));
+    let run = Arc::new(
+        agent
+            .start_prompt("drive one effect at a time")
+            .expect("run starts"),
+    );
     let executor = smol::Executor::new();
     let driving_run = Arc::clone(&run);
     let drive = executor.spawn(async move { driving_run.drive().await });

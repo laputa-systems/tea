@@ -7,25 +7,25 @@
 //! supervisor remains the sole owner of revision activation at an epoch
 //! boundary.
 
+use crate::events::EventHub;
+use crate::manager::HarnessSourceDiff;
 use crate::{
     CandidateHypothesis, DiagnosticCode, HarnessApplyRequest, HarnessError, HarnessEvent,
     HarnessFilePatch, HarnessIdentity, HarnessManager, RegistryOperation, TeaEvent,
     ValidationStage,
 };
-use crate::events::EventHub;
-use crate::manager::HarnessSourceDiff;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use tea_core::error::ToolError;
 use tea_core::tool::{
-    AgentTool, AgentToolResult, ToolCall, ToolContext, ToolExecutionMode, ToolFailure,
-    ToolFuture, ToolRegistry, ToolUpdateSink,
-};
-use tea_session::{
-    reduce_lane, ArtifactId, EntryId, EpochFinishReason, EpochFinishedRecord,
-    HarnessRevisionId, LaneId, LaneRecord, NormalizedPath, OperationId, SessionWriter,
+    AgentTool, AgentToolResult, ToolCall, ToolContext, ToolExecutionMode, ToolFailure, ToolFuture,
+    ToolRegistry, ToolUpdateSink,
 };
 use tea_protocol::{JsonNumber, JsonValue};
+use tea_session::{
+    ArtifactId, EntryId, EpochFinishReason, EpochFinishedRecord, HarnessRevisionId, LaneId,
+    LaneRecord, NormalizedPath, OperationId, SessionWriter, reduce_lane,
+};
 
 pub(crate) const STABLE_HARNESS_TOOL_NAME: &str = "tea_harness";
 
@@ -156,26 +156,42 @@ where
     fn status(&self, object: &BTreeMap<String, JsonValue>) -> Result<ControlResponse, String> {
         require_exact_fields(object, &["operation"])?;
         let snapshot = self.session_snapshot()?;
-        let reduction = reduce_lane(snapshot.clone(), LaneId::main()).map_err(|error| error.to_string())?;
+        let reduction =
+            reduce_lane(snapshot.clone(), LaneId::main()).map_err(|error| error.to_string())?;
         let active_revision = reduction
             .lane_state
             .active_harness_revision
             .ok_or_else(|| "managed harness branch has no active revision".to_owned())?;
-        let active = self.manager.revision(&active_revision).map_err(harness_error)?;
+        let active = self
+            .manager
+            .revision(&active_revision)
+            .map_err(harness_error)?;
         let used = rollover_count(&snapshot, &self.operation_id);
-        let pending = reduction.pending_harness_activation.map(|pending| {
-            JsonValue::object([
-                ("candidate_id", JsonValue::String(pending.request.candidate_id.to_string())),
-                (
-                    "proposed_snapshot_id",
-                    JsonValue::String(pending.request.proposed_snapshot_id.to_string()),
-                ),
-            ])
-        }).unwrap_or(JsonValue::Null);
+        let pending = reduction
+            .pending_harness_activation
+            .map(|pending| {
+                JsonValue::object([
+                    (
+                        "candidate_id",
+                        JsonValue::String(pending.request.candidate_id.to_string()),
+                    ),
+                    (
+                        "proposed_snapshot_id",
+                        JsonValue::String(pending.request.proposed_snapshot_id.to_string()),
+                    ),
+                ])
+            })
+            .unwrap_or(JsonValue::Null);
         Ok(ControlResponse::plain(JsonValue::object([
             ("operation", JsonValue::String("status".into())),
-            ("active_revision", JsonValue::String(active_revision.to_string())),
-            ("active_snapshot", JsonValue::String(active.snapshot_id.to_string())),
+            (
+                "active_revision",
+                JsonValue::String(active_revision.to_string()),
+            ),
+            (
+                "active_snapshot",
+                JsonValue::String(active.snapshot_id.to_string()),
+            ),
             (
                 "epoch_revision",
                 JsonValue::String(self.identity.revision_id().to_string()),
@@ -246,10 +262,22 @@ where
                 .take(maximum)
                 .map(|revision| {
                     JsonValue::object([
-                        ("revision_id", JsonValue::String(revision.revision_id.to_string())),
-                        ("snapshot_id", JsonValue::String(revision.snapshot_id.to_string())),
-                        ("reason", JsonValue::String(revision_reason(&revision.reason).into())),
-                        ("actor", JsonValue::String(actor_name(revision.actor).into())),
+                        (
+                            "revision_id",
+                            JsonValue::String(revision.revision_id.to_string()),
+                        ),
+                        (
+                            "snapshot_id",
+                            JsonValue::String(revision.snapshot_id.to_string()),
+                        ),
+                        (
+                            "reason",
+                            JsonValue::String(revision_reason(&revision.reason).into()),
+                        ),
+                        (
+                            "actor",
+                            JsonValue::String(actor_name(revision.actor).into()),
+                        ),
                         (
                             "parent_revision_ids",
                             JsonValue::Array(
@@ -286,7 +314,10 @@ where
     }
 
     fn read(&self, object: &BTreeMap<String, JsonValue>) -> Result<ControlResponse, String> {
-        require_exact_fields(object, &["operation", "revision", "path", "offset", "maximum_bytes"])?;
+        require_exact_fields(
+            object,
+            &["operation", "revision", "path", "offset", "maximum_bytes"],
+        )?;
         let revision = optional_revision(object, "revision")?
             .unwrap_or_else(|| self.identity.revision_id().clone());
         let path = NormalizedPath::new(required_string(object, "path")?)
@@ -312,7 +343,10 @@ where
             ("operation", JsonValue::String("read".into())),
             ("revision", JsonValue::String(revision.to_string())),
             ("path", JsonValue::String(path.to_string())),
-            ("artifact_id", JsonValue::String(source.artifact_id.to_hex())),
+            (
+                "artifact_id",
+                JsonValue::String(source.artifact_id.to_hex()),
+            ),
             ("offset", unsigned(offset as u64)),
             ("eof", JsonValue::Bool(end == source.bytes.len())),
             ("page", bytes_value(&source.bytes[offset..end])),
@@ -320,7 +354,10 @@ where
     }
 
     fn diff(&self, object: &BTreeMap<String, JsonValue>) -> Result<ControlResponse, String> {
-        require_exact_fields(object, &["operation", "base_revision", "target_revision", "maximum"])?;
+        require_exact_fields(
+            object,
+            &["operation", "base_revision", "target_revision", "maximum"],
+        )?;
         let base = required_revision(object, "base_revision")?;
         let target = required_revision(object, "target_revision")?;
         let maximum = optional_usize(object, "maximum", 50, MAXIMUM_LIST_ITEMS)?;
@@ -376,7 +413,12 @@ where
     ) -> Result<ControlResponse, String> {
         require_exact_fields(
             object,
-            &["operation", "base_revision", "target_revision", "hypothesis"],
+            &[
+                "operation",
+                "base_revision",
+                "target_revision",
+                "hypothesis",
+            ],
         )?;
         self.require_mutation_authorization()?;
         let base_revision_id = required_revision(object, "base_revision")?;
@@ -476,7 +518,9 @@ where
             object.insert("activation_scheduled".into(), JsonValue::Bool(false));
             object.insert(
                 "continuation".into(),
-                JsonValue::String("candidate remains staged for inspection; no activation was scheduled".into()),
+                JsonValue::String(
+                    "candidate remains staged for inspection; no activation was scheduled".into(),
+                ),
             );
             return Ok(ControlResponse {
                 value,
@@ -502,12 +546,17 @@ where
             .lock()
             .map_err(|_| "durable session mutex is poisoned".to_owned())?;
         let snapshot = session.snapshot().map_err(|error| error.to_string())?;
-        let reduction = reduce_lane(snapshot.clone(), LaneId::main()).map_err(|error| error.to_string())?;
+        let reduction =
+            reduce_lane(snapshot.clone(), LaneId::main()).map_err(|error| error.to_string())?;
         if reduction.lane_state.active_operation.as_ref() != Some(&self.operation_id) {
             return Err("harness mutation belongs to an operation that is no longer active".into());
         }
-        if reduction.lane_state.active_harness_revision.as_ref() != Some(self.identity.revision_id()) {
-            return Err("harness mutation epoch no longer owns the active immutable branch revision".into());
+        if reduction.lane_state.active_harness_revision.as_ref()
+            != Some(self.identity.revision_id())
+        {
+            return Err(
+                "harness mutation epoch no longer owns the active immutable branch revision".into(),
+            );
         }
         let used = rollover_count(&snapshot, &self.operation_id);
         if used >= self.rollover_budget {
@@ -525,14 +574,18 @@ where
                 is_error: true,
             });
         }
-        let existing = snapshot.records().iter().filter_map(|stored| match &stored.record {
-            LaneRecord::HarnessActivationRequested(existing)
-                if existing.operation_id == self.operation_id =>
-            {
-                Some(existing)
-            }
-            _ => None,
-        }).collect::<Vec<_>>();
+        let existing = snapshot
+            .records()
+            .iter()
+            .filter_map(|stored| match &stored.record {
+                LaneRecord::HarnessActivationRequested(existing)
+                    if existing.operation_id == self.operation_id =>
+                {
+                    Some(existing)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
         if let Some(existing) = existing.first() {
             if *existing != &request {
                 return Err(
@@ -585,13 +638,14 @@ where
     }
 
     fn publish_candidate_staged(&self, candidate: &crate::HarnessCandidateV1) {
-        self.events.publish(TeaEvent::Harness(HarnessEvent::CandidateStaged {
-            lane_id: LaneId::main(),
-            candidate_id: candidate.candidate_id.clone(),
-            parent_revision_id: candidate.draft.parent_revision_id.clone(),
-            snapshot_id: candidate.draft.proposed_snapshot_id.clone(),
-            changed_paths: candidate.draft.changed_paths.clone(),
-        }));
+        self.events
+            .publish(TeaEvent::Harness(HarnessEvent::CandidateStaged {
+                lane_id: LaneId::main(),
+                candidate_id: candidate.candidate_id.clone(),
+                parent_revision_id: candidate.draft.parent_revision_id.clone(),
+                snapshot_id: candidate.draft.proposed_snapshot_id.clone(),
+                changed_paths: candidate.draft.changed_paths.clone(),
+            }));
     }
 
     fn publish_candidate_rejected(
@@ -604,14 +658,15 @@ where
         let Ok(code) = DiagnosticCode::new(code) else {
             return;
         };
-        self.events.publish(TeaEvent::Harness(HarnessEvent::CandidateRejected {
-            lane_id: LaneId::main(),
-            candidate_id,
-            active_revision_id: self.identity.revision_id().clone(),
-            stage,
-            code,
-            diagnostic: bounded_diagnostic(diagnostic),
-        }));
+        self.events
+            .publish(TeaEvent::Harness(HarnessEvent::CandidateRejected {
+                lane_id: LaneId::main(),
+                candidate_id,
+                active_revision_id: self.identity.revision_id().clone(),
+                stage,
+                code,
+                diagnostic: bounded_diagnostic(diagnostic),
+            }));
     }
 }
 
@@ -652,72 +707,6 @@ fn operation_authorizes_harness_mutation(
     })
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use tea_session::{
-        HarnessRevisionId, MemorySession, ModelHarnessProfileId, OperationKind,
-        OperationStartedRecord, ProvisionedEntry, SessionHeader, SessionId, SessionWriter,
-    };
-
-    #[test]
-    fn authoring_authorization_is_a_host_recorded_user_entry_fact() {
-        let operation_id = OperationId::new("authoring-operation").expect("fixture operation ID");
-        let make_session = |authorized: bool| {
-            let mut session = MemorySession::create(SessionHeader::new(
-                SessionId::new(if authorized {
-                    "authorized-authoring-session"
-                } else {
-                    "ordinary-authoring-session"
-                })
-                .expect("fixture session ID"),
-                "fixture-workspace",
-                Default::default(),
-            ))
-            .expect("fixture session creates");
-            let mut entry = ProvisionedEntry::user(
-                EntryId::new(if authorized {
-                    "authorized-authoring-input"
-                } else {
-                    "ordinary-authoring-input"
-                })
-                .expect("fixture entry ID"),
-                "please edit the harness",
-            );
-            if authorized {
-                let tea_session::SessionEntry::UserMessage(message) = &mut entry.body else {
-                    unreachable!("user constructor must create a user entry");
-                };
-                message.metadata.insert(
-                    crate::AUTHORING_AUTHORIZATION_METADATA_KEY.into(),
-                    JsonValue::Bool(true),
-                );
-            }
-            session
-                .append_record(LaneRecord::OperationStarted(OperationStartedRecord::new(
-                    operation_id.clone(),
-                    LaneId::main(),
-                    None,
-                    OperationKind::Run,
-                    vec![entry],
-                    HarnessRevisionId::new("authoring-revision").expect("fixture revision ID"),
-                    ModelHarnessProfileId::new("authoring-profile").expect("fixture profile ID"),
-                )))
-                .expect("fixture operation record appends");
-            session.snapshot().expect("fixture snapshot")
-        };
-
-        assert!(!operation_authorizes_harness_mutation(
-            &make_session(false),
-            &operation_id,
-        ));
-        assert!(operation_authorizes_harness_mutation(
-            &make_session(true),
-            &operation_id,
-        ));
-    }
-}
-
 struct ControlResponse {
     value: JsonValue,
     terminate: bool,
@@ -737,7 +726,10 @@ impl ControlResponse {
 fn parse_object(call: &ToolCall) -> Result<BTreeMap<String, JsonValue>, String> {
     match JsonValue::parse(call.arguments.as_str()).map_err(|error| error.to_string())? {
         JsonValue::Object(object) => Ok(object),
-        other => Err(format!("tea_harness arguments must be an object, got {:?}", other.kind())),
+        other => Err(format!(
+            "tea_harness arguments must be an object, got {:?}",
+            other.kind()
+        )),
     }
 }
 
@@ -747,7 +739,9 @@ fn require_exact_fields(
 ) -> Result<(), String> {
     for name in object.keys() {
         if !allowed.contains(&name.as_str()) {
-            return Err(format!("tea_harness operation does not accept field {name:?}"));
+            return Err(format!(
+                "tea_harness operation does not accept field {name:?}"
+            ));
         }
     }
     Ok(())
@@ -832,9 +826,10 @@ fn optional_revision(
     object: &BTreeMap<String, JsonValue>,
     name: &str,
 ) -> Result<Option<HarnessRevisionId>, String> {
-    optional_string(object, name)?.map(HarnessRevisionId::new).transpose().map_err(|error| {
-        format!("{name} must be a valid harness revision ID: {error}")
-    })
+    optional_string(object, name)?
+        .map(HarnessRevisionId::new)
+        .transpose()
+        .map_err(|error| format!("{name} must be a valid harness revision ID: {error}"))
 }
 
 fn parse_hypothesis(object: &BTreeMap<String, JsonValue>) -> Result<CandidateHypothesis, String> {
@@ -850,7 +845,9 @@ fn parse_hypothesis(object: &BTreeMap<String, JsonValue>) -> Result<CandidateHyp
     })
 }
 
-fn parse_file_patches(object: &BTreeMap<String, JsonValue>) -> Result<Vec<HarnessFilePatch>, String> {
+fn parse_file_patches(
+    object: &BTreeMap<String, JsonValue>,
+) -> Result<Vec<HarnessFilePatch>, String> {
     required_array(object, "files")?
         .iter()
         .enumerate()
@@ -883,9 +880,7 @@ fn parse_file_patches(object: &BTreeMap<String, JsonValue>) -> Result<Vec<Harnes
                         expected_artifact_id: artifact_id,
                     })
                 }
-                _ => Err(format!(
-                    "files[{index}].operation must be upsert or delete",
-                )),
+                _ => Err(format!("files[{index}].operation must be upsert or delete",)),
             }
         })
         .collect()
@@ -916,7 +911,10 @@ fn parse_registry_operations(
 
 fn candidate_value(candidate: crate::HarnessCandidateV1) -> JsonValue {
     JsonValue::object([
-        ("candidate_id", JsonValue::String(candidate.candidate_id.to_string())),
+        (
+            "candidate_id",
+            JsonValue::String(candidate.candidate_id.to_string()),
+        ),
         (
             "snapshot_id",
             JsonValue::String(candidate.draft.proposed_snapshot_id.to_string()),
@@ -1040,10 +1038,12 @@ fn error_result(call: ToolCall, code: &str, message: String) -> AgentToolResult 
 }
 
 fn json_text(value: JsonValue) -> Result<String, ToolError> {
-    value.to_json_string().map_err(|error| ToolError::Execution {
-        tool: STABLE_HARNESS_TOOL_NAME.into(),
-        message: error.to_string(),
-    })
+    value
+        .to_json_string()
+        .map_err(|error| ToolError::Execution {
+            tool: STABLE_HARNESS_TOOL_NAME.into(),
+            message: error.to_string(),
+        })
 }
 
 fn unsigned(value: u64) -> JsonValue {
@@ -1084,4 +1084,70 @@ fn harness_schema() -> &'static JsonValue {
         )
         .expect("stable tea_harness schema is valid")
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tea_session::{
+        HarnessRevisionId, MemorySession, ModelHarnessProfileId, OperationKind,
+        OperationStartedRecord, ProvisionedEntry, SessionHeader, SessionId, SessionWriter,
+    };
+
+    #[test]
+    fn authoring_authorization_is_a_host_recorded_user_entry_fact() {
+        let operation_id = OperationId::new("authoring-operation").expect("fixture operation ID");
+        let make_session = |authorized: bool| {
+            let mut session = MemorySession::create(SessionHeader::new(
+                SessionId::new(if authorized {
+                    "authorized-authoring-session"
+                } else {
+                    "ordinary-authoring-session"
+                })
+                .expect("fixture session ID"),
+                "fixture-workspace",
+                Default::default(),
+            ))
+            .expect("fixture session creates");
+            let mut entry = ProvisionedEntry::user(
+                EntryId::new(if authorized {
+                    "authorized-authoring-input"
+                } else {
+                    "ordinary-authoring-input"
+                })
+                .expect("fixture entry ID"),
+                "please edit the harness",
+            );
+            if authorized {
+                let tea_session::SessionEntry::UserMessage(message) = &mut entry.body else {
+                    unreachable!("user constructor must create a user entry");
+                };
+                message.metadata.insert(
+                    crate::AUTHORING_AUTHORIZATION_METADATA_KEY.into(),
+                    JsonValue::Bool(true),
+                );
+            }
+            session
+                .append_record(LaneRecord::OperationStarted(OperationStartedRecord::new(
+                    operation_id.clone(),
+                    LaneId::main(),
+                    None,
+                    OperationKind::Run,
+                    vec![entry],
+                    HarnessRevisionId::new("authoring-revision").expect("fixture revision ID"),
+                    ModelHarnessProfileId::new("authoring-profile").expect("fixture profile ID"),
+                )))
+                .expect("fixture operation record appends");
+            session.snapshot().expect("fixture snapshot")
+        };
+
+        assert!(!operation_authorizes_harness_mutation(
+            &make_session(false),
+            &operation_id,
+        ));
+        assert!(operation_authorizes_harness_mutation(
+            &make_session(true),
+            &operation_id,
+        ));
+    }
 }

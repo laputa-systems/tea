@@ -11,8 +11,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use tea_harness::{CandidateHypothesis, HarnessSurface};
 use tea_session::{
-    ArtifactId, CanonicalHashWriter, Digest, ExperimentId, FailureSignatureId,
-    HarnessCandidateId, HarnessSnapshotId, ModelHarnessProfileId,
+    ArtifactId, CanonicalHashWriter, Digest, ExperimentId, FailureSignatureId, HarnessCandidateId,
+    HarnessSnapshotId, ModelHarnessProfileId,
 };
 
 mod store;
@@ -141,7 +141,10 @@ impl BuildIdentity {
             ("rust_version", self.rust_version.as_str()),
             ("operating_system", self.operating_system.as_str()),
             ("architecture", self.architecture.as_str()),
-            ("provider_adapter_version", self.provider_adapter_version.as_str()),
+            (
+                "provider_adapter_version",
+                self.provider_adapter_version.as_str(),
+            ),
             ("requested_model", self.requested_model.as_str()),
             ("workspace_commit", self.workspace_commit.as_str()),
         ] {
@@ -241,11 +244,8 @@ impl ExperimentLockV1 {
 
     /// Return the canonical immutable input digest.
     pub fn identity_digest(&self) -> Digest {
-        let mut writer = CanonicalHashWriter::new(
-            "tea-evolution-experiment-lock",
-            EVOLUTION_SCHEMA_VERSION,
-            1,
-        );
+        let mut writer =
+            CanonicalHashWriter::new("tea-evolution-experiment-lock", EVOLUTION_SCHEMA_VERSION, 1);
         writer.u64("target_profile_count", self.target_profiles.len() as u64);
         for profile in &self.target_profiles {
             writer.string("target_profile", profile.as_str());
@@ -261,7 +261,10 @@ impl ExperimentLockV1 {
             "capability_envelope",
             self.capability_envelope_digest,
         );
-        writer.u64("search.maximum_candidates", self.search_budget.maximum_candidates as u64);
+        writer.u64(
+            "search.maximum_candidates",
+            self.search_budget.maximum_candidates as u64,
+        );
         writer.u64(
             "search.maximum_provider_requests",
             self.search_budget.maximum_provider_requests,
@@ -274,12 +277,19 @@ impl ExperimentLockV1 {
             "serving.maximum_provider_requests_per_task",
             self.serving_budget.maximum_provider_requests_per_task as u64,
         );
-        writer.u64("serving.maximum_context_bytes", self.serving_budget.maximum_context_bytes);
+        writer.u64(
+            "serving.maximum_context_bytes",
+            self.serving_budget.maximum_context_bytes,
+        );
         writer.u64(
             "serving.maximum_plugin_source_bytes",
             self.serving_budget.maximum_plugin_source_bytes,
         );
-        digest_field(&mut writer, "promotion_policy", self.promotion_policy_digest);
+        digest_field(
+            &mut writer,
+            "promotion_policy",
+            self.promotion_policy_digest,
+        );
         build_identity_hash(&mut writer, &self.tea_build_identity);
         writer.finish()
     }
@@ -846,7 +856,8 @@ impl Campaign {
                 "campaign exhausted its frozen candidate-count budget",
             ));
         }
-        self.proposals.insert(proposal.candidate_id.clone(), proposal);
+        self.proposals
+            .insert(proposal.candidate_id.clone(), proposal);
         Ok(())
     }
 
@@ -888,11 +899,12 @@ impl Campaign {
         candidate_id: &HarnessCandidateId,
     ) -> Result<(), EvolutionError> {
         let PromotionAuthority::Operator = authority;
-        let evaluation = self.evaluations.get(candidate_id).ok_or_else(|| {
-            EvolutionError::PromotionDenied {
-                message: "candidate has no complete frozen evaluation".into(),
-            }
-        })?;
+        let evaluation =
+            self.evaluations
+                .get(candidate_id)
+                .ok_or_else(|| EvolutionError::PromotionDenied {
+                    message: "candidate has no complete frozen evaluation".into(),
+                })?;
         let decision = self.policy.decide(&self.lock, evaluation)?;
         if !decision.is_promotable() {
             return Err(EvolutionError::PromotionDenied {
@@ -1105,10 +1117,7 @@ mod tests {
             CausalStatus::Supported,
             FailureLocus::ToolArguments,
             MechanismCode::new("wrong_argument_name").expect("mechanism"),
-            vec![
-                TraceSpanRef::new(ArtifactId::from_bytes("trace"), 1, 4)
-                    .expect("trace span"),
-            ],
+            vec![TraceSpanRef::new(ArtifactId::from_bytes("trace"), 1, 4).expect("trace span")],
             EvidenceConfidence::High,
             Addressability::LuauPolicy,
         )
@@ -1133,7 +1142,10 @@ mod tests {
         }
     }
 
-    fn complete_evaluation(lock: &ExperimentLockV1, candidate_id: HarnessCandidateId) -> CandidateEvaluationV1 {
+    fn complete_evaluation(
+        lock: &ExperimentLockV1,
+        candidate_id: HarnessCandidateId,
+    ) -> CandidateEvaluationV1 {
         CandidateEvaluationV1 {
             experiment_id: lock.experiment_id.clone(),
             candidate_id,

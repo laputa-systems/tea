@@ -20,10 +20,9 @@ pub mod tool_handler;
 mod policy;
 pub use policy::{
     CollectedPolicyMemoryProposal, LuaPolicy, LuaPolicyHookSet, PolicyAfterToolOutput,
-    PolicyContextAnnotation, PolicyContextEntry, PolicyContextInput,
-    PolicyContextProjectionPatch, PolicyError, PolicyLimits, PolicyMemoryCollector,
-    PolicyMemoryProposal, PolicyMemoryRetention, PolicyMemoryVisibility, PolicyPromptSection,
-    PolicyTool,
+    PolicyContextAnnotation, PolicyContextEntry, PolicyContextInput, PolicyContextProjectionPatch,
+    PolicyError, PolicyLimits, PolicyMemoryCollector, PolicyMemoryProposal, PolicyMemoryRetention,
+    PolicyMemoryVisibility, PolicyPromptSection, PolicyTool,
 };
 
 #[cfg(test)]
@@ -153,7 +152,9 @@ mod tests {
         let bundle = Bundle::from_sources(
             BundleManifest::new(BUNDLE_ABI_VERSION, "main.luau", std::iter::empty::<&str>())
                 .expect("v1 manifest is valid"),
-            [("main.luau", r#"
+            [(
+                "main.luau",
+                r#"
                 return {
                     prompt_sections = {
                         {
@@ -163,7 +164,8 @@ mod tests {
                     },
                     before_tool = function(_) return "allow" end,
                 }
-            "#)],
+            "#,
+            )],
         )
         .expect("v1 bundle is closed");
 
@@ -175,7 +177,10 @@ mod tests {
                 content: "Run the narrowest relevant validator before finalizing.".into(),
             }],
         );
-        assert_eq!(policy.before_tool_call(&call("inspect")), Ok(BeforeToolCall::Allow));
+        assert_eq!(
+            policy.before_tool_call(&call("inspect")),
+            Ok(BeforeToolCall::Allow)
+        );
     }
 
     #[test]
@@ -183,14 +188,17 @@ mod tests {
         let bundle = Bundle::from_sources(
             BundleManifest::new(BUNDLE_ABI_VERSION, "main.luau", std::iter::empty::<&str>())
                 .expect("v1 manifest is valid"),
-            [("main.luau", r#"
+            [(
+                "main.luau",
+                r#"
                 return {
                     prompt_sections = {
                         { id = "verification", content = "first" },
                         { id = "verification", content = "second" },
                     },
                 }
-            "#)],
+            "#,
+            )],
         )
         .expect("v1 source tree is closed");
 
@@ -205,7 +213,9 @@ mod tests {
         let bundle = Bundle::from_sources(
             BundleManifest::new(BUNDLE_ABI_VERSION, "main.luau", std::iter::empty::<&str>())
                 .expect("v1 manifest is valid"),
-            [("main.luau", r#"
+            [(
+                "main.luau",
+                r#"
                 return {
                     prompt_sections = {},
                     before_tool = function(call)
@@ -218,7 +228,8 @@ mod tests {
                         return "allow"
                     end,
                 }
-            "#)],
+            "#,
+            )],
         )
         .expect("v1 source tree is closed");
 
@@ -236,7 +247,9 @@ mod tests {
         let bundle = Bundle::from_sources(
             BundleManifest::new(BUNDLE_ABI_VERSION, "main.luau", std::iter::empty::<&str>())
                 .expect("v1 manifest is valid"),
-            [("main.luau", r#"
+            [(
+                "main.luau",
+                r#"
                 return {
                     prompt_sections = {},
                     after_tool = function(_, result)
@@ -250,7 +263,8 @@ mod tests {
                         }
                     end,
                 }
-            "#)],
+            "#,
+            )],
         )
         .expect("v1 source tree is closed");
         let policy = LuaPolicy::load_bundle(bundle).expect("v1 policy must load");
@@ -293,14 +307,17 @@ mod tests {
         let bundle = Bundle::from_sources(
             BundleManifest::new(BUNDLE_ABI_VERSION, "main.luau", std::iter::empty::<&str>())
                 .expect("v1 manifest is valid"),
-            [("main.luau", r#"
+            [(
+                "main.luau",
+                r#"
                 return {
                     prompt_sections = {},
                     after_tool = function(_, _)
                         return { usage = 999 }
                     end,
                 }
-            "#)],
+            "#,
+            )],
         )
         .expect("v1 source tree is closed");
         let policy = LuaPolicy::load_bundle(bundle).expect("v1 policy must load");
@@ -326,7 +343,9 @@ mod tests {
         let bundle = Bundle::from_sources(
             BundleManifest::new(BUNDLE_ABI_VERSION, "main.luau", std::iter::empty::<&str>())
                 .expect("v1 manifest is valid"),
-            [("main.luau", r#"
+            [(
+                "main.luau",
+                r#"
                 return {
                     prompt_sections = {},
                     context_projection = function(context)
@@ -344,7 +363,8 @@ mod tests {
                         }
                     end,
                 }
-            "#)],
+            "#,
+            )],
         )
         .expect("v1 source tree is closed");
         let policy = LuaPolicy::load_bundle(bundle).expect("context policy loads");
@@ -381,7 +401,9 @@ mod tests {
         let bundle = Bundle::from_sources(
             BundleManifest::new(BUNDLE_ABI_VERSION, "main.luau", std::iter::empty::<&str>())
                 .expect("v1 manifest is valid"),
-            [("main.luau", r#"
+            [(
+                "main.luau",
+                r#"
                 return {
                     prompt_sections = {},
                     resume_hooks = {
@@ -414,7 +436,8 @@ mod tests {
                         },
                     },
                 }
-            "#)],
+            "#,
+            )],
         )
         .expect("v1 source tree is closed");
         let policy = LuaPolicy::load_bundle(bundle).expect("v1 policy must load");
@@ -432,8 +455,7 @@ mod tests {
         assert_eq!(
             operation.get("second"),
             Some(
-                &tea_protocol::JsonValue::parse(r#"{"other":"private","owner":"second"}"#)
-                    .unwrap()
+                &tea_protocol::JsonValue::parse(r#"{"other":"private","owner":"second"}"#).unwrap()
             )
         );
         assert_eq!(

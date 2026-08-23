@@ -257,7 +257,10 @@ impl LuaPolicy {
         let result_table = runtime.lua.create_table().map_err(runtime_error)?;
         for (name, value) in policy_result_fields(result)? {
             result_table
-                .set(name, json_to_lua(&runtime.lua, &value).map_err(runtime_error)?)
+                .set(
+                    name,
+                    json_to_lua(&runtime.lua, &value).map_err(runtime_error)?,
+                )
                 .map_err(runtime_error)?;
         }
         let projection = function
@@ -284,11 +287,15 @@ impl LuaPolicy {
         for (index, entry) in input.entries.iter().enumerate() {
             let value = runtime.lua.create_table().map_err(runtime_error)?;
             value.set("id", entry.id.as_str()).map_err(runtime_error)?;
-            value.set("kind", entry.kind.as_str()).map_err(runtime_error)?;
+            value
+                .set("kind", entry.kind.as_str())
+                .map_err(runtime_error)?;
             value
                 .set("model_visible", entry.model_visible)
                 .map_err(runtime_error)?;
-            value.set("protected", entry.protected).map_err(runtime_error)?;
+            value
+                .set("protected", entry.protected)
+                .map_err(runtime_error)?;
             entries.set(index + 1, value).map_err(runtime_error)?;
         }
         let input_table = runtime.lua.create_table().map_err(runtime_error)?;
@@ -301,9 +308,7 @@ impl LuaPolicy {
     /// the harness commits its operation-start record. Keys are bundle-local
     /// stable IDs; the harness namespaces them with the immutable plugin ID
     /// before persistence.
-    pub fn before_operation_resume_data(
-        &self,
-    ) -> Result<BTreeMap<String, JsonValue>, PolicyError> {
+    pub fn before_operation_resume_data(&self) -> Result<BTreeMap<String, JsonValue>, PolicyError> {
         self.lifecycle_resume_data(ResumeDataPhase::Operation)
     }
 

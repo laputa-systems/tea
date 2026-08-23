@@ -4,12 +4,14 @@ use crate::HarnessError;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use tea_core::error::ToolError;
-use tea_core::tool::{AgentTool, AgentToolResult, ToolCall, ToolContext, ToolFuture, ToolRegistry, ToolUpdateSink};
+use tea_core::tool::{
+    AgentTool, AgentToolResult, ToolCall, ToolContext, ToolFuture, ToolRegistry, ToolUpdateSink,
+};
+use tea_protocol::{JsonNumber, JsonValue};
 use tea_session::{
     ArtifactId, ArtifactPolicy, ArtifactStore, LaneRecord, PayloadRef, SessionEntry,
     SessionSnapshot, SessionWriter, StoredMutation,
 };
-use tea_protocol::{JsonNumber, JsonValue};
 
 pub(crate) const STABLE_ARTIFACT_TOOL_NAMES: [&str; 3] = [
     "tea_artifact_read",
@@ -242,17 +244,23 @@ impl AgentTool for HistorySearchTool {
                     continue;
                 }
                 let kind = entry_kind(&entry.body);
-                if entry_type.as_deref().is_some_and(|expected| expected != kind) {
+                if entry_type
+                    .as_deref()
+                    .is_some_and(|expected| expected != kind)
+                {
                     continue;
                 }
                 if operation_id.as_deref().is_some_and(|expected| {
                     operation_by_entry
                         .get(&entry.header.id)
-                        .map_or(true, |actual| actual != expected)
+                        .is_none_or(|actual| actual != expected)
                 }) {
                     continue;
                 }
-                if tool_name.as_deref().is_some_and(|expected| !entry_has_tool(&entry.body, expected)) {
+                if tool_name
+                    .as_deref()
+                    .is_some_and(|expected| !entry_has_tool(&entry.body, expected))
+                {
                     continue;
                 }
                 if error_only && !entry_is_error(&entry.body) {
@@ -326,16 +334,12 @@ fn success_result(call: ToolCall, content: String) -> AgentToolResult {
     }
 }
 
-fn parse_arguments(
-    tool: &str,
-    call: &ToolCall,
-) -> Result<BTreeMap<String, JsonValue>, ToolError> {
-    let value = JsonValue::parse(call.arguments.as_str()).map_err(|error| {
-        ToolError::InvalidArguments {
+fn parse_arguments(tool: &str, call: &ToolCall) -> Result<BTreeMap<String, JsonValue>, ToolError> {
+    let value =
+        JsonValue::parse(call.arguments.as_str()).map_err(|error| ToolError::InvalidArguments {
             tool: tool.into(),
             message: error.to_string(),
-        }
-    })?;
+        })?;
     match value {
         JsonValue::Object(object) => Ok(object),
         other => Err(ToolError::InvalidArguments {
@@ -345,10 +349,7 @@ fn parse_arguments(
     }
 }
 
-fn artifact_id(
-    object: &BTreeMap<String, JsonValue>,
-    tool: &str,
-) -> Result<ArtifactId, ToolError> {
+fn artifact_id(object: &BTreeMap<String, JsonValue>, tool: &str) -> Result<ArtifactId, ToolError> {
     let value = required_string(object, "artifact_id", tool)?;
     ArtifactId::from_hex(&value).map_err(|error| ToolError::InvalidArguments {
         tool: tool.into(),
@@ -446,10 +447,12 @@ fn execution_error(tool: &str, message: String) -> ToolError {
 }
 
 fn json_text(value: JsonValue) -> Result<String, ToolError> {
-    value.to_json_string().map_err(|error| ToolError::Execution {
-        tool: "tea durable recovery tool".into(),
-        message: error.to_string(),
-    })
+    value
+        .to_json_string()
+        .map_err(|error| ToolError::Execution {
+            tool: "tea durable recovery tool".into(),
+            message: error.to_string(),
+        })
 }
 
 fn unsigned(value: u64) -> JsonValue {
@@ -521,9 +524,10 @@ fn entry_kind(entry: &SessionEntry) -> &'static str {
 
 fn entry_has_tool(entry: &SessionEntry, expected: &str) -> bool {
     match entry {
-        SessionEntry::AssistantMessage(assistant) => {
-            assistant.tool_calls.iter().any(|call| call.name == expected)
-        }
+        SessionEntry::AssistantMessage(assistant) => assistant
+            .tool_calls
+            .iter()
+            .any(|call| call.name == expected),
         SessionEntry::ToolResult(result) => result.tool_name == expected,
         _ => false,
     }
@@ -540,7 +544,13 @@ fn entry_search_text(entry: &SessionEntry) -> Result<String, ToolError> {
             let calls = assistant
                 .tool_calls
                 .iter()
-                .map(|call| format!("{} {}", call.name, call.arguments.to_json_string().unwrap_or_default()))
+                .map(|call| {
+                    format!(
+                        "{} {}",
+                        call.name,
+                        call.arguments.to_json_string().unwrap_or_default()
+                    )
+                })
                 .collect::<Vec<_>>()
                 .join("\n");
             Ok(format!("{}\n{calls}", assistant.content))
@@ -554,7 +564,9 @@ fn entry_search_text(entry: &SessionEntry) -> Result<String, ToolError> {
                 PayloadRef::Inline(value) => value
                     .to_json_string()
                     .map_err(|error| execution_error("tea_history_search", error.to_string()))?,
-                PayloadRef::Artifact { artifact_id, .. } => format!("tea-artifact://blake3/{artifact_id}"),
+                PayloadRef::Artifact { artifact_id, .. } => {
+                    format!("tea-artifact://blake3/{artifact_id}")
+                }
             };
             Ok(format!("{}\n{}\n{inline}", result.tool_name, projection))
         }
@@ -575,23 +587,29 @@ fn entry_search_text(entry: &SessionEntry) -> Result<String, ToolError> {
             PayloadRef::Inline(value) => value
                 .to_json_string()
                 .map_err(|error| execution_error("tea_history_search", error.to_string())),
-            PayloadRef::Artifact { artifact_id, .. } => Ok(format!("tea-artifact://blake3/{artifact_id}")),
+            PayloadRef::Artifact { artifact_id, .. } => {
+                Ok(format!("tea-artifact://blake3/{artifact_id}"))
+            }
         },
         SessionEntry::Custom(entry) => match &entry.payload {
             PayloadRef::Inline(value) => value
                 .to_json_string()
                 .map(|value| format!("{}\n{value}", entry.type_name))
                 .map_err(|error| execution_error("tea_history_search", error.to_string())),
-            PayloadRef::Artifact { artifact_id, .. } => {
-                Ok(format!("{}\ntea-artifact://blake3/{artifact_id}", entry.type_name))
-            }
+            PayloadRef::Artifact { artifact_id, .. } => Ok(format!(
+                "{}\ntea-artifact://blake3/{artifact_id}",
+                entry.type_name
+            )),
         },
     }
 }
 
 fn bounded_preview(text: &str, query: &str) -> String {
     const MAXIMUM: usize = 1_024;
-    let start = text.find(query).unwrap_or_default().saturating_sub(MAXIMUM / 3);
+    let start = text
+        .find(query)
+        .unwrap_or_default()
+        .saturating_sub(MAXIMUM / 3);
     let mut end = start.saturating_add(MAXIMUM).min(text.len());
     while end > start && !text.is_char_boundary(end) {
         end = end.saturating_sub(1);

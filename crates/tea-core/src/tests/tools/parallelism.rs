@@ -34,10 +34,7 @@ impl HookSet for NormalizingHook {
         Ok(context)
     }
 
-    fn convert_to_llm(
-        &self,
-        _context: ContextEnvelope,
-    ) -> Result<String, crate::error::HookError> {
+    fn convert_to_llm(&self, _context: ContextEnvelope) -> Result<String, crate::error::HookError> {
         Ok("fixture context".into())
     }
 }
@@ -308,19 +305,22 @@ fn recovered_assistant_tool_calls_use_the_shared_scheduler_before_the_next_reque
             name: "echo".into(),
             arguments: SerializedJson::new("{}"),
         }];
-        agent.restore_pending_tool_calls(vec![
-            AgentMessage::User {
-                id: MessageId(1),
-                content: "recover this tool call".into(),
-            },
-            AgentMessage::Assistant {
-                id: MessageId(2),
-                content: String::new(),
-                tool_calls: recovered_calls.clone(),
-                stop_reason: Some(StopReason::ToolUse),
-                error_message: None,
-            },
-        ], recovered_calls.clone())?;
+        agent.restore_pending_tool_calls(
+            vec![
+                AgentMessage::User {
+                    id: MessageId(1),
+                    content: "recover this tool call".into(),
+                },
+                AgentMessage::Assistant {
+                    id: MessageId(2),
+                    content: String::new(),
+                    tool_calls: recovered_calls.clone(),
+                    stop_reason: Some(StopReason::ToolUse),
+                    error_message: None,
+                },
+            ],
+            recovered_calls.clone(),
+        )?;
 
         agent
             .start_recover_tool_calls(recovered_calls)?
@@ -819,14 +819,12 @@ fn exclusive_tool_rejects_the_entire_mixed_batch_before_any_effect_starts() {
             ModelStream {
                 events: vec![
                     ModelStreamEvent::ToolCall(AgentToolCall {
-                        id: ToolCallId::new("ordinary-before-exclusive")
-                            .expect("fixture call ID"),
+                        id: ToolCallId::new("ordinary-before-exclusive").expect("fixture call ID"),
                         name: "echo".into(),
                         arguments: SerializedJson::new("{}"),
                     }),
                     ModelStreamEvent::ToolCall(AgentToolCall {
-                        id: ToolCallId::new("exclusive-after-ordinary")
-                            .expect("fixture call ID"),
+                        id: ToolCallId::new("exclusive-after-ordinary").expect("fixture call ID"),
                         name: "exclusive".into(),
                         arguments: SerializedJson::new("{}"),
                     }),
@@ -837,8 +835,8 @@ fn exclusive_tool_rejects_the_entire_mixed_batch_before_any_effect_starts() {
                 events: vec![ModelStreamEvent::End(StopReason::Stop)],
             },
         ]));
-        let schema = tea_protocol::JsonValue::parse(r#"{"type":"object"}"#)
-            .expect("fixture schema");
+        let schema =
+            tea_protocol::JsonValue::parse(r#"{"type":"object"}"#).expect("fixture schema");
         let ordinary_calls = Arc::new(Mutex::new(Vec::new()));
         let exclusive_calls = Arc::new(Mutex::new(0));
         let agent = Agent::builder()
@@ -856,17 +854,23 @@ fn exclusive_tool_rejects_the_entire_mixed_batch_before_any_effect_starts() {
 
         run.drive().await?;
 
-        assert!(ordinary_calls.lock().expect("ordinary calls mutex").is_empty());
+        assert!(ordinary_calls
+            .lock()
+            .expect("ordinary calls mutex")
+            .is_empty());
         assert_eq!(*exclusive_calls.lock().expect("exclusive calls mutex"), 0);
-        assert!(!run.events().iter().any(|event| {
-            matches!(event.kind, AgentEventKind::ToolExecutionStart { .. })
-        }));
+        assert!(!run
+            .events()
+            .iter()
+            .any(|event| { matches!(event.kind, AgentEventKind::ToolExecutionStart { .. }) }));
         let results = agent
             .snapshot()
             .messages
             .into_iter()
             .filter_map(|message| match message {
-                AgentMessage::ToolResult { content, is_error, .. } => Some((content, is_error)),
+                AgentMessage::ToolResult {
+                    content, is_error, ..
+                } => Some((content, is_error)),
                 _ => None,
             })
             .collect::<Vec<_>>();

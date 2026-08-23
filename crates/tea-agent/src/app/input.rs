@@ -382,7 +382,8 @@ impl App {
             });
             return Ok(());
         }
-        self.state.notice("queue commands require an active durable operation");
+        self.state
+            .notice("queue commands require an active durable operation");
         Ok(())
     }
 

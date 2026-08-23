@@ -134,7 +134,10 @@ impl PluginCapabilityCatalog {
 
     /// Insert a single explicit grant. Duplicate plugin/capability pairs are
     /// rejected rather than silently replacing a host authority object.
-    pub fn insert(&mut self, binding: PluginCapabilityBinding) -> Result<(), CapabilityBindingError> {
+    pub fn insert(
+        &mut self,
+        binding: PluginCapabilityBinding,
+    ) -> Result<(), CapabilityBindingError> {
         let key = (binding.plugin_id.clone(), binding.capability.clone());
         if self.bindings.contains_key(&key) {
             return Err(CapabilityBindingError::Duplicate {
@@ -161,9 +164,11 @@ impl PluginCapabilityCatalog {
         let binding = self
             .bindings
             .get(&(plugin_id.to_owned(), capability.to_owned()))
-            .ok_or_else(|| HarnessError::invalid_state(format!(
-                "plugin {plugin_id} capability {capability} has no trusted host binding",
-            )))?;
+            .ok_or_else(|| {
+                HarnessError::invalid_state(format!(
+                    "plugin {plugin_id} capability {capability} has no trusted host binding",
+                ))
+            })?;
         if binding.capability_version != capability_version {
             return Err(HarnessError::invalid_state(format!(
                 "plugin {plugin_id} capability {capability} is pinned to version {capability_version}, but the trusted host catalog provides {}",
@@ -242,7 +247,10 @@ impl fmt::Display for CapabilityBindingError {
                 "plugin capability binding {field} must use the portable [A-Za-z0-9._-] spelling; got {value:?}",
             ),
             Self::InvalidLimit { field } => {
-                write!(formatter, "plugin capability binding limit {field} must be greater than zero")
+                write!(
+                    formatter,
+                    "plugin capability binding limit {field} must be greater than zero"
+                )
             }
             Self::Duplicate {
                 plugin_id,
@@ -309,9 +317,9 @@ fn validate_portable_identifier(
 ) -> Result<(), CapabilityBindingError> {
     if value.is_empty()
         || value.len() > 120
-        || value.bytes().any(|byte| {
-            !(byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
-        })
+        || value
+            .bytes()
+            .any(|byte| !(byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-')))
     {
         return Err(CapabilityBindingError::InvalidIdentifier {
             field,

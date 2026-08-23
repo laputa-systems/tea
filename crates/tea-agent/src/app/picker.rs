@@ -85,7 +85,8 @@ impl App {
         self.state.composer_mut().clear();
         self.state.context_estimate = None;
         self.state.close_surface();
-        self.state.notice("new durable session will begin with the next prompt");
+        self.state
+            .notice("new durable session will begin with the next prompt");
         Ok(())
     }
 

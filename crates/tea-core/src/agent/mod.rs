@@ -4,8 +4,8 @@
 //! It has no executor and no provider implementation; callers configure those explicit
 //! capabilities and drive the run from their own async environment.
 
-use crate::error::CoreError;
 use crate::effect::{EffectGate, NoopEffectGate, RunProvenance};
+use crate::error::CoreError;
 use crate::event::EventObserver;
 use crate::hooks::HookSet;
 use crate::queue::{AgentQueues, QueueMode, QueuedMessage};
@@ -491,11 +491,7 @@ impl Agent {
                 ),
             ));
         }
-        let _ = validate_recovery_tool_batch(
-            &messages,
-            &tool_calls,
-            "restore_pending_tool_calls",
-        )?;
+        let _ = validate_recovery_tool_batch(&messages, &tool_calls, "restore_pending_tool_calls")?;
 
         let mut state = self.inner.state.lock().expect("agent state mutex poisoned");
         match state.phase {

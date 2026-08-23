@@ -15,12 +15,10 @@ use tea_core::profile::{PiDefaultCodingProfile, ProfileSpec};
 use tea_core::scheduler::{
     CancellationToken, ModelFuture, ModelProvider, ModelRequest, ModelStream, ModelStreamEvent,
 };
-use tea_core::state::{
-    AgentMessage, AgentPhase, AgentToolCall, RunPhase, StopReason, ToolCallId,
-};
+use tea_core::state::{AgentMessage, AgentPhase, AgentToolCall, RunPhase, StopReason, ToolCallId};
 use tea_core::tool::{
-    AgentTool, ToolCall, ToolContext, ToolDefinition, ToolExecutionMode, ToolFuture, ToolRegistry,
-    AgentToolResult, ToolUpdateSink,
+    AgentTool, AgentToolResult, ToolCall, ToolContext, ToolDefinition, ToolExecutionMode,
+    ToolFuture, ToolRegistry, ToolUpdateSink,
 };
 
 fn schema() -> tea_protocol::JsonValue {
