@@ -105,7 +105,9 @@ fn cbor_optional_cache_evidence(output: &mut Vec<u8>, evidence: Option<&CacheEvi
     cbor_text(output, "common_context_prefix_ratio_millionths");
     cbor_optional_unsigned(
         output,
-        evidence.common_context_prefix_ratio_millionths.map(u64::from),
+        evidence
+            .common_context_prefix_ratio_millionths
+            .map(u64::from),
     );
     cbor_text(output, "context_projection_changed");
     cbor_optional_bool(output, evidence.context_projection_changed);

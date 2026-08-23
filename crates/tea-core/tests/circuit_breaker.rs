@@ -1,16 +1,16 @@
 use std::num::NonZeroU32;
 use std::sync::{Arc, Mutex};
+use tea_core::Agent;
+use tea_core::error::CoreError;
+use tea_core::event::AgentEventKind;
 use tea_core::scheduler::{
     CancellationToken, ModelFuture, ModelProvider, ModelRequest, ModelStream, ModelStreamEvent,
 };
-use tea_core::event::AgentEventKind;
-use tea_core::error::CoreError;
 use tea_core::state::{AgentMessage, AgentToolCall, SerializedJson, StopReason, ToolCallId};
 use tea_core::tool::{
     AgentTool, AgentToolResult, FailureSignature, ToolCall, ToolContext, ToolExecutionMode,
     ToolFailure, ToolFailureCircuitBreaker, ToolFuture, ToolUpdateSink,
 };
-use tea_core::Agent;
 
 struct Provider {
     streams: Mutex<Vec<ModelStream>>,

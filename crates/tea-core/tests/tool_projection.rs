@@ -1,15 +1,15 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
+use tea_core::Agent;
+use tea_core::error::CoreError;
 use tea_core::scheduler::{
     CancellationToken, ModelFuture, ModelProvider, ModelRequest, ModelStream, ModelStreamEvent,
 };
-use tea_core::error::CoreError;
 use tea_core::state::{AgentMessage, AgentToolCall, SerializedJson, StopReason, ToolCallId};
 use tea_core::tool::{
     AgentTool, AgentToolResult, FailureSignature, ToolCall, ToolContext, ToolFailure, ToolFuture,
     ToolResultProjectionPolicy, ToolUpdateSink, project_tool_result_as_text, truncate_middle,
 };
-use tea_core::Agent;
 
 #[test]
 fn projection_marks_error_details_truncation_and_repeated_payloads_deterministically() {

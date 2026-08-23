@@ -49,9 +49,10 @@ fn commandcode_message(
         "assistant" => {
             let mut content = Vec::new();
             if let Some(text) = optional_string_or_null(object, "content")?
-                && !text.is_empty() {
-                    content.push(json_value!({"type": "text", "text": text}));
-                }
+                && !text.is_empty()
+            {
+                content.push(json_value!({"type": "text", "text": text}));
+            }
             if let Some(calls) = object.get("tool_calls").and_then(JsonValue::as_array) {
                 for call in calls {
                     let call = call.as_object().ok_or_else(|| {

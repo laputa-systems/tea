@@ -226,11 +226,13 @@ fn await_future_settles_a_transaction_receipt_after_cancellation() {
         let events = run.events();
         let receipt_end = events
             .iter()
-            .position(|event| matches!(
-                &event.kind,
-                AgentEventKind::ToolExecutionEnd { result, .. }
-                    if result.content == "commit receipt: committed" && !result.is_error
-            ))
+            .position(|event| {
+                matches!(
+                    &event.kind,
+                    AgentEventKind::ToolExecutionEnd { result, .. }
+                        if result.content == "commit receipt: committed" && !result.is_error
+                )
+            })
             .expect("transaction receipt must settle");
         let agent_end = events
             .iter()
@@ -490,7 +492,7 @@ fn recovery_resumes_only_the_missing_suffix_of_a_partially_committed_tool_batch(
                     tool_name: "echo".into(),
                     content: "echoed: hello".into(),
                     details: None,
-                    usage: None,
+                    usage: Box::new(None),
                     added_tool_names: Vec::new(),
                     terminate: false,
                     is_error: false,
@@ -557,23 +559,26 @@ fn after_tool_metadata_is_preserved_in_the_transcript() {
 
         run.drive().await?;
 
-        assert!(matches!(
-            &agent.snapshot().messages[2],
-            crate::state::AgentMessage::ToolResult {
-                tool_call_id,
-                details: Some(details),
-                usage: Some(Usage {
-                    input_tokens: Some(3),
-                    output_tokens: Some(5),
-                    reasoning_tokens: Some(2),
-                    ..
-                }),
-                added_tool_names,
-                ..
-            } if tool_call_id == &call_id
-                && details.as_str() == r#"{"source":"hook"}"#
-                && added_tool_names == &["later-tool"]
-        ));
+        let message = &agent.snapshot().messages[2];
+        let crate::state::AgentMessage::ToolResult {
+            tool_call_id,
+            details: Some(details),
+            usage,
+            added_tool_names,
+            ..
+        } = message
+        else {
+            panic!("snapshot must contain the expected tool result message");
+        };
+        let Some(usage) = usage.as_ref().as_ref() else {
+            panic!("tool result usage should be available");
+        };
+        assert_eq!(tool_call_id, &call_id);
+        assert_eq!(details.as_str(), r#"{"source":"hook"}"#);
+        assert_eq!(usage.input_tokens, Some(3));
+        assert_eq!(usage.output_tokens, Some(5));
+        assert_eq!(usage.reasoning_tokens, Some(2));
+        assert_eq!(added_tool_names, &["later-tool"]);
 
         Ok::<(), CoreError>(())
     })

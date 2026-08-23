@@ -87,7 +87,10 @@ impl AgentTool for MultiEditTool {
         let mut resolved = Vec::with_capacity(requests.len());
         let mut unique = BTreeSet::new();
         for request in requests {
-            let path = match path_error(self.name(), self.root.resolve_existing(&request.requested_path)) {
+            let path = match path_error(
+                self.name(),
+                self.root.resolve_existing(&request.requested_path),
+            ) {
                 Ok(path) => path,
                 Err(error) => return Box::pin(std::future::ready(Err(error))),
             };
@@ -118,7 +121,9 @@ impl AgentTool for MultiEditTool {
             {
                 return Err(ToolError::Execution {
                     tool: "edit".into(),
-                    message: "host returned snapshots that do not exactly match the requested edit plan".into(),
+                    message:
+                        "host returned snapshots that do not exactly match the requested edit plan"
+                            .into(),
                 });
             }
             let mut snapshot_bytes = 0_usize;
@@ -129,7 +134,10 @@ impl AgentTool for MultiEditTool {
                 if !snapshot.is_regular_file {
                     return Err(ToolError::Execution {
                         tool: "edit".into(),
-                        message: format!("{} is not an ordinary regular file", request.requested_path),
+                        message: format!(
+                            "{} is not an ordinary regular file",
+                            request.requested_path
+                        ),
                     });
                 }
                 let original = snapshot.content;
@@ -143,18 +151,19 @@ impl AgentTool for MultiEditTool {
                         ),
                     });
                 }
-                if let Some(expected) = request.expected_digest {
-                    if Digest::from_bytes(&original) != expected {
-                        return Err(ToolError::Execution {
-                            tool: "edit".into(),
-                            message: format!(
-                                "expectedDigest does not match the original snapshot for {}",
-                                request.requested_path
-                            ),
-                        });
-                    }
+                if let Some(expected) = request.expected_digest
+                    && Digest::from_bytes(&original) != expected
+                {
+                    return Err(ToolError::Execution {
+                        tool: "edit".into(),
+                        message: format!(
+                            "expectedDigest does not match the original snapshot for {}",
+                            request.requested_path
+                        ),
+                    });
                 }
-                let replacement = apply_replacements(&request.requested_path, original, &request.edits)?;
+                let replacement =
+                    apply_replacements(&request.requested_path, original, &request.edits)?;
                 replacement_count = replacement_count.saturating_add(request.edits.len());
                 planned.push(ConditionalFileEdit {
                     path,
@@ -163,9 +172,7 @@ impl AgentTool for MultiEditTool {
                 });
             }
             check_cancelled("edit", &context)?;
-            let transaction = EditTransaction {
-                files: planned,
-            };
+            let transaction = EditTransaction { files: planned };
             match operations
                 .commit_edit_transaction(&transaction, context.cancellation.clone())
                 .await
@@ -175,7 +182,8 @@ impl AgentTool for MultiEditTool {
                     &call,
                     format!(
                         "Applied {} replacements in {} files.",
-                        replacement_count, transaction.files.len(),
+                        replacement_count,
+                        transaction.files.len(),
                     ),
                 )),
                 EditTransactionOutcome::RolledBack { reason } => Err(ToolError::Execution {
@@ -227,7 +235,10 @@ fn parse_multiedit_args(name: &str, call: &ToolCall) -> Result<Vec<FileRequest>,
         let expected_digest = optional_string(name, file, "expectedDigest")?
             .map(|value| {
                 Digest::from_hex(&value).map_err(|error| {
-                    invalid(name, format!("files[].expectedDigest must be a BLAKE3 digest: {error}"))
+                    invalid(
+                        name,
+                        format!("files[].expectedDigest must be a BLAKE3 digest: {error}"),
+                    )
                 })
             })
             .transpose()?;
@@ -252,18 +263,27 @@ fn parse_multiedit_args(name: &str, call: &ToolCall) -> Result<Vec<FileRequest>,
         for edit in edits {
             let edit = match edit {
                 JsonValue::Object(edit) => edit,
-                _ => return Err(invalid(name, "each files[].edits[] entry must be an object")),
+                _ => {
+                    return Err(invalid(
+                        name,
+                        "each files[].edits[] entry must be an object",
+                    ));
+                }
             };
             let old = string_field(name, edit, "oldText")?;
             let new = string_field(name, edit, "newText")?;
             if old.is_empty() {
                 return Err(invalid(name, "files[].edits[].oldText cannot be empty"));
             }
-            total_edit_bytes = total_edit_bytes.saturating_add(old.len()).saturating_add(new.len());
+            total_edit_bytes = total_edit_bytes
+                .saturating_add(old.len())
+                .saturating_add(new.len());
             if total_edit_bytes > MAX_TOTAL_EDIT_BYTES {
                 return Err(invalid(
                     name,
-                    format!("total oldText and newText bytes exceed the {MAX_TOTAL_EDIT_BYTES} byte limit"),
+                    format!(
+                        "total oldText and newText bytes exceed the {MAX_TOTAL_EDIT_BYTES} byte limit"
+                    ),
                 ));
             }
             replacements.push(Replacement { old, new });

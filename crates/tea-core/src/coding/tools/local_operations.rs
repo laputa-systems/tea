@@ -8,8 +8,8 @@ use super::contract::{
 use super::search::{GlobMatcher, local_grep, walk_files};
 use crate::scheduler::CancellationToken;
 use crate::tool::{ToolUpdate, ToolUpdateSink};
-use std::future::Future;
 use std::fs::{self, File, OpenOptions};
+use std::future::Future;
 use std::io::{Read, Write};
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
@@ -52,7 +52,10 @@ impl<T: Send + 'static> Future for BlockingOperation<T> {
 
     fn poll(self: std::pin::Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
         let work = {
-            let mut state = self.state.lock().expect("blocking operation state mutex poisoned");
+            let mut state = self
+                .state
+                .lock()
+                .expect("blocking operation state mutex poisoned");
             if let Some(result) = state.result.take() {
                 return Poll::Ready(result);
             }
@@ -78,7 +81,10 @@ impl<T: Send + 'static> Future for BlockingOperation<T> {
                 });
             if let Err(error) = spawned {
                 let waker = {
-                    let mut state = self.state.lock().expect("blocking operation state mutex poisoned");
+                    let mut state = self
+                        .state
+                        .lock()
+                        .expect("blocking operation state mutex poisoned");
                     state.result = Some(Err(OperationError::new(format!(
                         "cannot start local coding operation: {error}",
                     ))));
@@ -161,13 +167,12 @@ impl CodingOperations for LocalCodingOperations {
             let mut declared_total_bytes = 0_usize;
             let mut returned_total_bytes = 0_usize;
             for path in paths {
-                let metadata = fs::metadata(&path)
-                    .map_err(|error| OperationError::new(error.to_string()))?;
+                let metadata =
+                    fs::metadata(&path).map_err(|error| OperationError::new(error.to_string()))?;
                 let is_regular_file = metadata.is_file();
                 if is_regular_file {
-                    declared_total_bytes = declared_total_bytes.saturating_add(
-                        usize::try_from(metadata.len()).unwrap_or(usize::MAX),
-                    );
+                    declared_total_bytes = declared_total_bytes
+                        .saturating_add(usize::try_from(metadata.len()).unwrap_or(usize::MAX));
                     if declared_total_bytes > max_total_bytes {
                         return Err(OperationError::new(format!(
                             "complete edit snapshots exceed the {max_total_bytes} byte transaction limit",
@@ -240,7 +245,9 @@ impl CodingOperations for LocalCodingOperations {
     ) -> OperationFuture<'a, Vec<GrepMatch>> {
         let root = root.to_path_buf();
         let pattern = pattern.to_owned();
-        Box::pin(blocking_operation(move || local_grep(&root, &pattern, options)))
+        Box::pin(blocking_operation(move || {
+            local_grep(&root, &pattern, options)
+        }))
     }
 
     fn execute_command<'a>(
@@ -295,15 +302,18 @@ fn commit_local_edit_transaction(
     // This is the complete precondition phase. No target mutation can occur
     // before all files are observed unchanged and cancellation is checked.
     for edit in &transaction.files {
-        let metadata = fs::metadata(&edit.path)
-            .map_err(|error| OperationError::new(error.to_string()))?;
+        let metadata =
+            fs::metadata(&edit.path).map_err(|error| OperationError::new(error.to_string()))?;
         if !metadata.is_file() {
             let outcome = EditTransactionOutcome::RolledBack {
-                reason: "a requested path is no longer an ordinary regular file; no files were written".into(),
+                reason:
+                    "a requested path is no longer an ordinary regular file; no files were written"
+                        .into(),
             };
             return Ok(outcome);
         }
-        let current = fs::read(&edit.path).map_err(|error| OperationError::new(error.to_string()))?;
+        let current =
+            fs::read(&edit.path).map_err(|error| OperationError::new(error.to_string()))?;
         if current != edit.expected_content {
             let outcome = EditTransactionOutcome::RolledBack {
                 reason: "a file changed after its original snapshot; no files were written".into(),
@@ -343,10 +353,9 @@ fn commit_local_edit_transaction(
     // Commit has now been requested. Do not turn a later cancellation into an
     // untruthful cancelled result: settle a receipt after publication.
     for index in 0..staged.len() {
-        if let Err(error) = publish_staged_file(
-            &staged[index].replacement_path,
-            &staged[index].edit.path,
-        ) {
+        if let Err(error) =
+            publish_staged_file(&staged[index].replacement_path, &staged[index].edit.path)
+        {
             // Restore every target from a separately staged original, including
             // the currently failing path. `rename` should not partially mutate
             // a path on error, but recovery must not rely on that assumption.
@@ -386,14 +395,20 @@ fn stage_local_edit(edit: &ConditionalFileEdit) -> Result<StagedLocalEdit<'_>, O
     let permissions = fs::metadata(&edit.path)
         .map_err(|error| OperationError::new(error.to_string()))?
         .permissions();
-    let replacement_path = stage_local_file(&edit.path, "replacement", &edit.replacement_content, &permissions)?;
-    let rollback_path = match stage_local_file(&edit.path, "rollback", &edit.expected_content, &permissions) {
-        Ok(path) => path,
-        Err(error) => {
-            let _ = fs::remove_file(&replacement_path);
-            return Err(error);
-        }
-    };
+    let replacement_path = stage_local_file(
+        &edit.path,
+        "replacement",
+        &edit.replacement_content,
+        &permissions,
+    )?;
+    let rollback_path =
+        match stage_local_file(&edit.path, "rollback", &edit.expected_content, &permissions) {
+            Ok(path) => path,
+            Err(error) => {
+                let _ = fs::remove_file(&replacement_path);
+                return Err(error);
+            }
+        };
     Ok(StagedLocalEdit {
         edit,
         replacement_path,
@@ -407,13 +422,21 @@ fn stage_local_file(
     bytes: &[u8],
     permissions: &fs::Permissions,
 ) -> Result<PathBuf, OperationError> {
-    let parent = target.parent().ok_or_else(|| OperationError::new("target has no parent directory"))?;
-    let base = target.file_name().and_then(|name| name.to_str()).unwrap_or("edit-target");
+    let parent = target
+        .parent()
+        .ok_or_else(|| OperationError::new("target has no parent directory"))?;
+    let base = target
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("edit-target");
     for _ in 0..32 {
         let sequence = EDIT_TRANSACTION_STAGE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         let candidate = parent.join(format!(
             ".tea-edit-v2-{}-{}-{}-{}",
-            std::process::id(), sequence, kind, base
+            std::process::id(),
+            sequence,
+            kind,
+            base
         ));
         let mut options = OpenOptions::new();
         options.write(true).create_new(true);
@@ -551,9 +574,10 @@ fn wait_for_shell_or_cancellation(
             // exited after `try_wait`; `wait` still reaps that shell and gives
             // the caller one deterministic settlement path.
             if let Err(error) = child.kill()
-                && error.kind() != std::io::ErrorKind::InvalidInput {
-                    return Err(OperationError::new(error.to_string()));
-                }
+                && error.kind() != std::io::ErrorKind::InvalidInput
+            {
+                return Err(OperationError::new(error.to_string()));
+            }
             return child
                 .wait()
                 .map_err(|error| OperationError::new(error.to_string()));
@@ -664,7 +688,10 @@ mod tests {
         fs::write(root.join("first.release"), b"").expect("first command releases");
         fs::write(root.join("second.release"), b"").expect("second command releases");
         let (first, second) = smol::block_on(async { smol::future::zip(first, second).await });
-        assert!(both_started, "both commands must start before either is released");
+        assert!(
+            both_started,
+            "both commands must start before either is released"
+        );
         assert_eq!(first.expect("first command").stdout, b"first-done");
         assert_eq!(second.expect("second command").stdout, b"second-done");
         drop(release_guard);

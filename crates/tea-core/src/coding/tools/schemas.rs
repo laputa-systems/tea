@@ -80,7 +80,9 @@ pub(crate) fn read_v2_schema() -> JsonValue {
             ("limit", schema_number("Maximum number of lines to read")),
             (
                 "includeDigest",
-                schema_boolean("Include the complete-file BLAKE3 digest in the result (default: false)"),
+                schema_boolean(
+                    "Include the complete-file BLAKE3 digest in the result (default: false)",
+                ),
             ),
         ],
     )
@@ -140,18 +142,20 @@ pub(crate) fn edit_v2_schema() -> JsonValue {
                 JsonValue::String("newText".to_owned()),
             ]),
         ),
-        (
-            "additionalProperties",
-            JsonValue::Bool(false),
-        ),
+        ("additionalProperties", JsonValue::Bool(false)),
         (
             "properties",
             JsonValue::object([
                 (
                     "oldText",
-                    schema_string("Exact non-empty original text. It must occur exactly once in this file's original snapshot."),
+                    schema_string(
+                        "Exact non-empty original text. It must occur exactly once in this file's original snapshot.",
+                    ),
                 ),
-                ("newText", schema_string("Replacement text for this targeted edit.")),
+                (
+                    "newText",
+                    schema_string("Replacement text for this targeted edit."),
+                ),
             ]),
         ),
     ]);

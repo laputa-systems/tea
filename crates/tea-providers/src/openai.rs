@@ -133,7 +133,7 @@ mod tests {
             tool_name: "fixture".into(),
             content: "error output".into(),
             details: Some(SerializedJson::new(r#"{"detail":"raw"}"#)),
-            usage: None,
+            usage: Box::new(None),
             added_tool_names: Vec::new(),
             terminate: false,
             is_error: true,

@@ -4,12 +4,12 @@ use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{sync_channel, Receiver, TryRecvError};
 use std::time::Duration;
+use tea_core::agent::AgentConfiguration;
 use tea_core::coding::TeaCodingToolsV2;
 use tea_core::compaction::AutomaticCompactionPolicy;
+use tea_core::error::CoreError;
 use tea_core::harness::HarnessError;
 use tea_core::runtime::{HarnessEvent, SessionEvent, TeaEvent, TeaEventSubscription};
-use tea_core::agent::AgentConfiguration;
-use tea_core::error::CoreError;
 use tea_providers::ProviderRegistry;
 use tea_tui::Size;
 
@@ -136,11 +136,9 @@ impl App {
                 AppError::Setup(format!("cannot read current directory: {error}"))
             })?,
         };
-        let tools = TeaCodingToolsV2::with_operations(
-            &workspace,
-            Arc::new(NonblockingCodingOperations),
-        )
-            .map_err(|error| AppError::Setup(format!("invalid --cwd: {error}")))?;
+        let tools =
+            TeaCodingToolsV2::with_operations(&workspace, Arc::new(NonblockingCodingOperations))
+                .map_err(|error| AppError::Setup(format!("invalid --cwd: {error}")))?;
         self.workspace = Some(tools.workspace().as_path().to_path_buf());
         let configuration = if self.options.provider() == Some(OsStr::new(mock::PROVIDER_ID)) {
             mock::configuration()
@@ -436,16 +434,16 @@ impl App {
             .as_ref()
             .ok_or_else(|| AppError::Setup("Tea home is not initialized".into()))?;
         let automatic_compaction = self.automatic_compaction.clone();
-        let harness = super::durable::create_host_harness(
-            home,
+        let harness = super::durable::create_host_harness(super::durable::HostHarnessConfig {
+            tea_home: home,
             workspace,
             configuration,
             model,
             provider,
-            self.options.thinking_level(),
-            self.compactor.clone(),
+            thinking_level: Some(self.options.thinking_level()),
+            compactor: self.compactor.clone(),
             automatic_compaction,
-        )?;
+        })?;
         self.durable_subscription = Some(harness.subscribe_events()?);
         self.durable_harness = Some(Arc::clone(&harness));
         Ok(harness)
@@ -491,16 +489,16 @@ impl App {
         // without fighting its own advisory writer lock.
         self.durable_subscription = None;
         self.durable_harness = None;
-        let harness = super::durable::reopen_host_harness(
-            &home,
-            &workspace,
-            id,
+        let harness = super::durable::reopen_host_harness(super::durable::HostHarnessReopen {
+            tea_home: &home,
+            workspace: &workspace,
+            session_id: id,
             configuration,
             model,
             provider,
-            self.compactor.clone(),
+            compactor: self.compactor.clone(),
             automatic_compaction,
-        )?;
+        })?;
         self.state.set_thinking_level(harness.thinking_level()?);
         let snapshot = harness.snapshot()?;
         let messages = super::durable::project_host_messages(&snapshot)?;

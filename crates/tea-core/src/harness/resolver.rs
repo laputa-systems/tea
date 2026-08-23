@@ -422,17 +422,17 @@ impl HarnessResolver {
                         .map(|policy| (plugin_id.clone(), Arc::clone(policy)))
                 },
             ));
-        resolve_snapshot(
-            &self.runtime_services,
-            &revision,
-            &snapshot,
-            self.self_extension_mode,
+        resolve_snapshot(ResolveSnapshotInput {
+            runtime_services: &self.runtime_services,
+            revision: &revision,
+            snapshot: &snapshot,
+            self_extension_mode: self.self_extension_mode,
             hooks,
             plugin_tools,
             lifecycle,
             memory_collector,
             context_policies,
-        )
+        })
     }
 
     /// Stage one immutable candidate.  Candidate validation remains fully
@@ -1022,19 +1022,9 @@ fn decode_harness_catalog(
     })
 }
 
-fn resolve_snapshot(
-    runtime_services: &RuntimeServices,
-    revision: &HarnessRevisionV1,
-    snapshot: &HarnessSnapshotV1,
-    self_extension_mode: SelfExtensionMode,
-    hooks: Arc<dyn tea_core::hooks::HookSet>,
-    plugin_tools: ToolRegistry,
-    lifecycle: PluginLifecycleRegistry,
-    memory_collector: Arc<ExtensionMemoryCollector>,
-    context_policies: ContextPolicyRegistry,
-) -> Result<ResolvedHarness, HarnessError> {
-    for name in plugin_tools.names() {
-        if runtime_services.trusted_tools().get(name).is_some() {
+fn resolve_snapshot(input: ResolveSnapshotInput<'_>) -> Result<ResolvedHarness, HarnessError> {
+    for name in input.plugin_tools.names() {
+        if input.runtime_services.trusted_tools().get(name).is_some() {
             return Err(HarnessError::invalid_state(format!(
                 "source-pinned plugin tool {name} collides with a trusted host capability",
             )));
@@ -1042,24 +1032,39 @@ fn resolve_snapshot(
     }
     Ok(ResolvedHarness {
         identity: HarnessIdentity::new(
-            revision.revision_id.clone(),
-            snapshot.id.clone(),
-            snapshot.spec.model_harness_profile.clone(),
+            input.revision.revision_id.clone(),
+            input.snapshot.id.clone(),
+            input.snapshot.spec.model_harness_profile.clone(),
         ),
-        system_prompt: compose_system_prompt(&snapshot.spec),
-        extension_tools: plugin_tools,
-        hooks,
-        automatic_compaction: runtime_services.automatic_compaction_policy().clone(),
-        tool_result_projection: runtime_services.tool_result_projection_policy().clone(),
-        tool_failure_circuit_breaker: runtime_services.tool_failure_circuit_breaker_policy(),
-        replay_safe_tools: runtime_services.replay_safe_tools().clone(),
-        artifact_policy: runtime_services.artifact_policy_config().clone(),
-        self_extension_mode,
-        lifecycle,
-        memory_collector,
-        harness_snapshot: Some(snapshot.clone()),
-        context_policies,
+        system_prompt: compose_system_prompt(&input.snapshot.spec),
+        extension_tools: input.plugin_tools,
+        hooks: input.hooks,
+        automatic_compaction: input.runtime_services.automatic_compaction_policy().clone(),
+        tool_result_projection: input
+            .runtime_services
+            .tool_result_projection_policy()
+            .clone(),
+        tool_failure_circuit_breaker: input.runtime_services.tool_failure_circuit_breaker_policy(),
+        replay_safe_tools: input.runtime_services.replay_safe_tools().clone(),
+        artifact_policy: input.runtime_services.artifact_policy_config().clone(),
+        self_extension_mode: input.self_extension_mode,
+        lifecycle: input.lifecycle,
+        memory_collector: input.memory_collector,
+        harness_snapshot: Some(input.snapshot.clone()),
+        context_policies: input.context_policies,
     })
+}
+
+struct ResolveSnapshotInput<'a> {
+    runtime_services: &'a RuntimeServices,
+    revision: &'a HarnessRevisionV1,
+    snapshot: &'a HarnessSnapshotV1,
+    self_extension_mode: SelfExtensionMode,
+    hooks: Arc<dyn tea_core::hooks::HookSet>,
+    plugin_tools: ToolRegistry,
+    lifecycle: PluginLifecycleRegistry,
+    memory_collector: Arc<ExtensionMemoryCollector>,
+    context_policies: ContextPolicyRegistry,
 }
 
 fn lineage_error(error: HarnessLineageError) -> HarnessError {

@@ -7,6 +7,7 @@
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tea_core::agent::AgentConfiguration;
 use tea_core::scheduler::{
     CancellationToken, ModelEventFuture, ModelEventStream, ModelFuture, ModelProvider,
     ModelRequest, ModelStreamEvent,
@@ -16,7 +17,6 @@ use tea_core::tool::{
     AgentTool, AgentToolResult, ToolCall, ToolContext, ToolFuture, ToolRegistry, ToolUpdate,
     ToolUpdateSink,
 };
-use tea_core::agent::AgentConfiguration;
 use tea_protocol::JsonValue;
 use tea_providers::{openai::OpenAiContextHook, ConfiguredProvider};
 

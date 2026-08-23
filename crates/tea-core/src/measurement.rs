@@ -7,8 +7,8 @@
 //! real cache accounting.
 
 use crate::scheduler::{AdapterRequestObservation, ModelRequest};
-use tea_protocol::JsonValue;
 use std::sync::Mutex;
+use tea_protocol::JsonValue;
 
 /// Opaque serving/cache scope.  Scope identity is equality-only: callers must
 /// not infer provider cache-key details from this value.
@@ -159,9 +159,7 @@ impl PromptLayoutLedger {
         measurement.continuity = match previous {
             None => PromptContinuity::FirstRequest,
             Some(_) if measurement.cache_domain_changed => PromptContinuity::DomainChanged,
-            Some(_) if measurement.exact_context_extension => {
-                PromptContinuity::ExactExtension
-            }
+            Some(_) if measurement.exact_context_extension => PromptContinuity::ExactExtension,
             Some(_) if measurement.common_context_prefix_bytes == 0 => {
                 PromptContinuity::Discontinuous
             }
@@ -173,7 +171,8 @@ impl PromptLayoutLedger {
                 &canonical_request_surface_bytes(request),
             )
         });
-        measurement.context_prefix_bytes = previous.map(|_| measurement.common_context_prefix_bytes);
+        measurement.context_prefix_bytes =
+            previous.map(|_| measurement.common_context_prefix_bytes);
         measurement
     }
 
@@ -427,9 +426,7 @@ pub fn measure_request_layout(
         thinking_fingerprint: thinking_fingerprint(current),
         exact_context_extension,
         append_only_context: exact_context_extension,
-        context_projection_changed: previous.is_some()
-            && same_domain
-            && !exact_context_extension,
+        context_projection_changed: previous.is_some() && same_domain && !exact_context_extension,
         adapter_serialized_request_bytes: current_adapter
             .and_then(|observation| observation.serialized_request_bytes),
         adapter_cache_domain_fingerprint: current_adapter
@@ -438,7 +435,11 @@ pub fn measure_request_layout(
     }
 }
 
-fn cache_domains_match(previous: &ModelRequest, current: &ModelRequest, current_tools: &[u8]) -> bool {
+fn cache_domains_match(
+    previous: &ModelRequest,
+    current: &ModelRequest,
+    current_tools: &[u8],
+) -> bool {
     previous.system_prompt == current.system_prompt
         && tool_definition_bytes(previous) == current_tools
         && previous.model == current.model
@@ -693,13 +694,17 @@ mod tests {
 
     #[test]
     fn require_exact_extension_keeps_first_request_but_rejects_domain_changes() {
-        let ledger = PromptLayoutLedger::default().policy(PromptLayoutPolicy::RequireExactExtension);
+        let ledger =
+            PromptLayoutLedger::default().policy(PromptLayoutPolicy::RequireExactExtension);
         let first = ledger.observe(&request("[one]"));
         assert_eq!(first.continuity, PromptContinuity::FirstRequest);
         let mut changed = request("[one][two]");
         changed.system_prompt = "changed".into();
         let domain_change = ledger.measure(&changed);
         assert_eq!(domain_change.continuity, PromptContinuity::DomainChanged);
-        assert_eq!(ledger.policy_value(), PromptLayoutPolicy::RequireExactExtension);
+        assert_eq!(
+            ledger.policy_value(),
+            PromptLayoutPolicy::RequireExactExtension
+        );
     }
 }

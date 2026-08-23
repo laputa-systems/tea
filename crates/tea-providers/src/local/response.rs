@@ -123,9 +123,10 @@ impl LocalSseDecoder {
             ));
         }
         if let Some(usage) = chunk.get("usage")
-            && !matches!(usage, JsonValue::Null) {
-                self.usage = usage.clone();
-            }
+            && !matches!(usage, JsonValue::Null)
+        {
+            self.usage = usage.clone();
+        }
         let Some(choice) = chunk
             .get("choices")
             .and_then(JsonValue::as_array)
@@ -144,9 +145,10 @@ impl LocalSseDecoder {
             return Ok(());
         };
         if let Some(content) = delta.get("content").and_then(JsonValue::as_str)
-            && !content.is_empty() {
-                events.push(ModelStreamEvent::TextDelta(content.to_owned()));
-            }
+            && !content.is_empty()
+        {
+            events.push(ModelStreamEvent::TextDelta(content.to_owned()));
+        }
         if let Some(calls) = delta.get("tool_calls").and_then(JsonValue::as_array) {
             for (position, call) in calls.iter().enumerate() {
                 let index = call
@@ -213,9 +215,10 @@ pub(super) fn parse_local_response(
     let message = object_field(choice, "message")?;
     let mut events = Vec::new();
     if let Some(content) = optional_string(message.get("content"))?
-        && !content.is_empty() {
-            events.push(ModelStreamEvent::TextDelta(content.to_owned()));
-        }
+        && !content.is_empty()
+    {
+        events.push(ModelStreamEvent::TextDelta(content.to_owned()));
+    }
     let mut has_tool_calls = false;
     if let Some(calls) = optional_array(message.get("tool_calls"))? {
         for (index, call) in calls.iter().enumerate() {

@@ -541,7 +541,9 @@ impl Agent {
             return Err(CoreError::ActiveRun { run_id });
         }
         drop(state);
-        self.inner.prompt_layout_ledger.expect_next_transition(transition);
+        self.inner
+            .prompt_layout_ledger
+            .expect_next_transition(transition);
         Ok(())
     }
 

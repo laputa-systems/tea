@@ -374,9 +374,10 @@ fn parse_response_inner(bytes: &[u8], allow_partial_sse: bool) -> Result<ParsedR
         .ok_or_else(|| "OpenRouter completion choice did not contain a message".to_owned())?;
     let mut events = Vec::new();
     if let Some(content) = message.get("content").and_then(JsonValue::as_str)
-        && !content.is_empty() {
-            events.push(ModelStreamEvent::TextDelta(content.to_owned()));
-        }
+        && !content.is_empty()
+    {
+        events.push(ModelStreamEvent::TextDelta(content.to_owned()));
+    }
     let mut has_tool_calls = false;
     if let Some(calls) = message.get("tool_calls").and_then(JsonValue::as_array) {
         for (index, call) in calls.iter().enumerate() {
@@ -549,9 +550,10 @@ impl StreamingSseDecoder {
         if !self.buffered.is_empty() {
             let line = std::mem::take(&mut self.buffered);
             if let Err(error) = self.process_line(&line, &mut events)
-                && !allow_partial {
-                    return Err(error);
-                }
+                && !allow_partial
+            {
+                return Err(error);
+            }
         }
         if !self.saw_data || (!allow_partial && !self.saw_done && self.finish_reason.is_none()) {
             return Err("OpenRouter SSE response ended before completion".to_owned());
@@ -674,9 +676,10 @@ impl StreamingSseDecoder {
             return Ok(());
         };
         if let Some(content) = delta.get("content").and_then(JsonValue::as_str)
-            && !content.is_empty() {
-                events.push_back(ModelStreamEvent::TextDelta(content.to_owned()));
-            }
+            && !content.is_empty()
+        {
+            events.push_back(ModelStreamEvent::TextDelta(content.to_owned()));
+        }
         if let Some(calls) = delta.get("tool_calls").and_then(JsonValue::as_array) {
             for (position, call) in calls.iter().enumerate() {
                 let index = call

@@ -13,13 +13,13 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
+use tea_core::agent::AgentConfiguration;
 use tea_core::compaction::AutomaticCompactionPolicy;
 use tea_core::event::AgentEventKind;
 use tea_core::harness::{
     HarnessActor, HarnessRepository, HarnessResolver, HarnessResourceLimits,
     HarnessRuntimePolicyDescriptors, HarnessSeedBuilder, ModelHarnessProfile, SelfExtensionMode,
-    ToolPresentationDescriptor,
-    SELF_EXTENSION_MODE_METADATA_KEY,
+    ToolPresentationDescriptor, SELF_EXTENSION_MODE_METADATA_KEY,
 };
 use tea_core::runtime::{
     HarnessIdentity, RuntimeServices, SessionRuntime, TeaEvent, TeaEventSubscription,
@@ -30,7 +30,6 @@ use tea_core::state::{
     ToolCallId, Usage,
 };
 use tea_core::tool::ToolExecutionMode;
-use tea_core::agent::AgentConfiguration;
 use tea_luau::LuauExtensionEngine;
 use tea_protocol::JsonValue;
 use tea_session::{
@@ -59,25 +58,51 @@ static NEXT_SESSION_NONCE: AtomicU64 = AtomicU64::new(1);
 const HOST_SESSION_METADATA_VERSION: u64 = 1;
 const MAX_HOST_SESSION_METADATA_BYTES: u64 = 65_536;
 
+pub(super) struct HostHarnessConfig<'a> {
+    pub(super) tea_home: &'a Path,
+    pub(super) workspace: &'a Path,
+    pub(super) configuration: AgentConfiguration,
+    pub(super) model: ModelDescriptor,
+    pub(super) provider: Arc<dyn ModelProvider>,
+    pub(super) thinking_level: Option<ThinkingLevel>,
+    pub(super) compactor: Option<Arc<ProviderCompactor>>,
+    pub(super) automatic_compaction: AutomaticCompactionPolicy,
+}
+
+pub(super) struct HostHarnessReopen<'a> {
+    pub(super) tea_home: &'a Path,
+    pub(super) workspace: &'a Path,
+    pub(super) session_id: &'a str,
+    pub(super) configuration: AgentConfiguration,
+    pub(super) model: ModelDescriptor,
+    pub(super) provider: Arc<dyn ModelProvider>,
+    pub(super) compactor: Option<Arc<ProviderCompactor>>,
+    pub(super) automatic_compaction: AutomaticCompactionPolicy,
+}
+
 /// Create one fresh session-local managed harness under the host-selected Tea
 /// home. The committed initial branch revision and immutable catalog exist
 /// before the harness can begin an operation.
 pub(super) fn create_host_harness(
-    tea_home: &Path,
-    workspace: &Path,
-    configuration: AgentConfiguration,
-    model: ModelDescriptor,
-    provider: Arc<dyn ModelProvider>,
-    thinking_level: ThinkingLevel,
-    compactor: Option<Arc<ProviderCompactor>>,
-    automatic_compaction: AutomaticCompactionPolicy,
+    config: HostHarnessConfig<'_>,
 ) -> Result<Arc<HostHarness>, AppError> {
+    let HostHarnessConfig {
+        tea_home,
+        workspace,
+        configuration,
+        model,
+        provider,
+        thinking_level,
+        compactor,
+        automatic_compaction,
+    } = config;
     let sessions_root = tea_home.join("sessions");
     ensure_private_directory(tea_home)?;
     ensure_private_directory(&sessions_root)?;
     let workspace_key = workspace_key(workspace);
     let workspace_root = sessions_root.join(&workspace_key);
     ensure_private_directory(&workspace_root)?;
+    let thinking_level = thinking_level.unwrap_or(ThinkingLevel::Off);
 
     let profile = model_profile(&model)?;
     let template = epoch_template(
@@ -153,7 +178,7 @@ pub(super) fn create_host_harness(
         )
         .trusted_tool_presentations(tool_presentations(&configuration))
         .seed(HarnessActor::Host, created_at_ms)
-            .map_err(|error| AppError::Setup(error.to_string()))?;
+        .map_err(|error| AppError::Setup(error.to_string()))?;
         let repository = seeded.repository;
         let snapshot = seeded.snapshot;
         let revision = seeded.revision;
@@ -300,15 +325,18 @@ pub(super) fn rebuild_host_session_metadata(
 /// header. The supervisor reconstructs its active revision from the committed
 /// catalog and semantic branch, then the caller may resume any open operation.
 pub(super) fn reopen_host_harness(
-    tea_home: &Path,
-    workspace: &Path,
-    session_id: &str,
-    configuration: AgentConfiguration,
-    selected_model: ModelDescriptor,
-    provider: Arc<dyn ModelProvider>,
-    compactor: Option<Arc<ProviderCompactor>>,
-    automatic_compaction: AutomaticCompactionPolicy,
+    input: HostHarnessReopen<'_>,
 ) -> Result<Arc<HostHarness>, AppError> {
+    let HostHarnessReopen {
+        tea_home,
+        workspace,
+        session_id,
+        configuration,
+        model,
+        provider,
+        compactor,
+        automatic_compaction,
+    } = input;
     let session_id = SessionId::new(session_id.to_owned())
         .map_err(|error| AppError::Setup(error.to_string()))?;
     let directory =
@@ -333,7 +361,7 @@ pub(super) fn reopen_host_harness(
     let stored_model = header.model.ok_or_else(|| {
         AppError::Setup("durable session header is missing its immutable model identity".into())
     })?;
-    if stored_model != selected_model {
+    if stored_model != model {
         return Err(AppError::Setup(format!(
             "durable session {} requires model {}/{}; select that exact model before reopening",
             session_id, stored_model.provider, stored_model.model
@@ -365,7 +393,7 @@ pub(super) fn reopen_host_harness(
     let template = epoch_template(
         provider,
         configuration,
-        selected_model,
+        model,
         thinking_level,
         compactor,
         automatic_compaction,
@@ -459,7 +487,7 @@ pub(super) fn project_host_messages(
                 tool_name: result.tool_name.clone(),
                 content: projected_tool_content(result),
                 details: None,
-                usage: Some(core_usage(&result.usage)),
+                usage: Box::new(Some(core_usage(&result.usage))),
                 added_tool_names: Vec::new(),
                 terminate: result.terminate,
                 is_error: result.is_error,
@@ -1150,16 +1178,16 @@ mod tests {
             model: "fixture-model".into(),
             revision: Some("fixture-revision".into()),
         };
-        let harness = create_host_harness(
-            &home,
-            &workspace,
+        let harness = create_host_harness(HostHarnessConfig {
+            tea_home: &home,
+            workspace: &workspace,
             configuration,
             model,
-            Arc::new(StopProvider),
-            ThinkingLevel::Off,
-            None,
-            AutomaticCompactionPolicy::disabled(),
-        )
+            provider: Arc::new(StopProvider),
+            thinking_level: Some(ThinkingLevel::Off),
+            compactor: None,
+            automatic_compaction: AutomaticCompactionPolicy::disabled(),
+        })
         .expect("host harness creates");
         let before = harness.snapshot().expect("initial session snapshot");
         assert!(before
@@ -1186,24 +1214,23 @@ mod tests {
         let home = temporary_home();
         let workspace = home.join("workspace");
         fs::create_dir(&workspace).expect("workspace creates");
-        let configuration = host_configuration(
-            TeaCodingToolsV2::new(&workspace).expect("Tea v2 tools configure"),
-        )
-        .expect("durable host configuration assembles");
-        let harness = create_host_harness(
-            &home,
-            &workspace,
+        let configuration =
+            host_configuration(TeaCodingToolsV2::new(&workspace).expect("Tea v2 tools configure"))
+                .expect("durable host configuration assembles");
+        let harness = create_host_harness(HostHarnessConfig {
+            tea_home: &home,
+            workspace: &workspace,
             configuration,
-            ModelDescriptor {
+            model: ModelDescriptor {
                 provider: "openrouter".into(),
                 model: "fixture-model".into(),
                 revision: None,
             },
-            Arc::new(ContextCheckingProvider),
-            ThinkingLevel::Off,
-            None,
-            AutomaticCompactionPolicy::disabled(),
-        )
+            provider: Arc::new(ContextCheckingProvider),
+            thinking_level: Some(ThinkingLevel::Off),
+            compactor: None,
+            automatic_compaction: AutomaticCompactionPolicy::disabled(),
+        })
         .expect("durable host harness creates");
 
         smol::block_on(harness.run_prompt("hello"))
@@ -1228,16 +1255,16 @@ mod tests {
             revision: Some("fixture-revision".into()),
         };
         let provider: Arc<dyn ModelProvider> = Arc::new(StopProvider);
-        let harness = create_host_harness(
-            &home,
-            &workspace,
-            configuration.clone(),
-            model.clone(),
-            Arc::clone(&provider),
-            ThinkingLevel::High,
-            None,
-            AutomaticCompactionPolicy::disabled(),
-        )
+        let harness = create_host_harness(HostHarnessConfig {
+            tea_home: &home,
+            workspace: &workspace,
+            configuration: configuration.clone(),
+            model: model.clone(),
+            provider: Arc::clone(&provider),
+            thinking_level: Some(ThinkingLevel::High),
+            compactor: None,
+            automatic_compaction: AutomaticCompactionPolicy::disabled(),
+        })
         .expect("host harness creates");
         smol::block_on(harness.run_prompt("retain this durable prompt"))
             .expect("durable prompt settles");
@@ -1250,16 +1277,16 @@ mod tests {
         assert_eq!(listed[0].id, session_id);
         assert_eq!(listed[0].model, Some(model.clone()));
 
-        let reopened = reopen_host_harness(
-            &home,
-            &workspace,
-            &session_id,
+        let reopened = reopen_host_harness(HostHarnessReopen {
+            tea_home: &home,
+            workspace: &workspace,
+            session_id: &session_id,
             configuration,
             model,
             provider,
-            None,
-            AutomaticCompactionPolicy::disabled(),
-        )
+            compactor: None,
+            automatic_compaction: AutomaticCompactionPolicy::disabled(),
+        })
         .expect("host reopen reconstructs the durable manager");
         let after = reopened.snapshot().expect("reopened durable snapshot");
         assert_eq!(after.last_sequence(), before.last_sequence());
@@ -1292,16 +1319,16 @@ mod tests {
             model: "fixture-model".into(),
             revision: None,
         };
-        let harness = create_host_harness(
-            &home,
-            &workspace,
+        let harness = create_host_harness(HostHarnessConfig {
+            tea_home: &home,
+            workspace: &workspace,
             configuration,
-            model.clone(),
-            Arc::new(StopProvider),
-            ThinkingLevel::Off,
-            None,
-            AutomaticCompactionPolicy::disabled(),
-        )
+            model: model.clone(),
+            provider: Arc::new(StopProvider),
+            thinking_level: Some(ThinkingLevel::Off),
+            compactor: None,
+            automatic_compaction: AutomaticCompactionPolicy::disabled(),
+        })
         .expect("host harness creates");
         let session_id = harness
             .snapshot()
@@ -1400,24 +1427,24 @@ mod tests {
         let home = temporary_home();
         let workspace = home.join("workspace");
         fs::create_dir(&workspace).expect("workspace creates");
-        let harness = create_host_harness(
-            &home,
-            &workspace,
-            AgentConfiguration::new(
+        let harness = create_host_harness(HostHarnessConfig {
+            tea_home: &home,
+            workspace: &workspace,
+            configuration: AgentConfiguration::new(
                 "trusted system prompt",
                 ToolRegistry::default(),
                 Arc::new(NoHooks),
             ),
-            ModelDescriptor {
+            model: ModelDescriptor {
                 provider: "fixture".into(),
                 model: "fixture-model".into(),
                 revision: None,
             },
-            Arc::new(StopProvider),
-            ThinkingLevel::Off,
-            None,
-            AutomaticCompactionPolicy::disabled(),
-        )
+            provider: Arc::new(StopProvider),
+            thinking_level: Some(ThinkingLevel::Off),
+            compactor: None,
+            automatic_compaction: AutomaticCompactionPolicy::disabled(),
+        })
         .expect("host harness creates");
         let snapshot = harness.snapshot().expect("session snapshot");
         let directory = session_workspace_root(&home, &workspace)
@@ -1445,24 +1472,24 @@ mod tests {
         let home = temporary_home();
         let workspace = home.join("workspace");
         fs::create_dir(&workspace).expect("workspace creates");
-        let harness = create_host_harness(
-            &home,
-            &workspace,
-            AgentConfiguration::new(
+        let harness = create_host_harness(HostHarnessConfig {
+            tea_home: &home,
+            workspace: &workspace,
+            configuration: AgentConfiguration::new(
                 "trusted system prompt",
                 ToolRegistry::default(),
                 Arc::new(NoHooks),
             ),
-            ModelDescriptor {
+            model: ModelDescriptor {
                 provider: "fixture".into(),
                 model: "fixture-model".into(),
                 revision: None,
             },
-            Arc::new(StopProvider),
-            ThinkingLevel::Off,
-            None,
-            AutomaticCompactionPolicy::disabled(),
-        )
+            provider: Arc::new(StopProvider),
+            thinking_level: Some(ThinkingLevel::Off),
+            compactor: None,
+            automatic_compaction: AutomaticCompactionPolicy::disabled(),
+        })
         .expect("host harness creates");
         let expected = harness.snapshot().expect("session snapshot");
         let directory = session_workspace_root(&home, &workspace)
@@ -1507,20 +1534,20 @@ mod tests {
             ToolRegistry::default(),
             Arc::new(NoHooks),
         );
-        let harness = create_host_harness(
-            &home,
-            &workspace,
+        let harness = create_host_harness(HostHarnessConfig {
+            tea_home: &home,
+            workspace: &workspace,
             configuration,
-            ModelDescriptor {
+            model: ModelDescriptor {
                 provider: "fixture".into(),
                 model: "fixture-model".into(),
                 revision: None,
             },
-            Arc::new(StopProvider),
-            ThinkingLevel::Off,
-            None,
-            AutomaticCompactionPolicy::disabled(),
-        )
+            provider: Arc::new(StopProvider),
+            thinking_level: Some(ThinkingLevel::Off),
+            compactor: None,
+            automatic_compaction: AutomaticCompactionPolicy::disabled(),
+        })
         .expect("host harness creates");
         let session_id = harness
             .snapshot()
@@ -1560,20 +1587,20 @@ mod tests {
             model: "fixture-model".into(),
             revision: None,
         };
-        let harness = create_host_harness(
-            &home,
-            &workspace,
-            AgentConfiguration::new(
+        let harness = create_host_harness(HostHarnessConfig {
+            tea_home: &home,
+            workspace: &workspace,
+            configuration: AgentConfiguration::new(
                 "trusted system prompt",
                 ToolRegistry::default(),
                 Arc::new(NoHooks),
             ),
             model,
-            Arc::new(StopProvider),
-            ThinkingLevel::Off,
-            None,
-            AutomaticCompactionPolicy::disabled(),
-        )
+            provider: Arc::new(StopProvider),
+            thinking_level: Some(ThinkingLevel::Off),
+            compactor: None,
+            automatic_compaction: AutomaticCompactionPolicy::disabled(),
+        })
         .expect("host harness creates");
         let session_id = harness
             .snapshot()

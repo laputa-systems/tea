@@ -140,10 +140,7 @@ impl HarnessSeedBuilder {
     }
 
     /// Install exact trusted host tool presentations in model-visible order.
-    pub fn trusted_tool_presentations(
-        mut self,
-        tools: Vec<ToolPresentationDescriptor>,
-    ) -> Self {
+    pub fn trusted_tool_presentations(mut self, tools: Vec<ToolPresentationDescriptor>) -> Self {
         self.trusted_tool_presentations = tools;
         self
     }
@@ -167,11 +164,12 @@ impl HarnessSeedBuilder {
         created_at_ms: u64,
     ) -> Result<SeededHarness, HarnessError> {
         self.profile.verify_identity()?;
-        validate_self_extension(self.self_extension_mode, self.self_extension_addendum.as_deref())?;
-        let mut repository = HarnessRepository::with_extension_engine(
-            self.artifacts,
-            self.extension_engine,
-        );
+        validate_self_extension(
+            self.self_extension_mode,
+            self.self_extension_addendum.as_deref(),
+        )?;
+        let mut repository =
+            HarnessRepository::with_extension_engine(self.artifacts, self.extension_engine);
         let mut global_plugins = Vec::new();
         let mut session_plugins = Vec::new();
         let mut extension_ids = BTreeSet::new();
@@ -194,11 +192,9 @@ impl HarnessSeedBuilder {
                 .files
                 .into_iter()
                 .map(|(relative, contents)| {
-                    let path = NormalizedPath::new(format!(
-                        "plugins/{}/{relative}",
-                        source.extension_id,
-                    ))
-                    .map_err(|error| HarnessError::invalid_state(error.to_string()))?;
+                    let path =
+                        NormalizedPath::new(format!("plugins/{}/{relative}", source.extension_id,))
+                            .map_err(|error| HarnessError::invalid_state(error.to_string()))?;
                     let media_type = if relative == "manifest.json" {
                         "application/json"
                     } else if relative.ends_with(".luau") {

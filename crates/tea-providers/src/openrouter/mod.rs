@@ -688,9 +688,10 @@ impl OpenRouterProvider {
                 .header("Content-Type", "application/json")
                 .with_stall_timeout(self.config.stall_timeout);
             if let Ok(output) = run_http(request, cancellation)
-                && let Some(cost) = parse_generation_cost(&output.body, usage) {
-                    return Some(cost);
-                }
+                && let Some(cost) = parse_generation_cost(&output.body, usage)
+            {
+                return Some(cost);
+            }
             if attempt < self.config.retry_policy.max_retries()
                 && !super::retry::wait_with_cancellation(
                     self.config.retry_policy.delay_before_retry(attempt),
@@ -1146,7 +1147,8 @@ data: [DONE]
                     schema: JsonValue::Object(std::collections::BTreeMap::new()),
                     execution_mode: ToolExecutionMode::Sequential,
                     requires_exclusive_batch: false,
-                    cancellation_settlement_mode: crate::tool::CancellationSettlementMode::DropFuture,
+                    cancellation_settlement_mode:
+                        crate::tool::CancellationSettlementMode::DropFuture,
                 }],
                 ..ModelRequest::default()
             },

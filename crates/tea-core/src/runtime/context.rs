@@ -809,14 +809,14 @@ fn message_for_entry(
                 tool_name: result.tool_name.clone(),
                 content,
                 details: details.map(SerializedJson::new),
-                usage: Some(tea_core::state::Usage {
+                usage: Box::new(Some(tea_core::state::Usage {
                     input_tokens: result.usage.input_tokens,
                     output_tokens: result.usage.output_tokens,
                     reasoning_tokens: result.usage.reasoning_tokens,
                     cache_read_tokens: result.usage.cache_read_tokens,
                     cache_write_tokens: result.usage.cache_write_tokens,
                     cost: result.usage.cost.clone(),
-                }),
+                })),
                 added_tool_names: Vec::new(),
                 terminate: result.terminate,
                 is_error: result.is_error,
@@ -1029,6 +1029,7 @@ fn canonical_message_json(message: &AgentMessage) -> Result<String, HarnessError
                 (
                     "usage",
                     usage
+                        .as_ref()
                         .as_ref()
                         .map(canonical_usage)
                         .unwrap_or(JsonValue::Null),

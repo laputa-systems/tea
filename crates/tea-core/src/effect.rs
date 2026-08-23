@@ -334,7 +334,7 @@ pub enum EffectOutcome {
     /// Result of one physical provider request.
     ProviderRequest(ProviderEffectOutcome),
     /// Result of one tool capability execution.
-    ToolExecution(ToolEffectOutcome),
+    ToolExecution(Box<ToolEffectOutcome>),
     /// Result of one host hook invocation.
     HookInvocation(HookEffectOutcome),
     /// Result of a host timer.

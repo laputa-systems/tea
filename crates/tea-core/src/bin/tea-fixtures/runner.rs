@@ -4,6 +4,8 @@ use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Poll, Waker};
+use tea_core::Agent;
+use tea_core::error::CoreError;
 use tea_core::event::{AgentEvent, AgentEventKind, EventObserver, ObserverFuture};
 use tea_core::hooks::{
     AfterToolCall, AgentLoopTurnUpdate, BeforeToolCall, ContextEnvelope, HookFuture, HookSet,
@@ -16,8 +18,6 @@ use tea_core::state::{AgentMessage, AgentPhase, ModelDescriptor, SerializedJson,
 use tea_core::tool::{
     AgentTool, AgentToolResult, ToolCall, ToolContext, ToolFuture, ToolUpdateSink,
 };
-use tea_core::error::CoreError;
-use tea_core::Agent;
 use tea_protocol::JsonValue;
 
 use super::fixture::{

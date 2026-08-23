@@ -1,4 +1,5 @@
 //! `tea` command-line entry point.
+#![allow(clippy::result_large_err)]
 
 use tea_agent::{run_session_command, App, AppError, CliCommand, CliOptions};
 use tea_protocol::JsonValue;

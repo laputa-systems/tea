@@ -114,7 +114,9 @@ fn json_optional_cache_evidence(output: &mut String, evidence: Option<&CacheEvid
     json_field_optional_number(
         output,
         "common_context_prefix_ratio_millionths",
-        evidence.common_context_prefix_ratio_millionths.map(u64::from),
+        evidence
+            .common_context_prefix_ratio_millionths
+            .map(u64::from),
     );
     output.push(',');
     json_field_optional_bool(
@@ -145,7 +147,11 @@ fn json_optional_cache_evidence(output: &mut String, evidence: Option<&CacheEvid
     output.push(',');
     json_field_optional_number(output, "model_fingerprint", evidence.model_fingerprint);
     output.push(',');
-    json_field_optional_number(output, "thinking_fingerprint", evidence.thinking_fingerprint);
+    json_field_optional_number(
+        output,
+        "thinking_fingerprint",
+        evidence.thinking_fingerprint,
+    );
     output.push(',');
     json_field_optional_number(
         output,

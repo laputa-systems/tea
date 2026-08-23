@@ -5,6 +5,7 @@
 //! or MCP authority; a host binds each declared capability explicitly.
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
+#![allow(clippy::result_large_err)]
 
 /// Caller-driven coroutine support for explicit asynchronous capabilities.
 pub mod async_runtime;

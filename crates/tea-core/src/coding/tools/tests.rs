@@ -43,7 +43,8 @@ impl CodingOperations for BatchProbeOperations {
             let mut total = 0_usize;
             let mut snapshots = Vec::with_capacity(paths.len());
             for path in paths {
-                let content = fs::read(path).map_err(|error| OperationError::new(error.to_string()))?;
+                let content =
+                    fs::read(path).map_err(|error| OperationError::new(error.to_string()))?;
                 total = total.saturating_add(content.len());
                 if total > max_total_bytes {
                     return Err(OperationError::new("snapshot limit exceeded"));
@@ -290,8 +291,14 @@ fn tea_v2_edit_applies_all_files_from_one_original_snapshot() {
     .expect("v2 transaction should commit");
 
     assert_eq!(result.content, "Applied 2 replacements in 2 files.");
-    assert_eq!(fs::read_to_string(root.join("first.txt")).unwrap(), "after first\n");
-    assert_eq!(fs::read_to_string(root.join("second.txt")).unwrap(), "after second\n");
+    assert_eq!(
+        fs::read_to_string(root.join("first.txt")).unwrap(),
+        "after first\n"
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("second.txt")).unwrap(),
+        "after second\n"
+    );
     assert!(tools.edit().requires_exclusive_batch());
     fs::remove_dir_all(root).unwrap();
 }
@@ -348,8 +355,14 @@ fn tea_v2_edit_rejects_any_invalid_file_before_writing_another() {
     .expect_err("a nonmatching file must reject the whole transaction");
 
     assert!(matches!(error, ToolError::Execution { tool, .. } if tool == "edit"));
-    assert_eq!(fs::read_to_string(root.join("first.txt")).unwrap(), "before first\n");
-    assert_eq!(fs::read_to_string(root.join("second.txt")).unwrap(), "before second\n");
+    assert_eq!(
+        fs::read_to_string(root.join("first.txt")).unwrap(),
+        "before first\n"
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("second.txt")).unwrap(),
+        "before second\n"
+    );
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -387,7 +400,10 @@ fn tea_v2_edit_rejects_duplicate_canonical_paths_and_stale_digests() {
         ToolUpdateSink::disabled(),
     ));
     assert!(matches!(stale, Err(ToolError::Execution { tool, .. }) if tool == "edit"));
-    assert_eq!(fs::read_to_string(root.join("nested/file.txt")).unwrap(), "before\n");
+    assert_eq!(
+        fs::read_to_string(root.join("nested/file.txt")).unwrap(),
+        "before\n"
+    );
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -415,7 +431,10 @@ fn tea_v2_edit_rejects_overlap_non_utf8_non_regular_and_oversized_snapshots() {
         assert!(matches!(error, ToolError::Execution { tool, .. } if tool == "edit"));
     }
 
-    assert_eq!(fs::read_to_string(root.join("overlap.txt")).unwrap(), "abcdef\n");
+    assert_eq!(
+        fs::read_to_string(root.join("overlap.txt")).unwrap(),
+        "abcdef\n"
+    );
     assert_eq!(fs::read(root.join("binary.dat")).unwrap(), [0xff, 0xfe]);
     fs::remove_dir_all(root).unwrap();
 }
@@ -442,10 +461,9 @@ fn local_edit_transaction_revalidates_every_preimage_and_honors_precommit_cancel
         ],
     };
     let operations = LocalCodingOperations;
-    let stale = smol::block_on(
-        operations.commit_edit_transaction(&transaction, CancellationToken::new()),
-    )
-    .expect("stale precondition has a transaction outcome");
+    let stale =
+        smol::block_on(operations.commit_edit_transaction(&transaction, CancellationToken::new()))
+            .expect("stale precondition has a transaction outcome");
     assert!(matches!(stale, EditTransactionOutcome::RolledBack { .. }));
     assert_eq!(fs::read(&first).unwrap(), b"first-original");
     assert_eq!(fs::read(&second).unwrap(), b"second-changed");

@@ -285,7 +285,11 @@ fn history_search_excerpt(
         let source_index = start + index;
         text.push(*character);
         styles.push(
-            if match_byte.is_some() && (match_start..match_end).contains(&source_index) { match_style } else { body_style },
+            if match_byte.is_some() && (match_start..match_end).contains(&source_index) {
+                match_style
+            } else {
+                body_style
+            },
         );
     }
     if trailing_ellipsis {
@@ -476,8 +480,12 @@ fn wrap_footer_primary(text: &str, width: u16) -> Vec<RenderLine> {
                     .find(character)
                     .map(|offset| source_offset + offset)
                     .unwrap_or(source_offset);
-                let style = if model_range
-                    .is_some_and(|(start, end)| (start..end).contains(&found)) { model } else { muted };
+                let style = if model_range.is_some_and(|(start, end)| (start..end).contains(&found))
+                {
+                    model
+                } else {
+                    muted
+                };
                 styles.push(style);
                 source_offset = found.saturating_add(character.len_utf8());
             }

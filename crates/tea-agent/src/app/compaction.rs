@@ -14,9 +14,7 @@ use tea_core::compaction::{
 };
 use tea_core::hooks::{ContextEnvelope, HookSet};
 use tea_core::scheduler::{CancellationToken, ModelProvider, ModelRequest, ModelStreamEvent};
-use tea_core::state::{
-    AgentMessage, MessageId, ModelDescriptor, StopReason, ThinkingLevel, Usage,
-};
+use tea_core::state::{AgentMessage, MessageId, ModelDescriptor, StopReason, ThinkingLevel, Usage};
 use tea_protocol::JsonValue;
 use tea_providers::openai::OpenAiContextHook;
 

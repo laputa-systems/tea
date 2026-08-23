@@ -58,8 +58,8 @@ impl CodingOperations for NonblockingCodingOperations {
     fn metadata<'a>(&'a self, path: &'a Path) -> OperationFuture<'a, EntryMetadata> {
         let path = path.to_path_buf();
         Box::pin(smol::unblock(move || {
-            let metadata = fs::metadata(path)
-                .map_err(|error| OperationError::new(error.to_string()))?;
+            let metadata =
+                fs::metadata(path).map_err(|error| OperationError::new(error.to_string()))?;
             Ok(EntryMetadata {
                 is_directory: metadata.is_dir(),
                 is_regular_file: metadata.is_file(),
@@ -95,8 +95,8 @@ impl CodingOperations for NonblockingCodingOperations {
         let path = path.to_path_buf();
         Box::pin(smol::unblock(move || {
             let mut entries = Vec::new();
-            for entry in fs::read_dir(path)
-                .map_err(|error| OperationError::new(error.to_string()))?
+            for entry in
+                fs::read_dir(path).map_err(|error| OperationError::new(error.to_string()))?
             {
                 let entry = entry.map_err(|error| OperationError::new(error.to_string()))?;
                 let metadata = entry
@@ -216,7 +216,9 @@ fn execute_command_blocking(
         if cancellation.is_cancelled() {
             let result = terminate_and_reap(&mut child);
             remove_captures(&stdout_path, &stderr_path);
-            return result.map(|_| ()).and_then(|_| Err(OperationError::new("cancelled")));
+            return result
+                .map(|_| ())
+                .and_then(|_| Err(OperationError::new("cancelled")));
         }
         if timeout.is_some_and(|limit| started.elapsed() >= limit) {
             let result = terminate_and_reap(&mut child);
@@ -436,7 +438,10 @@ mod tests {
         fs::write(root.join("first.release"), b"").expect("first command releases");
         fs::write(root.join("second.release"), b"").expect("second command releases");
         let (first, second) = smol::block_on(async { smol::future::zip(first, second).await });
-        assert!(both_started, "both commands must start before either is released");
+        assert!(
+            both_started,
+            "both commands must start before either is released"
+        );
         assert_eq!(first.expect("first command").stdout, b"first-done");
         assert_eq!(second.expect("second command").stdout, b"second-done");
         drop(release_guard);
@@ -460,20 +465,19 @@ mod tests {
         let call = ToolCall {
             id: ToolCallId::new("stream").expect("call ID"),
             name: "bash".into(),
-            arguments: SerializedJson::new(r#"{"command":"printf first; sleep 0.2; printf second"}"#),
+            arguments: SerializedJson::new(
+                r#"{"command":"printf first; sleep 0.2; printf second"}"#,
+            ),
         };
         let updates = ToolUpdateSink::new(move |update| {
             let _ = sender.try_send(update);
         });
         let task = smol::spawn(async move { tool.execute(call, context, updates).await });
         let update = smol::block_on(async {
-            smol::future::race(
-                receiver.recv(),
-                async {
-                    smol::Timer::after(Duration::from_secs(1)).await;
-                    Err(smol::channel::RecvError)
-                },
-            )
+            smol::future::race(receiver.recv(), async {
+                smol::Timer::after(Duration::from_secs(1)).await;
+                Err(smol::channel::RecvError)
+            })
             .await
         })
         .expect("streamed update arrives");
@@ -509,7 +513,10 @@ mod tests {
         cancellation.cancel();
         let result = smol::block_on(task);
         assert!(started.elapsed() < Duration::from_millis(500));
-        assert_eq!(result.expect_err("cancellation should fail"), OperationError::new("cancelled"));
+        assert_eq!(
+            result.expect_err("cancellation should fail"),
+            OperationError::new("cancelled")
+        );
         let _ = fs::remove_dir_all(root);
     }
 }

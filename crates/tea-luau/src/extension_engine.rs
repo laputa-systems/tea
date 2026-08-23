@@ -87,11 +87,14 @@ impl ExtensionEngine for LuauExtensionEngine {
                     policy: Arc::clone(&policy),
                 }) as Arc<dyn ExtensionContextPolicy>
             });
-        let lifecycle = policy.has_resume_hooks().map_err(extension_error)?.then(|| {
-            Arc::new(LuauPolicyAdapter {
-                policy: Arc::clone(&policy),
-            }) as Arc<dyn ExtensionLifecycle>
-        });
+        let lifecycle = policy
+            .has_resume_hooks()
+            .map_err(extension_error)?
+            .then(|| {
+                Arc::new(LuauPolicyAdapter {
+                    policy: Arc::clone(&policy),
+                }) as Arc<dyn ExtensionLifecycle>
+            });
         Ok(ResolvedExtension {
             hooks,
             tools,

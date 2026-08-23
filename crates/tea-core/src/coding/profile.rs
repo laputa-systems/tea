@@ -208,8 +208,10 @@ impl TeaDefaultCodingProfileV2 {
         };
         spec.validate()?;
         let contract_digest = tea_v2_contract_digest(&profile_id, &spec);
-        let captured_digest = Digest::from_hex(profile_string(root, "contract_digest")?)
-            .map_err(|error| ProfileError::new(format!("invalid Tea v2 contract digest: {error}")))?;
+        let captured_digest =
+            Digest::from_hex(profile_string(root, "contract_digest")?).map_err(|error| {
+                ProfileError::new(format!("invalid Tea v2 contract digest: {error}"))
+            })?;
         if contract_digest != captured_digest {
             return Err(ProfileError::new(format!(
                 "Tea v2 executable contract differs from its capture: expected {}, got {}",

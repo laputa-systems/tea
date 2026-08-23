@@ -2,8 +2,8 @@ use super::{HarnessIdentity, RuntimeServices, SessionRuntime};
 use crate::harness::extension::NoExtensions;
 use crate::harness::{
     HarnessActor, HarnessRepository, HarnessResolver, HarnessResourceLimits, HarnessSnapshotSpec,
-    PromptSectionDescriptor, SelfExtensionMode, ToolPresentationDescriptor,
-    SELF_EXTENSION_MODE_METADATA_KEY,
+    PromptSectionDescriptor, SELF_EXTENSION_MODE_METADATA_KEY, SelfExtensionMode,
+    ToolPresentationDescriptor,
 };
 use crate::scheduler::{
     CancellationToken, ModelFuture, ModelProvider, ModelRequest, ModelStream, ModelStreamEvent,
@@ -16,8 +16,8 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use tea_protocol::JsonValue;
 use tea_session::{
-    ArtifactStore, Digest, EntryId, HarnessRevisionChangedEntry, LaneId, LaneRecord,
-    DurabilityMode, JsonlSession, MemoryArtifactStore, MemorySession, ModelHarnessProfileId,
+    ArtifactStore, Digest, DurabilityMode, EntryId, HarnessRevisionChangedEntry, JsonlSession,
+    LaneId, LaneRecord, MemoryArtifactStore, MemorySession, ModelHarnessProfileId,
     ProvisionedEntry, SessionEntry, SessionFact, SessionHeader, SessionId, SessionWriter,
 };
 
@@ -113,7 +113,8 @@ fn fixture_manager(
     provider: Arc<dyn ModelProvider>,
     store: Arc<MemoryArtifactStore>,
 ) -> (Arc<HarnessResolver>, HarnessIdentity) {
-    let mut repository = HarnessRepository::with_extension_engine(store.clone(), Arc::new(NoExtensions));
+    let mut repository =
+        HarnessRepository::with_extension_engine(store.clone(), Arc::new(NoExtensions));
     let snapshot = repository
         .stage_snapshot(snapshot_spec())
         .expect("no-extension snapshot stages");
@@ -129,9 +130,9 @@ fn fixture_manager(
     tools.insert(Arc::new(RecordingTool));
     (
         Arc::new(HarnessResolver::new(
-        repository,
-        RuntimeServices::new(provider, tools),
-        Default::default(),
+            repository,
+            RuntimeServices::new(provider, tools),
+            Default::default(),
         )),
         identity,
     )
@@ -146,10 +147,7 @@ fn fixture_metadata() -> tea_session::Metadata {
     .collect()
 }
 
-fn append_initial_revision<S: SessionWriter>(
-    session: &mut S,
-    identity: &HarnessIdentity,
-) {
+fn append_initial_revision<S: SessionWriter>(session: &mut S, identity: &HarnessIdentity) {
     session
         .append_entry(
             &LaneId::main(),
@@ -172,13 +170,11 @@ fn build_runtime(
     store: Arc<MemoryArtifactStore>,
 ) -> (SessionRuntime<MemorySession>, HarnessIdentity) {
     let (manager, identity) = fixture_manager(provider, store.clone());
-    let mut session = MemorySession::create(
-        SessionHeader::new(
-            SessionId::new(session_id).expect("fixture session ID"),
-            "runtime-test-workspace",
-            fixture_metadata(),
-        ),
-    )
+    let mut session = MemorySession::create(SessionHeader::new(
+        SessionId::new(session_id).expect("fixture session ID"),
+        "runtime-test-workspace",
+        fixture_metadata(),
+    ))
     .expect("fixture session creates");
     append_initial_revision(&mut session, &identity);
     (
@@ -221,13 +217,18 @@ fn no_extension_runtime_persists_intents_trace_and_verifies() {
             .expect("runtime operation settles");
         assert!(operation.is_completed());
         let snapshot = runtime.snapshot().expect("durable snapshot is readable");
-        assert!(snapshot.records().iter().any(|stored| {
-            matches!(stored.record, LaneRecord::ProviderRequestStarted(_))
-        }));
-        assert!(snapshot
-            .records()
-            .iter()
-            .any(|stored| matches!(stored.record, LaneRecord::ToolStarted(_))));
+        assert!(
+            snapshot
+                .records()
+                .iter()
+                .any(|stored| { matches!(stored.record, LaneRecord::ProviderRequestStarted(_)) })
+        );
+        assert!(
+            snapshot
+                .records()
+                .iter()
+                .any(|stored| matches!(stored.record, LaneRecord::ToolStarted(_)))
+        );
         assert_eq!(
             snapshot
                 .entries()
@@ -251,13 +252,14 @@ fn no_extension_runtime_persists_intents_trace_and_verifies() {
         let trace_bytes = store
             .get(trace.artifact_id)
             .expect("retained trace artifact remains reachable");
-        assert!(std::str::from_utf8(&trace_bytes)
-            .expect("trace is JSON Lines")
-            .contains(r#""type":"episode_end""#));
+        assert!(
+            std::str::from_utf8(&trace_bytes)
+                .expect("trace is JSON Lines")
+                .contains(r#""type":"episode_end""#)
+        );
         runtime
             .verify_durable_state()
             .expect("runtime verifies its catalog and reachable artifacts");
-
     });
 }
 
@@ -287,8 +289,9 @@ fn jsonl_runtime_reopens_the_persisted_no_extension_catalog() {
     )
     .expect("fixture JSONL session creates");
     append_initial_revision(&mut session, &identity);
-    let runtime = SessionRuntime::new_with_artifact_store(session, manager, identity, store.clone())
-        .expect("runtime persists its immutable catalog");
+    let runtime =
+        SessionRuntime::new_with_artifact_store(session, manager, identity, store.clone())
+            .expect("runtime persists its immutable catalog");
     let expected_sequence = runtime
         .snapshot()
         .expect("created runtime snapshot is readable")
@@ -300,18 +303,16 @@ fn jsonl_runtime_reopens_the_persisted_no_extension_catalog() {
     let reopened_provider = Arc::new(QueuedProvider {
         streams: Mutex::new(VecDeque::new()),
     });
-    let empty_repository = HarnessRepository::with_extension_engine(store.clone(), Arc::new(NoExtensions));
+    let empty_repository =
+        HarnessRepository::with_extension_engine(store.clone(), Arc::new(NoExtensions));
     let reopened_manager = Arc::new(HarnessResolver::new(
         empty_repository,
         RuntimeServices::new(reopened_provider, ToolRegistry::default()),
         Default::default(),
     ));
-    let reopened = SessionRuntime::reopen_with_artifact_store(
-        reopened_session,
-        reopened_manager,
-        store,
-    )
-    .expect("runtime restores the catalog from durable state");
+    let reopened =
+        SessionRuntime::reopen_with_artifact_store(reopened_session, reopened_manager, store)
+            .expect("runtime restores the catalog from durable state");
     assert_eq!(
         reopened
             .snapshot()
@@ -354,7 +355,10 @@ fn live_runtime_joins_prompt_layout_across_fresh_operations() {
         });
         let store = Arc::new(MemoryArtifactStore::default());
         let (runtime, _) = build_runtime("runtime-prompt-layout", provider, store.clone());
-        let first = runtime.run_prompt("first operation").await.expect("first settles");
+        let first = runtime
+            .run_prompt("first operation")
+            .await
+            .expect("first settles");
         let second = runtime
             .run_prompt("second operation")
             .await
@@ -364,12 +368,14 @@ fn live_runtime_joins_prompt_layout_across_fresh_operations() {
             .facts()
             .iter()
             .filter_map(|stored| match &stored.fact {
-                SessionFact::TraceArtifact(trace) if trace.operation_id == *first.id() => {
-                    Some((false, store.get(trace.artifact_id).expect("trace artifact reads")))
-                }
-                SessionFact::TraceArtifact(trace) if trace.operation_id == *second.id() => {
-                    Some((true, store.get(trace.artifact_id).expect("trace artifact reads")))
-                }
+                SessionFact::TraceArtifact(trace) if trace.operation_id == *first.id() => Some((
+                    false,
+                    store.get(trace.artifact_id).expect("trace artifact reads"),
+                )),
+                SessionFact::TraceArtifact(trace) if trace.operation_id == *second.id() => Some((
+                    true,
+                    store.get(trace.artifact_id).expect("trace artifact reads"),
+                )),
                 _ => None,
             })
             .collect::<Vec<_>>();

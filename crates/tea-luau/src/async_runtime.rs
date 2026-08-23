@@ -475,7 +475,6 @@ mod tests {
         type Output = Result<String, HostCallError>;
 
         fn poll(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Self::Output> {
-            let _ = self;
             Poll::Pending
         }
     }

@@ -181,9 +181,10 @@ impl RunHandle {
             .await?;
             let mut preparation = self.prepare_tool_call(agent, &mut call).await?;
             if let PreparedToolCall::Immediate { result, terminate } = &mut preparation {
-                normalize_result_failure(result);
-                self.emit_tool_execution_end(agent, &call, result).await?;
-                completions[source_index] = Some((result.clone(), *terminate));
+                normalize_result_failure(result.as_mut());
+                self.emit_tool_execution_end(agent, &call, result.as_ref())
+                    .await?;
+                completions[source_index] = Some((result.as_ref().clone(), *terminate));
             }
             prepared.push(PreparedToolExecution {
                 source_index,
@@ -202,7 +203,7 @@ impl RunHandle {
                 pending.push(PendingToolExecution {
                     source_index: prepared_call.source_index,
                     call: prepared_call.call.clone(),
-                    effect: effect.clone(),
+                    effect: (**effect).clone(),
                     cancellation_settlement_mode: tool.cancellation_settlement_mode(),
                     future,
                 });
@@ -231,10 +232,10 @@ impl RunHandle {
                         result.failure = Some(crate::tool::ToolFailure::cancelled());
                         self.settle_effect(
                             pending_call.effect,
-                            EffectOutcome::ToolExecution(ToolEffectOutcome {
+                            EffectOutcome::ToolExecution(Box::new(ToolEffectOutcome {
                                 raw_result: result.clone(),
                                 result: result.clone(),
-                            }),
+                            })),
                         )
                         .await?;
                         self.emit_tool_execution_end(agent, &pending_call.call, &result)
@@ -294,10 +295,10 @@ impl RunHandle {
                                     result.failure = Some(crate::tool::ToolFailure::cancelled());
                                     self.settle_effect(
                                         pending_call.effect,
-                                        EffectOutcome::ToolExecution(ToolEffectOutcome {
+                                        EffectOutcome::ToolExecution(Box::new(ToolEffectOutcome {
                                             raw_result: result.clone(),
                                             result: result.clone(),
-                                        }),
+                                        })),
                                     )
                                     .await?;
                                     (result, false)
@@ -372,7 +373,7 @@ impl RunHandle {
         call: &mut ToolCall,
     ) -> Result<(AgentToolResult, bool), CoreError> {
         match self.prepare_tool_call(agent, call).await? {
-            PreparedToolCall::Immediate { result, terminate } => Ok((result, terminate)),
+            PreparedToolCall::Immediate { result, terminate } => Ok((*result, terminate)),
             PreparedToolCall::Execute { tool, effect } => {
                 let updates = PendingToolUpdates::default();
                 let future = self.start_tool_future(&tool, call.clone(), updates.clone());
@@ -406,12 +407,12 @@ impl RunHandle {
                         }
                         ToolStep::Completed { result, updates } => {
                             self.emit_tool_updates(agent, updates).await?;
-                            break result;
+                            break *result;
                         }
                     }
                 };
                 self.flush_tool_updates(agent, &updates).await?;
-                self.finalize_executed_tool(agent, call, effect, execution)
+                self.finalize_executed_tool(agent, call, *effect, execution)
                     .await
             }
         }
@@ -424,19 +425,22 @@ impl RunHandle {
     ) -> Result<PreparedToolCall, CoreError> {
         let Some(tool) = self.configuration.tools.get(&call.name).cloned() else {
             return Ok(PreparedToolCall::Immediate {
-                result: error_tool_result(call, format!("Tool {} not found", call.name)),
+                result: Box::new(error_tool_result(
+                    call,
+                    format!("Tool {} not found", call.name),
+                )),
                 terminate: false,
             });
         };
         if let Err(error) = tea_protocol::JsonValue::parse(call.arguments.as_str()) {
             return Ok(PreparedToolCall::Immediate {
-                result: error_tool_result(
+                result: Box::new(error_tool_result(
                     call,
                     format!(
                         "Tool {} received invalid JSON arguments: {error}",
                         call.name
                     ),
-                ),
+                )),
                 terminate: false,
             });
         }
@@ -462,26 +466,26 @@ impl RunHandle {
             }
             Ok(BeforeToolCall::Block { reason }) => {
                 return Ok(PreparedToolCall::Immediate {
-                    result: error_tool_result(call, reason),
+                    result: Box::new(error_tool_result(call, reason)),
                     terminate: false,
                 });
             }
             Ok(BeforeToolCall::Terminate { reason }) => {
                 return Ok(PreparedToolCall::Immediate {
-                    result: error_tool_result(call, reason),
+                    result: Box::new(error_tool_result(call, reason)),
                     terminate: true,
                 });
             }
             Err(error) => {
                 return Ok(PreparedToolCall::Immediate {
-                    result: error_tool_result(call, error.message),
+                    result: Box::new(error_tool_result(call, error.message)),
                     terminate: false,
                 });
             }
         }
         if let Err(error) = validate_tool_arguments(&call.name, tool.schema(), &call.arguments) {
             return Ok(PreparedToolCall::Immediate {
-                result: error_tool_result_from_error(call, error),
+                result: Box::new(error_tool_result_from_error(call, error)),
                 terminate: false,
             });
         }
@@ -489,7 +493,7 @@ impl RunHandle {
             let mut result = error_tool_result(call, "Operation aborted");
             result.failure = Some(crate::tool::ToolFailure::cancelled());
             return Ok(PreparedToolCall::Immediate {
-                result,
+                result: Box::new(result),
                 // Pi records this tool failure and gives the provider the
                 // already-aborted signal on the next turn. It is not a policy
                 // termination hint.
@@ -499,7 +503,10 @@ impl RunHandle {
         let effect = self
             .begin_effect(EffectSubject::ToolExecution { call: call.clone() })
             .await?;
-        Ok(PreparedToolCall::Execute { tool, effect })
+        Ok(PreparedToolCall::Execute {
+            tool,
+            effect: Box::new(effect),
+        })
     }
 
     fn start_tool_future<'a>(
@@ -570,10 +577,10 @@ impl RunHandle {
         };
         self.settle_effect(
             effect,
-            EffectOutcome::ToolExecution(ToolEffectOutcome {
+            EffectOutcome::ToolExecution(Box::new(ToolEffectOutcome {
                 raw_result,
                 result: result.clone(),
-            }),
+            })),
         )
         .await?;
         Ok((result, terminate))
@@ -782,7 +789,7 @@ impl RunHandle {
                 tool_name: call.name,
                 content: result.content,
                 details: result.details,
-                usage: result.usage,
+                usage: Box::new(result.usage),
                 added_tool_names: result.added_tool_names,
                 terminate: result.terminate,
                 is_error: result.is_error,

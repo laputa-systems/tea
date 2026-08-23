@@ -15,9 +15,7 @@ use crate::event::{
     ProviderRequestSkipReason,
 };
 use crate::hooks::{AfterToolCall, AgentLoopTurnUpdate, Replacement};
-use crate::scheduler::{
-    CancellationToken, ModelEventStream, ModelRequest, ModelStreamEvent,
-};
+use crate::scheduler::{CancellationToken, ModelEventStream, ModelRequest, ModelStreamEvent};
 use crate::state::{
     AgentMessage, AgentPhase, AgentToolCall, ModelDescriptor, RunId, RunPhase, RunSnapshot,
     RunState, StopReason, ThinkingLevel, ToolCallId, TurnId, Usage,
@@ -35,12 +33,12 @@ mod tool_execution;
 
 enum PreparedToolCall {
     Immediate {
-        result: AgentToolResult,
+        result: Box<AgentToolResult>,
         terminate: bool,
     },
     Execute {
         tool: Arc<dyn AgentTool>,
-        effect: EffectTicket,
+        effect: Box<EffectTicket>,
     },
 }
 
@@ -217,6 +215,13 @@ struct NextTurn {
     thinking_override: Option<ThinkingLevel>,
 }
 
+struct AssistantTurnContinuation {
+    turn_id: TurnId,
+    reason: StopReason,
+    model_override: Option<ModelDescriptor>,
+    thinking_override: Option<ThinkingLevel>,
+}
+
 /// A handle to the one run currently owning an agent.
 pub struct RunHandle {
     pub(crate) agent: Weak<AgentInner>,
@@ -331,28 +336,29 @@ impl RunHandle {
     pub async fn drive(&self) -> Result<(), CoreError> {
         let result = self.drive_inner().await;
         if let Err(error) = &result
-            && !self.snapshot().phase.is_terminal() {
-                if self.cancellation.is_cancelled() {
-                    if self
-                        .policy
-                        .lock()
-                        .expect("run policy mutex poisoned")
-                        .compaction_cancelled
-                    {
-                        self.settle_compaction_boundary_cancellation().await;
-                    } else {
-                        self.settle_cancellation().await;
-                    }
-                } else if matches!(
-                    error,
-                    CoreError::AutomaticCompaction { .. }
-                        | CoreError::AutomaticCompactionUnavailable { .. }
-                ) {
-                    self.settle_compaction_boundary_failure(error).await;
+            && !self.snapshot().phase.is_terminal()
+        {
+            if self.cancellation.is_cancelled() {
+                if self
+                    .policy
+                    .lock()
+                    .expect("run policy mutex poisoned")
+                    .compaction_cancelled
+                {
+                    self.settle_compaction_boundary_cancellation().await;
                 } else {
-                    self.settle_failure(error).await;
+                    self.settle_cancellation().await;
                 }
+            } else if matches!(
+                error,
+                CoreError::AutomaticCompaction { .. }
+                    | CoreError::AutomaticCompactionUnavailable { .. }
+            ) {
+                self.settle_compaction_boundary_failure(error).await;
+            } else {
+                self.settle_failure(error).await;
             }
+        }
         result
     }
 
@@ -526,12 +532,14 @@ impl RunHandle {
             let Some(next_turn) = self
                 .advance_after_assistant_turn(
                     &agent,
-                    turn_id,
-                    StopReason::ToolUse,
+                    &mut AssistantTurnContinuation {
+                        turn_id,
+                        reason: StopReason::ToolUse,
+                        model_override,
+                        thinking_override,
+                    },
                     &tool_calls,
                     tool_batch,
-                    model_override,
-                    thinking_override,
                 )
                 .await?
             else {
@@ -604,7 +612,7 @@ impl RunHandle {
                 crate::measurement::PromptLayoutPolicy::RejectUnexpectedRebase
             ) && matches!(
                 request_continuity,
-                    crate::measurement::PromptContinuity::Rebased
+                crate::measurement::PromptContinuity::Rebased
                     | crate::measurement::PromptContinuity::Discontinuous
             ) || matches!(
                 agent.prompt_layout_ledger.policy_value(),
@@ -792,12 +800,14 @@ impl RunHandle {
             let Some(next_turn) = self
                 .advance_after_assistant_turn(
                     &agent,
-                    turn_id,
-                    reason,
+                    &mut AssistantTurnContinuation {
+                        turn_id,
+                        reason,
+                        model_override,
+                        thinking_override,
+                    },
                     &tool_calls,
                     tool_batch,
-                    model_override,
-                    thinking_override,
                 )
                 .await?
             else {
@@ -817,12 +827,9 @@ impl RunHandle {
     async fn advance_after_assistant_turn(
         &self,
         agent: &AgentInner,
-        turn_id: TurnId,
-        reason: StopReason,
+        continuation: &mut AssistantTurnContinuation,
         tool_calls: &[AgentToolCall],
         tool_batch: ToolBatchOutcome,
-        mut model_override: Option<ModelDescriptor>,
-        mut thinking_override: Option<ThinkingLevel>,
     ) -> Result<Option<NextTurn>, CoreError> {
         if let Some(terminal_failure) = tool_batch.terminal_failure {
             self.emit(
@@ -835,7 +842,7 @@ impl RunHandle {
             self.emit(
                 agent,
                 AgentEventKind::TurnEnd {
-                    turn_id,
+                    turn_id: continuation.turn_id,
                     reason: StopReason::Error,
                 },
             )
@@ -850,8 +857,14 @@ impl RunHandle {
             return Err(error);
         }
 
-        self.emit(agent, AgentEventKind::TurnEnd { turn_id, reason })
-            .await?;
+        self.emit(
+            agent,
+            AgentEventKind::TurnEnd {
+                turn_id: continuation.turn_id,
+                reason: continuation.reason,
+            },
+        )
+        .await?;
         let current_context = self.current_context(agent)?;
         let prepare_next_turn_effect = self
             .begin_effect(EffectSubject::HookInvocation {
@@ -872,10 +885,10 @@ impl RunHandle {
         } = prepared_turn?;
         let prepared_context = context.unwrap_or(current_context);
         if let Some(model) = model {
-            model_override = Some(model);
+            continuation.model_override = Some(model);
         }
         if let Some(thinking_level) = thinking_level {
-            thinking_override = Some(thinking_level);
+            continuation.thinking_override = Some(thinking_level);
         }
 
         let should_stop_effect = self
@@ -890,7 +903,8 @@ impl RunHandle {
             .await;
         self.settle_hook(should_stop_effect, &should_stop).await?;
         if should_stop? {
-            self.emit_agent_end_and_succeed(agent, reason).await?;
+            self.emit_agent_end_and_succeed(agent, continuation.reason)
+                .await?;
             return Ok(None);
         }
 
@@ -900,7 +914,7 @@ impl RunHandle {
             queued = self.drain_follow_up(agent);
         }
         if has_more_tool_calls || !queued.is_empty() {
-            let next_turn_id = TurnId(turn_id.0.saturating_add(1));
+            let next_turn_id = TurnId(continuation.turn_id.0.saturating_add(1));
             self.advance_turn(next_turn_id)?;
             self.emit(
                 agent,
@@ -915,12 +929,13 @@ impl RunHandle {
             return Ok(Some(NextTurn {
                 turn_id: next_turn_id,
                 context,
-                model_override,
-                thinking_override,
+                model_override: continuation.model_override.take(),
+                thinking_override: continuation.thinking_override.take(),
             }));
         }
 
-        self.emit_agent_end_and_succeed(agent, reason).await?;
+        self.emit_agent_end_and_succeed(agent, continuation.reason)
+            .await?;
         Ok(None)
     }
 
@@ -2470,13 +2485,13 @@ fn automatic_compaction_split(
         && let Some(turn_start) = (0..start)
             .rev()
             .find(|index| matches!(messages[*index], AgentMessage::User { .. }))
-        {
-            return (
-                messages[..turn_start].to_vec(),
-                messages[start..].to_vec(),
-                messages[turn_start..start].to_vec(),
-            );
-        }
+    {
+        return (
+            messages[..turn_start].to_vec(),
+            messages[start..].to_vec(),
+            messages[turn_start..start].to_vec(),
+        );
+    }
     (
         messages[..start].to_vec(),
         messages[start..].to_vec(),
@@ -2575,7 +2590,7 @@ impl Drop for RunHandle {
 enum ToolStep {
     Updates(Vec<PendingToolUpdate>),
     Completed {
-        result: Result<AgentToolResult, crate::error::ToolError>,
+        result: Box<Result<AgentToolResult, crate::error::ToolError>>,
         updates: Vec<PendingToolUpdate>,
     },
 }
@@ -2611,9 +2626,9 @@ async fn next_tool_step<'a>(
         {
             updates.close(call_id);
             return Poll::Ready(ToolStep::Completed {
-                result: Err(crate::error::ToolError::Cancelled {
+                result: Box::new(Err(crate::error::ToolError::Cancelled {
                     tool: "cancelled operation".into(),
-                }),
+                })),
                 updates: updates.take().unwrap_or_default(),
             });
         }
@@ -2633,9 +2648,9 @@ async fn next_tool_step<'a>(
         {
             updates.close(call_id);
             return Poll::Ready(ToolStep::Completed {
-                result: Err(crate::error::ToolError::Cancelled {
+                result: Box::new(Err(crate::error::ToolError::Cancelled {
                     tool: "cancelled operation".into(),
-                }),
+                })),
                 updates: updates.take().unwrap_or_default(),
             });
         }
@@ -2643,7 +2658,7 @@ async fn next_tool_step<'a>(
             Poll::Ready(result) => {
                 updates.close(call_id);
                 Poll::Ready(ToolStep::Completed {
-                    result,
+                    result: Box::new(result),
                     updates: updates.take().unwrap_or_default(),
                 })
             }
@@ -2656,9 +2671,9 @@ async fn next_tool_step<'a>(
                 {
                     updates.close(call_id);
                     Poll::Ready(ToolStep::Completed {
-                        result: Err(crate::error::ToolError::Cancelled {
+                        result: Box::new(Err(crate::error::ToolError::Cancelled {
                             tool: "cancelled operation".into(),
-                        }),
+                        })),
                         updates: Vec::new(),
                     })
                 } else {

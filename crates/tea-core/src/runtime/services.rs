@@ -137,22 +137,17 @@ impl RuntimeServices {
     /// runtime's layout ledger.
     pub fn prompt_cache_scope(mut self, scope: crate::measurement::PromptCacheScope) -> Self {
         let policy = self.prompt_layout_ledger.policy_value();
-        self.prompt_layout_ledger = Arc::new(
-            crate::measurement::PromptLayoutLedger::new(scope).policy(policy),
-        );
+        self.prompt_layout_ledger =
+            Arc::new(crate::measurement::PromptLayoutLedger::new(scope).policy(policy));
         self
     }
 
     /// Select whether layout continuity is observed or rejected before
     /// provider dispatch.
-    pub fn prompt_layout_policy(
-        mut self,
-        policy: crate::measurement::PromptLayoutPolicy,
-    ) -> Self {
+    pub fn prompt_layout_policy(mut self, policy: crate::measurement::PromptLayoutPolicy) -> Self {
         let scope = self.prompt_layout_ledger.scope();
-        self.prompt_layout_ledger = Arc::new(
-            crate::measurement::PromptLayoutLedger::new(scope).policy(policy),
-        );
+        self.prompt_layout_ledger =
+            Arc::new(crate::measurement::PromptLayoutLedger::new(scope).policy(policy));
         self
     }
 

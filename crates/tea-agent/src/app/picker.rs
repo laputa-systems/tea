@@ -1,8 +1,8 @@
 use crate::terminal::{KeyCode, KeyEvent, KeyModifiers};
 use std::num::NonZeroU64;
 use std::sync::Arc;
-use tea_core::compaction::{AutomaticCompactionPolicy, ContextBudgetSource, OverflowRecovery};
 use tea_core::agent::AgentConfiguration;
+use tea_core::compaction::{AutomaticCompactionPolicy, ContextBudgetSource, OverflowRecovery};
 use tea_core::state::Usage;
 use tea_providers::{ConfiguredProvider, ProviderConfiguration};
 
@@ -328,10 +328,7 @@ impl App {
         Ok(())
     }
 
-    fn configuration_for_provider(
-        &self,
-        provider: &str,
-    ) -> Result<AgentConfiguration, AppError> {
+    fn configuration_for_provider(&self, provider: &str) -> Result<AgentConfiguration, AppError> {
         if provider == mock::PROVIDER_ID {
             return Ok(mock::configuration());
         }
@@ -343,7 +340,7 @@ impl App {
             workspace,
             Arc::new(NonblockingCodingOperations),
         )
-            .map_err(|error| AppError::Setup(format!("invalid --cwd: {error}")))?;
+        .map_err(|error| AppError::Setup(format!("invalid --cwd: {error}")))?;
         super::host::host_configuration(tools)
     }
 

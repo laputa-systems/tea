@@ -243,9 +243,7 @@ impl AppState {
                 message,
                 text_delta,
             } => {
-                if let (AgentMessage::Assistant { .. }, Some(delta)) =
-                    (message, text_delta)
-                {
+                if let (AgentMessage::Assistant { .. }, Some(delta)) = (message, text_delta) {
                     if let Some(index) = self.streaming_line {
                         if let Some(TranscriptEntry::Assistant { text, .. }) =
                             self.transcript.get_mut(index)
@@ -748,8 +746,11 @@ impl AppState {
             self.reported_usage.cache_write_tokens,
         ) {
             let prompt_tokens = input.saturating_add(read).saturating_add(write);
-            if prompt_tokens != 0 {
-                stats.push(format!("CH{}%", read.saturating_mul(100) / prompt_tokens));
+            if let Some(percentage) = read
+                .checked_mul(100)
+                .and_then(|value| value.checked_div(prompt_tokens))
+            {
+                stats.push(format!("CH{}%", percentage));
             }
         }
         [hint, stats.join(" · ")]
@@ -1031,9 +1032,7 @@ impl AppState {
     }
 
     pub(super) fn history_next(&mut self) -> Option<String> {
-        let Some(index) = self.history_index else {
-            return None;
-        };
+        let index = self.history_index?;
         let next = index + 1;
         if next >= self.history.len() {
             self.history_index = None;
@@ -1042,7 +1041,6 @@ impl AppState {
         self.history_index = Some(next);
         self.history.get(next).cloned()
     }
-
     /// Append a submitted active-operation message to the one visible next-message slot.
     pub(crate) fn queue_message(&mut self, message: String) {
         match &mut self.queued_message {

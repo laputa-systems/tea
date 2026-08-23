@@ -107,9 +107,7 @@ pub(super) fn normalize_event(
         AgentEventKind::ProviderRequestObserved { .. } => {
             ("provider_request_observed", empty_object())
         }
-        AgentEventKind::PromptLayoutObserved { .. } => {
-            ("prompt_layout_observed", empty_object())
-        }
+        AgentEventKind::PromptLayoutObserved { .. } => ("prompt_layout_observed", empty_object()),
         AgentEventKind::CompactionStart { .. } => ("compaction_start", empty_object()),
         AgentEventKind::CompactionResult { .. } => ("compaction_result", empty_object()),
         AgentEventKind::CompactionEnd { .. } => ("compaction_end", empty_object()),

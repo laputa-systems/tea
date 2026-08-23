@@ -4,6 +4,7 @@
 //! model transports and the Luau VM remain external adapters composed by a host.
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
+#![allow(clippy::result_large_err)]
 
 extern crate self as tea_core;
 

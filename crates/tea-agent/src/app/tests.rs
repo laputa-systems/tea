@@ -15,10 +15,10 @@ use tea_core::scheduler::{
     CancellationToken, ModelFuture, ModelProvider, ModelRequest, ModelStream, ModelStreamEvent,
 };
 use tea_core::state::{AgentMessage, MessageId, SerializedJson, ToolCallId};
-use tea_core::tool::ToolUpdate;
-use tea_core::tool::{ToolDefinition, ToolExecutionMode};
 use tea_core::state::{ModelDescriptor, ThinkingLevel, Usage};
 use tea_core::tool::AgentToolResult;
+use tea_core::tool::ToolUpdate;
+use tea_core::tool::{ToolDefinition, ToolExecutionMode};
 use tea_session::{
     ArtifactStore, CustomEntry, DurabilityMode, EntryId, HarnessCatalogFact, JsonValue,
     JsonlSession, LaneId, Metadata, PayloadRef, ProvisionedEntry, SessionEntry, SessionFact,
@@ -153,8 +153,12 @@ fn new_reaps_a_completed_task_but_never_drops_a_pending_task_receiver() {
 
     // The special `/new` path reaches `new_session`, but an empty receiver
     // still owns a worker that can publish terminal durable effects.
-    app.dispatch_command("/new").expect("command dispatch succeeds");
-    assert!(app.durable_task.is_some(), "pending task ownership is retained");
+    app.dispatch_command("/new")
+        .expect("command dispatch succeeds");
+    assert!(
+        app.durable_task.is_some(),
+        "pending task ownership is retained"
+    );
     assert_eq!(
         app.state.footer_notice(),
         Some(("new session requires an idle agent", false))
@@ -163,7 +167,8 @@ fn new_reaps_a_completed_task_but_never_drops_a_pending_task_receiver() {
     sender
         .send(Ok(()))
         .expect("test task completion is delivered");
-    app.dispatch_command("/new").expect("completed task is reaped first");
+    app.dispatch_command("/new")
+        .expect("completed task is reaped first");
     assert!(app.durable_task.is_none(), "terminal receiver is reaped");
     assert_eq!(
         app.state.footer_notice(),
@@ -1252,7 +1257,8 @@ fn cache_friendly_compaction_appends_one_instruction_to_an_exact_source_prefix()
                             )]),
                             execution_mode: ToolExecutionMode::Parallel,
                             requires_exclusive_batch: false,
-                            cancellation_settlement_mode: tea_core::tool::CancellationSettlementMode::DropFuture,
+                            cancellation_settlement_mode:
+                                tea_core::tool::CancellationSettlementMode::DropFuture,
                         }],
                     }),
                 },

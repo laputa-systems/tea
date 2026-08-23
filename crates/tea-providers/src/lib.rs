@@ -5,6 +5,7 @@
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
+#![allow(clippy::result_large_err)]
 
 mod error {
     pub use tea_core::error::*;

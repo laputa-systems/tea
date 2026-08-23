@@ -109,12 +109,17 @@ impl AgentTool for ReadTool {
             };
             let (output, truncated) = truncate_read_output(selected.as_bytes());
             let suffix = if truncated { "\n[truncated]" } else { "" };
-            let digest = args.3.then(|| tea_session::Digest::from_bytes(&bytes).to_hex());
+            let digest = args
+                .3
+                .then(|| tea_session::Digest::from_bytes(&bytes).to_hex());
             let digest_suffix = digest
                 .as_deref()
                 .map(|digest| format!("\n[complete-file blake3: {digest}]"))
                 .unwrap_or_default();
-            Ok(result_ok(&call, format!("{}{}{}", output, suffix, digest_suffix)))
+            Ok(result_ok(
+                &call,
+                format!("{}{}{}", output, suffix, digest_suffix),
+            ))
         })
     }
 }

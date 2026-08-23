@@ -191,8 +191,8 @@ mod tests {
     use crate::tool::{
         AgentTool, AgentToolResult, ToolCall, ToolContext, ToolFuture, ToolUpdateSink,
     };
-    use std::sync::Mutex;
     use std::collections::BTreeMap;
+    use std::sync::Mutex;
     use tea_protocol::JsonValue;
     use tea_session::{Digest, MemoryArtifactStore};
 
@@ -375,12 +375,24 @@ mod tests {
 
         let managed_snapshot = managed.snapshot();
         let hosted_snapshot = hosted.agent().snapshot();
-        assert_eq!(managed_snapshot.system_prompt, hosted_snapshot.system_prompt);
-        assert_eq!(managed_snapshot.model, hosted_snapshot.model);
-        assert_eq!(managed_snapshot.thinking_level, hosted_snapshot.thinking_level);
-        assert_eq!(managed.tool_definitions(), hosted.agent().tool_definitions());
         assert_eq!(
-            hosted.surface_fingerprints().provider_surface_digest.to_hex(),
+            managed_snapshot.system_prompt,
+            hosted_snapshot.system_prompt
+        );
+        assert_eq!(managed_snapshot.model, hosted_snapshot.model);
+        assert_eq!(
+            managed_snapshot.thinking_level,
+            hosted_snapshot.thinking_level
+        );
+        assert_eq!(
+            managed.tool_definitions(),
+            hosted.agent().tool_definitions()
+        );
+        assert_eq!(
+            hosted
+                .surface_fingerprints()
+                .provider_surface_digest
+                .to_hex(),
             hosted
                 .provenance()
                 .provider_surface_digest
@@ -416,12 +428,13 @@ mod tests {
         let mut additional = ToolRegistry::default();
         additional.insert(Arc::new(FixtureTool));
         let error = services
-            .prepare_hosted_epoch(
-                &resolved,
-                input(RunProvenance::default(), additional),
-            )
+            .prepare_hosted_epoch(&resolved, input(RunProvenance::default(), additional))
             .expect_err("additional tool cannot replace a trusted tool");
-        assert!(error.to_string().contains("collides with reserved host tool"));
+        assert!(
+            error
+                .to_string()
+                .contains("collides with reserved host tool")
+        );
 
         let (services, mut resolved) = fixture();
         resolved.extension_tools.insert(Arc::new(FixtureTool));
@@ -441,12 +454,11 @@ mod tests {
     #[test]
     fn hosted_epoch_rejects_unhandled_context_and_lifecycle_policies() {
         let (services, mut resolved) = fixture();
-        resolved.context_policies = super::super::context::ContextPolicyRegistry::from_resolved([
-            (
+        resolved.context_policies =
+            super::super::context::ContextPolicyRegistry::from_resolved([(
                 "fixture".to_owned(),
                 Arc::new(FixtureContextPolicy) as Arc<dyn ExtensionContextPolicy>,
-            ),
-        ]);
+            )]);
         let error = services
             .prepare_hosted_epoch(
                 &resolved,
@@ -456,12 +468,10 @@ mod tests {
         assert!(error.to_string().contains("context-policy host"));
 
         let (services, mut resolved) = fixture();
-        resolved.lifecycle = super::super::lifecycle::PluginLifecycleRegistry::from_resolved([
-            (
-                "fixture".to_owned(),
-                Arc::new(FixtureLifecycle) as Arc<dyn ExtensionLifecycle>,
-            ),
-        ])
+        resolved.lifecycle = super::super::lifecycle::PluginLifecycleRegistry::from_resolved([(
+            "fixture".to_owned(),
+            Arc::new(FixtureLifecycle) as Arc<dyn ExtensionLifecycle>,
+        )])
         .expect("fixture lifecycle registers");
         let error = services
             .prepare_hosted_epoch(
@@ -496,8 +506,14 @@ mod tests {
                 .await
                 .expect("hosted run settles");
             trace.with_sink(|events| {
-                assert!(matches!(events.first(), Some(tea_trace::TraceEvent::EpisodeHeader(_))));
-                assert!(matches!(events.last(), Some(tea_trace::TraceEvent::EpisodeEnd(_))));
+                assert!(matches!(
+                    events.first(),
+                    Some(tea_trace::TraceEvent::EpisodeHeader(_))
+                ));
+                assert!(matches!(
+                    events.last(),
+                    Some(tea_trace::TraceEvent::EpisodeEnd(_))
+                ));
             });
         });
     }

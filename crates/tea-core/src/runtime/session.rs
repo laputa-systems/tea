@@ -834,21 +834,21 @@ where
             .as_ref()
             .map(|recovery| recovery.replay_tool_starts.clone())
             .unwrap_or_default();
-        let runtime = Arc::new(Mutex::new(EpochRuntime::new(
-            Arc::clone(&self.session),
-            Arc::clone(&self.artifacts),
-            Arc::clone(&self.events),
-            operation_id.clone(),
-            epoch_id.clone(),
-            configuration.identity.clone(),
-            configuration.clone(),
-            Arc::clone(&configuration.memory_collector),
+        let runtime = Arc::new(Mutex::new(EpochRuntime::new(EpochRuntimeInit {
+            session: Arc::clone(&self.session),
+            artifacts: Arc::clone(&self.artifacts),
+            events: Arc::clone(&self.events),
+            operation_id: operation_id.clone(),
+            epoch_id: epoch_id.clone(),
+            identity: configuration.identity.clone(),
+            resolved_harness: configuration.clone(),
+            memory_collector: Arc::clone(&configuration.memory_collector),
             tool_definition_digests,
             tool_definition_schemas,
             replay_safe_host_tools,
-            recovery_assistant_entry,
+            last_assistant_entry: recovery_assistant_entry,
             replay_tool_starts,
-        )));
+        })));
         let gate: Arc<dyn EffectGate> = Arc::new(DurableEffectGate { runtime });
         let agent = runtime_services.build_agent_with_tools(
             &configuration,
@@ -1749,43 +1749,45 @@ struct PendingTool {
     tool_call_id: String,
 }
 
+struct EpochRuntimeInit<S> {
+    session: Arc<Mutex<S>>,
+    artifacts: Arc<dyn ArtifactStore>,
+    events: Arc<EventHub>,
+    operation_id: OperationId,
+    epoch_id: EpochId,
+    identity: HarnessIdentity,
+    resolved_harness: ResolvedHarness,
+    memory_collector: Arc<ExtensionMemoryCollector>,
+    tool_definition_digests: BTreeMap<String, Digest>,
+    tool_definition_schemas: BTreeMap<String, JsonValue>,
+    replay_safe_host_tools: BTreeSet<String>,
+    last_assistant_entry: Option<EntryId>,
+    replay_tool_starts: BTreeMap<(EntryId, u32), ToolStartedRecord>,
+}
+
 impl<S> EpochRuntime<S>
 where
     S: SessionWriter + Send + 'static,
 {
-    fn new(
-        session: Arc<Mutex<S>>,
-        artifacts: Arc<dyn ArtifactStore>,
-        events: Arc<EventHub>,
-        operation_id: OperationId,
-        epoch_id: EpochId,
-        identity: HarnessIdentity,
-        resolved_harness: ResolvedHarness,
-        memory_collector: Arc<ExtensionMemoryCollector>,
-        tool_definition_digests: BTreeMap<String, Digest>,
-        tool_definition_schemas: BTreeMap<String, JsonValue>,
-        replay_safe_host_tools: BTreeSet<String>,
-        last_assistant_entry: Option<EntryId>,
-        replay_tool_starts: BTreeMap<(EntryId, u32), ToolStartedRecord>,
-    ) -> Self {
+    fn new(init: EpochRuntimeInit<S>) -> Self {
         Self {
-            session,
-            artifacts,
-            events,
+            session: init.session,
+            artifacts: init.artifacts,
+            events: init.events,
             lane: LaneId::main(),
-            operation_id,
-            epoch_id,
-            identity,
-            resolved_harness,
-            memory_collector,
-            tool_definition_digests,
-            tool_definition_schemas,
-            replay_safe_host_tools,
-            replay_tool_starts,
+            operation_id: init.operation_id,
+            epoch_id: init.epoch_id,
+            identity: init.identity,
+            resolved_harness: init.resolved_harness,
+            memory_collector: init.memory_collector,
+            tool_definition_digests: init.tool_definition_digests,
+            tool_definition_schemas: init.tool_definition_schemas,
+            replay_safe_host_tools: init.replay_safe_host_tools,
+            replay_tool_starts: init.replay_tool_starts,
             pending_providers: BTreeMap::new(),
             pending_tools: BTreeMap::new(),
             started_tool_indices: BTreeMap::new(),
-            last_assistant_entry,
+            last_assistant_entry: init.last_assistant_entry,
             fault: None,
         }
     }
@@ -1827,7 +1829,7 @@ where
                 self.after_provider(action.id(), outcome)
             }
             (EffectSubject::ToolExecution { call }, EffectOutcome::ToolExecution(outcome)) => {
-                self.after_tool(action.id(), call, outcome)
+                self.after_tool(action.id(), call, *outcome)
             }
             (EffectSubject::HookInvocation { hook }, EffectOutcome::HookInvocation(outcome)) => {
                 self.append_hook_fact(action.id(), hook, "settled", Some(&outcome))
@@ -2021,11 +2023,7 @@ where
         }
     }
 
-    fn before_tool(
-        &mut self,
-        action_id: EffectId,
-        call: &ToolCall,
-    ) -> Result<(), EffectGateError> {
+    fn before_tool(&mut self, action_id: EffectId, call: &ToolCall) -> Result<(), EffectGateError> {
         let assistant_entry_id = self
             .last_assistant_entry
             .clone()
@@ -2982,14 +2980,14 @@ fn derive_core_messages(
                     tool_name: result.tool_name.clone(),
                     content,
                     details: details.map(SerializedJson::new),
-                    usage: Some(tea_core::state::Usage {
+                    usage: Box::new(Some(tea_core::state::Usage {
                         input_tokens: result.usage.input_tokens,
                         output_tokens: result.usage.output_tokens,
                         reasoning_tokens: result.usage.reasoning_tokens,
                         cache_read_tokens: result.usage.cache_read_tokens,
                         cache_write_tokens: result.usage.cache_write_tokens,
                         cost: result.usage.cost.clone(),
-                    }),
+                    })),
                     added_tool_names: Vec::new(),
                     terminate: result.terminate,
                     is_error: result.is_error,

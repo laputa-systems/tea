@@ -6,6 +6,7 @@
 //! rows to native scrollback, redraws only a bounded live tail through ANSI
 //! sequences, and drives durable operations on Smol.
 #![forbid(unsafe_code)]
+#![allow(clippy::result_large_err)]
 
 pub mod app;
 pub mod composer;

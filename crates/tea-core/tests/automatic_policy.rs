@@ -1,21 +1,21 @@
 use std::num::NonZeroU64;
 use std::sync::{Arc, Mutex};
+use tea_core::Agent;
 use tea_core::compaction::{
     AutomaticCompactionPolicy, AutomaticCompactionReason, AutomaticCompactionRequest,
-    CompactionContext, CompactionError, CompactionFuture, CompactionRejection, CompactionResult,
-    CompactionLifecycleRecord, CompactionTerminalOutcome, Compactor, ContextBudgetSource,
-    OverflowRecovery,
+    CompactionContext, CompactionError, CompactionFuture, CompactionLifecycleRecord,
+    CompactionRejection, CompactionResult, CompactionTerminalOutcome, Compactor,
+    ContextBudgetSource, OverflowRecovery,
 };
+use tea_core::error::CoreError;
+use tea_core::event::{AgentEventKind, AutomaticCompactionOutcome};
 use tea_core::scheduler::{
     CancellationToken, ModelFuture, ModelProvider, ModelRequest, ModelStream, ModelStreamEvent,
 };
-use tea_core::event::{AgentEventKind, AutomaticCompactionOutcome};
 use tea_core::state::{AgentMessage, AgentToolCall, SerializedJson, StopReason, ToolCallId, Usage};
 use tea_core::tool::{
     AgentTool, AgentToolResult, ToolCall, ToolContext, ToolFuture, ToolUpdateSink,
 };
-use tea_core::error::CoreError;
-use tea_core::Agent;
 
 #[derive(Default)]
 struct RecordingProvider {

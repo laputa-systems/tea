@@ -30,7 +30,7 @@ pub enum AgentMessage {
         tool_name: String,
         content: String,
         details: Option<SerializedJson>,
-        usage: Option<Usage>,
+        usage: Box<Option<Usage>>,
         added_tool_names: Vec<String>,
         /// Whether this finalized result requested the run stop after its batch.
         terminate: bool,

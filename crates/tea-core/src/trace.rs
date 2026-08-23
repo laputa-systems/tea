@@ -381,7 +381,9 @@ fn evidence_from_request_observation(
         deterministic_common_prefix_bytes: observation.deterministic_common_prefix_bytes,
         deterministic_common_prefix_tokens_estimate: observation
             .deterministic_common_prefix_tokens_estimate,
-        serialized_request_bytes: observation.serialized_request_bytes.map(|value| value as u64),
+        serialized_request_bytes: observation
+            .serialized_request_bytes
+            .map(|value| value as u64),
         adapter_cache_domain_fingerprint: observation.cache_domain_fingerprint,
         adapter_cache_domain_components: observation.cache_domain_components.clone(),
         ..CacheEvidence::default()
@@ -458,7 +460,8 @@ fn merge_cache_evidence_value(target: &mut CacheEvidence, update: CacheEvidence)
         target.common_context_prefix_bytes = update.common_context_prefix_bytes;
     }
     if update.common_context_prefix_ratio_millionths.is_some() {
-        target.common_context_prefix_ratio_millionths = update.common_context_prefix_ratio_millionths;
+        target.common_context_prefix_ratio_millionths =
+            update.common_context_prefix_ratio_millionths;
     }
     if update.context_projection_changed.is_some() {
         target.context_projection_changed = update.context_projection_changed;
@@ -985,12 +988,15 @@ mod tests {
     #[test]
     fn trace_retains_content_free_logical_and_adapter_cache_diagnostics() {
         let observer = TraceObserver::new("cache-diagnostics", Vec::<TraceEvent>::new());
-        let mut previous = crate::scheduler::ModelRequest::default();
-        previous.system_prompt = "stable".into();
-        previous.context = "retained annotation=a".into();
+        let previous = crate::scheduler::ModelRequest {
+            system_prompt: "stable".into(),
+            context: "retained annotation=a".into(),
+            ..crate::scheduler::ModelRequest::default()
+        };
         let mut current = previous.clone();
         current.context = "retained annotation=b".into();
-        let measurement = crate::measurement::measure_prompt_cacheability(Some(&previous), &current);
+        let measurement =
+            crate::measurement::measure_prompt_cacheability(Some(&previous), &current);
         let mut components = BTreeMap::new();
         components.insert("provider_tools".into(), 41);
 
@@ -1027,7 +1033,10 @@ mod tests {
             let TraceEvent::Turn(turn) = &events[1] else {
                 panic!("the completed turn follows the header");
             };
-            let cache = turn.cache_evidence.as_ref().expect("cache evidence persists");
+            let cache = turn
+                .cache_evidence
+                .as_ref()
+                .expect("cache evidence persists");
             assert_eq!(cache.continuity.as_deref(), Some("rebased"));
             assert_eq!(cache.context_projection_changed, Some(true));
             assert!(cache.common_context_prefix_ratio_millionths.is_some());

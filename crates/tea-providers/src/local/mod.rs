@@ -330,7 +330,8 @@ mod tests {
                     schema: JsonValue::object([("type", JsonValue::from("object"))]),
                     execution_mode: crate::tool::ToolExecutionMode::Parallel,
                     requires_exclusive_batch: false,
-                    cancellation_settlement_mode: crate::tool::CancellationSettlementMode::DropFuture,
+                    cancellation_settlement_mode:
+                        crate::tool::CancellationSettlementMode::DropFuture,
                 }],
                 model: Some(ModelDescriptor {
                     provider: "local".into(),
