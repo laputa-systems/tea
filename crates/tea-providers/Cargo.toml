@@ -31,7 +31,9 @@ eval-runner = ["dep:smol", "provider-commandcode", "provider-openrouter"]
 
 [dependencies]
 tea-core = { path = "../tea-core" }
+tea-luau = { path = "../tea-luau" }
 tea-protocol = { path = "../tea-protocol" }
+tea-session = { path = "../tea-session" }
 smol = { workspace = true, optional = true }
 h12tiny-client-sync = {
     package = "h12tiny-client-sync",

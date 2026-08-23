@@ -43,6 +43,11 @@ static OPENROUTER_MODELS: &[ModelDescriptor] = &[
         context_window: Some(1_050_000),
     },
     ModelDescriptor {
+        id: "poolside/laguna-s-2.1:free",
+        display_name: "Poolside Laguna S 2.1 (Free)",
+        context_window: Some(262_144),
+    },
+    ModelDescriptor {
         id: "poolside/laguna-xs-2.1",
         display_name: "Poolside Laguna XS 2.1",
         context_window: Some(262_144),

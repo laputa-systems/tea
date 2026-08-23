@@ -8,7 +8,7 @@ from pathlib import Path
 from unittest.mock import call, patch
 
 from . import coding_cases
-from .coding_cases import CodingCaseError, cache_bare_repository, load_cases
+from .coding_cases import CodingCaseError, assert_oracle_isolated_worktree, cache_bare_repository, load_cases
 from .coding_runner import _adapter_task, _profile_capabilities
 
 
@@ -59,6 +59,19 @@ class CodingCasesTest(unittest.TestCase):
         task = _adapter_task(load_cases()[0], capabilities)
         self.assertEqual(task["capabilities"], capabilities)
         self.assertEqual([tool["name"] for tool in capabilities], ["read", "bash", "edit", "write"])
+
+    def test_oracle_isolation_rejects_a_worktree_that_contains_the_fix(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="tea-quality-worktree-") as temporary:
+            workspace = Path(temporary)
+            with patch.object(coding_cases, "_git") as git, patch.object(coding_cases.subprocess, "run") as run:
+                git.side_effect = [
+                    type("Result", (), {"stdout": "baseline\n"})(),
+                    type("Result", (), {"stdout": ""})(),
+                    type("Result", (), {"stdout": ""})(),
+                ]
+                run.return_value = type("Result", (), {"returncode": 0})()
+                with self.assertRaises(CodingCaseError):
+                    assert_oracle_isolated_worktree(workspace, "a" * 40, "b" * 40)
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-Yes. The shootout should execute **three conditions** from fresh copies of the same pinned repository state:
+The shootout should execute **three conditions** from fresh copies of the same pinned repository state:
 
 1. `pi-static`
 2. `tea-static`
@@ -11,17 +11,17 @@ It should then emit two first-class reports:
 
 Tea already has an appropriate default task: `express-3936-medium`, pinned to exact `pi-bench` and Express commits, with a direct fast validator whose baseline is known to fail and whose fix commit is known to pass.   The Pi SDK exposes the exact machinery required for a controlled adapter—isolated services, in-memory settings/session management, event subscription, system-prompt access, tool factories, session statistics, and cleanup—and Pi’s own eval harness demonstrates the intended pattern.   The current published SDK manifest is `0.84.2` and requires Node `>=22.19.0`, so this can be pinned exactly and run without Pi CLI headless mode.
 
-# Coding-agent prompt: scaffold Tea Harness JIT v0 and `make pi-shootout`
+# Goal: scaffold Tea Harness JIT v0 and `make pi-shootout`
 
 Implement the first small, controlled proof of Tea’s harness-JIT thesis.
+
 
 Assume all previously specified architectural cleanup and `tea-tui` work has been completed. Adapt paths and type names to the final repository, but preserve the design below.
 
 The resulting command must be:
 
 ```sh
-PI_SHOOTOUT_MODEL=<openrouter-model-id> \
-PI_SHOOTOUT_ENV_FILE=.env \
+vault OPENROUTER_API_KEY -- \
 make pi-shootout
 ```
 
@@ -360,8 +360,8 @@ The normalized result must have this semantic shape:
     "requested_model": "…",
     "returned_model": null,
     "returned_provider": null,
-    "thinking_level": "off",
-    "max_output_tokens": 4096,
+    "thinking_level": "high",
+    "max_output_tokens": null,
     "sampling": {
       "temperature": null,
       "seed": null,
@@ -792,7 +792,28 @@ openrouter
 
 Do not implement a provider matrix.
 
-Require an explicit model ID.
+For this v0 experiment, use exactly this model ID:
+
+```text
+poolside/laguna-s-2.1:free
+```
+
+Do not substitute the similarly named but different:
+
+```text
+poolside/laguna-xs-2.1:free
+```
+
+The provider credential must be injected only at the final live-process
+boundary using:
+
+```sh
+vault OPENROUTER_API_KEY -- <command...>
+```
+
+The orchestrator, evidence pack, and coding-tool child environments must never
+read or serialize the key. Use `vault OPENROUTER_API_KEY -- <command...>` at
+the final live-process boundary; an env file is not part of this v0 invocation.
 
 Use the same:
 
@@ -806,11 +827,14 @@ attempt timeout
 
 for all three conditions.
 
-Default:
+Fixed v0 configuration:
 
 ```text
-thinking level = off
-maximum output tokens = 4096
+provider = openrouter
+model = poolside/laguna-s-2.1:free
+thinking level = high
+maximum output tokens = unconstrained
+attempt timeout = 900 seconds
 ```
 
 Do not claim temperature or seed equality unless both adapters actually set and verify those fields.
@@ -1149,12 +1173,14 @@ For multiple repeats, randomize the order independently and deterministically fr
 
 The Python orchestrator must never parse or retain the provider API key.
 
-Continue using the existing pattern where an explicit env file is sourced only in the final child-process boundary.
+Use `vault OPENROUTER_API_KEY -- <adapter>` only at the final live adapter
+process boundary. The Python orchestrator never reads, parses, or serializes
+the provider key.
 
 The visible command record should show something like:
 
 ```text
-source explicit env file (redacted)
+vault OPENROUTER_API_KEY -- <adapter redacted>
 ```
 
 Never serialize:
@@ -1616,29 +1642,29 @@ Use approximately:
 ```make
 PI_SHOOTOUT_TASK ?= express-3936-medium
 PI_SHOOTOUT_PROVIDER ?= openrouter
-PI_SHOOTOUT_MODEL ?=
-PI_SHOOTOUT_THINKING ?= off
-PI_SHOOTOUT_MAX_OUTPUT_TOKENS ?= 4096
+PI_SHOOTOUT_MODEL ?= poolside/laguna-s-2.1:free
+PI_SHOOTOUT_THINKING ?= high
+PI_SHOOTOUT_MAX_OUTPUT_TOKENS ?= unlimited
+PI_SHOOTOUT_TIMEOUT_SECONDS ?= 900
 PI_SHOOTOUT_REPEATS ?= 1
 PI_SHOOTOUT_SEED ?= 20260823
-PI_SHOOTOUT_ENV_FILE ?= .env
 PI_SHOOTOUT_CACHE_ROOT ?= /tmp/tea-pi-shootout-cache
 PI_SHOOTOUT_WORKSPACE_ROOT ?= /tmp/tea-pi-shootout-workspaces
 PI_SHOOTOUT_OUT ?= /tmp/tea-pi-shootout
 ```
 
-Do not provide a default model.
+The model is deliberately fixed for v0; a different value must fail rather
+than silently run a different experiment.
 
 Fail with a clear message when:
 
 ```text
-PI_SHOOTOUT_MODEL is empty
-env file is missing
+the fixed provider, model, or thinking configuration is overridden
 node is too old
 npm is missing
 curl is missing
 git is missing
-the provider is not openrouter
+vault is missing for a live run
 ```
 
 ## `pi-shootout-plan`
@@ -1927,9 +1953,8 @@ git diff --check
 Then perform one explicit live run with caller-supplied credentials:
 
 ```sh
-PI_SHOOTOUT_MODEL=<explicit-model> \
-PI_SHOOTOUT_ENV_FILE=<explicit-env-file> \
 PI_SHOOTOUT_REPEATS=1 \
+vault OPENROUTER_API_KEY -- \
 make pi-shootout
 ```
 

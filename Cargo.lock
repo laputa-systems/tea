@@ -887,7 +887,9 @@ dependencies = [
  "percent-encoding",
  "smol",
  "tea-core",
+ "tea-luau",
  "tea-protocol",
+ "tea-session",
 ]
 
 [[package]]

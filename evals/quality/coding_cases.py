@@ -300,24 +300,67 @@ class CleanWorktree:
 def materialize_clean_worktree(
     case: dict[str, Any], cache_root: Path, workspace_root: Path, *, populate_cache: bool = False
 ) -> CleanWorktree:
-    """Clone an exact detached commit from the bare cache, never using ``git worktree``."""
+    """Materialize only the baseline object into a detached attempt repository.
+
+    The cache deliberately retains the known-correct fix so the validator contract
+    can be audited.  An attempt must not inherit that object merely because it
+    shares the cache: models may inspect their local object database through the
+    normal ``bash`` tool.  Fetching the one shallow baseline object into a fresh
+    repository keeps the attempt useful as a Git checkout while making the oracle
+    commit unavailable to the model.
+    """
     validate_case(case)
     commit = case["baseline"]["commit"]
     bare = cache_bare_repository(case["baseline"]["repository"], commit, cache_root, populate=populate_cache)
     parent = _explicit_root(workspace_root, "workspace_root")
     path = Path(tempfile.mkdtemp(prefix=f"{case['id']}-", dir=parent))
     try:
-        # --no-local/--no-hardlinks ensures later worktree mutations cannot alter the cache.
-        _git("clone", "--no-local", "--no-hardlinks", "--no-checkout", str(bare), str(path), timeout=600)
-        _git("checkout", "--detach", "--force", commit, cwd=path)
+        # Do not clone the cache. A clone copies every reachable cache ref,
+        # including the validator's known-good oracle. An explicit shallow fetch
+        # is the narrow object transfer boundary for an agent workspace.
+        _git("init", str(path), timeout=600)
+        _git(
+            "-C",
+            str(path),
+            "-c",
+            "protocol.file.allow=always",
+            "fetch",
+            "--depth=1",
+            str(bare),
+            commit,
+            timeout=600,
+        )
+        _git("checkout", "--detach", "--force", "FETCH_HEAD", cwd=path)
+        _git("remote", "remove", "origin", cwd=path) if _git("remote", cwd=path).stdout.strip() else None
+        _git("reflog", "expire", "--expire=now", "--all", cwd=path)
+        _git("gc", "--prune=now", cwd=path)
         actual = _git("rev-parse", "HEAD", cwd=path).stdout.strip()
         status = _git("status", "--porcelain=v1", "--untracked-files=all", cwd=path).stdout
         if actual != commit or status:
             raise CodingCaseError("materialized worktree is not the requested clean commit")
+        assert_oracle_isolated_worktree(path, commit, case["baseline"]["fix_commit"])
     except BaseException:
         shutil.rmtree(path, ignore_errors=True)
         raise
     return CleanWorktree(path, commit, bare)
+
+
+def assert_oracle_isolated_worktree(workspace: Path, baseline_commit: str, fix_commit: str) -> None:
+    """Verify that an attempt contains its baseline but not the audited fix object."""
+    _commit(baseline_commit, "baseline_commit")
+    _commit(fix_commit, "fix_commit")
+    actual = _git("rev-parse", "HEAD", cwd=workspace).stdout.strip()
+    status = _git("status", "--porcelain=v1", "--untracked-files=all", cwd=workspace).stdout
+    remotes = _git("remote", cwd=workspace).stdout.strip()
+    probe = subprocess.run(
+        ["git", "cat-file", "-e", f"{fix_commit}^{{commit}}"],
+        cwd=workspace,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if actual != baseline_commit or status or remotes or probe.returncode == 0:
+        raise CodingCaseError("attempt worktree exposes a non-baseline Git oracle")
 
 
 def remove_worktree(worktree: CleanWorktree, workspace_root: Path) -> None:

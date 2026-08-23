@@ -21,6 +21,11 @@ The coding tier requires an explicit model, environment file, cache root, and
 workspace root. See [`quality/README.md`](quality/README.md) for its setup and
 scope.
 
+[`pi_shootout`](pi_shootout/README.md) is a separate explicit one-task Pi SDK
+versus durable Tea harness experiment. It is provider-opt-in, uses a caller
+visible `vault OPENROUTER_API_KEY --` boundary, and is not part of the normal
+quality suite or CI.
+
 `controller.py` and `baselines.example.json` remain a generic, caller-supplied
 multi-baseline controller contract. The checked-in provider-specific manifests
 and upstream adapters have been retired because their runner is no longer part

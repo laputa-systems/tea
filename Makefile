@@ -1,4 +1,4 @@
-.PHONY: lint test test-linux tui local-install local-model local quality-fast quality-resources quality-compaction
+.PHONY: lint test test-linux tui local-install local-model local quality-fast quality-resources quality-compaction pi-shootout pi-shootout-plan pi-shootout-check
 
 lint:
 	cargo fmt --all
@@ -92,3 +92,42 @@ quality-resources:
 
 quality-compaction:
 	PYTHONDONTWRITEBYTECODE=1 python3 -m evals.quality compaction --out /tmp/tea-compaction-quality
+
+# This is an explicit, provider-opt-in one-task experiment. The model is fixed
+# for v0 so a typo cannot silently compare Laguna XS rather than Laguna S.
+PI_SHOOTOUT_TASK ?= express-3936-medium
+PI_SHOOTOUT_PROVIDER ?= openrouter
+PI_SHOOTOUT_MODEL ?= poolside/laguna-s-2.1:free
+PI_SHOOTOUT_THINKING ?= high
+PI_SHOOTOUT_MAX_OUTPUT_TOKENS ?= unlimited
+PI_SHOOTOUT_TIMEOUT_SECONDS ?= 900
+PI_SHOOTOUT_REPEATS ?= 1
+PI_SHOOTOUT_SEED ?= 20260823
+PI_SHOOTOUT_CACHE_ROOT ?= /tmp/tea-pi-shootout-cache
+PI_SHOOTOUT_WORKSPACE_ROOT ?= /tmp/tea-pi-shootout-workspaces
+PI_SHOOTOUT_OUT ?= /tmp/tea-pi-shootout
+
+PI_SHOOTOUT_ARGS = --task "$(PI_SHOOTOUT_TASK)" --provider "$(PI_SHOOTOUT_PROVIDER)" --model "$(PI_SHOOTOUT_MODEL)" --thinking "$(PI_SHOOTOUT_THINKING)" --max-output-tokens "$(PI_SHOOTOUT_MAX_OUTPUT_TOKENS)" --timeout-seconds "$(PI_SHOOTOUT_TIMEOUT_SECONDS)" --repeats "$(PI_SHOOTOUT_REPEATS)" --seed "$(PI_SHOOTOUT_SEED)" --cache-root "$(PI_SHOOTOUT_CACHE_ROOT)" --workspace-root "$(PI_SHOOTOUT_WORKSPACE_ROOT)" --out "$(PI_SHOOTOUT_OUT)"
+
+pi-shootout-plan:
+	@command -v node >/dev/null 2>&1 || { echo "missing required command: node" >&2; exit 1; }
+	@command -v npm >/dev/null 2>&1 || { echo "missing required command: npm" >&2; exit 1; }
+	@command -v curl >/dev/null 2>&1 || { echo "missing required command: curl" >&2; exit 1; }
+	@command -v git >/dev/null 2>&1 || { echo "missing required command: git" >&2; exit 1; }
+	@node -e 'const [major, minor] = process.versions.node.split(".").map(Number); if (major < 22 || (major === 22 && minor < 19)) process.exit(1)' || { echo "node >=22.19.0 is required" >&2; exit 1; }
+	PYTHONDONTWRITEBYTECODE=1 python3 -m evals.pi_shootout plan $(PI_SHOOTOUT_ARGS)
+
+pi-shootout-check:
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest evals.pi_shootout.test_contract evals.pi_shootout.test_report
+	npm --prefix evals/pi_shootout/sdk ci
+	npm --prefix evals/pi_shootout/sdk run check
+	npm --prefix evals/pi_shootout/sdk test
+	cargo +nightly-2026-07-24 test -p tea-providers --bin tea-eval --features eval-runner --locked
+	cargo +nightly-2026-07-24 test -p tea-session --locked jsonl_reopen_fixed_point_covers_compaction_harness_activation_and_core_rollover
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest evals.quality.test_coding_cases
+
+pi-shootout: pi-shootout-plan
+	@command -v vault >/dev/null 2>&1 || { echo "missing required command: vault (expected: vault OPENROUTER_API_KEY -- <adapter>)" >&2; exit 1; }
+	npm --prefix evals/pi_shootout/sdk ci
+	cargo +nightly-2026-07-24 build -p tea-providers --bin tea-eval --features eval-runner --locked
+	PYTHONDONTWRITEBYTECODE=1 python3 -m evals.pi_shootout run $(PI_SHOOTOUT_ARGS)

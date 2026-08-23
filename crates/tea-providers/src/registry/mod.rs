@@ -103,6 +103,13 @@ mod tests {
         );
         assert_eq!(
             provider
+                .model("poolside/laguna-s-2.1:free")
+                .expect("checked-in model")
+                .context_window,
+            Some(262_144)
+        );
+        assert_eq!(
+            provider
                 .model("poolside/laguna-xs-2.1:free")
                 .expect("checked-in model")
                 .context_window,
