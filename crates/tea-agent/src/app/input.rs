@@ -2,14 +2,18 @@ use crate::editor::Editor;
 use crate::terminal::{
     KeyCode, KeyEvent, KeyEventKind, KeyModifiers, TerminalEvent, TerminalGuard,
 };
-use tea_core::state::AgentPhase;
-use tea_core::{CoreError, Usage};
 
 use super::commands;
 use super::error::AppError;
 use super::runtime::App;
-use super::state::{QueueDelivery, UiSurface};
+use super::state::UiSurface;
 use super::support::format_footer_usage;
+
+#[derive(Clone, Copy)]
+enum QueueDelivery {
+    Steering,
+    FollowUp,
+}
 
 impl App {
     pub(super) fn handle_terminal_event(
@@ -176,13 +180,21 @@ impl App {
     }
 
     fn handle_control_c(&mut self) {
-        let Some(agent) = self.core.as_ref() else {
+        let active_harness = self
+            .durable_harness
+            .as_ref()
+            .filter(|harness| harness.is_active())
+            .cloned();
+        if let Some(harness) = active_harness {
+            match harness.abort() {
+                Ok(true) => self.state.notice("cancelling"),
+                Ok(false) => self.state.notice("waiting for durable epoch startup"),
+                Err(error) => self.state.notice(error.to_string()),
+            }
+            self.state.slash_completion = None;
             return;
-        };
-        if !matches!(agent.snapshot().phase, AgentPhase::Idle) {
-            agent.abort();
-            self.state.notice("cancelling");
-        } else if self.state.composer().text().is_empty() {
+        }
+        if self.state.composer().text().is_empty() {
             self.quitting = true;
         } else {
             self.state.composer_mut().clear();
@@ -199,26 +211,37 @@ impl App {
         if input.starts_with('/') {
             self.dispatch_command(&input)
         } else {
-            let agent = self.agent_or_setup()?.clone();
-            match agent.snapshot().phase {
-                AgentPhase::Idle if !agent.has_model_provider() => {
-                    self.state.notice("select a model first");
-                    self.open_model_picker();
+            let active_harness = self
+                .durable_harness
+                .as_ref()
+                .filter(|harness| harness.is_active())
+                .cloned();
+            if let Some(harness) = active_harness {
+                match harness.enqueue_steering(input.clone()) {
+                    Ok(_) => self.state.notice("steering queued"),
+                    Err(error) => {
+                        self.state.composer_mut().replace_from_editor(input);
+                        self.state.notice(error.to_string());
+                    }
                 }
-                AgentPhase::Idle => match agent.start_prompt(input.clone()) {
-                    Ok(run) => {
-                        self.submitted_prompt = Some(input);
-                        self.spawn_run(run);
+                return Ok(());
+            }
+            if self.durable_task.is_some() {
+                self.state.composer_mut().replace_from_editor(input);
+                self.state.notice("waiting for durable operation startup");
+            } else if self.configured_provider.is_none() {
+                self.state.notice("select a model first");
+                self.open_model_picker();
+            } else {
+                match self.ensure_durable_harness() {
+                    Ok(harness) => {
+                        self.submitted_prompt = Some(input.clone());
+                        self.spawn_durable_prompt(harness, input);
                     }
                     Err(error) => {
                         self.state.composer_mut().replace_from_editor(input);
                         self.state.notice(error.to_string());
                     }
-                },
-                AgentPhase::Running(_) | AgentPhase::Cancelling(_) => {
-                    agent.enqueue_steering(input)?;
-                    self.state.set_queue_snapshot(&agent);
-                    self.state.notice("steering queued");
                 }
             }
             Ok(())
@@ -310,45 +333,18 @@ impl App {
                     self.state.notice(error.to_string());
                 }
             }
-            "/compact" => {
-                let agent = self.agent_or_setup()?;
-                match agent.start_compaction() {
-                    Ok(compaction) => self.spawn_compaction(compaction),
-                    Err(CoreError::MissingCompactor) => self
-                        .state
-                        .notice("manual compaction is unavailable for this provider/model"),
-                    Err(error) => self.state.notice(error.to_string()),
-                }
-            }
-            "/reload-extensions" => {
-                if let Err(error) = self.reload_tea_extensions() {
-                    self.state.notice(format!(
-                        "Tea extensions were not reloaded; the previous snapshot remains active: {error}"
-                    ));
-                }
-            }
-            "/clear" => {
-                let agent = self.agent_or_setup()?;
-                match agent.reset() {
-                    Ok(()) => {
-                        let snapshot = agent.snapshot();
-                        self.state.clear_transcript();
-                        self.state.close_surface();
-                        self.state.set_snapshot(snapshot);
-                        self.state.notice("cleared");
-                    }
-                    Err(CoreError::ActiveRun { .. }) => {
-                        self.state.notice("cannot clear while the agent is active");
-                    }
-                    Err(error) => self.state.notice(error.to_string()),
-                }
-            }
             "/quit" => {
                 self.quitting = true;
-                if let Some(agent) = self.core.as_ref() {
-                    if !matches!(agent.snapshot().phase, AgentPhase::Idle) {
-                        agent.abort();
-                        self.state.notice("cancelling before exit");
+                let active_harness = self
+                    .durable_harness
+                    .as_ref()
+                    .filter(|harness| harness.is_active())
+                    .cloned();
+                if let Some(harness) = active_harness {
+                    match harness.abort() {
+                        Ok(true) => self.state.notice("cancelling before exit"),
+                        Ok(false) => self.state.notice("waiting for durable epoch startup"),
+                        Err(error) => self.state.notice(error.to_string()),
                     }
                 }
             }
@@ -370,69 +366,43 @@ impl App {
             });
             return Ok(());
         }
-        let agent = self.agent_or_setup()?.clone();
-        match delivery {
-            QueueDelivery::Steering => agent.enqueue_steering(content)?,
-            QueueDelivery::FollowUp => agent.enqueue_follow_up(content)?,
-        };
-        self.state.set_queue_snapshot(&agent);
-        self.state.notice(match delivery {
-            QueueDelivery::Steering => "steering queued",
-            QueueDelivery::FollowUp => "follow-up queued",
-        });
+        let active_harness = self
+            .durable_harness
+            .as_ref()
+            .filter(|harness| harness.is_active())
+            .cloned();
+        if let Some(harness) = active_harness {
+            match delivery {
+                QueueDelivery::Steering => harness.enqueue_steering(content)?,
+                QueueDelivery::FollowUp => harness.enqueue_follow_up(content)?,
+            };
+            self.state.notice(match delivery {
+                QueueDelivery::Steering => "steering queued",
+                QueueDelivery::FollowUp => "follow-up queued",
+            });
+            return Ok(());
+        }
+        self.state.notice("queue commands require an active durable operation");
         Ok(())
     }
 
     fn show_cost_surface(&mut self) {
-        let Some(snapshot) = self.state.snapshot().cloned() else {
-            self.state.set_surface_lines(
-                UiSurface::Cost,
-                vec![format!(
-                    "cost total: {}",
-                    format_footer_usage(&Usage::default())
-                )],
-            );
-            return;
-        };
-        if snapshot.accounting.turns.is_empty() {
-            self.state.set_surface_lines(
-                UiSurface::Cost,
-                vec![format!(
-                    "cost total: {}",
-                    format_footer_usage(&snapshot.accounting.aggregate)
-                )],
-            );
-            return;
-        }
-        let mut lines = Vec::with_capacity(snapshot.accounting.turns.len() + 1);
-        for turn in &snapshot.accounting.turns {
-            let model = turn
-                .model
-                .as_ref()
-                .map(|model| format!("{}/{}", model.provider, model.model))
-                .unwrap_or_else(|| "unknown model".into());
-            lines.push(format!(
-                "cost run {} turn {} {model}: {}",
-                turn.run_id.0,
-                turn.turn_id.0,
-                format_footer_usage(&turn.usage)
-            ));
-        }
-        lines.push(format!(
-            "cost total: {}",
-            format_footer_usage(&snapshot.accounting.aggregate)
-        ));
-        self.state.set_surface_lines(UiSurface::Cost, lines);
+        self.state.set_surface_lines(
+            UiSurface::Cost,
+            vec![format!(
+                "cost total: {}",
+                format_footer_usage(&self.state.reported_usage)
+            )],
+        );
     }
 }
 
 fn help_surface_lines() -> Vec<String> {
     const GROUPS: &[(&str, &[&str])] = &[
-        ("General", &["/help", "/clear", "/quit"]),
+        ("General", &["/help", "/quit"]),
         ("Session", &["/new", "/session", "/resume"]),
-        ("Runtime", &["/model", "/cost", "/compact"]),
+        ("Runtime", &["/model", "/cost"]),
         ("Queue", &["/steer", "/followup"]),
-        ("Extensions", &["/reload-extensions"]),
     ];
 
     let mut lines = vec![format!("Commands {}", commands::all().len())];

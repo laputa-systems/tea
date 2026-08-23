@@ -132,7 +132,7 @@ let provider = CommandCodeProvider::new(config);
 
 `CommandCodeConfig` also provides explicit permission mode, a canonical UUID thread ID, mode,
 temperature, output-token limit, and zero-data-retention-header settings. When present, the
-thread ID is also sent as the Command Code session ID, matching the current headless client's
+thread ID is also sent as the Command Code session ID, matching the current
 per-thread request shape without having the library generate or discover an identifier.
 The current Command Code client metadata is also preserved: the project slug defaults to the
 final component of the already-explicit `workingDir` (and can be overridden), and taste learning

@@ -147,13 +147,13 @@ SCENARIOS = tuple(
         "automatic_policy",
     )
     + _scenario_group(
-        "compatibility-determinism",
+        "determinism",
         (
             "lifecycle-id-stable",
             "lifecycle-terminal-once",
             "trace-content-free",
-            "trace-v0-records-unchanged",
-            "trace-v1-additive",
+            "trace-records-unchanged",
+            "trace-schema-v1",
             "request-observation-same-stream",
             "measurement-pure",
             "offline-no-network",
@@ -318,7 +318,7 @@ def run_compaction_quality(*, out: Path, update_baseline: bool = False, reason: 
             "prefix_proxy": "not_a_cache_hit_claim",
             "model_free_pruning": "not implemented without a dominant-tool-result baseline",
         },
-        "default_decision": "cache_replay_summary_v0 is the only runtime strategy",
+        "default_decision": "cache_replay_summary_v1 is the only runtime strategy",
         "continuation_fixtures": continuation,
     }
     summary["report_sha256"] = _digest({key: value for key, value in summary.items() if key != "report_sha256"})

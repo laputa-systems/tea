@@ -20,7 +20,8 @@ pub(super) use tea_core::scheduler::CancellationToken;
 use tea_core::scheduler::CancellationWait;
 use tea_core::state::{SerializedJson, ToolCallId, Usage};
 use tea_core::tool::{
-    AgentTool, ToolCall, ToolContext, ToolExecutionMode, ToolFuture, ToolResult, ToolUpdateSink,
+    AgentTool, AgentToolResult, ToolCall, ToolContext, ToolExecutionMode, ToolFuture,
+    ToolUpdateSink,
 };
 use tea_protocol::{JsonNumber, JsonValue};
 
@@ -165,7 +166,7 @@ struct LuaToolExecution<'a> {
 }
 
 impl Future for LuaToolExecution<'_> {
-    type Output = Result<ToolResult, ToolError>;
+    type Output = Result<AgentToolResult, ToolError>;
 
     fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
@@ -339,7 +340,7 @@ impl Future for LuaToolExecution<'_> {
                             }));
                         }
                     };
-                    return Poll::Ready(Ok(ToolResult {
+                    return Poll::Ready(Ok(AgentToolResult {
                         tool_call_id: call_id,
                         content: result.content,
                         details: result.details,
@@ -685,7 +686,7 @@ mod tests {
         Waker::noop().clone()
     }
 
-    fn run_to_completion(future: ToolFuture<'_>) -> Result<ToolResult, ToolError> {
+    fn run_to_completion(future: ToolFuture<'_>) -> Result<AgentToolResult, ToolError> {
         let mut future = future;
         let waker = noop_waker();
         let mut context = Context::from_waker(&waker);

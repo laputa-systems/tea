@@ -16,7 +16,7 @@ from . import controller
 class ControllerContractTests(unittest.TestCase):
     def test_checked_in_tasks_validate(self) -> None:
         tasks = controller.load_tasks(controller.TASKS)
-        self.assertEqual([task["task_id"] for task in tasks], ["interval-merge-v0", "ready-v0"])
+        self.assertEqual([task["task_id"] for task in tasks], ["interval-merge-v1", "ready-v1"])
 
     def test_example_baselines_validate_and_plan_is_deterministic(self) -> None:
         config = controller.load_baselines(controller.ROOT / "baselines.example.json")
@@ -28,7 +28,7 @@ class ControllerContractTests(unittest.TestCase):
 
     def test_task_selection_is_explicit_and_rejects_unknown_ids(self) -> None:
         tasks = controller.load_tasks(controller.TASKS)
-        self.assertEqual([task["task_id"] for task in controller.select_tasks(tasks, ["ready-v0"])], ["ready-v0"])
+        self.assertEqual([task["task_id"] for task in controller.select_tasks(tasks, ["ready-v1"])], ["ready-v1"])
         with self.assertRaises(controller.ContractError):
             controller.select_tasks(tasks, ["not-a-task"])
 
@@ -124,7 +124,7 @@ class ControllerContractTests(unittest.TestCase):
                 controller.run_attempt(
                     task,
                     baseline,
-                    attempt_id="ready-v0-r0-upstream",
+                    attempt_id="ready-v1-r0-upstream",
                     workspace_parent=Path(temporary),
                     allow_provider=False,
                     comparison=config["comparison"],
@@ -138,7 +138,7 @@ class ControllerContractTests(unittest.TestCase):
         baseline["command"] = [
             sys.executable,
             "-c",
-            "import json,sys; json.dump(dict(schema_version='tea-coding-eval-result/v0', attempt_id=sys.argv[2], baseline_id=sys.argv[3], terminal=dict(status='completed'), final_text='READY', turns=0, tool_calls=0, usage=dict(input=0, output=0, cache_read=0, cache_write=0), trace=[]), open(sys.argv[1], 'w'))",
+            "import json,sys; json.dump(dict(schema_version='tea-coding-eval-result/v1', attempt_id=sys.argv[2], baseline_id=sys.argv[3], terminal=dict(status='completed'), final_text='READY', turns=0, tool_calls=0, usage=dict(input=0, output=0, cache_read=0, cache_write=0), trace=[]), open(sys.argv[1], 'w'))",
             "{result_json}",
             "{attempt_id}",
             "{baseline_id}",
@@ -147,7 +147,7 @@ class ControllerContractTests(unittest.TestCase):
             record = controller.run_attempt(
                 task,
                 baseline,
-                attempt_id="ready-v0-r0-upstream",
+                attempt_id="ready-v1-r0-upstream",
                 workspace_parent=Path(temporary),
                 allow_provider=True,
                 comparison=config["comparison"],
@@ -335,7 +335,7 @@ class ControllerContractTests(unittest.TestCase):
             )
 
         self.assertEqual([record["attempt_id"] for record in records], [
-            "ready-v0-r0-upstream", "ready-v0-r1-upstream", "ready-v0-r2-upstream",
+            "ready-v1-r0-upstream", "ready-v1-r1-upstream", "ready-v1-r2-upstream",
         ])
         self.assertEqual(report["logical_concurrency"], 3)
         self.assertEqual(report["admission_concurrency"], 2)

@@ -5,6 +5,7 @@
 //! capabilities and drive the run from their own async environment.
 
 use crate::error::CoreError;
+use crate::effect::{EffectGate, NoopEffectGate, RunProvenance};
 use crate::event::EventObserver;
 use crate::hooks::HookSet;
 use crate::queue::{AgentQueues, QueueMode, QueuedMessage};
@@ -120,6 +121,14 @@ pub struct AgentConfiguration {
     pub tools: ToolRegistry,
     /// Host policy hooks used at context and tool lifecycle boundaries.
     pub hooks: Arc<dyn HookSet>,
+    /// Host-owned barrier around externally observable execution effects.
+    ///
+    /// The core invokes this immutable handle before and after provider, tool,
+    /// and hook effects. It never gives the gate filesystem or session
+    /// ownership; a durable supervisor supplies that implementation.
+    pub effect_gate: Arc<dyn EffectGate>,
+    /// Opaque durable attribution attached to every effect in a run.
+    pub provenance: RunProvenance,
 }
 
 impl AgentConfiguration {
@@ -129,10 +138,29 @@ impl AgentConfiguration {
         tools: ToolRegistry,
         hooks: Arc<dyn HookSet>,
     ) -> Self {
+        Self::with_effect_gate(
+            system_prompt,
+            tools,
+            hooks,
+            Arc::new(NoopEffectGate),
+            RunProvenance::default(),
+        )
+    }
+
+    /// Construct configuration with an explicit effect gate and provenance.
+    pub fn with_effect_gate(
+        system_prompt: impl Into<String>,
+        tools: ToolRegistry,
+        hooks: Arc<dyn HookSet>,
+        effect_gate: Arc<dyn EffectGate>,
+        provenance: RunProvenance,
+    ) -> Self {
         Self {
             system_prompt: system_prompt.into(),
             tools,
             hooks,
+            effect_gate,
+            provenance,
         }
     }
 }
@@ -143,6 +171,8 @@ impl Clone for AgentConfiguration {
             system_prompt: self.system_prompt.clone(),
             tools: self.tools.clone(),
             hooks: Arc::clone(&self.hooks),
+            effect_gate: Arc::clone(&self.effect_gate),
+            provenance: self.provenance.clone(),
         }
     }
 }
@@ -152,6 +182,7 @@ impl std::fmt::Debug for AgentConfiguration {
         f.debug_struct("AgentConfiguration")
             .field("system_prompt", &self.system_prompt)
             .field("tools", &self.tools)
+            .field("provenance", &self.provenance)
             .finish_non_exhaustive()
     }
 }
@@ -435,6 +466,56 @@ impl Agent {
         }
     }
 
+    /// Restore a validated transcript whose final assistant tool batch still
+    /// requires recovery.
+    ///
+    /// Ordinary [`Self::restore_messages`] rejects an unmatched tool call so a
+    /// caller cannot accidentally present an invalid context as settled. A
+    /// durable supervisor that has an explicit recovery plan instead uses this
+    /// narrow method and must immediately start the exact matching
+    /// [`Self::start_recover_tool_calls`] path. The final assistant turn may
+    /// be followed by a source-order prefix of already committed tool results;
+    /// only its remaining suffix is eligible for recovery. Every preceding
+    /// relationship is validated by the normal transcript validator.
+    pub fn restore_pending_tool_calls(
+        &self,
+        messages: Vec<crate::state::AgentMessage>,
+        tool_calls: Vec<crate::state::AgentToolCall>,
+    ) -> Result<(), CoreError> {
+        if tool_calls.is_empty() {
+            return Err(CoreError::InvalidTransition(
+                crate::error::StateTransitionError::new(
+                    "agent",
+                    "empty-tool-batch",
+                    "restore_pending_tool_calls",
+                ),
+            ));
+        }
+        let _ = validate_recovery_tool_batch(
+            &messages,
+            &tool_calls,
+            "restore_pending_tool_calls",
+        )?;
+
+        let mut state = self.inner.state.lock().expect("agent state mutex poisoned");
+        match state.phase {
+            AgentPhase::Idle => {
+                state.replace_messages(messages);
+                state.partial_response = None;
+                state.is_streaming = false;
+                state.pending_tool_calls.clear();
+                state.last_error = None;
+                state.accounting = crate::state::ModelAccountingSnapshot::default();
+                drop(state);
+                self.clear_all_queues();
+                Ok(())
+            }
+            AgentPhase::Running(run_id) | AgentPhase::Cancelling(run_id) => {
+                Err(CoreError::ActiveRun { run_id })
+            }
+        }
+    }
+
     /// Validate a persisted message vector without changing agent state.
     pub fn validate_messages(messages: &[crate::state::AgentMessage]) -> Result<(), CoreError> {
         crate::compaction::validate_messages(messages).map_err(CoreError::Compaction)
@@ -633,6 +714,43 @@ impl Agent {
         )
     }
 
+    /// Resume the unresolved suffix of a retained terminal assistant tool batch.
+    ///
+    /// A durable supervisor uses this after restoring a validated transcript
+    /// whose last assistant response requested tools. The regular core tool
+    /// scheduler, hooks, cancellation, result insertion, and subsequent model
+    /// continuation remain exactly the same as a fresh run; this method only
+    /// selects the first scheduler step rather than issuing another provider
+    /// request before those calls are resolved.
+    pub fn start_recover_tool_calls(
+        &self,
+        tool_calls: Vec<crate::state::AgentToolCall>,
+    ) -> Result<RunHandle, CoreError> {
+        if tool_calls.is_empty() {
+            return Err(CoreError::InvalidTransition(
+                crate::error::StateTransitionError::new(
+                    "agent",
+                    "empty-tool-batch",
+                    "recover_tool_calls",
+                ),
+            ));
+        }
+        let prior_all_terminate = {
+            let state = self.inner.state.lock().expect("agent state mutex poisoned");
+            match state.phase {
+                AgentPhase::Running(run_id) | AgentPhase::Cancelling(run_id) => {
+                    return Err(CoreError::ActiveRun { run_id });
+                }
+                AgentPhase::Idle => {}
+            }
+            validate_recovery_tool_batch(&state.messages, &tool_calls, "recover_tool_calls")?
+        };
+        let mut run = self.start_run(Vec::new(), false)?;
+        run.recovery_tool_calls = Some(tool_calls);
+        run.recovery_prior_all_terminate = Some(prior_all_terminate);
+        Ok(run)
+    }
+
     fn drain_continue_tail_messages(&self) -> Vec<QueuedMessage> {
         let steering_mode = self.steering_mode();
         let follow_up_mode = self.follow_up_mode();
@@ -708,6 +826,9 @@ impl Agent {
             skip_initial_steering,
             configuration,
             policy: Mutex::new(crate::run::RunPolicyState::default()),
+            next_effect_id: AtomicU64::new(0),
+            recovery_tool_calls: None,
+            recovery_prior_all_terminate: None,
         })
     }
 
@@ -937,4 +1058,77 @@ impl Agent {
             AgentPhase::Idle
         )
     }
+}
+
+/// Validate the one recovery shape that permits an intentionally unfinished
+/// tool batch. The core normally rejects every unmatched assistant call. A
+/// durable supervisor is allowed to retain a final assistant response plus a
+/// committed source-order result prefix and execute only its missing suffix.
+///
+/// This helper derives whether already committed results all requested
+/// termination, preserving the normal batch-level termination behavior after
+/// the suffix settles.
+fn validate_recovery_tool_batch(
+    messages: &[AgentMessage],
+    recovery_calls: &[crate::state::AgentToolCall],
+    operation: &'static str,
+) -> Result<bool, CoreError> {
+    let Some(assistant_index) = messages
+        .iter()
+        .rposition(|message| matches!(message, AgentMessage::Assistant { .. }))
+    else {
+        return Err(recovery_transition("missing-assistant", operation));
+    };
+    let AgentMessage::Assistant {
+        tool_calls,
+        stop_reason,
+        ..
+    } = &messages[assistant_index]
+    else {
+        unreachable!("assistant index was selected from assistant messages");
+    };
+    if *stop_reason != Some(crate::state::StopReason::ToolUse) {
+        return Err(recovery_transition("assistant-not-tool-use", operation));
+    }
+    let settled_results = &messages[assistant_index.saturating_add(1)..];
+    if settled_results.len() >= tool_calls.len()
+        || tool_calls.get(settled_results.len()..) != Some(recovery_calls)
+    {
+        return Err(recovery_transition("assistant-tool-mismatch", operation));
+    }
+
+    let mut prior_all_terminate = true;
+    for (call, message) in tool_calls.iter().zip(settled_results) {
+        let AgentMessage::ToolResult {
+            tool_call_id,
+            tool_name,
+            terminate,
+            ..
+        } = message
+        else {
+            return Err(recovery_transition("non-result-after-assistant", operation));
+        };
+        if tool_call_id != &call.id || tool_name != &call.name {
+            return Err(recovery_transition("result-prefix-mismatch", operation));
+        }
+        prior_all_terminate &= *terminate;
+    }
+
+    let mut settled_transcript = messages.to_vec();
+    let AgentMessage::Assistant {
+        tool_calls: settled_calls,
+        ..
+    } = &mut settled_transcript[assistant_index]
+    else {
+        unreachable!("assistant index was selected from assistant messages");
+    };
+    settled_calls.truncate(settled_results.len());
+    Agent::validate_messages(&settled_transcript)?;
+    Ok(prior_all_terminate)
+}
+
+fn recovery_transition(from: &'static str, operation: &'static str) -> CoreError {
+    CoreError::InvalidTransition(crate::error::StateTransitionError::new(
+        "agent", from, operation,
+    ))
 }

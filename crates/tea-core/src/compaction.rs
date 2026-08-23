@@ -28,7 +28,7 @@ pub const COMPACTION_CONTEXT_VERSION: u32 = 1;
 ///
 /// The TUI's provider-backed compactor implements this strategy. Its prompt
 /// and request construction are part of the host contract.
-pub const CACHE_REPLAY_SUMMARY_V0: &str = "cache_replay_summary_v0";
+pub const CACHE_REPLAY_SUMMARY_V1: &str = "cache_replay_summary_v1";
 
 /// Stable identity of one compaction attempt within a run.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Hash)]
@@ -126,10 +126,10 @@ impl CompactionStrategy {
     }
 
     /// Descriptor for the provider-backed baseline preserved by `tea-agent`.
-    pub fn cache_replay_summary_v0(prompt_fingerprint: u64) -> Self {
+    pub fn cache_replay_summary_v1(prompt_fingerprint: u64) -> Self {
         Self {
-            id: CACHE_REPLAY_SUMMARY_V0.into(),
-            schema_version: 0,
+            id: CACHE_REPLAY_SUMMARY_V1.into(),
+            schema_version: 1,
             implementation: CompactionImplementation::ProviderSummarization,
             request_layout: CompactionRequestLayout::ExactReplay,
             prompt_fingerprint: Some(prompt_fingerprint),
@@ -1108,6 +1108,9 @@ impl Agent {
                 skip_initial_steering: true,
                 configuration,
                 policy: Mutex::new(crate::run::RunPolicyState::default()),
+                next_effect_id: std::sync::atomic::AtomicU64::new(0),
+                recovery_tool_calls: None,
+                recovery_prior_all_terminate: None,
             },
             compactor,
         })

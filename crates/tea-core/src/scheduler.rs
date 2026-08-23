@@ -75,6 +75,12 @@ pub struct ModelRequest {
 /// provider-specific structs.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct AdapterRequestObservation {
+    /// Core-measured shared prefix with the preceding logical request in this
+    /// run. `None` means no predecessor exists; zero means no bytes matched.
+    /// This is a cacheability proxy, never a provider cache-hit claim.
+    pub deterministic_common_prefix_bytes: Option<u64>,
+    /// Stable rough token estimate for the deterministic shared prefix.
+    pub deterministic_common_prefix_tokens_estimate: Option<u64>,
     /// Byte count of the exact serialized request supplied to transport.
     pub serialized_request_bytes: Option<usize>,
     /// Adapter-defined cache-domain fingerprint, when the adapter can expose one safely.

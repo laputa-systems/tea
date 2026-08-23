@@ -2,6 +2,7 @@
 
 use super::{Agent, AgentConfiguration, AgentInner, IdleNotifier, ObserverRegistration};
 use crate::default_tools::DefaultCodingTools;
+use crate::effect::{EffectGate, NoopEffectGate, RunProvenance};
 use crate::event::EventObserver;
 use crate::hooks::{HookSet, NoHooks};
 use crate::profile::PiDefaultCodingProfile;
@@ -26,6 +27,8 @@ pub struct AgentBuilder {
     tool_result_projection: crate::tool::ToolResultProjectionPolicy,
     tool_failure_circuit_breaker: crate::tool::ToolFailureCircuitBreaker,
     hooks: Option<Arc<dyn HookSet>>,
+    effect_gate: Option<Arc<dyn EffectGate>>,
+    provenance: RunProvenance,
     observers: Vec<Arc<dyn EventObserver>>,
     steering_mode: QueueMode,
     follow_up_mode: QueueMode,
@@ -150,6 +153,25 @@ impl AgentBuilder {
         self
     }
 
+    /// Attach a host-owned barrier around provider, tool, and hook effects.
+    ///
+    /// A durable supervisor uses this to commit effect intent before dispatch
+    /// and settlement before the core can continue. The default is an
+    /// immediate no-op gate for sessionless embeddings.
+    pub fn effect_gate(mut self, effect_gate: Arc<dyn EffectGate>) -> Self {
+        self.effect_gate = Some(effect_gate);
+        self
+    }
+
+    /// Attach opaque durable attribution to each effect of future runs.
+    ///
+    /// The core stores and forwards this data but never interprets it as a
+    /// path, credential, or persistence authority.
+    pub fn effect_provenance(mut self, provenance: RunProvenance) -> Self {
+        self.provenance = provenance;
+        self
+    }
+
     /// Add an awaited lifecycle observer in registration order.
     pub fn observer(mut self, observer: Arc<dyn EventObserver>) -> Self {
         self.observers.push(observer);
@@ -207,10 +229,12 @@ impl AgentBuilder {
                 state: Mutex::new(state),
                 queues: Mutex::new(AgentQueues::default()),
                 active_run: Mutex::new(None),
-                configuration: RwLock::new(Arc::new(AgentConfiguration::new(
+                configuration: RwLock::new(Arc::new(AgentConfiguration::with_effect_gate(
                     system_prompt,
                     self.tools,
                     self.hooks.unwrap_or_else(|| Arc::new(NoHooks)),
+                    self.effect_gate.unwrap_or_else(|| Arc::new(NoopEffectGate)),
+                    self.provenance,
                 ))),
                 steering_mode: Mutex::new(self.steering_mode),
                 follow_up_mode: Mutex::new(self.follow_up_mode),

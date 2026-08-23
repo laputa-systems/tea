@@ -96,7 +96,7 @@ fn provider_with_answers(answers: &[&str]) -> Arc<FixtureProvider> {
                 .map(|answer| ModelStream {
                     events: vec![
                         ModelStreamEvent::TextDelta((*answer).into()),
-                        ModelStreamEvent::End(StopReason::EndTurn),
+                        ModelStreamEvent::End(StopReason::Stop),
                     ],
                 })
                 .collect(),

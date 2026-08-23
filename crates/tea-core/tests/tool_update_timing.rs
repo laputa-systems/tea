@@ -8,9 +8,9 @@ use tea_core::event::AgentEventKind;
 use tea_core::scheduler::{
     CancellationToken, ModelFuture, ModelProvider, ModelRequest, ModelStream, ModelStreamEvent,
 };
-use tea_core::state::{AssistantToolCall, SerializedJson, StopReason, ToolCallId};
+use tea_core::state::{AgentToolCall, SerializedJson, StopReason, ToolCallId};
 use tea_core::tool::{
-    AgentTool, ToolCall, ToolContext, ToolExecutionMode, ToolFuture, ToolResult, ToolUpdate,
+    AgentTool, AgentToolResult, ToolCall, ToolContext, ToolExecutionMode, ToolFuture, ToolUpdate,
     ToolUpdateSink,
 };
 use tea_core::Agent;
@@ -78,7 +78,7 @@ struct GatedToolFuture {
 }
 
 impl Future for GatedToolFuture {
-    type Output = Result<ToolResult, tea_core::error::ToolError>;
+    type Output = Result<AgentToolResult, tea_core::error::ToolError>;
 
     fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
         if !self.emitted {
@@ -91,7 +91,7 @@ impl Future for GatedToolFuture {
             self.emitted = true;
         }
         if self.gate.ready.load(Ordering::Acquire) {
-            return Poll::Ready(Ok(ToolResult {
+            return Poll::Ready(Ok(AgentToolResult {
                 tool_call_id: self.call_id.clone(),
                 content: self.name.into(),
                 details: None,
@@ -144,12 +144,12 @@ impl AgentTool for UpdateThenGateTool {
 fn model_with_parallel_calls() -> ModelStream {
     ModelStream {
         events: vec![
-            ModelStreamEvent::ToolCall(AssistantToolCall {
+            ModelStreamEvent::ToolCall(AgentToolCall {
                 id: ToolCallId::new("call_updates").expect("non-empty ID"),
                 name: "updates".into(),
                 arguments: SerializedJson::new("{}"),
             }),
-            ModelStreamEvent::ToolCall(AssistantToolCall {
+            ModelStreamEvent::ToolCall(AgentToolCall {
                 id: ToolCallId::new("call_waiting").expect("non-empty ID"),
                 name: "waiting".into(),
                 arguments: SerializedJson::new("{}"),
@@ -169,7 +169,7 @@ fn callback_update_is_emitted_while_parallel_tools_are_still_pending() {
         .model_provider(Arc::new(ScriptedProvider::new([
             model_with_parallel_calls(),
             ModelStream {
-                events: vec![ModelStreamEvent::End(StopReason::EndTurn)],
+                events: vec![ModelStreamEvent::End(StopReason::Stop)],
             },
         ])))
         .tool(Arc::new(UpdateThenGateTool {

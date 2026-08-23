@@ -8,6 +8,10 @@ use super::{
 };
 use crate::agent::AgentInner;
 use crate::error::CoreError;
+use crate::effect::{
+    DurableWriteRequest, EffectCompletion, EffectOutcome, EffectSubject, HookInvocation,
+    ToolEffectOutcome,
+};
 use crate::event::AgentEventKind;
 use crate::hooks::BeforeToolCall;
 use crate::schema_validation::validate_tool_arguments;
@@ -22,6 +26,20 @@ impl RunHandle {
         agent: &AgentInner,
         tool_calls: &[AgentToolCall],
     ) -> Result<ToolBatchOutcome, CoreError> {
+        if tool_calls.len() > 1 {
+            let exclusive = tool_calls.iter().filter_map(|assistant_call| {
+                self.configuration
+                    .tools
+                    .get(&assistant_call.name)
+                    .filter(|tool| tool.requires_exclusive_batch())
+                    .map(|tool| tool.name().to_owned())
+            }).collect::<Vec<_>>();
+            if !exclusive.is_empty() {
+                return self
+                    .reject_exclusive_tool_batch(agent, tool_calls, &exclusive)
+                    .await;
+            }
+        }
         let has_sequential_tool = tool_calls.iter().any(|assistant_call| {
             self.configuration
                 .tools
@@ -37,6 +55,35 @@ impl RunHandle {
         }
     }
 
+    /// Close every call in an invalid mixed batch without beginning any
+    /// external capability.  A transactional host tool cannot safely be
+    /// ordered beside arbitrary sibling effects, and rejecting just that tool
+    /// would still permit a partial batch to escape.
+    async fn reject_exclusive_tool_batch(
+        &self,
+        agent: &AgentInner,
+        tool_calls: &[AgentToolCall],
+        exclusive: &[String],
+    ) -> Result<ToolBatchOutcome, CoreError> {
+        let names = exclusive.join(", ");
+        let message = format!(
+            "{names} must be the only tool call in an assistant batch. No calls in this batch were executed; retry the transactional request alone."
+        );
+        for assistant_call in tool_calls {
+            let call = ToolCall {
+                id: assistant_call.id.clone(),
+                name: assistant_call.name.clone(),
+                arguments: assistant_call.arguments.clone(),
+            };
+            self.append_tool_result_message(agent, call.clone(), error_tool_result(&call, &message))
+                .await?;
+        }
+        Ok(ToolBatchOutcome {
+            all_terminate: false,
+            terminal_failure: None,
+        })
+    }
+
     async fn execute_tool_calls_sequential(
         &self,
         agent: &AgentInner,
@@ -44,7 +91,7 @@ impl RunHandle {
     ) -> Result<ToolBatchOutcome, CoreError> {
         let mut all_terminate = true;
         for (source_index, assistant_call) in tool_calls.iter().enumerate() {
-            let call = ToolCall {
+            let mut call = ToolCall {
                 id: assistant_call.id.clone(),
                 name: assistant_call.name.clone(),
                 arguments: assistant_call.arguments.clone(),
@@ -63,7 +110,7 @@ impl RunHandle {
             )
             .await?;
 
-            let (mut result, terminate) = self.execute_one_tool_call(agent, call.clone()).await?;
+            let (mut result, terminate) = self.execute_one_tool_call(agent, &mut call).await?;
             normalize_result_failure(&mut result);
             self.emit_tool_execution_end(agent, &call, &result).await?;
             self.append_tool_result_message(agent, call.clone(), result.clone())
@@ -104,7 +151,7 @@ impl RunHandle {
         // batch. Immediate preparation failures therefore end before later calls are announced;
         // successful result messages remain deferred until every batch completion is known.
         for (source_index, assistant_call) in tool_calls.iter().enumerate() {
-            let call = ToolCall {
+            let mut call = ToolCall {
                 id: assistant_call.id.clone(),
                 name: assistant_call.name.clone(),
                 arguments: assistant_call.arguments.clone(),
@@ -122,7 +169,7 @@ impl RunHandle {
                 },
             )
             .await?;
-            let mut preparation = self.prepare_tool_call(agent, &call).await?;
+            let mut preparation = self.prepare_tool_call(agent, &mut call).await?;
             if let PreparedToolCall::Immediate { result, terminate } = &mut preparation {
                 normalize_result_failure(result);
                 self.emit_tool_execution_end(agent, &call, result).await?;
@@ -139,12 +186,13 @@ impl RunHandle {
         // prepared vector so futures are dropped before their referenced capabilities.
         let mut pending = Vec::new();
         for prepared_call in &prepared {
-            if let PreparedToolCall::Execute { tool } = &prepared_call.preparation {
+            if let PreparedToolCall::Execute { tool, effect } = &prepared_call.preparation {
                 let future =
                     self.start_tool_future(tool, prepared_call.call.clone(), updates.clone());
                 pending.push(PendingToolExecution {
                     source_index: prepared_call.source_index,
                     call: prepared_call.call.clone(),
+                    effect: effect.clone(),
                     future,
                 });
             }
@@ -170,6 +218,14 @@ impl RunHandle {
                         updates.close(&pending_call.call.id);
                         let mut result = error_tool_result(&pending_call.call, "Operation aborted");
                         result.failure = Some(crate::tool::ToolFailure::cancelled());
+                        self.settle_effect(
+                            pending_call.effect,
+                            EffectOutcome::ToolExecution(ToolEffectOutcome {
+                                raw_result: result.clone(),
+                                result: result.clone(),
+                            }),
+                        )
+                        .await?;
                         self.emit_tool_execution_end(agent, &pending_call.call, &result)
                             .await?;
                         completions[pending_call.source_index] = Some((result, false));
@@ -207,13 +263,26 @@ impl RunHandle {
                             self.flush_tool_updates(agent, &updates).await?;
                             let (result, terminate) = match execution {
                                 Some(result) => {
-                                    self.finalize_executed_tool(agent, &pending_call.call, result)
-                                        .await?
+                                    self.finalize_executed_tool(
+                                        agent,
+                                        &pending_call.call,
+                                        pending_call.effect,
+                                        result,
+                                    )
+                                    .await?
                                 }
                                 None => {
                                     let mut result =
                                         error_tool_result(&pending_call.call, "Operation aborted");
                                     result.failure = Some(crate::tool::ToolFailure::cancelled());
+                                    self.settle_effect(
+                                        pending_call.effect,
+                                        EffectOutcome::ToolExecution(ToolEffectOutcome {
+                                            raw_result: result.clone(),
+                                            result: result.clone(),
+                                        }),
+                                    )
+                                    .await?;
                                     (result, false)
                                 }
                             };
@@ -238,7 +307,12 @@ impl RunHandle {
                 } => {
                     self.emit_tool_updates(agent, pending_updates).await?;
                     let (result, terminate) = self
-                        .finalize_executed_tool(agent, &completed.call, completed.result)
+                        .finalize_executed_tool(
+                            agent,
+                            &completed.call,
+                            completed.effect,
+                            completed.result,
+                        )
                         .await?;
                     // Another parallel tool may have delivered an update while
                     // the completion hook was awaited. Deliver it before this
@@ -278,11 +352,11 @@ impl RunHandle {
     async fn execute_one_tool_call(
         &self,
         agent: &AgentInner,
-        call: ToolCall,
+        call: &mut ToolCall,
     ) -> Result<(AgentToolResult, bool), CoreError> {
-        match self.prepare_tool_call(agent, &call).await? {
+        match self.prepare_tool_call(agent, call).await? {
             PreparedToolCall::Immediate { result, terminate } => Ok((result, terminate)),
-            PreparedToolCall::Execute { tool } => {
+            PreparedToolCall::Execute { tool, effect } => {
                 let updates = PendingToolUpdates::default();
                 let future = self.start_tool_future(&tool, call.clone(), updates.clone());
                 let mut future = future;
@@ -312,7 +386,7 @@ impl RunHandle {
                     }
                 };
                 self.flush_tool_updates(agent, &updates).await?;
-                self.finalize_executed_tool(agent, &call, execution).await
+                self.finalize_executed_tool(agent, call, effect, execution).await
             }
         }
     }
@@ -320,7 +394,7 @@ impl RunHandle {
     async fn prepare_tool_call(
         &self,
         agent: &AgentInner,
-        call: &ToolCall,
+        call: &mut ToolCall,
     ) -> Result<PreparedToolCall, CoreError> {
         let Some(tool) = self.configuration.tools.get(&call.name).cloned() else {
             return Ok(PreparedToolCall::Immediate {
@@ -328,20 +402,35 @@ impl RunHandle {
                 terminate: false,
             });
         };
-        if let Err(error) = validate_tool_arguments(&call.name, tool.schema(), &call.arguments) {
+        if let Err(error) = tea_protocol::JsonValue::parse(call.arguments.as_str()) {
             return Ok(PreparedToolCall::Immediate {
-                result: error_tool_result_from_error(call, error),
+                result: error_tool_result(
+                    call,
+                    format!("Tool {} received invalid JSON arguments: {error}", call.name),
+                ),
                 terminate: false,
             });
         }
         let context = self.current_context(agent)?;
-        match self
+        let before_tool_effect = self
+            .begin_effect(EffectSubject::HookInvocation {
+                hook: HookInvocation::BeforeTool {
+                    tool_call_id: call.id.to_string(),
+                    tool_name: call.name.clone(),
+                },
+            })
+            .await?;
+        let before = self
             .configuration
             .hooks
             .before_tool_call_async(call, context, self.cancellation.clone())
-            .await
-        {
+            .await;
+        self.settle_hook(before_tool_effect, &before).await?;
+        match before {
             Ok(BeforeToolCall::Allow) => {}
+            Ok(BeforeToolCall::Normalize { arguments }) => {
+                call.arguments = arguments;
+            }
             Ok(BeforeToolCall::Block { reason }) => {
                 return Ok(PreparedToolCall::Immediate {
                     result: error_tool_result(call, reason),
@@ -361,6 +450,12 @@ impl RunHandle {
                 });
             }
         }
+        if let Err(error) = validate_tool_arguments(&call.name, tool.schema(), &call.arguments) {
+            return Ok(PreparedToolCall::Immediate {
+                result: error_tool_result_from_error(call, error),
+                terminate: false,
+            });
+        }
         if self.cancellation.is_cancelled() {
             let mut result = error_tool_result(call, "Operation aborted");
             result.failure = Some(crate::tool::ToolFailure::cancelled());
@@ -372,7 +467,10 @@ impl RunHandle {
                 terminate: false,
             });
         }
-        Ok(PreparedToolCall::Execute { tool })
+        let effect = self
+            .begin_effect(EffectSubject::ToolExecution { call: call.clone() })
+            .await?;
+        Ok(PreparedToolCall::Execute { tool, effect })
     }
 
     fn start_tool_future<'a>(
@@ -401,9 +499,10 @@ impl RunHandle {
         &self,
         agent: &AgentInner,
         call: &ToolCall,
+        effect: super::EffectTicket,
         execution: Result<AgentToolResult, crate::error::ToolError>,
     ) -> Result<(AgentToolResult, bool), CoreError> {
-        let mut result = match execution {
+        let raw_result = match execution {
             Ok(result) if result.tool_call_id == call.id => result,
             Ok(result) => error_tool_result(
                 call,
@@ -414,13 +513,23 @@ impl RunHandle {
             ),
             Err(error) => error_tool_result_from_error(call, error),
         };
+        let mut result = raw_result.clone();
         let context = self.current_context(agent)?;
-        let terminate = match self
+        let after_tool_effect = self
+            .begin_effect(EffectSubject::HookInvocation {
+                hook: HookInvocation::AfterTool {
+                    tool_call_id: call.id.to_string(),
+                    tool_name: call.name.clone(),
+                },
+            })
+            .await?;
+        let after = self
             .configuration
             .hooks
-            .after_tool_call_async(call, &result, context, self.cancellation.clone())
-            .await
-        {
+            .after_tool_call_async(call, &raw_result, context, self.cancellation.clone())
+            .await;
+        self.settle_hook(after_tool_effect, &after).await?;
+        let terminate = match after {
             Ok(after) => {
                 apply_after_tool_call(&mut result, after);
                 result.terminate
@@ -430,6 +539,14 @@ impl RunHandle {
                 false
             }
         };
+        self.settle_effect(
+            effect,
+            EffectOutcome::ToolExecution(ToolEffectOutcome {
+                raw_result,
+                result: result.clone(),
+            }),
+        )
+        .await?;
         Ok((result, terminate))
     }
 
@@ -611,6 +728,23 @@ impl RunHandle {
         call: ToolCall,
         result: AgentToolResult,
     ) -> Result<(), CoreError> {
+        // A durable host receives the complete post-policy result before the
+        // in-memory message exists. This also covers schema-invalid and
+        // blocked calls, which deliberately have no ToolStarted intent but
+        // still require an ordinary durable semantic result.
+        let durable_write = self
+            .begin_effect(EffectSubject::DurableWrite {
+                write: DurableWriteRequest::ToolResult {
+                    call: call.clone(),
+                    result: result.clone(),
+                },
+            })
+            .await?;
+        self.settle_effect(
+            durable_write,
+            EffectOutcome::DurableWrite(EffectCompletion::Succeeded),
+        )
+        .await?;
         let message = {
             let mut state = agent.state.lock().expect("agent state mutex poisoned");
             let message = AgentMessage::ToolResult {

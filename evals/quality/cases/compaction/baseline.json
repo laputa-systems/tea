@@ -3,8 +3,8 @@
   "baseline_report_sha256": null,
   "baseline_manifest": {
     "tea_commit": "38a74e5",
-    "strategy_id": "cache_replay_summary_v0",
-    "strategy_schema_version": 0,
+    "strategy_id": "cache_replay_summary_v1",
+    "strategy_schema_version": 1,
     "summary_prompt_fingerprint": "0x0a849fb0b4d9703a",
     "compaction_policy": "host context capacity; reserve/minimum headroom/recent tail are explicit",
     "estimator_version": "conservative-canonical-or-provider-checkpoint-v1",
@@ -77,15 +77,15 @@
     "checkpoint-semantics-valid-tool-pairs",
     "checkpoint-semantics-commit-atomicity",
     "checkpoint-semantics-failure-preserves-history",
-    "compatibility-determinism-lifecycle-id-stable",
-    "compatibility-determinism-lifecycle-terminal-once",
-    "compatibility-determinism-trace-content-free",
-    "compatibility-determinism-trace-v0-records-unchanged",
-    "compatibility-determinism-trace-v1-additive",
-    "compatibility-determinism-request-observation-same-stream",
-    "compatibility-determinism-measurement-pure",
-    "compatibility-determinism-offline-no-network",
-    "compatibility-determinism-deterministic-replay"
+    "determinism-lifecycle-id-stable",
+    "determinism-lifecycle-terminal-once",
+    "determinism-trace-content-free",
+    "determinism-trace-records-unchanged",
+    "determinism-trace-schema-v1",
+    "determinism-request-observation-same-stream",
+    "determinism-measurement-pure",
+    "determinism-offline-no-network",
+    "determinism-deterministic-replay"
   ],
   "schema_version": "tea-compaction-quality/v1"
 }

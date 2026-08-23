@@ -41,11 +41,11 @@ impl Future for GateEnd {
 
     fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
         if self.gate.released.load(Ordering::Acquire) {
-            return Poll::Ready(Ok(Some(ModelStreamEvent::End(StopReason::EndTurn))));
+            return Poll::Ready(Ok(Some(ModelStreamEvent::End(StopReason::Stop))));
         }
         let mut waker = self.gate.waker.lock().expect("gate waker mutex poisoned");
         if self.gate.released.load(Ordering::Acquire) {
-            Poll::Ready(Ok(Some(ModelStreamEvent::End(StopReason::EndTurn))))
+            Poll::Ready(Ok(Some(ModelStreamEvent::End(StopReason::Stop))))
         } else {
             *waker = Some(context.waker().clone());
             Poll::Pending

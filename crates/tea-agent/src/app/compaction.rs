@@ -125,7 +125,7 @@ impl ProviderCompactor {
 
 impl Compactor for ProviderCompactor {
     fn strategy(&self) -> CompactionStrategy {
-        CompactionStrategy::cache_replay_summary_v0(baseline_prompt_fingerprint())
+        CompactionStrategy::cache_replay_summary_v1(baseline_prompt_fingerprint())
     }
 
     fn compact<'a>(

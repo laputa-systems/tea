@@ -76,7 +76,7 @@ normalized output. It must not contain a path escape, an absolute path, or a pro
 Tool definitions are only capabilities supplied to the agent. They do not grant ambient
 filesystem, process, clock, network, or environment access.
 
-`setup.context_hooks` is an optional, closed V0 fixture adapter for the context boundary. It
+`setup.context_hooks` is an optional, closed v1 fixture adapter for the context boundary. It
 exists to exercise the Rust context boundary without embedding runner-specific callbacks in a case.
 When present it requires:
 
@@ -108,7 +108,7 @@ Actions are applied in order. Version 1 defines:
 An action consumes one `model_script` turn when inference is started. A fixture must provide
 enough turns for its actions. Extra turns are an error, rather than silently ignored input.
 
-The currently checked-in V0 adapters implement a deliberately closed action slice: ordered
+The currently checked-in v1 adapters implement a deliberately closed action slice: ordered
 `steer`, `follow_up`, `prompt`, and `continue` actions. Deterministic model-stream cancellation
 uses the explicit `model_script[*].cancel_after` checkpoint described below; arbitrary timing,
 wall-clock cancellation, and ambient provider behavior remain outside this format.
@@ -129,7 +129,7 @@ Every turn ends in exactly one `done` or `error` chunk. A `tool_call` done turn 
 the tool result and, unless the fixture reaches a terminal condition, the next scripted inference turn. Scripted
 arguments are data, not executable code.
 
-`cancel_after` is an optional adapter-owned deterministic cancellation checkpoint. V0 supports
+`cancel_after` is an optional adapter-owned deterministic cancellation checkpoint. v1 supports
 `"cancel_after": "text_delta"`: after the first scripted text delta, both adapters truncate the
 response, request host cancellation, and settle an `aborted` assistant turn with the stable
 diagnostic `Operation aborted`. This is a fixture scheduling directive, not a wall-clock delay or

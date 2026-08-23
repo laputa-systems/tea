@@ -330,7 +330,7 @@ fn generated_run_message_and_event_ids_are_monotonic_after_cancellation() {
 
         Ok::<(), CoreError>(())
     })
-    .expect("V0-generated correlation identifiers must not be reused after cancellation");
+    .expect("v1 correlation identifiers must not be reused after cancellation");
 }
 
 #[test]

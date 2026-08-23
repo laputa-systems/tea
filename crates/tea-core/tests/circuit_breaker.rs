@@ -6,7 +6,7 @@ use tea_core::scheduler::{
 use tea_core::state::{AgentToolCall, SerializedJson, StopReason, ToolCallId};
 use tea_core::tool::{
     AgentTool, FailureSignature, ToolCall, ToolContext, ToolExecutionMode, ToolFailure,
-    ToolFailureCircuitBreaker, ToolFuture, ToolResult, ToolUpdateSink,
+    ToolFailureCircuitBreaker, ToolFuture, ToolUpdateSink, AgentToolResult,
 };
 use tea_core::{Agent, AgentEventKind, AgentMessage, CoreError};
 
@@ -77,7 +77,7 @@ impl AgentTool for FailureTool {
             .expect("call mutex poisoned")
             .push(call.id.to_string());
         let failure = self.failure.clone();
-        Box::pin(std::future::ready(Ok(ToolResult {
+        Box::pin(std::future::ready(Ok(AgentToolResult {
             tool_call_id: call.id,
             content: "capability is unavailable".into(),
             details: None,

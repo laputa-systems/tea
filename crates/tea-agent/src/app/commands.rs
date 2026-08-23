@@ -25,33 +25,18 @@ const COMMANDS: &[CommandSpec] = &[
         allowed_while_active: true,
     },
     CommandSpec {
-        name: "/compact",
-        help: "compact the retained conversation",
-        allowed_while_active: false,
-    },
-    CommandSpec {
-        name: "/reload-extensions",
-        help: "reload idle Tea extensions",
-        allowed_while_active: false,
-    },
-    CommandSpec {
         name: "/session",
-        help: "pick a saved linear session",
+        help: "pick a durable session",
         allowed_while_active: false,
     },
     CommandSpec {
         name: "/resume",
-        help: "resume a saved linear session",
+        help: "resume a durable session",
         allowed_while_active: false,
     },
     CommandSpec {
         name: "/new",
-        help: "start a fresh linear session",
-        allowed_while_active: false,
-    },
-    CommandSpec {
-        name: "/clear",
-        help: "clear the idle conversation",
+        help: "start a fresh durable session",
         allowed_while_active: false,
     },
     CommandSpec {
@@ -101,7 +86,7 @@ mod tests {
                 .iter()
                 .all(|other| other.name != command.name));
         }
-        assert_eq!(COMMANDS.len(), 12);
+        assert_eq!(COMMANDS.len(), 9);
         assert!(find("/steer").is_some_and(|command| command.allowed_while_active));
         assert!(find("/model").is_some_and(|command| !command.allowed_while_active));
     }

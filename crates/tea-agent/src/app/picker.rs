@@ -4,11 +4,11 @@ use std::sync::Arc;
 use tea_core::compaction::{AutomaticCompactionPolicy, ContextBudgetSource, OverflowRecovery};
 use tea_core::provider::{ConfiguredProvider, ProviderConfiguration};
 
+use super::durable::list_host_sessions;
 use super::error::AppError;
 use super::host::model_candidates;
 use super::preferences::save_last_model;
 use super::runtime::App;
-use super::session::{SessionRecord, SessionStore};
 use super::state::{Picker, UiSurface};
 use super::support::utc_date;
 
@@ -34,7 +34,7 @@ impl App {
         else {
             return Err(AppError::Setup("Tea home is not initialized".into()));
         };
-        let entries = SessionStore::new(home).for_workspace(workspace).list()?;
+        let entries = list_host_sessions(home, workspace)?;
         if entries.is_empty() {
             self.state.close_surface();
             self.state.notice("no saved sessions");
@@ -58,28 +58,18 @@ impl App {
         else {
             return Err(AppError::Setup("Tea home is not initialized".into()));
         };
-        let record = SessionStore::new(home).for_workspace(workspace).load(id)?;
-        if !record.cwd.is_empty() && record.cwd != workspace.to_string_lossy() {
-            return Err(AppError::Setup(format!(
-                "session belongs to workspace {}; current workspace is {}",
-                record.cwd,
-                workspace.display()
-            )));
-        }
-        let messages = record.messages.clone();
-        tea_core::Agent::validate_messages(&messages)?;
-        if let Some(model) = record.model.clone() {
+        let summary = list_host_sessions(home, workspace)?
+            .into_iter()
+            .find(|summary| summary.id == id)
+            .ok_or_else(|| AppError::Setup(format!("durable session {id} does not exist")))?;
+        if let Some(model) = summary.model {
             self.select_model(model.provider, model.model)?;
+        } else {
+            return Err(AppError::Setup(
+                "durable session is missing its immutable model identity".into(),
+            ));
         }
-        let agent = self.agent_or_setup()?.clone();
-        agent.replace_thinking_level(record.thinking_level)?;
-        agent.restore_messages(messages.clone())?;
-        self.state.restore_messages(&messages);
-        self.state.set_snapshot(agent.snapshot());
-        self.current_session = Some(record);
-        self.state.close_surface();
-        self.state.notice(format!("resumed session {id}"));
-        Ok(())
+        self.reopen_durable_session(id)
     }
 
     pub(super) fn new_session(&mut self) -> Result<(), AppError> {
@@ -87,28 +77,15 @@ impl App {
             self.state.notice("new session requires an idle agent");
             return Ok(());
         }
-        if !self.persist_session() {
-            self.state
-                .notice("new session cancelled; the current session was not saved");
-            return Ok(());
-        }
-        let agent = self.agent_or_setup()?.clone();
-        agent.reset()?;
-        let thinking_level = agent.snapshot().thinking_level;
+        self.durable_subscription = None;
+        self.durable_harness = None;
+        self.durable_task = None;
         self.state.clear_transcript();
         self.state.clear_history();
         self.state.composer_mut().clear();
-        self.state.set_snapshot(agent.snapshot());
+        self.state.context_estimate = None;
         self.state.close_surface();
-        self.current_session = Some(
-            SessionRecord::new(self.state.selected_model.clone(), thinking_level).with_workspace(
-                self.workspace
-                    .as_ref()
-                    .map(|path| path.to_string_lossy().into_owned())
-                    .unwrap_or_default(),
-            ),
-        );
-        self.state.notice("new session");
+        self.state.notice("new durable session will begin with the next prompt");
         Ok(())
     }
 
@@ -287,8 +264,7 @@ impl App {
         let configured = self.configured_provider(&provider, &model)?;
         let descriptor = configured.descriptor.clone();
         let configured_provider = configured.provider;
-        self.agent_or_setup()?
-            .replace_model_provider(descriptor.clone(), Arc::clone(&configured_provider))?;
+        self.configured_provider = Some(Arc::clone(&configured_provider));
         if let Some(compactor) = &self.compactor {
             compactor.configure(descriptor.clone(), Arc::clone(&configured_provider));
         }
@@ -306,18 +282,19 @@ impl App {
         } else {
             AutomaticCompactionPolicy::disabled()
         };
-        self.agent_or_setup()?
-            .replace_automatic_compaction(policy)?;
-        self.state.automatic_compaction_enabled =
-            self.agent_or_setup()?.automatic_compaction().enabled;
+        self.automatic_compaction = policy.clone();
+        self.state.automatic_compaction_enabled = policy.enabled;
         self.state.selected_context_window = context_window;
         self.state.selected_model = Some(descriptor.clone());
-        if let Some(session) = self.current_session.as_mut() {
-            session.model = self.state.selected_model.clone();
-        }
         self.state.context_estimate = None;
         self.state.close_surface();
-        self.state.set_snapshot(self.agent_or_setup()?.snapshot());
+        self.state.reported_usage = tea_core::Usage::default();
+        // A model/provider change is a new immutable durable profile. Do not
+        // mutate an existing session's active snapshot in place; the next
+        // prompt creates a fresh session unless the user explicitly resumes
+        // the old one.
+        self.durable_harness = None;
+        self.durable_subscription = None;
         self.state.notice("model selected");
         if let Some(home) = self.tea_home.as_ref() {
             if let Err(error) = save_last_model(home, &descriptor) {

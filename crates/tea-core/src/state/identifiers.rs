@@ -76,16 +76,6 @@ pub enum ThinkingLevel {
     Max,
 }
 
-impl ThinkingLevel {
-    /// Legacy spelling for [`ThinkingLevel::Off`].
-    ///
-    /// Upstream Pi models the default agent setting as `"off"`; Rust callers
-    /// that used the former enum variant can continue to write
-    /// `ThinkingLevel::Default` while new code uses the upstream vocabulary.
-    #[allow(non_upper_case_globals)]
-    pub const Default: Self = Self::Off;
-}
-
 /// Provider-independent model identity.
 ///
 /// There is intentionally no `Default` implementation: a host must choose a

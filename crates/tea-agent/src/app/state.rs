@@ -5,12 +5,12 @@ use tea_core::event::{
     AgentEventKind, AutomaticCompactionOutcome, CompactionOutcome, ProviderRequestSkipReason,
 };
 use tea_core::provider::ProviderRegistry;
-use tea_core::state::{AgentMessage, AgentSnapshot, ToolCallId};
-use tea_core::{Agent, AgentEvent, ModelDescriptor, Usage};
+use tea_core::state::{AgentMessage, ToolCallId};
+use tea_core::{AgentEvent, ModelDescriptor, Usage};
 
 use super::commands;
 use super::host::{model_candidates, overlay_lines};
-use super::session::SessionSummary;
+use super::durable::DurableSessionSummary;
 
 /// Typed transcript entry contract for presentation consumers.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -107,7 +107,7 @@ pub(super) enum Picker {
     Session {
         filter: String,
         selected: usize,
-        entries: Vec<SessionSummary>,
+        entries: Vec<DurableSessionSummary>,
     },
 }
 
@@ -127,10 +127,8 @@ pub struct AppState {
     pub(super) follow_output: bool,
     pub(super) visible_transcript_lines: usize,
     pub(super) transcript_rows: usize,
-    pub(super) last_snapshot: Option<AgentSnapshot>,
     pub(super) selected_model: Option<ModelDescriptor>,
-    /// Presentation projection of the selected model's installed compactor/policy; core remains
-    /// the source of compaction truth.
+    /// Presentation projection of the selected model's durable compaction policy.
     pub(super) automatic_compaction_enabled: bool,
     /// Effective context capacity selected by the host. This may be an explicit local override;
     /// the registry remains the fallback for catalog-backed models.
@@ -142,8 +140,6 @@ pub struct AppState {
     /// The most recent core-emitted context estimate. `None` means the core has not supplied
     /// capacity-policy evidence for this projection; it is never inferred from rendered text.
     pub(super) context_estimate: Option<ContextEstimate>,
-    /// Read-only projection of the two queues the core owns and drains.
-    pub(super) queued_prompts: Vec<QueuedPrompt>,
     /// In-memory prompt history for the current terminal invocation.
     pub(super) history: Vec<String>,
     /// Current history cursor; `None` means the live composer draft.
@@ -177,22 +173,6 @@ pub(super) struct ContextEstimate {
     pub(super) message_count: usize,
 }
 
-/// A prompt awaiting a named core queue boundary.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) struct QueuedPrompt {
-    pub(super) sequence: u64,
-    pub(super) content: String,
-    pub(super) delivery: QueueDelivery,
-    pub(super) mode: tea_core::queue::QueueMode,
-}
-
-/// The core queue whose boundary will place the prompt in the transcript.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum QueueDelivery {
-    Steering,
-    FollowUp,
-}
-
 impl AppState {
     /// Create an empty projection.
     pub fn new() -> Self {
@@ -220,7 +200,7 @@ impl AppState {
         match &event.kind {
             AgentEventKind::AgentStart => self.status = UiStatus::Active,
             AgentEventKind::MessageStart { message } => {
-                if let tea_core::Message::User { content, .. } = message {
+                if let tea_core::AgentMessage::User { content, .. } = message {
                     self.push_entry(
                         sequence,
                         TranscriptEntry::User {
@@ -233,7 +213,7 @@ impl AppState {
                 message,
                 text_delta,
             } => {
-                if let (tea_core::Message::Assistant { .. }, Some(delta)) = (message, text_delta) {
+                if let (tea_core::AgentMessage::Assistant { .. }, Some(delta)) = (message, text_delta) {
                     if let Some(index) = self.streaming_line {
                         if let Some(TranscriptEntry::Assistant { text, .. }) =
                             self.transcript.get_mut(index)
@@ -253,7 +233,7 @@ impl AppState {
                 }
             }
             AgentEventKind::MessageEnd { message } => {
-                if let tea_core::Message::Assistant {
+                if let tea_core::AgentMessage::Assistant {
                     content,
                     error_message,
                     ..
@@ -444,12 +424,6 @@ impl AppState {
         }
     }
 
-    /// Replace the displayed inspection snapshot.
-    pub fn set_snapshot(&mut self, snapshot: AgentSnapshot) {
-        self.selected_model = snapshot.model.clone();
-        self.last_snapshot = Some(snapshot);
-    }
-
     /// Rebuild the visible transcript from a restored canonical conversation.
     ///
     /// These rows deliberately have no event sequence: loading a session is a host projection,
@@ -519,36 +493,6 @@ impl AppState {
         }
     }
 
-    /// Refresh the visible queue projection from the agent's owned inspection boundary.
-    pub(super) fn set_queue_snapshot(&mut self, agent: &Agent) {
-        let queues = agent.queue_snapshot();
-        let steering_mode = agent.steering_mode();
-        let follow_up_mode = agent.follow_up_mode();
-        self.queued_prompts = queues
-            .steering
-            .snapshot()
-            .into_iter()
-            .map(|entry| QueuedPrompt {
-                sequence: entry.sequence,
-                content: entry.content,
-                delivery: QueueDelivery::Steering,
-                mode: steering_mode,
-            })
-            .chain(
-                queues
-                    .follow_up
-                    .snapshot()
-                    .into_iter()
-                    .map(|entry| QueuedPrompt {
-                        sequence: entry.sequence,
-                        content: entry.content,
-                        delivery: QueueDelivery::FollowUp,
-                        mode: follow_up_mode,
-                    }),
-            )
-            .collect();
-    }
-
     /// Borrow the raw typed transcript projection.
     pub fn transcript(&self) -> &[TranscriptEntry] {
         &self.transcript
@@ -557,11 +501,6 @@ impl AppState {
     /// Snapshot the typed presentation contract for callers that need ownership.
     pub fn transcript_entries(&self) -> Vec<TranscriptEntry> {
         self.transcript.clone()
-    }
-
-    /// Alias used by presentation callers that do not need the legacy line projection.
-    pub fn entries(&self) -> Vec<TranscriptEntry> {
-        self.transcript_entries()
     }
 
     /// Borrow the local composer.
@@ -693,11 +632,6 @@ impl AppState {
         self.follow_output
     }
 
-    /// Return the latest core snapshot, if one has been attached.
-    pub fn snapshot(&self) -> Option<&AgentSnapshot> {
-        self.last_snapshot.as_ref()
-    }
-
     /// Return the compact, event-derived telemetry lines for the fixed footer.
     pub(crate) fn footer_lines(&self, registry: &ProviderRegistry) -> [String; 2] {
         let selected = self.selected_model.as_ref();
@@ -754,14 +688,9 @@ impl AppState {
             ),
         };
         let telemetry = self
-            .last_snapshot
-            .as_ref()
-            .map(|snapshot| &snapshot.accounting.aggregate)
-            .or_else(|| {
-                self.reported_usage
-                    .is_reported()
-                    .then_some(&self.reported_usage)
-            })
+            .reported_usage
+            .is_reported()
+            .then_some(&self.reported_usage)
             .filter(|usage| {
                 usage.input_tokens.is_some()
                     || usage.output_tokens.is_some()
@@ -777,27 +706,7 @@ impl AppState {
         [hint, context]
     }
 
-    pub(crate) fn queued_lines(&self) -> Vec<String> {
-        self.queued_prompts
-            .iter()
-            .map(|prompt| {
-                let (delivery, boundary) = match prompt.delivery {
-                    QueueDelivery::Steering => ("steering", "next active turn"),
-                    QueueDelivery::FollowUp => ("follow-up", "next idle boundary"),
-                };
-                let mode = match prompt.mode {
-                    tea_core::queue::QueueMode::OneAtATime => "one at a time",
-                    tea_core::queue::QueueMode::All => "all queued prompts",
-                };
-                format!(
-                    "queued {delivery} #{} ({boundary}; {mode}): {}",
-                    prompt.sequence, prompt.content
-                )
-            })
-            .collect()
-    }
-
-    /// Return v0 picker lines for the renderer, if an overlay is active.
+    /// Return v1 picker lines for the renderer, if an overlay is active.
     pub fn picker_lines(&self, registry: &ProviderRegistry) -> Option<Vec<String>> {
         self.picker_lines_visible(registry, usize::MAX)
     }
@@ -847,7 +756,7 @@ impl AppState {
                             .as_ref()
                             .map(|model| format!("{}/{}", model.provider, model.model))
                             .unwrap_or_else(|| "unknown model".into());
-                        format!("{} · {model} · {} messages", entry.id, entry.message_count)
+                        format!("{} · {model} · durable", entry.id)
                     })
                     .collect::<Vec<_>>();
                 overlay_lines("Sessions", filter, &rows, *selected, max_rows)

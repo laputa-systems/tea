@@ -1,5 +1,5 @@
 {
-  "schema_version": "tea-coding-eval-baselines/v0",
+  "schema_version": "tea-coding-eval-baselines/v1",
   "seed": 20260813,
   "repeats": 1,
   "comparison": {
@@ -34,8 +34,8 @@
       "runtime_version": "PIN_UPSTREAM_RUNTIME_VERSION",
       "revision": "PIN_UPSTREAM_COMMIT",
       "adapter": {
-        "protocol": "tea-coding-eval-adapter/v0",
-        "result_schema": "tea-coding-eval-result/v0"
+        "protocol": "tea-coding-eval-adapter/v1",
+        "result_schema": "tea-coding-eval-result/v1"
       },
       "command": [
         "<explicit-upstream-adapter>",
@@ -60,8 +60,8 @@
       "runtime_version": "PIN_RUST_RUNTIME_VERSION",
       "revision": "PIN_RUST_REVISION",
       "adapter": {
-        "protocol": "tea-coding-eval-adapter/v0",
-        "result_schema": "tea-coding-eval-result/v0"
+        "protocol": "tea-coding-eval-adapter/v1",
+        "result_schema": "tea-coding-eval-result/v1"
       },
       "command": [
         "<explicit-rust-adapter>",

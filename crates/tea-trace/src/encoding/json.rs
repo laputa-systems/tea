@@ -1,7 +1,10 @@
 //! JSON Lines encoding for trace events.
 
 use super::{compaction_stage_name, end_reason_name, event_schema_version, event_type};
-use crate::event::{Compaction, EpisodeEnd, EpisodeHeader, Tool, TraceEvent, Turn};
+use crate::event::{
+    CacheEvidence, Compaction, EpisodeEnd, EpisodeHeader, Tool, TraceEvent, TraceProvenance,
+    Turn,
+};
 use std::collections::BTreeMap;
 
 pub(super) fn write_json_event(output: &mut String, event: &TraceEvent) {
@@ -29,6 +32,9 @@ fn write_json_header(output: &mut String, header: &EpisodeHeader) {
     json_map(output, &header.metadata);
     output.push(',');
     json_field_optional_number(output, "started_at_ms", header.started_at_ms);
+    output.push(',');
+    json_field_name(output, "provenance");
+    json_optional_provenance(output, header.provenance.as_ref());
 }
 
 fn write_json_turn(output: &mut String, turn: &Turn) {
@@ -41,6 +47,76 @@ fn write_json_turn(output: &mut String, turn: &Turn) {
     json_field_optional_string(output, "output", turn.output.as_deref());
     output.push(',');
     json_field_optional_string(output, "stop_reason", turn.stop_reason.as_deref());
+    output.push(',');
+    json_field_name(output, "cache_evidence");
+    json_optional_cache_evidence(output, turn.cache_evidence.as_ref());
+}
+
+fn json_optional_provenance(output: &mut String, provenance: Option<&TraceProvenance>) {
+    let Some(provenance) = provenance else {
+        output.push_str("null");
+        return;
+    };
+    output.push('{');
+    let fields = [
+        ("session_id", provenance.session_id.as_deref()),
+        ("lane_id", provenance.lane_id.as_deref()),
+        ("operation_id", provenance.operation_id.as_deref()),
+        ("epoch_id", provenance.epoch_id.as_deref()),
+        ("core_run_id", provenance.core_run_id.as_deref()),
+        ("harness_snapshot_id", provenance.harness_snapshot_id.as_deref()),
+        ("harness_revision_id", provenance.harness_revision_id.as_deref()),
+        (
+            "model_harness_profile_id",
+            provenance.model_harness_profile_id.as_deref(),
+        ),
+        ("experiment_id", provenance.experiment_id.as_deref()),
+    ];
+    for (index, (name, value)) in fields.into_iter().enumerate() {
+        if index != 0 {
+            output.push(',');
+        }
+        json_field_optional_string(output, name, value);
+    }
+    output.push('}');
+}
+
+fn json_optional_cache_evidence(output: &mut String, evidence: Option<&CacheEvidence>) {
+    let Some(evidence) = evidence else {
+        output.push_str("null");
+        return;
+    };
+    output.push('{');
+    json_field_optional_number(
+        output,
+        "deterministic_common_prefix_bytes",
+        evidence.deterministic_common_prefix_bytes,
+    );
+    output.push(',');
+    json_field_optional_number(
+        output,
+        "deterministic_common_prefix_tokens_estimate",
+        evidence.deterministic_common_prefix_tokens_estimate,
+    );
+    output.push(',');
+    json_field_optional_number(
+        output,
+        "provider_cache_read_tokens",
+        evidence.provider_cache_read_tokens,
+    );
+    output.push(',');
+    json_field_optional_number(
+        output,
+        "provider_cache_write_tokens",
+        evidence.provider_cache_write_tokens,
+    );
+    output.push(',');
+    json_field_optional_string(
+        output,
+        "provider_surface_digest",
+        evidence.provider_surface_digest.as_deref(),
+    );
+    output.push('}');
 }
 
 fn write_json_tool(output: &mut String, tool: &Tool) {

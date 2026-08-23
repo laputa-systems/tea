@@ -1,8 +1,9 @@
 # Quickstart
 
-This guide runs a headless Rust agent with a caller-owned model provider and
-Smol executor. The core never discovers a provider, workspace, or credential
-for you.
+This guide runs an in-memory v1 core epoch with a caller-owned model provider
+and Smol executor. The core never discovers a provider, workspace, or
+credential for you. Use the durable harness when the run must survive process
+loss or retain recovery evidence.
 
 ## Build the repository
 
@@ -19,7 +20,7 @@ executor yourself:
 
 ```toml
 [dependencies]
-tea-core = { path = "../tea/crates/tea-core" }
+tea-core = { version = "1", path = "../tea/crates/tea-core" }
 smol = "=2.0.2"
 ```
 
@@ -52,7 +53,7 @@ impl ModelProvider for DemoProvider {
         let stream = ModelStream {
             events: vec![
                 ModelStreamEvent::TextDelta("Hello from the model.".into()),
-                ModelStreamEvent::End(StopReason::EndTurn),
+                ModelStreamEvent::End(StopReason::Stop),
             ],
         };
         Box::pin(std::future::ready(Ok(
@@ -178,7 +179,9 @@ For two narrow, optional HTTP adapters, see [provider adapters](provider-adapter
 They require explicit Cargo features and caller-supplied configuration; the
 default build remains provider-free.
 
-For the full request, tool, queue, hook, and terminal contracts, read
-[runtime semantics](semantics.md). For an optional capability-scoped Luau
-policy, start with [Writing Luau extensions](luau-extensions.md); a scripting
-VM is not required for ordinary Rust agents.
+For durable host integration, begin with [the durable harness](durable-harness.md)
+and [harness recovery](harness-recovery.md). For the pure core request, tool,
+queue, hook, and terminal contracts, read [runtime semantics](semantics.md).
+For an optional capability-scoped Luau policy, start with
+[Luau ABI v1](luau-abi-v1.md); a scripting VM is not required for ordinary Rust
+agents.

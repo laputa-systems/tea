@@ -165,7 +165,7 @@ pub enum AgentEventKind {
     MessageUpdate {
         /// Reduced message snapshot after this update.
         message: AgentMessage,
-        /// Exact text fragment delivered by the current V0 stream event.
+        /// Exact text fragment delivered by the current v1 stream event.
         text_delta: Option<String>,
     },
     /// A message settled.

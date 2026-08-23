@@ -1,6 +1,6 @@
 [package]
 name = "tea-luau"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 description = "Hermetic Luau policy layer for tea-core"
 license = "MIT"

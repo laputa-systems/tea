@@ -25,7 +25,7 @@ from .trace import coerce_trace, extract_metrics
 ROOT = Path(__file__).resolve().parents[2]
 QUALITY_ROOT = Path(__file__).resolve().parent
 CASE_ROOT = QUALITY_ROOT / "cases"
-PROTOCOL = "tea-quality-adapter/v0"
+PROTOCOL = "tea-quality-adapter/v1"
 RUST_ADAPTER = QUALITY_ROOT / "adapters" / "rust-core" / "adapter.py"
 QUALITY_SCHEMA = "tea-quality-run/v1"
 USAGE = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0, "total_tokens": 0}
@@ -111,7 +111,7 @@ def _terminal_chunk(raw: Mapping[str, Any]) -> dict[str, Any]:
         message = raw.get("message")
         if not isinstance(message, str) or not message:
             raise ContractError("stream_error needs a non-empty message")
-        # The V0 deterministic stream contract has only error/aborted at this
+        # The v1 deterministic stream contract has only error/aborted at this
         # boundary. Keep the provider classification in the diagnostic so the
         # canonical trace can classify it without guessing.
         reason = "aborted" if raw.get("reason") == "aborted" else "error"
@@ -192,10 +192,10 @@ def _compile_host(manifest: Mapping[str, Any]) -> dict[str, Any]:
                 raise ContractError("host tool call needs a result")
             content = result.get("content")
             if not isinstance(content, list) or len(content) != 1 or not isinstance(content[0], Mapping):
-                raise ContractError("quality V0 lowering supports exactly one text tool-result content part")
+                raise ContractError("quality v1 lowering supports exactly one text tool-result content part")
             text = content[0].get("text")
             if content[0].get("type") != "text" or not isinstance(text, str):
-                raise ContractError("quality V0 lowering supports text tool-result content only")
+                raise ContractError("quality v1 lowering supports text tool-result content only")
             calls_out.append(
                 {
                     "arguments": dict(raw_call["arguments"]),
@@ -232,7 +232,7 @@ def _compile_host(manifest: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def compile_core_fixture(manifest: Mapping[str, Any]) -> dict[str, Any]:
-    """Lower an open quality manifest to the shared closed V0 fixture dialect.
+    """Lower an open quality manifest to the shared closed v1 fixture dialect.
 
     The lowering is intentionally narrow and auditable.  It does not encode an
     expected result; it makes only the complete-call, timer-free surface accepted by
@@ -391,7 +391,7 @@ def _error_class(call: Mapping[str, Any], setup: Mapping[str, Any]) -> str | Non
 
 
 def canonical_trace(adapter_response: Mapping[str, Any], manifest: Mapping[str, Any]) -> dict[str, Any]:
-    """Normalize either adapter's V0 result into a stable quality trace."""
+    """Normalize either adapter's v1 result into a stable quality trace."""
 
     result = adapter_response.get("result")
     if not isinstance(result, Mapping):

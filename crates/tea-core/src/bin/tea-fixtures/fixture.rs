@@ -66,7 +66,7 @@ pub(super) struct Fixture {
 /// One deterministic model turn, including adapter-only cancellation control.
 ///
 /// The core provider contract intentionally receives a finite `ModelStream` in
-/// this V0 harness. A cancellation checkpoint therefore rewrites the fixture
+/// this v1 harness. A cancellation checkpoint therefore rewrites the fixture
 /// stream at parse time and marks the caller-owned token before returning it;
 /// both adapters still expose the same partial response and aborted terminal
 /// lifecycle without relying on wall-clock scheduling.

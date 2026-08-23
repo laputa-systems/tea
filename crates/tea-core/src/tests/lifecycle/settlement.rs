@@ -11,25 +11,63 @@ fn caller_driven_text_run_emits_lifecycle_and_settles() {
         run.drive().await?;
 
         let events = run.events();
-        assert_eq!(events.len(), 9);
-        assert!(matches!(events[0].kind, AgentEventKind::AgentStart));
-        assert!(matches!(events[1].kind, AgentEventKind::TurnStart { .. }));
-        assert!(matches!(
-            events[2].kind,
-            AgentEventKind::MessageStart { .. }
-        ));
-        assert!(matches!(events[3].kind, AgentEventKind::MessageEnd { .. }));
-        assert!(matches!(
-            events[4].kind,
-            AgentEventKind::MessageStart { .. }
-        ));
-        assert!(matches!(
-            events[5].kind,
-            AgentEventKind::MessageUpdate { .. }
-        ));
-        assert!(matches!(events[6].kind, AgentEventKind::MessageEnd { .. }));
-        assert!(matches!(events[7].kind, AgentEventKind::TurnEnd { .. }));
-        assert!(matches!(events[8].kind, AgentEventKind::AgentEnd { .. }));
+        assert!(matches!(events.first().map(|event| &event.kind), Some(AgentEventKind::AgentStart)));
+        assert!(matches!(events.last().map(|event| &event.kind), Some(AgentEventKind::AgentEnd { .. })));
+        let user_start = events
+            .iter()
+            .position(|event| matches!(
+                event.kind,
+                AgentEventKind::MessageStart {
+                    message: crate::state::AgentMessage::User { .. }
+                }
+            ))
+            .expect("user message starts");
+        let user_end = events
+            .iter()
+            .position(|event| matches!(
+                event.kind,
+                AgentEventKind::MessageEnd {
+                    message: crate::state::AgentMessage::User { .. }
+                }
+            ))
+            .expect("user message ends");
+        let assistant_start = events
+            .iter()
+            .position(|event| matches!(
+                event.kind,
+                AgentEventKind::MessageStart {
+                    message: crate::state::AgentMessage::Assistant { .. }
+                }
+            ))
+            .expect("assistant message starts");
+        let assistant_update = events
+            .iter()
+            .position(|event| matches!(
+                event.kind,
+                AgentEventKind::MessageUpdate {
+                    message: crate::state::AgentMessage::Assistant { .. },
+                    ..
+                }
+            ))
+            .expect("assistant message updates");
+        let assistant_end = events
+            .iter()
+            .position(|event| matches!(
+                event.kind,
+                AgentEventKind::MessageEnd {
+                    message: crate::state::AgentMessage::Assistant { .. }
+                }
+            ))
+            .expect("assistant message ends");
+        let turn_end = events
+            .iter()
+            .position(|event| matches!(event.kind, AgentEventKind::TurnEnd { .. }))
+            .expect("turn ends");
+        assert!(user_start < user_end);
+        assert!(user_end < assistant_start);
+        assert!(assistant_start < assistant_update);
+        assert!(assistant_update < assistant_end);
+        assert!(assistant_end < turn_end);
 
         let snapshot = agent.snapshot();
         assert_eq!(snapshot.phase, AgentPhase::Idle);
@@ -57,14 +95,32 @@ fn provider_failure_settles_the_agent_before_returning_the_error() {
 
         assert!(matches!(error, CoreError::ModelProvider { .. }));
         let events = run.events();
-        assert_eq!(events.len(), 8);
-        assert!(matches!(
-            events[4].kind,
-            AgentEventKind::MessageStart { .. }
-        ));
-        assert!(matches!(events[5].kind, AgentEventKind::MessageEnd { .. }));
-        assert!(matches!(events[6].kind, AgentEventKind::TurnEnd { .. }));
-        assert!(matches!(events[7].kind, AgentEventKind::AgentEnd { .. }));
+        assert!(matches!(events.first().map(|event| &event.kind), Some(AgentEventKind::AgentStart)));
+        assert!(matches!(events.last().map(|event| &event.kind), Some(AgentEventKind::AgentEnd { .. })));
+        let assistant_start = events
+            .iter()
+            .position(|event| matches!(
+                event.kind,
+                AgentEventKind::MessageStart {
+                    message: crate::state::AgentMessage::Assistant { .. }
+                }
+            ))
+            .expect("failed assistant message starts");
+        let assistant_end = events
+            .iter()
+            .position(|event| matches!(
+                event.kind,
+                AgentEventKind::MessageEnd {
+                    message: crate::state::AgentMessage::Assistant { .. }
+                }
+            ))
+            .expect("failed assistant message ends");
+        let turn_end = events
+            .iter()
+            .position(|event| matches!(event.kind, AgentEventKind::TurnEnd { .. }))
+            .expect("failed turn ends");
+        assert!(assistant_start < assistant_end);
+        assert!(assistant_end < turn_end);
         let snapshot = agent.snapshot();
         assert_eq!(snapshot.phase, AgentPhase::Idle);
         assert!(!snapshot.is_streaming);

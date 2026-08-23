@@ -16,7 +16,7 @@ import sys
 from typing import Any
 
 
-PROTOCOL = "tea-quality-adapter/v0"
+PROTOCOL = "tea-quality-adapter/v1"
 ADAPTER = "rust-core"
 TOOLCHAIN = "nightly-2026-07-24"
 

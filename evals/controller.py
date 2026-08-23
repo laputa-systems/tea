@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Stdlib-only, provider-opt-in controller for the V0 coding evaluation.
+"""Stdlib-only, provider-opt-in controller for the v1 coding evaluation.
 
 Validation and planning are inert. A live run requires --allow-provider and an explicit argv
 adapter; the controller never discovers or forwards credentials and never uses a shell.
@@ -28,10 +28,10 @@ from typing import Any, Iterable
 
 ROOT = Path(__file__).resolve().parent
 TASKS = ROOT / "tasks"
-TASK_SCHEMA = "tea-coding-eval-task/v0"
-BASELINE_SCHEMA = "tea-coding-eval-baselines/v0"
-RESULT_SCHEMA = "tea-coding-eval-result/v0"
-ADAPTER_SCHEMA = "tea-coding-eval-adapter/v0"
+TASK_SCHEMA = "tea-coding-eval-task/v1"
+BASELINE_SCHEMA = "tea-coding-eval-baselines/v1"
+RESULT_SCHEMA = "tea-coding-eval-result/v1"
+ADAPTER_SCHEMA = "tea-coding-eval-adapter/v1"
 # These are the complete adapter argv contract.  Identity values are passed explicitly so
 # adapters never infer them from temporary filenames or hard-code a single attempt.
 TOKENS = (
@@ -343,7 +343,7 @@ def run_adapter_process(
 def verify_ready(workspace: Path, result: dict[str, Any]) -> dict[str, Any]:
     del workspace
     passed = result.get("final_text") == "READY" and result.get("terminal", {}).get("status") == "completed"
-    return {"oracle_id": "ready-exact-v0", "status": "passed" if passed else "failed"}
+    return {"oracle_id": "ready-exact-v1", "status": "passed" if passed else "failed"}
 
 
 INTERVAL_ORACLE = r'''
@@ -374,28 +374,28 @@ else:
 
 def verify_interval(workspace: Path, result: dict[str, Any]) -> dict[str, Any]:
     if result.get("terminal", {}).get("status") != "completed":
-        return {"oracle_id": "interval-merge-hidden-v0", "status": "failed", "detail": "not completed"}
+        return {"oracle_id": "interval-merge-hidden-v1", "status": "failed", "detail": "not completed"}
     implementation = workspace / "intervals.py"
     if not implementation.is_file() or implementation.is_symlink():
-        return {"oracle_id": "interval-merge-hidden-v0", "status": "failed", "detail": "intervals.py missing"}
+        return {"oracle_id": "interval-merge-hidden-v1", "status": "failed", "detail": "intervals.py missing"}
     try:
         completed = subprocess.run(
             [sys.executable, "-I", "-c", INTERVAL_ORACLE],
             cwd=workspace, env=safe_environment(), capture_output=True, text=True, timeout=10, check=False
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
-        return {"oracle_id": "interval-merge-hidden-v0", "status": "failed", "detail": str(exc)}
+        return {"oracle_id": "interval-merge-hidden-v1", "status": "failed", "detail": str(exc)}
     if completed.returncode == 0:
-        return {"oracle_id": "interval-merge-hidden-v0", "status": "passed"}
+        return {"oracle_id": "interval-merge-hidden-v1", "status": "passed"}
     detail = (completed.stdout + "\n" + completed.stderr).strip()[-2_000:]
-    return {"oracle_id": "interval-merge-hidden-v0", "status": "failed", "detail": detail}
+    return {"oracle_id": "interval-merge-hidden-v1", "status": "failed", "detail": detail}
 
 
 def verify_result(task: dict[str, Any], workspace: Path, result: dict[str, Any]) -> dict[str, Any]:
     oracle = task["oracle_id"]
-    if oracle == "ready-exact-v0":
+    if oracle == "ready-exact-v1":
         return verify_ready(workspace, result)
-    if oracle == "interval-merge-hidden-v0":
+    if oracle == "interval-merge-hidden-v1":
         return verify_interval(workspace, result)
     raise ContractError(f"no controller-owned oracle for {oracle!r}")
 
@@ -494,7 +494,7 @@ def attempt_envelope(
     usage = result.get("usage") if isinstance(result, dict) else None
     cost = result.get("cost") if isinstance(result, dict) else None
     return {
-        "schema_version": "tea-coding-eval-attempt/v0",
+        "schema_version": "tea-coding-eval-attempt/v1",
         "attempt_id": attempt_id,
         "baseline_id": baseline["id"],
         "task_id": task["task_id"],
@@ -824,7 +824,7 @@ def command_run(args: argparse.Namespace) -> int:
         wave_reports.append(wave_report)
     summary = summarize(records)
     report = {
-        "schema_version": "tea-coding-eval-report/v0",
+        "schema_version": "tea-coding-eval-report/v1",
         "records": records,
         "summary": summary,
         "provider_reported_cost_comparison": paired_cost_comparison(summary),

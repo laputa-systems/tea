@@ -65,7 +65,7 @@ fn parse_hold_agent_end_observer(host: &BTreeMap<String, JsonValue>) -> Result<b
     match observer.get("hold_agent_end") {
         Some(JsonValue::Bool(true)) => Ok(true),
         Some(JsonValue::Bool(false)) => {
-            Err("host.observer.hold_agent_end must be true in the V0 fixture adapter".into())
+            Err("host.observer.hold_agent_end must be true in the v1 fixture adapter".into())
         }
         Some(_) => Err("host.observer.hold_agent_end must be a boolean".into()),
         None => Err("host.observer.hold_agent_end is required".into()),
@@ -178,7 +178,7 @@ fn string_array(value: &JsonValue, path: &str) -> Result<Vec<String>, String> {
 fn parse_actions(value: &JsonValue) -> Result<Vec<FixtureAction>, String> {
     let actions = array(value, "actions")?;
     if actions.is_empty() {
-        return Err("the V0 runner requires at least one action".into());
+        return Err("the v1 runner requires at least one action".into());
     }
     let parsed = actions
         .iter()
@@ -195,7 +195,7 @@ fn parse_actions(value: &JsonValue) -> Result<Vec<FixtureAction>, String> {
                     string_field(action, "text")?.to_owned(),
                 )),
                 "continue" => Ok(FixtureAction::Continue),
-                kind => Err(format!("the V0 runner does not support action {kind:?}")),
+                kind => Err(format!("the v1 runner does not support action {kind:?}")),
             }
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -203,7 +203,7 @@ fn parse_actions(value: &JsonValue) -> Result<Vec<FixtureAction>, String> {
         .iter()
         .any(|action| matches!(action, FixtureAction::Prompt(_) | FixtureAction::Continue))
     {
-        return Err("the V0 runner requires an action that starts a run".into());
+        return Err("the v1 runner requires an action that starts a run".into());
     }
     Ok(parsed)
 }
@@ -268,12 +268,12 @@ fn parse_tool_response(value: &JsonValue) -> Result<FixtureToolResponse, String>
     let content = array(field(result, "content")?, "host tool result.content")?;
     if content.len() != 1 {
         return Err(
-            "the V0 fixture adapter supports exactly one text tool-result content part".into(),
+            "the v1 fixture adapter supports exactly one text tool-result content part".into(),
         );
     }
     let text = object(&content[0], "host tool result.content[0]")?;
     if string_field(text, "type")? != "text" {
-        return Err("the V0 fixture adapter supports text tool-result content only".into());
+        return Err("the v1 fixture adapter supports text tool-result content only".into());
     }
     let yield_once = match value.get("yield_once") {
         None => false,

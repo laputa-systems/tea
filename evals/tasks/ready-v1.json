@@ -1,0 +1,11 @@
+{
+  "schema_version": "tea-coding-eval-task/v1",
+  "task_id": "ready-v1",
+  "task_version": 1,
+  "kind": "control",
+  "prompt": "Reply with exactly READY and no additional text. Do not call any tools.",
+  "initial_workspace": [],
+  "capabilities": [],
+  "timeout_seconds": 30,
+  "oracle_id": "ready-exact-v1"
+}

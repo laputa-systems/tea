@@ -437,9 +437,6 @@ pub struct AgentToolResult {
     pub failure: Option<ToolFailure>,
 }
 
-/// Compatibility spelling retained for existing Rust integrations.
-pub type ToolResult = AgentToolResult;
-
 /// A partial update emitted during tool execution.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ToolUpdate {
@@ -515,6 +512,16 @@ pub trait AgentTool: Send + Sync {
     /// Execution ordering policy.
     fn execution_mode(&self) -> ToolExecutionMode {
         ToolExecutionMode::Parallel
+    }
+    /// Whether this capability may run only as the sole call in one assistant
+    /// tool batch.
+    ///
+    /// This is a scheduling boundary for host-owned transactional tools.  The
+    /// run rejects the entire batch before any sibling capability starts when
+    /// an exclusive tool appears beside another call.  Ordinary tools remain
+    /// composable by default.
+    fn requires_exclusive_batch(&self) -> bool {
+        false
     }
     /// Execute the call on the caller-owned executor.
     fn execute<'a>(

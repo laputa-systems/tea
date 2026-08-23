@@ -13,7 +13,7 @@ observers, and terminal settlement caused by that invocation. A **turn** starts 
 A **message** is a transcript item; a **tool call** is an assistant content block and has the
 provider-supplied `toolCallId`.
 
-Public events do not carry run, turn, or message IDs. V0 therefore makes the
+Public events do not carry run, turn, or message IDs. V1 therefore makes the
 Rust representation explicit: `RunId` is a process-local monotonic counter; `TurnId` begins at
 one within a run; `MessageId` is a durable agent-local monotonic counter; and `EventSequence`
 begins at one within a run. A cancelled prompt keeps any already-retained message IDs, and later
@@ -91,8 +91,8 @@ transactional compactor operation. `AutomaticCompactionRequest` gives the
 compactor an exact safe retained suffix, summary prefix, and split-turn prefix
 when a retained suffix begins mid-turn, plus the requested recent-token
 budget, reason, and retry intent; compactors may override
-`Compactor::compact_automatic` to use this split while legacy compactors retain
-their `compact` behavior.
+`Compactor::compact_automatic` to use this split while compactors that do not
+override it use their `compact` behavior.
 
 ```text
 completed assistant/tool turn
@@ -283,7 +283,7 @@ OpenAI-compatible context carries the bounded marked representation.
 The target distinguishes an awaited `EventObserver` from a non-blocking observational subscription.
 The public `subscribe` path behaves as an awaited listener: listeners run in
 registration order, receive the run signal, and `agent_end` listener settlement precedes idle.
-V0 must pin the Rust adaptation rather than silently conflating these meanings.
+V1 pins the Rust adaptation rather than silently conflating these meanings.
 
 ```text
 event emitted/reduced into state

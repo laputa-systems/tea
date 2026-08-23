@@ -255,6 +255,8 @@ fn local_request_observation(
         domain_bytes.extend_from_slice(&fingerprint.to_le_bytes());
     }
     AdapterRequestObservation {
+        deterministic_common_prefix_bytes: None,
+        deterministic_common_prefix_tokens_estimate: None,
         serialized_request_bytes: Some(serialized_request_bytes),
         cache_domain_fingerprint: Some(stable_fingerprint(&domain_bytes)),
         cache_domain_components: components,

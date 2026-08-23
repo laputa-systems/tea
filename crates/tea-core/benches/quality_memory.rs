@@ -29,7 +29,7 @@ impl ModelProvider for TextProvider {
         Box::pin(std::future::ready(Ok(Box::new(ModelStream {
             events: vec![
                 ModelStreamEvent::TextDelta("quality memory fixture".into()),
-                ModelStreamEvent::End(StopReason::EndTurn),
+                ModelStreamEvent::End(StopReason::Stop),
             ],
         }) as _)))
     }

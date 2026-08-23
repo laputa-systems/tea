@@ -16,7 +16,7 @@ mod json;
 
 /// A [`TraceSink`] that writes one JSON object followed by a newline per event.
 ///
-/// The JSON shape is an explicit V0 wire format. Every object carries
+/// The JSON shape is the explicit v1 wire format. Every object carries
 /// `schema_version` and a `type` discriminator. Its key order is stable, so
 /// deterministic traces stay diff-friendly without an external serializer.
 pub struct JsonLinesSink<W> {
@@ -109,14 +109,8 @@ fn event_type(event: &TraceEvent) -> &'static str {
     }
 }
 
-fn event_schema_version(event: &TraceEvent) -> u16 {
-    match event {
-        TraceEvent::Compaction(_) => crate::event::COMPACTION_TRACE_SCHEMA_VERSION,
-        TraceEvent::EpisodeHeader(_)
-        | TraceEvent::Turn(_)
-        | TraceEvent::Tool(_)
-        | TraceEvent::EpisodeEnd(_) => crate::event::TRACE_SCHEMA_VERSION,
-    }
+fn event_schema_version(_event: &TraceEvent) -> u16 {
+    crate::event::TRACE_SCHEMA_VERSION
 }
 
 fn compaction_stage_name(stage: CompactionStage) -> &'static str {
@@ -161,7 +155,7 @@ mod tests {
         assert_eq!(
             text.lines().next(),
             Some(
-                r#"{"schema_version":0,"type":"episode_header","episode_id":"episode\n1","metadata":{"z":"\u0001\""},"started_at_ms":null}"#
+                r#"{"schema_version":1,"type":"episode_header","episode_id":"episode\n1","metadata":{"z":"\u0001\""},"started_at_ms":null,"provenance":null}"#
             ),
         );
         assert!(text.contains(r#""type":"turn"#));
@@ -173,9 +167,9 @@ mod tests {
         sink.append(TraceEvent::from(EpisodeHeader::new("episode")))
             .expect("in-memory write succeeds");
         let bytes = sink.into_inner();
-        // Major type 5 (map), length 5. The record is one CBOR value, not a
+        // Major type 5 (map), length 6. The record is one CBOR value, not a
         // newline-delimited JSON encoding.
-        assert_eq!(bytes.first(), Some(&0xa5));
+        assert_eq!(bytes.first(), Some(&0xa6));
         assert!(!bytes.contains(&b'\n'));
         assert!(
             bytes
@@ -185,9 +179,9 @@ mod tests {
     }
 
     #[test]
-    fn compaction_is_an_additive_v1_content_free_record() {
+    fn compaction_is_a_v1_content_free_record() {
         let mut record = Compaction::new("run-7:compact-1", CompactionStage::Terminal);
-        record.strategy_id = Some("cache_replay_summary_v0".into());
+        record.strategy_id = Some("cache_replay_summary_v1".into());
         record.terminal_outcome = Some("committed".into());
         record.serialized_request_bytes = Some(321);
         let mut sink = JsonLinesSink::new(Vec::new());

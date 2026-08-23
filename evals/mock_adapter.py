@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Deterministic, provider-free adapter used to exercise the V0 controller contract.
+"""Deterministic, provider-free adapter used to exercise the v1 controller contract.
 
 This is intentionally a tiny task adapter, not an agent implementation.  It proves that a
 manifest can pass explicit task/workspace/result/identity arguments through the controller and
@@ -17,7 +17,7 @@ import sys
 from typing import Any
 
 
-RESULT_SCHEMA = "tea-coding-eval-result/v0"
+RESULT_SCHEMA = "tea-coding-eval-result/v1"
 
 
 def read_object(path: Path) -> dict[str, Any]:
@@ -108,12 +108,12 @@ def main(argv: list[str] | None = None) -> int:
     if capabilities != task.get("capabilities"):
         raise ValueError("capability manifest does not match task")
     task_id = task.get("task_id")
-    if task_id == "ready-v0":
+    if task_id == "ready-v1":
         payload = result(
             attempt_id=args.attempt_id, baseline_id=args.baseline_id,
             status="completed", final_text="READY", turns=1, tool_calls=0,
         )
-    elif task_id == "interval-merge-v0":
+    elif task_id == "interval-merge-v1":
         write_workspace_file(args.workspace, "intervals.py", INTERVALS)
         write_workspace_file(args.workspace, "test_intervals.py", INTERVAL_TESTS)
         try:

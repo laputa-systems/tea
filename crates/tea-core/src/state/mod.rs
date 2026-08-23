@@ -1,7 +1,7 @@
 //! Canonical agent and run state.
 //!
 //! State is split into durable conversation data and transient execution data. The public
-//! state module is a compatibility facade over focused contract modules.
+//! state module collects focused contract modules into one public boundary.
 
 mod accounting;
 mod identifiers;

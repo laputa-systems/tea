@@ -28,7 +28,9 @@ pub enum CoreError {
     ModelAborted { message: String },
     /// A hook failed at an explicit lifecycle boundary.
     Hook(HookError),
-    /// The model stream used a behavior that the active V0 slice does not yet support.
+    /// A host-owned durable/effect gate rejected an execution boundary.
+    EffectGate(crate::effect::EffectGateError),
+    /// The model stream used a behavior that the active v1 slice does not support.
     UnsupportedModelStream { message: String },
     /// A caller-supplied manual compaction operation failed or proposed invalid context.
     Compaction(crate::compaction::CompactionError),
@@ -88,6 +90,7 @@ impl fmt::Display for CoreError {
             Self::ModelError { message } => write!(f, "model response failed: {message}"),
             Self::ModelAborted { message } => write!(f, "model response aborted: {message}"),
             Self::Hook(error) => error.fmt(f),
+            Self::EffectGate(error) => write!(f, "effect gate failed: {error}"),
             Self::UnsupportedModelStream { message } => {
                 write!(f, "unsupported model stream behavior: {message}")
             }
@@ -123,6 +126,12 @@ impl std::error::Error for CoreError {}
 impl From<HookError> for CoreError {
     fn from(error: HookError) -> Self {
         Self::Hook(error)
+    }
+}
+
+impl From<crate::effect::EffectGateError> for CoreError {
+    fn from(error: crate::effect::EffectGateError) -> Self {
+        Self::EffectGate(error)
     }
 }
 impl std::error::Error for StateTransitionError {}

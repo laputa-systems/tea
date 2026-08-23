@@ -40,11 +40,6 @@ pub enum AgentMessage {
     },
 }
 
-/// Compatibility spelling retained for existing Rust integrations.
-///
-/// New code should use [`AgentMessage`], which matches the upstream core name.
-pub type Message = AgentMessage;
-
 /// A tool call embedded in an assistant message.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AgentToolCall {
@@ -55,6 +50,3 @@ pub struct AgentToolCall {
     /// Serialized JSON arguments.
     pub arguments: SerializedJson,
 }
-
-/// Compatibility spelling retained for existing Rust integrations.
-pub type AssistantToolCall = AgentToolCall;

@@ -171,7 +171,7 @@ source calls A, B, C
 
 Sequential mode performs the entire prepare/execute/finalize/result cycle in source order. The
 selected contract serializes the entire batch when any call has a sequential
-override; the mixed-mode fixture in `docs/semantics.md` decides whether V0 preserves that exact
+override; the mixed-mode fixture in `docs/semantics.md` decides whether v1 preserves that exact
 rule. Partial updates are awaited before a tool end event and ignored after settlement. Tool
 results are inserted in source order even when completion events are not.
 

@@ -5,5 +5,10 @@ mod loading;
 mod parsing;
 mod types;
 
-pub use hooks::LuaPolicyHookSet;
-pub use types::{LuaPolicy, PolicyError, PolicyLimits, PolicyTool};
+pub use hooks::{CollectedPolicyMemoryProposal, LuaPolicyHookSet, PolicyMemoryCollector};
+pub use types::{
+    LuaPolicy, PolicyAfterToolOutput, PolicyContextAnnotation, PolicyContextEntry,
+    PolicyContextInput, PolicyContextProjectionPatch, PolicyError, PolicyLimits,
+    PolicyMemoryProposal, PolicyMemoryRetention, PolicyMemoryVisibility, PolicyPromptSection,
+    PolicyTool,
+};

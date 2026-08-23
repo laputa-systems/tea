@@ -4,8 +4,10 @@ use tea_core::event::AgentEventKind;
 use tea_core::scheduler::{
     CancellationToken, ModelFuture, ModelProvider, ModelRequest, ModelStream, ModelStreamEvent,
 };
-use tea_core::state::{AssistantToolCall, Message, SerializedJson, StopReason, ToolCallId};
-use tea_core::tool::{AgentTool, ToolCall, ToolContext, ToolFuture, ToolResult, ToolUpdateSink};
+use tea_core::state::{AgentMessage, AgentToolCall, SerializedJson, StopReason, ToolCallId};
+use tea_core::tool::{
+    AgentTool, AgentToolResult, ToolCall, ToolContext, ToolFuture, ToolUpdateSink,
+};
 use tea_core::Agent;
 
 #[derive(Debug)]
@@ -61,7 +63,7 @@ impl AgentTool for TerminatingTool {
         _context: ToolContext,
         _updates: ToolUpdateSink,
     ) -> ToolFuture<'a> {
-        Box::pin(std::future::ready(Ok(ToolResult {
+        Box::pin(std::future::ready(Ok(AgentToolResult {
             tool_call_id: call.id,
             content: "finished".into(),
             details: None,
@@ -74,7 +76,7 @@ impl AgentTool for TerminatingTool {
     }
 }
 
-fn agent_end_messages(agent_run: &tea_core::RunHandle) -> Vec<Message> {
+fn agent_end_messages(agent_run: &tea_core::RunHandle) -> Vec<AgentMessage> {
     agent_run
         .events()
         .into_iter()
@@ -91,7 +93,7 @@ fn continuation_agent_end_contains_only_messages_created_by_continuation() {
         let provider = Arc::new(ScriptedProvider::new([
             ModelStream {
                 events: vec![
-                    ModelStreamEvent::ToolCall(AssistantToolCall {
+                    ModelStreamEvent::ToolCall(AgentToolCall {
                         id: ToolCallId::new("call_finish").expect("non-empty tool-call ID"),
                         name: "finish".into(),
                         arguments: SerializedJson::new("{}"),
@@ -102,7 +104,7 @@ fn continuation_agent_end_contains_only_messages_created_by_continuation() {
             ModelStream {
                 events: vec![
                     ModelStreamEvent::TextDelta("continued response".into()),
-                    ModelStreamEvent::End(StopReason::EndTurn),
+                    ModelStreamEvent::End(StopReason::Stop),
                 ],
             },
         ]));
@@ -118,13 +120,13 @@ fn continuation_agent_end_contains_only_messages_created_by_continuation() {
         first_run.drive().await.expect("first run succeeds");
         assert!(matches!(
             agent.snapshot().messages.last(),
-            Some(Message::ToolResult { .. })
+            Some(AgentMessage::ToolResult { .. })
         ));
 
         let first_messages = agent_end_messages(&first_run);
         assert_eq!(first_messages.len(), 3);
         assert!(
-            matches!(first_messages[0], Message::User { ref content, .. } if content == "initial prompt")
+            matches!(first_messages[0], AgentMessage::User { ref content, .. } if content == "initial prompt")
         );
 
         let continuation = agent.start_continue().expect("start continuation");
@@ -134,11 +136,11 @@ fn continuation_agent_end_contains_only_messages_created_by_continuation() {
         assert_eq!(continuation_messages.len(), 1);
         assert!(matches!(
             &continuation_messages[0],
-            Message::Assistant { content, .. } if content == "continued response"
+            AgentMessage::Assistant { content, .. } if content == "continued response"
         ));
         assert!(!continuation_messages.iter().any(|message| matches!(
             message,
-            Message::User { content, .. } if content == "initial prompt"
+            AgentMessage::User { content, .. } if content == "initial prompt"
         )));
     });
 }

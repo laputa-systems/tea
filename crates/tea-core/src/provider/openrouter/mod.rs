@@ -401,6 +401,8 @@ fn openrouter_request_observation(
         domain_bytes.extend_from_slice(&fingerprint.to_le_bytes());
     }
     AdapterRequestObservation {
+        deterministic_common_prefix_bytes: None,
+        deterministic_common_prefix_tokens_estimate: None,
         serialized_request_bytes: Some(serialized_request_bytes),
         cache_domain_fingerprint: Some(stable_fingerprint(&domain_bytes)),
         cache_domain_components: components,
@@ -505,7 +507,7 @@ impl OpenRouterProvider {
                 usage.cost = cost.total_usd_exact.clone();
                 self.record(usage.clone(), cost);
                 if usage.is_reported() {
-                    // V0 streams cannot deliver any event after `End`; usage is part of the
+                    // v1 streams cannot deliver any event after `End`; usage is part of the
                     // provider response and must precede the terminal settlement event.
                     let terminal = events
                         .pop()

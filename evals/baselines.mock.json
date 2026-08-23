@@ -1,10 +1,10 @@
 {
-  "schema_version": "tea-coding-eval-baselines/v0",
+  "schema_version": "tea-coding-eval-baselines/v1",
   "seed": 20260813,
   "repeats": 1,
   "comparison": {
     "model": "mock-no-provider",
-    "provider_revision": "mock-no-provider-v0",
+    "provider_revision": "mock-no-provider-v1",
     "sampling": {
       "temperature": 0,
       "seed": 20260813,
@@ -30,12 +30,12 @@
     {
       "id": "upstream",
       "label": "provider-free upstream contract adapter",
-      "profile_version": "mock-profile-v0",
+      "profile_version": "mock-profile-v1",
       "runtime_version": "python-stdlib",
-      "revision": "mock-upstream-v0",
+      "revision": "mock-upstream-v1",
       "adapter": {
-        "protocol": "tea-coding-eval-adapter/v0",
-        "result_schema": "tea-coding-eval-result/v0"
+        "protocol": "tea-coding-eval-adapter/v1",
+        "result_schema": "tea-coding-eval-result/v1"
       },
       "command": [
         "{controller_python}",
@@ -51,12 +51,12 @@
     {
       "id": "rust",
       "label": "provider-free Rust contract adapter stand-in",
-      "profile_version": "mock-profile-v0",
+      "profile_version": "mock-profile-v1",
       "runtime_version": "python-stdlib",
-      "revision": "mock-rust-v0",
+      "revision": "mock-rust-v1",
       "adapter": {
-        "protocol": "tea-coding-eval-adapter/v0",
-        "result_schema": "tea-coding-eval-result/v0"
+        "protocol": "tea-coding-eval-adapter/v1",
+        "result_schema": "tea-coding-eval-result/v1"
       },
       "command": [
         "{controller_python}",

@@ -9,7 +9,9 @@ use tea_core::scheduler::{
     CancellationToken, ModelFuture, ModelProvider, ModelRequest, ModelStream, ModelStreamEvent,
 };
 use tea_core::state::{AgentToolCall, SerializedJson, StopReason, ToolCallId, Usage};
-use tea_core::tool::{AgentTool, ToolCall, ToolContext, ToolFuture, ToolResult, ToolUpdateSink};
+use tea_core::tool::{
+    AgentTool, AgentToolResult, ToolCall, ToolContext, ToolFuture, ToolUpdateSink,
+};
 use tea_core::{Agent, AgentMessage, CoreError};
 
 #[derive(Default)]
@@ -88,7 +90,7 @@ impl AgentTool for OutputTool {
             .lock()
             .expect("output mutex poisoned")
             .remove(0);
-        Box::pin(std::future::ready(Ok(ToolResult {
+        Box::pin(std::future::ready(Ok(AgentToolResult {
             tool_call_id: call.id,
             content,
             details: Some(SerializedJson::new(r#"{"raw":"details"}"#)),

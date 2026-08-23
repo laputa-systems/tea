@@ -5,13 +5,19 @@
 //! settles the agent as cancelled, ensuring an abandoned run cannot leave the agent busy.
 
 use crate::agent::{AgentConfiguration, AgentInner};
+use crate::effect::{
+    EffectAction, EffectId, EffectOutcome, EffectSubject, HookEffectOutcome, HookInvocation,
+    ProviderEffectOutcome, ProviderResponse,
+};
 use crate::error::CoreError;
 use crate::event::{
     AgentEvent, AgentEventKind, AutomaticCompactionOutcome, EventSequence,
     ProviderRequestSkipReason,
 };
 use crate::hooks::{AfterToolCall, AgentLoopTurnUpdate, Replacement};
-use crate::scheduler::{CancellationToken, ModelEventStream, ModelRequest, ModelStreamEvent};
+use crate::scheduler::{
+    AdapterRequestObservation, CancellationToken, ModelEventStream, ModelRequest, ModelStreamEvent,
+};
 use crate::state::{
     AgentMessage, AgentPhase, AgentToolCall, ModelDescriptor, RunId, RunPhase, RunSnapshot,
     RunState, StopReason, ThinkingLevel, ToolCallId, TurnId, Usage,
@@ -21,6 +27,7 @@ use crate::tool::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::mpsc::TrySendError;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::task::{Poll, Waker};
 
@@ -33,6 +40,7 @@ enum PreparedToolCall {
     },
     Execute {
         tool: Arc<dyn AgentTool>,
+        effect: EffectTicket,
     },
 }
 
@@ -111,13 +119,24 @@ impl PendingToolUpdates {
 struct PendingToolExecution<'a> {
     source_index: usize,
     call: ToolCall,
+    effect: EffectTicket,
     future: ToolFuture<'a>,
 }
 
 struct CompletedToolExecution {
     source_index: usize,
     call: ToolCall,
+    effect: EffectTicket,
     result: Result<AgentToolResult, crate::error::ToolError>,
+}
+
+/// One successfully accepted before-effect boundary awaiting settlement.
+///
+/// This stays private to the core run so a tool/provider path cannot settle an
+/// effect that was never admitted by its configured gate.
+#[derive(Clone)]
+struct EffectTicket {
+    action: EffectAction,
 }
 
 /// Context accounting uses a provider-confirmed input checkpoint plus only the
@@ -189,6 +208,14 @@ pub(super) struct ToolBatchOutcome {
     pub(super) terminal_failure: Option<TerminalToolFailure>,
 }
 
+/// State carried from one settled assistant turn to the next model request.
+struct NextTurn {
+    turn_id: TurnId,
+    context: Option<crate::hooks::ContextEnvelope>,
+    model_override: Option<ModelDescriptor>,
+    thinking_override: Option<ThinkingLevel>,
+}
+
 /// A handle to the one run currently owning an agent.
 pub struct RunHandle {
     pub(crate) agent: Weak<AgentInner>,
@@ -202,6 +229,15 @@ pub struct RunHandle {
     /// Immutable prompt/tool/hook configuration captured when this run claimed the agent.
     pub(crate) configuration: Arc<AgentConfiguration>,
     pub(crate) policy: Mutex<RunPolicyState>,
+    /// Monotonic process-local correlation IDs for paired gate calls.
+    pub(crate) next_effect_id: AtomicU64,
+    /// Assistant calls restored from durable state that must run before the
+    /// first provider request of this core epoch.
+    pub(crate) recovery_tool_calls: Option<Vec<AgentToolCall>>,
+    /// Whether the committed source-order result prefix of a recovered batch
+    /// already requested termination. The normal scheduler combines this with
+    /// the recovered suffix instead of treating the suffix as a new batch.
+    pub(crate) recovery_prior_all_terminate: Option<bool>,
 }
 
 impl std::fmt::Debug for RunHandle {
@@ -213,6 +249,49 @@ impl std::fmt::Debug for RunHandle {
 }
 
 impl RunHandle {
+    async fn begin_effect(&self, subject: EffectSubject) -> Result<EffectTicket, CoreError> {
+        let effect_id = EffectId(
+            self.next_effect_id
+                .fetch_add(1, Ordering::Relaxed)
+                .saturating_add(1),
+        );
+        let action = EffectAction::new(
+            effect_id,
+            self.id(),
+            self.configuration.provenance.clone(),
+            subject,
+        );
+        self.configuration.effect_gate.before(action.clone()).await?;
+        Ok(EffectTicket { action })
+    }
+
+    async fn settle_effect(
+        &self,
+        ticket: EffectTicket,
+        outcome: EffectOutcome,
+    ) -> Result<(), CoreError> {
+        self.configuration
+            .effect_gate
+            .after(ticket.action, outcome)
+            .await?;
+        Ok(())
+    }
+
+    async fn settle_hook<T>(
+        &self,
+        ticket: EffectTicket,
+        outcome: &Result<T, crate::error::HookError>,
+    ) -> Result<(), CoreError> {
+        let outcome = match outcome {
+            Ok(_) => HookEffectOutcome::Succeeded,
+            Err(error) => HookEffectOutcome::Failed {
+                message: error.message.clone(),
+            },
+        };
+        self.settle_effect(ticket, EffectOutcome::HookInvocation(outcome))
+            .await
+    }
+
     /// Stable identifier for this run.
     pub fn id(&self) -> RunId {
         self.state.lock().expect("run state mutex poisoned").id
@@ -422,6 +501,7 @@ impl RunHandle {
         let mut model_override = None::<ModelDescriptor>;
         let mut thinking_override = None::<ThinkingLevel>;
         let mut context_estimator = ContextEstimator::default();
+        let mut previous_request = None::<ModelRequest>;
         let mut completed_assistant_turn = false;
         let mut next_context = if self.skip_initial_steering {
             None
@@ -433,6 +513,33 @@ impl RunHandle {
             )
             .await?
         };
+        if let Some(tool_calls) = self.recovery_tool_calls.clone() {
+            // Recovered assistant calls use the normal tool scheduler and the
+            // same post-turn continuation procedure as fresh model output.
+            let mut tool_batch = self.execute_tool_calls(&agent, &tool_calls).await?;
+            if let Some(prior_all_terminate) = self.recovery_prior_all_terminate {
+                tool_batch.all_terminate &= prior_all_terminate;
+            }
+            completed_assistant_turn = true;
+            let Some(next_turn) = self
+                .advance_after_assistant_turn(
+                    &agent,
+                    turn_id,
+                    StopReason::ToolUse,
+                    &tool_calls,
+                    tool_batch,
+                    model_override,
+                    thinking_override,
+                )
+                .await?
+            else {
+                return Ok(());
+            };
+            turn_id = next_turn.turn_id;
+            next_context = next_turn.context;
+            model_override = next_turn.model_override;
+            thinking_override = next_turn.thinking_override;
+        }
         loop {
             if completed_assistant_turn
                 && self
@@ -473,21 +580,75 @@ impl RunHandle {
                     .await?;
             }
             let turn_model = request.model.clone();
+            let request_observation = crate::measurement::deterministic_request_prefix_evidence(
+                previous_request.as_ref(),
+                &request,
+            );
             let provider = agent
                 .provider
                 .read()
                 .expect("agent provider lock poisoned")
                 .clone()
                 .ok_or(CoreError::MissingModelProvider)?;
-            let mut stream = provider
-                .stream(request, self.cancellation.clone())
-                .await
-                .map_err(|error| CoreError::ModelProvider {
-                    message: error.to_string(),
-                })?;
-            let (reason, tool_calls, error_message, valid_input_tokens, provider_context_overflow) =
-                self.consume_assistant_stream(&agent, stream.as_mut(), turn_id, turn_model)
+            let provider_effect = self
+                .begin_effect(EffectSubject::ProviderRequest {
+                    request: request.clone(),
+                })
+                .await?;
+            self.emit(
+                &agent,
+                AgentEventKind::ProviderRequestObserved {
+                    turn_id,
+                    observation: AdapterRequestObservation {
+                        deterministic_common_prefix_bytes: request_observation
+                            .map(|evidence| evidence.common_prefix_bytes),
+                        deterministic_common_prefix_tokens_estimate: request_observation
+                            .map(|evidence| evidence.common_prefix_tokens_estimate),
+                        ..AdapterRequestObservation::default()
+                    },
+                },
+            )
+            .await?;
+            previous_request = Some(request.clone());
+            let mut stream = match provider.stream(request, self.cancellation.clone()).await {
+                Ok(stream) => stream,
+                Err(error) => {
+                    let message = error.to_string();
+                    self.settle_effect(
+                        provider_effect,
+                        EffectOutcome::ProviderRequest(ProviderEffectOutcome::Failed {
+                            message: message.clone(),
+                        }),
+                    )
                     .await?;
+                    return Err(CoreError::ModelProvider { message });
+                }
+            };
+            let (response, valid_input_tokens) = match self
+                .consume_assistant_stream(&agent, stream.as_mut(), turn_id, turn_model)
+                .await
+            {
+                Ok(response) => response,
+                Err(error) => {
+                    self.settle_effect(
+                        provider_effect,
+                        EffectOutcome::ProviderRequest(ProviderEffectOutcome::Failed {
+                            message: error.to_string(),
+                        }),
+                    )
+                    .await?;
+                    return Err(error);
+                }
+            };
+            self.settle_effect(
+                provider_effect,
+                EffectOutcome::ProviderRequest(ProviderEffectOutcome::Settled(response.clone())),
+            )
+            .await?;
+            let reason = response.stop_reason;
+            let tool_calls = response.tool_calls;
+            let error_message = response.error_message;
+            let provider_context_overflow = response.context_overflow;
 
             context_estimator.observe_valid_input(valid_input_tokens, request_message_count);
 
@@ -608,80 +769,134 @@ impl RunHandle {
                 self.execute_tool_calls(&agent, &tool_calls).await?
             };
 
-            if let Some(terminal_failure) = tool_batch.terminal_failure {
-                self.emit(
+            let Some(next_turn) = self
+                .advance_after_assistant_turn(
                     &agent,
-                    AgentEventKind::ProviderRequestSkipped {
-                        reason: ProviderRequestSkipReason::ToolCircuitBreaker,
-                    },
+                    turn_id,
+                    reason,
+                    &tool_calls,
+                    tool_batch,
+                    model_override,
+                    thinking_override,
                 )
-                .await?;
-                self.emit(
-                    &agent,
-                    AgentEventKind::TurnEnd {
-                        turn_id,
-                        reason: StopReason::Error,
-                    },
-                )
-                .await?;
-                let messages = self.new_messages(&agent);
-                self.emit(&agent, AgentEventKind::AgentEnd { messages })
-                    .await?;
-                let error = CoreError::ToolCircuitBreaker {
-                    message: terminal_failure.message,
-                };
-                self.fail(error.to_string())?;
-                return Err(error);
-            }
-
-            self.emit(&agent, AgentEventKind::TurnEnd { turn_id, reason })
-                .await?;
-
-            let current_context = self.current_context(&agent)?;
-            let AgentLoopTurnUpdate {
-                context,
-                model,
-                thinking_level,
-            } = self
-                .configuration
-                .hooks
-                .prepare_next_turn_async(current_context.clone(), self.cancellation.clone())
-                .await?;
-            let prepared_context = context.unwrap_or(current_context);
-            if let Some(model) = model {
-                model_override = Some(model);
-            }
-            if let Some(thinking_level) = thinking_level {
-                thinking_override = Some(thinking_level);
-            }
-            if self
-                .configuration
-                .hooks
-                .should_stop_after_turn_async(&prepared_context, self.cancellation.clone())
                 .await?
-            {
-                return self.emit_agent_end_and_succeed(&agent, reason).await;
-            }
-
-            let mut queued = self.drain_steering(&agent);
-            let has_more_tool_calls = !tool_calls.is_empty() && !tool_batch.all_terminate;
-            if !has_more_tool_calls && queued.is_empty() {
-                queued = self.drain_follow_up(&agent);
-            }
-
-            if has_more_tool_calls || !queued.is_empty() {
-                turn_id = TurnId(turn_id.0.saturating_add(1));
-                self.advance_turn(turn_id)?;
-                self.emit(&agent, AgentEventKind::TurnStart { turn_id })
-                    .await?;
-                next_context = self
-                    .inject_queued_messages(&agent, prepared_context, queued)
-                    .await?;
-                continue;
-            }
-
-            return self.emit_agent_end_and_succeed(&agent, reason).await;
+            else {
+                return Ok(());
+            };
+            turn_id = next_turn.turn_id;
+            next_context = next_turn.context;
+            model_override = next_turn.model_override;
+            thinking_override = next_turn.thinking_override;
         }
+    }
+
+    /// Run the shared post-assistant continuation procedure for a fresh or
+    /// recovered tool batch. The caller supplies the already-settled assistant
+    /// reason and source-order calls; this helper owns hooks, queue drains,
+    /// turn advancement, and terminal settlement.
+    async fn advance_after_assistant_turn(
+        &self,
+        agent: &AgentInner,
+        turn_id: TurnId,
+        reason: StopReason,
+        tool_calls: &[AgentToolCall],
+        tool_batch: ToolBatchOutcome,
+        mut model_override: Option<ModelDescriptor>,
+        mut thinking_override: Option<ThinkingLevel>,
+    ) -> Result<Option<NextTurn>, CoreError> {
+        if let Some(terminal_failure) = tool_batch.terminal_failure {
+            self.emit(
+                agent,
+                AgentEventKind::ProviderRequestSkipped {
+                    reason: ProviderRequestSkipReason::ToolCircuitBreaker,
+                },
+            )
+            .await?;
+            self.emit(
+                agent,
+                AgentEventKind::TurnEnd {
+                    turn_id,
+                    reason: StopReason::Error,
+                },
+            )
+            .await?;
+            let messages = self.new_messages(agent);
+            self.emit(agent, AgentEventKind::AgentEnd { messages })
+                .await?;
+            let error = CoreError::ToolCircuitBreaker {
+                message: terminal_failure.message,
+            };
+            self.fail(error.to_string())?;
+            return Err(error);
+        }
+
+        self.emit(agent, AgentEventKind::TurnEnd { turn_id, reason })
+            .await?;
+        let current_context = self.current_context(agent)?;
+        let prepare_next_turn_effect = self
+            .begin_effect(EffectSubject::HookInvocation {
+                hook: HookInvocation::PrepareNextTurn,
+            })
+            .await?;
+        let prepared_turn = self
+            .configuration
+            .hooks
+            .prepare_next_turn_async(current_context.clone(), self.cancellation.clone())
+            .await;
+        self.settle_hook(prepare_next_turn_effect, &prepared_turn)
+            .await?;
+        let AgentLoopTurnUpdate {
+            context,
+            model,
+            thinking_level,
+        } = prepared_turn?;
+        let prepared_context = context.unwrap_or(current_context);
+        if let Some(model) = model {
+            model_override = Some(model);
+        }
+        if let Some(thinking_level) = thinking_level {
+            thinking_override = Some(thinking_level);
+        }
+
+        let should_stop_effect = self
+            .begin_effect(EffectSubject::HookInvocation {
+                hook: HookInvocation::ShouldStopAfterTurn,
+            })
+            .await?;
+        let should_stop = self
+            .configuration
+            .hooks
+            .should_stop_after_turn_async(&prepared_context, self.cancellation.clone())
+            .await;
+        self.settle_hook(should_stop_effect, &should_stop).await?;
+        if should_stop? {
+            self.emit_agent_end_and_succeed(agent, reason).await?;
+            return Ok(None);
+        }
+
+        let mut queued = self.drain_steering(agent);
+        let has_more_tool_calls = !tool_calls.is_empty() && !tool_batch.all_terminate;
+        if !has_more_tool_calls && queued.is_empty() {
+            queued = self.drain_follow_up(agent);
+        }
+        if has_more_tool_calls || !queued.is_empty() {
+            let next_turn_id = TurnId(turn_id.0.saturating_add(1));
+            self.advance_turn(next_turn_id)?;
+            self.emit(agent, AgentEventKind::TurnStart { turn_id: next_turn_id })
+                .await?;
+            let context = self
+                .inject_queued_messages(agent, prepared_context, queued)
+                .await?;
+            return Ok(Some(NextTurn {
+                turn_id: next_turn_id,
+                context,
+                model_override,
+                thinking_override,
+            }));
+        }
+
+        self.emit_agent_end_and_succeed(agent, reason).await?;
+        Ok(None)
     }
 
     async fn model_request(
@@ -736,18 +951,32 @@ impl RunHandle {
         context: crate::hooks::ContextEnvelope,
     ) -> Result<crate::compaction::ProviderContext, CoreError> {
         let projected_context = project_model_context(context, &agent.tool_result_projection);
+        let transform_effect = self
+            .begin_effect(EffectSubject::HookInvocation {
+                hook: HookInvocation::TransformContext,
+            })
+            .await?;
         let transformed = self
             .configuration
             .hooks
             .transform_context_async(projected_context, self.cancellation.clone())
+            .await;
+        self.settle_hook(transform_effect, &transformed).await?;
+        let transformed = transformed?;
+        let convert_effect = self
+            .begin_effect(EffectSubject::HookInvocation {
+                hook: HookInvocation::ConvertToLlm,
+            })
             .await?;
+        let converted = self
+            .configuration
+            .hooks
+            .convert_to_llm_async(transformed, self.cancellation.clone())
+            .await;
+        self.settle_hook(convert_effect, &converted).await?;
         Ok(crate::compaction::ProviderContext {
             system_prompt: self.configuration.system_prompt.clone(),
-            context: self
-                .configuration
-                .hooks
-                .convert_to_llm_async(transformed, self.cancellation.clone())
-                .await?,
+            context: converted?,
             tools: self.configuration.tools.definitions(),
             active_context: None,
         })
@@ -1629,16 +1858,7 @@ impl RunHandle {
         stream: &mut dyn ModelEventStream,
         turn_id: TurnId,
         model: Option<ModelDescriptor>,
-    ) -> Result<
-        (
-            StopReason,
-            Vec<AgentToolCall>,
-            Option<String>,
-            Option<u64>,
-            bool,
-        ),
-        CoreError,
-    > {
+    ) -> Result<(ProviderResponse, Option<u64>), CoreError> {
         let mut assistant_id = None;
         let mut assistant_text = String::new();
         let mut tool_calls = Vec::new();
@@ -1752,6 +1972,14 @@ impl RunHandle {
         let reason = reason.ok_or(CoreError::UnsupportedModelStream {
             message: "model stream ended without a terminal event".into(),
         })?;
+        let response = ProviderResponse {
+            stop_reason: reason,
+            assistant_text: assistant_text.clone(),
+            tool_calls: tool_calls.clone(),
+            error_message: error_message.clone(),
+            usage: usage.clone(),
+            context_overflow,
+        };
         let assistant = {
             let mut state = agent.state.lock().expect("agent state mutex poisoned");
             let id = assistant_id.unwrap_or_else(|| state.allocate_message_id());
@@ -1804,13 +2032,7 @@ impl RunHandle {
             self.emit(agent, AgentEventKind::ModelTurnUsage { accounting })
                 .await?;
         }
-        Ok((
-            reason,
-            tool_calls,
-            error_message,
-            valid_input_tokens,
-            context_overflow,
-        ))
+        Ok((response, valid_input_tokens))
     }
 
     /// Refuse tool calls from a length-truncated assistant response. The
@@ -2450,6 +2672,7 @@ async fn next_parallel_step<'a>(
                     completed: Box::new(CompletedToolExecution {
                         source_index: pending.source_index,
                         call: pending.call,
+                        effect: pending.effect,
                         result,
                     }),
                     updates: updates.take().unwrap_or_default(),

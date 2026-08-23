@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 #![doc = "A compact, dependency-free, append-only trajectory contract."]
 #![doc = ""]
-#![doc = "The V0 boundary is intentionally small:"]
+#![doc = "The v1 boundary is intentionally small:"]
 #![doc = ""]
 #![doc = "* [`event`] owns the episode header, turn, tool, and end records;"]
 #![doc = "* [`sink`] defines the append-only observer boundary; and"]
@@ -23,9 +23,9 @@ pub mod sink;
 
 pub use encoding::{CborSink, JsonLinesSink};
 pub use event::{
-    COMPACTION_TRACE_SCHEMA_VERSION, Compaction, CompactionStage, EndReason, EpisodeEnd,
-    EpisodeHeader, ModelTurn, TRACE_SCHEMA_VERSION, Tool, ToolExecution, TraceEvent,
-    TraceEventKind, Turn, TurnIndex,
+    CacheEvidence, Compaction, CompactionStage, EndReason,
+    EpisodeEnd, EpisodeHeader, ModelTurn, TRACE_SCHEMA_VERSION, Tool, ToolExecution,
+    TraceEvent, TraceEventKind, TraceProvenance, Turn, TurnIndex,
 };
 pub use redaction::{NoRedaction, RedactingSink, Redactor};
 pub use sink::{IsolatedSink, NoopSink, TraceSink};

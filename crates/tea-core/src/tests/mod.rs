@@ -3,6 +3,10 @@
 pub(super) use crate::agent::Agent;
 pub(super) use crate::error::CoreError;
 pub(super) use crate::event::{AgentEvent, AgentEventKind, EventObserver, ObserverFuture};
+pub(super) use crate::effect::{
+    EffectAction, EffectFuture, EffectGate, EffectKind, EffectOutcome, EffectPhase,
+    EffectSubject, ManualEffectGate,
+};
 pub(super) use crate::hooks::{
     AfterToolCall, AgentLoopTurnUpdate, BeforeToolCall, ContextEnvelope, HookFuture, HookSet,
     Replacement,
@@ -30,6 +34,7 @@ mod support;
 use support::*;
 
 mod lifecycle;
+mod effects;
 mod observers;
 mod ownership;
 mod queues;

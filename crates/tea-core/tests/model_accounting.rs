@@ -55,7 +55,7 @@ fn usage_is_reduced_into_a_settled_turn_event_and_snapshot() {
                     cache_write_tokens: Some(0),
                     cost: Some("0.000000000000000001".into()),
                 }),
-                ModelStreamEvent::End(StopReason::EndTurn),
+                ModelStreamEvent::End(StopReason::Stop),
             ],
         }]),
     });
@@ -94,13 +94,13 @@ fn aggregate_preserves_unknown_fields_and_adds_exact_costs() {
             ModelStream {
                 events: vec![
                     ModelStreamEvent::Usage(usage(Some(1), Some(2), Some("0.1"))),
-                    ModelStreamEvent::End(StopReason::EndTurn),
+                    ModelStreamEvent::End(StopReason::Stop),
                 ],
             },
             ModelStream {
                 events: vec![
                     ModelStreamEvent::Usage(usage(Some(0), None, Some("0.200000000000000001"))),
-                    ModelStreamEvent::End(StopReason::EndTurn),
+                    ModelStreamEvent::End(StopReason::Stop),
                 ],
             },
         ]),

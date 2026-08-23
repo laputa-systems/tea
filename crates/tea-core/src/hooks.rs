@@ -24,6 +24,16 @@ pub type HookFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, HookError>> +
 pub enum BeforeToolCall {
     /// Proceed with execution.
     Allow,
+    /// Replace the arguments that will be validated and sent to the
+    /// capability.
+    ///
+    /// The replacement is not trusted merely because a hook returned it:
+    /// `tea-core` runs the registered tool's canonical schema validator after
+    /// this decision and before opening the external-effect boundary.
+    Normalize {
+        /// Complete JSON arguments for the same immutable tool-call ID/name.
+        arguments: SerializedJson,
+    },
     /// Convert the call into an error tool result.
     Block { reason: String },
     /// End the current run after recording the policy reason.
@@ -94,9 +104,6 @@ pub struct AgentLoopTurnUpdate {
     /// Replacement reasoning level for the next request.
     pub thinking_level: Option<ThinkingLevel>,
 }
-
-/// Compatibility spelling retained for existing Rust integrations.
-pub type NextTurn = AgentLoopTurnUpdate;
 
 /// Hook trait implemented by the embedding policy layer.
 pub trait HookSet: Send + Sync {

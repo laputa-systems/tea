@@ -23,20 +23,25 @@ fn ambient_process_file_module_and_debug_globals_are_not_available() {
                 return dofile("/__tea_core_missing_file__")
             end)
             return {
-                system_prompt_append = "io=" .. tostring(io == nil)
-                    .. ",os=" .. tostring(os == nil)
-                    .. ",package=" .. tostring(package == nil)
-                    .. ",debug=" .. tostring(debug == nil)
-                    .. ",require=" .. tostring(require_ok)
-                    .. ",loadfile=" .. tostring(loadfile_ok)
-                    .. ",dofile=" .. tostring(dofile_ok),
+                prompt_sections = {
+                    {
+                        id = "ambient",
+                        content = "io=" .. tostring(io == nil)
+                            .. ",os=" .. tostring(os == nil)
+                            .. ",package=" .. tostring(package == nil)
+                            .. ",debug=" .. tostring(debug == nil)
+                            .. ",require=" .. tostring(require_ok)
+                            .. ",loadfile=" .. tostring(loadfile_ok)
+                            .. ",dofile=" .. tostring(dofile_ok),
+                    },
+                },
             }
         "#,
     )
     .expect("the policy should load without ambient globals");
 
     assert_eq!(
-        policy.system_prompt_append(),
+        policy.prompt_sections()[0].content,
         "io=true,os=true,package=true,debug=true,require=false,loadfile=false,dofile=false"
     );
 }
@@ -46,7 +51,7 @@ fn sandbox_rejects_global_table_mutation() {
     let error = match LuaPolicy::load(
         r#"
             _G.tea_core_hardening_probe = true
-            return { system_prompt_append = "unreachable" }
+            return { prompt_sections = {} }
         "#,
     ) {
         Ok(_) => panic!("a policy must not mutate the VM global table"),
@@ -84,7 +89,7 @@ fn zero_resource_limits_are_rejected_by_field() {
 
     for (field, limits) in cases {
         let error =
-            match LuaPolicy::load_with_limits("return { system_prompt_append = \"\" }", limits) {
+            match LuaPolicy::load_with_limits("return { prompt_sections = {} }", limits) {
                 Ok(_) => panic!("zero {field} must be rejected before VM setup"),
                 Err(error) => error,
             };
@@ -94,7 +99,7 @@ fn zero_resource_limits_are_rejected_by_field() {
 
 #[test]
 fn source_limit_is_a_deterministic_byte_boundary() {
-    let source = "return { system_prompt_append = \"\" }";
+    let source = "return { prompt_sections = {} }";
     let exact = PolicyLimits {
         max_source_bytes: source.len(),
         ..PolicyLimits::default()
@@ -119,7 +124,7 @@ fn allocation_budget_terminates_a_policy_during_initial_evaluation() {
             for index = 1, 100000 do
                 values[index] = string.rep("allocation", 32)
             end
-            return { system_prompt_append = tostring(#values) }
+            return { prompt_sections = { { id = "allocation", content = tostring(#values) } } }
         "#,
         PolicyLimits {
             max_source_bytes: 4 * 1024,
@@ -139,8 +144,8 @@ fn interrupt_budget_terminates_a_malicious_loop_hook() {
     let policy = LuaPolicy::load_with_limits(
         r#"
             return {
-                system_prompt_append = "",
-                before_tool_call = function(_) while true do end end,
+                prompt_sections = {},
+                before_tool = function(_) while true do end end,
             }
         "#,
         PolicyLimits {
@@ -165,8 +170,8 @@ fn recursion_budget_terminates_a_malicious_hook() {
                 return recurse()
             end
             return {
-                system_prompt_append = "",
-                before_tool_call = function(_) return recurse() end,
+                prompt_sections = {},
+                before_tool = function(_) return recurse() end,
             }
         "#,
         PolicyLimits {
@@ -189,8 +194,8 @@ fn policy_error_does_not_poison_or_permanently_disable_the_policy() {
         r#"
             local first_call = true
             return {
-                system_prompt_append = "",
-                before_tool_call = function(_)
+                prompt_sections = {},
+                before_tool = function(_)
                     if first_call then
                         first_call = false
                         error("intentional policy failure")
@@ -218,8 +223,8 @@ fn policies_have_isolated_vm_state_when_interleaved() {
         r#"
             local count = 0
             return {
-                system_prompt_append = "left",
-                before_tool_call = function(_)
+                prompt_sections = { { id = "left", content = "left" } },
+                before_tool = function(_)
                     count = count + 1
                     return { action = "block", reason = "left-" .. tostring(count) }
                 end,
@@ -231,8 +236,8 @@ fn policies_have_isolated_vm_state_when_interleaved() {
         r#"
             local count = 0
             return {
-                system_prompt_append = "right",
-                before_tool_call = function(_)
+                prompt_sections = { { id = "right", content = "right" } },
+                before_tool = function(_)
                     count = count + 1
                     return { action = "block", reason = "right-" .. tostring(count) }
                 end,
@@ -241,8 +246,8 @@ fn policies_have_isolated_vm_state_when_interleaved() {
     )
     .expect("right policy should load");
 
-    assert_eq!(left.system_prompt_append(), "left");
-    assert_eq!(right.system_prompt_append(), "right");
+    assert_eq!(left.prompt_sections()[0].content, "left");
+    assert_eq!(right.prompt_sections()[0].content, "right");
     assert_eq!(
         left.before_tool_call(&call("left-1")),
         Ok(BeforeToolCall::Block {
@@ -273,7 +278,7 @@ fn policies_have_isolated_vm_state_when_interleaved() {
 fn equivalent_policy_declarations_are_deterministic() {
     let source = r#"
         return {
-            system_prompt_append = "stable prompt",
+            prompt_sections = { { id = "stable", content = "stable prompt" } },
             tools = {
                 {
                     name = "first",
@@ -290,7 +295,7 @@ fn equivalent_policy_declarations_are_deterministic() {
                     schema_json = '{"type":"object"}',
                 },
             },
-            before_tool_call = function(call)
+            before_tool = function(call)
                 return call.name == "first" and "allow"
                     or { action = "terminate", reason = "stable decision" }
             end,
@@ -299,7 +304,7 @@ fn equivalent_policy_declarations_are_deterministic() {
     let first = LuaPolicy::load(source).expect("first equivalent policy should load");
     let second = LuaPolicy::load(source).expect("second equivalent policy should load");
 
-    assert_eq!(first.system_prompt_append(), second.system_prompt_append());
+    assert_eq!(first.prompt_sections(), second.prompt_sections());
     assert_eq!(first.tools(), second.tools());
     assert_eq!(
         first.before_tool_call(&call("first")),

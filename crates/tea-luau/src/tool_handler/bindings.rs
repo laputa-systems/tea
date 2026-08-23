@@ -10,6 +10,12 @@ use tea_core::state::ToolCallId;
 use tea_core::tool::ToolUpdateSink;
 use tea_protocol::JsonValue;
 
+/// Stable closed-catalog name for a handler that performs only deterministic
+/// computation inside its sandboxed Luau VM. A handler with this grant may
+/// return a value directly, but any attempt to yield an external operation is
+/// denied by [`PureCapability`].
+pub const PURE_CAPABILITY_V1: &str = "tea.pure.v1";
+
 /// A host capability request yielded by a Luau handler.
 #[derive(Clone, Debug)]
 pub struct CapabilityRequest {
@@ -105,6 +111,26 @@ pub trait LuauCapability: Send + Sync {
         request: CapabilityRequest,
         cancellation: CancellationToken,
     ) -> CapabilityFuture;
+}
+
+/// The no-world-effect capability used for pure JSON/text transformations and
+/// deterministic computation. It exists because every handler declares an
+/// explicit capability even when it never yields; yielding through this grant
+/// is always denied instead of becoming an ambient extension point.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PureCapability;
+
+impl LuauCapability for PureCapability {
+    fn invoke(
+        &self,
+        request: CapabilityRequest,
+        _cancellation: CancellationToken,
+    ) -> CapabilityFuture {
+        Box::pin(std::future::ready(Err(CapabilityError::MethodDenied {
+            capability: PURE_CAPABILITY_V1.into(),
+            method: request.method,
+        })))
+    }
 }
 
 /// Failure while constructing an explicit capability binding set.

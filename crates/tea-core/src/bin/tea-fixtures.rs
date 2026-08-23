@@ -3,7 +3,7 @@
 //! The executable is deliberately outside the library runtime boundary: it
 //! uses `smol::block_on` to drive one caller-owned fixture future. It accepts
 //! one fixture path, has no network/provider capability, and supports the
-//! closed V0 fixture subset implemented by the Rust core.
+//! closed v1 fixture subset implemented by the Rust core.
 
 #[path = "tea-fixtures/fixture.rs"]
 mod fixture;

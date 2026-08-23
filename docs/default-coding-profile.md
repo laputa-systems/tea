@@ -1,6 +1,6 @@
 # Pinned default coding profile
 
-`PiDefaultCodingProfile` is the core-owned V0 profile that reproduces the selected Pi coding-agent
+`PiDefaultCodingProfile` is the core-owned v1 profile that reproduces the selected Pi coding-agent
 inputs while keeping all authority replaceable. It is not a port of `pi-coding-agent` and it does
 not load resources, sessions, settings, skills, extensions, or ambient configuration.
 
@@ -28,7 +28,7 @@ The profile may be omitted entirely. A sterile profile can provide no tools and 
 replace `read`, `bash`, `edit`, `write`, `grep`, `find`, or `ls` independently. The runtime never
 knows whether an operation is local, remote, sandboxed, logged, denied, or virtual.
 
-The executable V0 factories live in `tea_core::default_tools::DefaultCodingTools`. Constructing
+The executable v1 factories live in `tea_core::default_tools::DefaultCodingTools`. Constructing
 one requires an existing workspace directory; the constructor canonicalizes that directory and
 every operation rejects lexical, canonical, and symlink escapes. `coding_tools()` returns the
 captured active order (`read`, `bash`, `edit`, `write`), `all_tools()` returns all seven pinned
@@ -120,7 +120,7 @@ Schema fixture requirements:
 2. With `customPrompt`, it uses the custom text, append/context/skills rules, and explicit working
    directory; skills are included only when `read` is selected.
 
-V0 uses the default mode for `PiDefaultCodingProfile`, with all path-like inputs made explicit by
+V1 uses the default mode for `PiDefaultCodingProfile`, with all path-like inputs made explicit by
 the profile adapter. The profile does not call `getReadmePath`, `getDocsPath`, `getExamplesPath`,
 resource loaders, or skills discovery. Fixture inputs substitute canonical fixed paths so the
 output is reproducible.

@@ -6,7 +6,8 @@ use tea_core::scheduler::{
 use tea_core::state::{AgentToolCall, SerializedJson, StopReason, ToolCallId};
 use tea_core::tool::{
     project_tool_result_as_text, truncate_middle, AgentTool, FailureSignature, ToolCall,
-    ToolContext, ToolFailure, ToolFuture, ToolResult, ToolResultProjectionPolicy, ToolUpdateSink,
+    ToolContext, ToolFailure, ToolFuture, ToolResultProjectionPolicy, ToolUpdateSink,
+    AgentToolResult,
 };
 use tea_core::{Agent, AgentMessage, CoreError};
 
@@ -124,7 +125,7 @@ impl AgentTool for DetailedTool {
         _context: ToolContext,
         _updates: ToolUpdateSink,
     ) -> ToolFuture<'a> {
-        Box::pin(std::future::ready(Ok(ToolResult {
+        Box::pin(std::future::ready(Ok(AgentToolResult {
             tool_call_id: call.id,
             content: "prefix-abcdefghijklmnopqrstuvwxyz-suffix".into(),
             details: Some(SerializedJson::new(r#"{"raw":"unbounded host detail"}"#)),

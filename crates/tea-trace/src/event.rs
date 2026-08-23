@@ -1,4 +1,4 @@
-//! The owned records that make up a V0 trace.
+//! The owned records that make up a v1 trace.
 //!
 //! A trace is deliberately smaller than a session or UI event log.  It has one
 //! header, zero or more turn and tool records, and one terminal record.  The
@@ -8,15 +8,7 @@
 use std::collections::BTreeMap;
 
 /// Version of the compact trace schema described by this crate.
-pub const TRACE_SCHEMA_VERSION: u16 = 0;
-
-/// Schema version used only by the additive, content-free compaction records.
-///
-/// Existing header, turn, tool, and episode-end records retain
-/// [`TRACE_SCHEMA_VERSION`]. Readers that only understand V0 can therefore
-/// continue to consume historical episodes unchanged and choose to ignore the
-/// new `compaction` records by their type discriminator.
-pub const COMPACTION_TRACE_SCHEMA_VERSION: u16 = 1;
+pub const TRACE_SCHEMA_VERSION: u16 = 1;
 
 /// The stable, host-assigned number of a model turn within an episode.
 pub type TurnIndex = u32;
@@ -151,6 +143,10 @@ pub struct EpisodeHeader {
     /// Optional wall-clock time supplied by the host, in milliseconds since
     /// the Unix epoch.  The trace crate does not read a clock.
     pub started_at_ms: Option<u64>,
+    /// Durable attribution for the exact harness/core run, when a host owns
+    /// one. These are identifiers only; no workspace path, prompt, provider
+    /// request body, or credential can cross this telemetry boundary.
+    pub provenance: Option<TraceProvenance>,
 }
 
 impl EpisodeHeader {
@@ -173,6 +169,44 @@ impl EpisodeHeader {
         self.started_at_ms = Some(started_at_ms);
         self
     }
+
+    /// Attach content-free durable run attribution.
+    pub fn with_provenance(mut self, provenance: TraceProvenance) -> Self {
+        self.provenance = Some(provenance);
+        self
+    }
+}
+
+/// Content-free durable identity for one traced execution.
+///
+/// This type deliberately uses strings rather than depending on the session
+/// crate's ID newtypes: `tea-trace` remains an optional passive observer with
+/// no ownership of session storage or harness state.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct TraceProvenance {
+    pub session_id: Option<String>,
+    pub lane_id: Option<String>,
+    pub operation_id: Option<String>,
+    pub epoch_id: Option<String>,
+    pub core_run_id: Option<String>,
+    pub harness_snapshot_id: Option<String>,
+    pub harness_revision_id: Option<String>,
+    pub model_harness_profile_id: Option<String>,
+    pub experiment_id: Option<String>,
+}
+
+/// Content-free cache evidence observed at an adapter request boundary.
+///
+/// Deterministic prefix similarity and provider cache usage remain distinct:
+/// missing provider metrics stay unknown rather than being represented as
+/// zeroes or inferred from a local fingerprint.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct CacheEvidence {
+    pub deterministic_common_prefix_bytes: Option<u64>,
+    pub deterministic_common_prefix_tokens_estimate: Option<u64>,
+    pub provider_cache_read_tokens: Option<u64>,
+    pub provider_cache_write_tokens: Option<u64>,
+    pub provider_surface_digest: Option<String>,
 }
 
 /// One model request/response turn in an episode.
@@ -190,6 +224,8 @@ pub struct Turn {
     pub output: Option<String>,
     /// Host/model stop reason, if one is available.
     pub stop_reason: Option<String>,
+    /// Per-request cache-domain evidence, when a host observed it.
+    pub cache_evidence: Option<CacheEvidence>,
 }
 
 /// Domain spelling for [`Turn`] when the caller wants to emphasize that the
@@ -217,11 +253,17 @@ impl Turn {
         self.stop_reason = Some(stop_reason.into());
         self
     }
+
+    /// Attach content-free request cache evidence.
+    pub fn with_cache_evidence(mut self, cache_evidence: CacheEvidence) -> Self {
+        self.cache_evidence = Some(cache_evidence);
+        self
+    }
 }
 
 /// One tool request and its eventual result.
 ///
-/// V0 keeps request and result together so a compact linear sink can write one
+/// V1 keeps request and result together so a compact linear sink can write one
 /// record per execution.  A failed tool is represented by [`Tool::error`],
 /// rather than by a sink error: tool failure is part of the trajectory.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -338,7 +380,7 @@ impl EpisodeEnd {
     }
 }
 
-/// One append-only record in a V0 episode.
+/// One append-only record in a v1 episode.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TraceEvent {
     /// Must be the first record in an episode.
@@ -426,7 +468,7 @@ impl From<EpisodeEnd> for TraceEvent {
     }
 }
 
-/// The finite set of event kinds in the V0 contract.
+/// The finite set of event kinds in the v1 contract.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TraceEventKind {
     /// Episode header.

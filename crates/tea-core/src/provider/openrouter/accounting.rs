@@ -35,8 +35,8 @@ pub struct OpenRouterCostTurn {
     pub total_usd: Option<f64>,
     /// Exact non-negative decimal token from the provider response.
     ///
-    /// This is the authoritative representation for accounting. `total_usd` is retained as a
-    /// convenience for legacy callers but is inherently lossy for decimal provider prices.
+    /// This is the authoritative representation for accounting. `total_usd` is inherently
+    /// lossy for decimal provider prices.
     pub total_usd_exact: Option<String>,
     /// Provider-reported upstream inference USD cost, if available.
     pub upstream_inference_usd: Option<f64>,

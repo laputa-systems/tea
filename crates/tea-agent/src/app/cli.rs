@@ -4,7 +4,7 @@ use std::num::NonZeroU64;
 use std::path::PathBuf;
 use tea_core::ThinkingLevel;
 
-/// Explicit command-line inputs accepted by the v0 terminal host.
+/// Explicit command-line inputs accepted by the v1 terminal host.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct CliOptions {
     provider: Option<OsString>,
@@ -203,7 +203,7 @@ pub enum CliError {
     DuplicateOption(&'static str),
     /// An option was supplied with an empty value.
     EmptyValue(&'static str),
-    /// The option is not part of v0.
+    /// The option is not supported by v1.
     UnknownOption(OsString),
     /// An option value is not valid for its declared domain.
     InvalidValue {
@@ -212,7 +212,7 @@ pub enum CliError {
         /// Rejected value.
         value: OsString,
     },
-    /// Positional arguments are not part of v0.
+    /// Positional arguments are not supported by v1.
     UnexpectedArgument(OsString),
 }
 

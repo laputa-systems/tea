@@ -26,7 +26,7 @@ impl ModelProvider for RecordingProvider {
         Box::pin(std::future::ready(Ok(Box::new(ModelStream {
             events: vec![
                 ModelStreamEvent::TextDelta("fixture response".into()),
-                ModelStreamEvent::End(StopReason::EndTurn),
+                ModelStreamEvent::End(StopReason::Stop),
             ],
         }) as _)))
     }

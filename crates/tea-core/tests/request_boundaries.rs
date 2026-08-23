@@ -1,14 +1,18 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use tea_core::error::HookError;
-use tea_core::hooks::{AfterToolCall, BeforeToolCall, ContextEnvelope, HookSet, NextTurn};
+use tea_core::hooks::{
+    AfterToolCall, AgentLoopTurnUpdate, BeforeToolCall, ContextEnvelope, HookSet,
+};
 use tea_core::scheduler::{
     CancellationToken, ModelFuture, ModelProvider, ModelRequest, ModelStream, ModelStreamEvent,
 };
 use tea_core::state::{
-    AssistantToolCall, ModelDescriptor, SerializedJson, StopReason, ThinkingLevel, ToolCallId,
+    AgentToolCall, ModelDescriptor, SerializedJson, StopReason, ThinkingLevel, ToolCallId,
 };
-use tea_core::tool::{AgentTool, ToolCall, ToolContext, ToolFuture, ToolResult, ToolUpdateSink};
+use tea_core::tool::{
+    AgentTool, AgentToolResult, ToolCall, ToolContext, ToolFuture, ToolUpdateSink,
+};
 use tea_core::Agent;
 
 #[derive(Debug)]
@@ -77,7 +81,7 @@ impl AgentTool for EchoTool {
         _context: ToolContext,
         _updates: ToolUpdateSink,
     ) -> ToolFuture<'a> {
-        Box::pin(std::future::ready(Ok(ToolResult {
+        Box::pin(std::future::ready(Ok(AgentToolResult {
             tool_call_id: call.id,
             content: "echoed".into(),
             details: None,
@@ -101,7 +105,7 @@ impl HookSet for RequestBoundaryHooks {
     fn after_tool_call(
         &self,
         _call: &ToolCall,
-        _result: &ToolResult,
+        _result: &AgentToolResult,
     ) -> Result<AfterToolCall, HookError> {
         Ok(AfterToolCall::default())
     }
@@ -126,8 +130,11 @@ impl HookSet for RequestBoundaryHooks {
         Ok(format!("converted:{host_messages}"))
     }
 
-    fn prepare_next_turn(&self, _context: ContextEnvelope) -> Result<NextTurn, HookError> {
-        Ok(NextTurn {
+    fn prepare_next_turn(
+        &self,
+        _context: ContextEnvelope,
+    ) -> Result<AgentLoopTurnUpdate, HookError> {
+        Ok(AgentLoopTurnUpdate {
             context: Some(ContextEnvelope {
                 version: 1,
                 messages: Vec::new(),
@@ -150,7 +157,7 @@ fn public_request_boundaries_reach_sequential_provider_requests() {
         let provider = Arc::new(RecordingProvider::new([
             ModelStream {
                 events: vec![
-                    ModelStreamEvent::ToolCall(AssistantToolCall {
+                    ModelStreamEvent::ToolCall(AgentToolCall {
                         id: call_id,
                         name: "echo".into(),
                         arguments: SerializedJson::new(r#"{"value":"hello"}"#),
@@ -161,7 +168,7 @@ fn public_request_boundaries_reach_sequential_provider_requests() {
             ModelStream {
                 events: vec![
                     ModelStreamEvent::TextDelta("done".into()),
-                    ModelStreamEvent::End(StopReason::EndTurn),
+                    ModelStreamEvent::End(StopReason::Stop),
                 ],
             },
         ]));

@@ -1,12 +1,15 @@
 //! Definite-length CBOR sequence encoding for trace events.
 
 use super::{compaction_stage_name, end_reason_name, event_schema_version, event_type};
-use crate::event::{Compaction, EpisodeEnd, EpisodeHeader, Tool, TraceEvent, Turn};
+use crate::event::{
+    CacheEvidence, Compaction, EpisodeEnd, EpisodeHeader, Tool, TraceEvent, TraceProvenance,
+    Turn,
+};
 
 pub(super) fn write_cbor_event(output: &mut Vec<u8>, event: &TraceEvent) {
     let field_count = match event {
-        TraceEvent::EpisodeHeader(_) => 5,
-        TraceEvent::Turn(_) => 6,
+        TraceEvent::EpisodeHeader(_) => 6,
+        TraceEvent::Turn(_) => 7,
         TraceEvent::EpisodeEnd(_) => 5,
         TraceEvent::Tool(_) => 8,
         TraceEvent::Compaction(compaction) => compaction_field_count(compaction),
@@ -36,6 +39,8 @@ fn write_cbor_header(output: &mut Vec<u8>, header: &EpisodeHeader) {
     }
     cbor_text(output, "started_at_ms");
     cbor_optional_unsigned(output, header.started_at_ms);
+    cbor_text(output, "provenance");
+    cbor_optional_provenance(output, header.provenance.as_ref());
 }
 
 fn write_cbor_turn(output: &mut Vec<u8>, turn: &Turn) {
@@ -47,6 +52,54 @@ fn write_cbor_turn(output: &mut Vec<u8>, turn: &Turn) {
     cbor_optional_text(output, turn.output.as_deref());
     cbor_text(output, "stop_reason");
     cbor_optional_text(output, turn.stop_reason.as_deref());
+    cbor_text(output, "cache_evidence");
+    cbor_optional_cache_evidence(output, turn.cache_evidence.as_ref());
+}
+
+fn cbor_optional_provenance(output: &mut Vec<u8>, provenance: Option<&TraceProvenance>) {
+    let Some(provenance) = provenance else {
+        output.push(0xf6);
+        return;
+    };
+    cbor_map(output, 9);
+    for (name, value) in [
+        ("session_id", provenance.session_id.as_deref()),
+        ("lane_id", provenance.lane_id.as_deref()),
+        ("operation_id", provenance.operation_id.as_deref()),
+        ("epoch_id", provenance.epoch_id.as_deref()),
+        ("core_run_id", provenance.core_run_id.as_deref()),
+        ("harness_snapshot_id", provenance.harness_snapshot_id.as_deref()),
+        ("harness_revision_id", provenance.harness_revision_id.as_deref()),
+        (
+            "model_harness_profile_id",
+            provenance.model_harness_profile_id.as_deref(),
+        ),
+        ("experiment_id", provenance.experiment_id.as_deref()),
+    ] {
+        cbor_text(output, name);
+        cbor_optional_text(output, value);
+    }
+}
+
+fn cbor_optional_cache_evidence(output: &mut Vec<u8>, evidence: Option<&CacheEvidence>) {
+    let Some(evidence) = evidence else {
+        output.push(0xf6);
+        return;
+    };
+    cbor_map(output, 5);
+    cbor_text(output, "deterministic_common_prefix_bytes");
+    cbor_optional_unsigned(output, evidence.deterministic_common_prefix_bytes);
+    cbor_text(output, "deterministic_common_prefix_tokens_estimate");
+    cbor_optional_unsigned(
+        output,
+        evidence.deterministic_common_prefix_tokens_estimate,
+    );
+    cbor_text(output, "provider_cache_read_tokens");
+    cbor_optional_unsigned(output, evidence.provider_cache_read_tokens);
+    cbor_text(output, "provider_cache_write_tokens");
+    cbor_optional_unsigned(output, evidence.provider_cache_write_tokens);
+    cbor_text(output, "provider_surface_digest");
+    cbor_optional_text(output, evidence.provider_surface_digest.as_deref());
 }
 
 fn write_cbor_tool(output: &mut Vec<u8>, tool: &Tool) {

@@ -21,12 +21,6 @@ pub enum StopReason {
     Error,
 }
 
-impl StopReason {
-    /// Compatibility spelling for the upstream `stop` outcome.
-    #[allow(non_upper_case_globals)]
-    pub const EndTurn: Self = Self::Stop;
-}
-
 /// The externally observable agent ownership phase.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AgentPhase {

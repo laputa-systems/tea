@@ -1,108 +1,29 @@
-use std::path::Path;
 use std::sync::Arc;
+use tea_core::profile::PiDefaultCodingProfile;
 use tea_core::provider::{openai::OpenAiContextHook, ProviderRegistry};
-use tea_core::{Agent, AgentConfiguration, DefaultCodingTools, ThinkingLevel};
-use tea_luau::LuaPolicyHookSet;
+use tea_core::{AgentConfiguration, DefaultCodingTools};
 
 use super::error::AppError;
-use super::tea::{TeaDeclaredTool, TeaExtensionFilesTool, TeaExtensionHandbookTool, TeaExtensions};
 
-const TEA_AUTHORING_PROMPT: &str = r#"
-Tea extensions
-
-When the user asks to create or modify a Tea extension, call `tea_extension_handbook` before
-writing source. Use `tea_extension_files` only for Tea extension files. Its writes are drafts:
-they cannot change the extension registry, activate a new extension, or grant authority. Tea
-extensions are reloaded only after a run has settled, so the current run keeps its original tools,
-prompt, and hooks.
-"#;
-
-/// Build the agent shared by the interactive host and its headless tests.
+/// Assemble the immutable configuration that each durable terminal epoch receives.
 ///
-/// Provider adapters consume the standard OpenAI-compatible context produced by the host
-/// policy hook. Keeping this assembly in one function makes a headless provider probe exercise
-/// the same boundary as the terminal application.
-pub fn build_host_agent(tools: DefaultCodingTools) -> Result<tea_core::AgentBuilder, AppError> {
-    build_host_agent_with_thinking(tools, ThinkingLevel::Off)
-}
-
-pub(super) fn build_host_agent_with_thinking(
+/// The terminal intentionally never constructs an unmanaged [`tea_core::Agent`]. Its only
+/// execution authority is the session-owned durable harness, which captures this configuration
+/// in a committed revision before starting an epoch.
+pub(super) fn host_configuration(
     tools: DefaultCodingTools,
-    thinking_level: ThinkingLevel,
-) -> Result<tea_core::AgentBuilder, AppError> {
-    Agent::builder()
-        .hooks(Arc::new(OpenAiContextHook))
-        .thinking_level(thinking_level)
-        .pinned_default_coding_profile(tools)
-        .map_err(|error| AppError::Setup(error.to_string()))
-}
-
-/// Compose the TUI's trusted host configuration with loaded Tea declarations.
-///
-/// This operation is intentionally separate from `AgentBuilder`: it can be applied with the
-/// core's idle-only `Agent::replace_configuration` API when a host reloads Tea files. No
-/// capability binding is created for a declaration or handler source.
-pub(super) fn compose_tea_configuration(
-    mut configuration: AgentConfiguration,
-    tea: &TeaExtensions,
-    tea_home: &Path,
 ) -> Result<AgentConfiguration, AppError> {
-    let mut seen = configuration
-        .tools
-        .names()
-        .map(str::to_owned)
-        .collect::<std::collections::BTreeSet<_>>();
-    let mut prompt = configuration.system_prompt;
-    for extension in tea.extensions() {
-        let append = extension.policy().system_prompt_append();
-        if !append.is_empty() {
-            if !prompt.is_empty() {
-                prompt.push('\n');
-            }
-            prompt.push_str(append);
-        }
-        for tool in extension.policy().tools() {
-            if !seen.insert(tool.name.clone()) {
-                return Err(AppError::Setup(format!(
-                    "Tea extension {:?} duplicates tool {:?}",
-                    extension.name(),
-                    tool.name
-                )));
-            }
-            configuration
-                .tools
-                .insert(Arc::new(TeaDeclaredTool::from_policy(
-                    extension.name(),
-                    tool,
-                )));
-        }
-    }
-    for reserved in ["tea_extension_handbook", "tea_extension_files"] {
-        if !seen.insert(reserved.to_owned()) {
-            return Err(AppError::Setup(format!(
-                "Tea extension tool name is reserved: {reserved:?}"
-            )));
-        }
-    }
-    if !prompt.is_empty() {
-        prompt.push('\n');
-    }
-    prompt.push_str(TEA_AUTHORING_PROMPT.trim());
-    configuration
-        .tools
-        .insert(Arc::new(TeaExtensionHandbookTool));
-    configuration
-        .tools
-        .insert(Arc::new(TeaExtensionFilesTool::new(tea_home)));
-
-    // Wrapping in reverse preserves registry order: the first extension's decision runs first.
-    let mut hooks = configuration.hooks;
-    for extension in tea.extensions().iter().rev() {
-        hooks = Arc::new(LuaPolicyHookSet::new(Arc::clone(extension.policy()), hooks));
-    }
-    configuration.system_prompt = prompt;
-    configuration.hooks = hooks;
-    Ok(configuration)
+    let profile = PiDefaultCodingProfile::pinned_default()
+        .map_err(|error| AppError::Setup(error.to_string()))?;
+    let registry = tools.registry();
+    profile
+        .validate_registry(&registry)
+        .map_err(|error| AppError::Setup(error.to_string()))?;
+    Ok(AgentConfiguration::new(
+        profile.system_prompt_for_workspace(tools.workspace().as_path()),
+        registry,
+        Arc::new(OpenAiContextHook),
+    ))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -185,29 +106,4 @@ pub(super) fn overlay_lines(
     }
     lines.push("↑/↓ navigate · Enter select · Esc close".into());
     lines
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use tea_core::hooks::NoHooks;
-    use tea_core::tool::ToolRegistry;
-
-    #[test]
-    fn tea_authoring_tools_and_guidance_are_present_without_an_extension_registry() {
-        let configuration = compose_tea_configuration(
-            AgentConfiguration::new("base prompt", ToolRegistry::default(), Arc::new(NoHooks)),
-            &TeaExtensions::default(),
-            Path::new("/fixture/tea"),
-        )
-        .expect("empty Tea registry composes with the host configuration");
-
-        assert!(configuration
-            .tools
-            .names()
-            .eq(["tea_extension_handbook", "tea_extension_files"]));
-        assert!(configuration
-            .system_prompt
-            .contains("call `tea_extension_handbook` before"));
-    }
 }

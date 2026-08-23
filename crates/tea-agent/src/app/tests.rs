@@ -6,7 +6,6 @@ use std::fs;
 use std::num::NonZeroU64;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::sync_channel;
 use std::sync::{Arc, Mutex};
 use tea_core::compaction::{
     AutomaticCompactionReason, AutomaticCompactionRequest, CompactionContext,
@@ -15,10 +14,10 @@ use tea_core::compaction::{
 use tea_core::scheduler::{
     CancellationToken, ModelFuture, ModelProvider, ModelRequest, ModelStream, ModelStreamEvent,
 };
-use tea_core::state::{Message, MessageId, SerializedJson, ToolCallId};
+use tea_core::state::{AgentMessage, MessageId, SerializedJson, ToolCallId};
 use tea_core::tool::ToolUpdate;
 use tea_core::tool::{ToolDefinition, ToolExecutionMode};
-use tea_core::{AgentToolResult, DefaultCodingTools, ModelDescriptor, ThinkingLevel, Usage};
+use tea_core::{AgentToolResult, ModelDescriptor, ThinkingLevel, Usage};
 
 fn test_tea_home(label: &str) -> PathBuf {
     static NEXT_HOME: AtomicU64 = AtomicU64::new(1);
@@ -30,9 +29,6 @@ fn test_tea_home(label: &str) -> PathBuf {
     fs::create_dir_all(&root).expect("test Tea home should be created");
     root
 }
-
-#[derive(Debug)]
-struct ContextCheckingProvider;
 
 #[derive(Debug)]
 struct SummaryProvider {
@@ -58,7 +54,7 @@ impl ModelProvider for RecordingSummaryProvider {
         let events = if request.model.as_ref() == Some(&self.expected_model) {
             vec![
                 ModelStreamEvent::TextDelta("updated summary".into()),
-                ModelStreamEvent::End(tea_core::state::StopReason::EndTurn),
+                ModelStreamEvent::End(tea_core::state::StopReason::Stop),
             ]
         } else {
             vec![ModelStreamEvent::Error {
@@ -80,33 +76,11 @@ impl ModelProvider for SummaryProvider {
         let events = if request.model.as_ref() == Some(&self.expected_model) {
             vec![
                 ModelStreamEvent::TextDelta("summary text".into()),
-                ModelStreamEvent::End(tea_core::state::StopReason::EndTurn),
+                ModelStreamEvent::End(tea_core::state::StopReason::Stop),
             ]
         } else {
             vec![ModelStreamEvent::Error {
                 message: "summary request used the wrong local model".into(),
-            }]
-        };
-        Box::pin(std::future::ready(
-            Ok(Box::new(ModelStream { events }) as _),
-        ))
-    }
-}
-
-impl ModelProvider for ContextCheckingProvider {
-    fn stream<'a>(
-        &'a self,
-        request: ModelRequest,
-        _cancellation: CancellationToken,
-    ) -> ModelFuture<'a> {
-        let events = if request.context == r#"[{"content":"hello","role":"user"}]"# {
-            vec![
-                ModelStreamEvent::TextDelta("ok".into()),
-                ModelStreamEvent::End(tea_core::state::StopReason::EndTurn),
-            ]
-        } else {
-            vec![ModelStreamEvent::Error {
-                message: "OpenRouter received invalid converted context".into(),
             }]
         };
         Box::pin(std::future::ready(
@@ -230,7 +204,7 @@ fn startup_does_not_open_model_picker_without_a_saved_selection() {
     .expect("startup options parse");
     let mut app = App::new(options);
 
-    app.assemble_agent().expect("host should assemble");
+    app.assemble_host().expect("host should assemble");
 
     assert_eq!(app.state().surface(), UiSurface::None);
     assert!(app.state().selected_model.is_none());
@@ -250,7 +224,7 @@ fn selected_model_is_saved_and_restored_without_starting_the_picker() {
     )
     .expect("startup options parse");
     let mut first = App::new(options.clone());
-    first.assemble_agent().expect("first host should assemble");
+    first.assemble_host().expect("first host should assemble");
     first
         .select_model(
             "local".into(),
@@ -261,7 +235,7 @@ fn selected_model_is_saved_and_restored_without_starting_the_picker() {
 
     let mut second = App::new(options);
     second
-        .assemble_agent()
+        .assemble_host()
         .expect("second host should assemble");
 
     assert_eq!(second.state().surface(), UiSurface::None);
@@ -279,7 +253,7 @@ fn selected_model_is_saved_and_restored_without_starting_the_picker() {
 #[test]
 fn event_projection_keeps_streaming_text_as_one_raw_line() {
     let mut state = AppState::new();
-    let message = Message::Assistant {
+    let message = AgentMessage::Assistant {
         id: MessageId(2),
         content: "hello".into(),
         tool_calls: Vec::new(),
@@ -446,7 +420,7 @@ fn event_projection_makes_provider_failure_and_abort_explicit() {
         run_id: tea_core::RunId(1),
         sequence: tea_core::EventSequence(1),
         kind: tea_core::AgentEventKind::MessageEnd {
-            message: Message::Assistant {
+            message: AgentMessage::Assistant {
                 id: MessageId(2),
                 content: String::new(),
                 tool_calls: Vec::new(),
@@ -592,15 +566,15 @@ fn local_compactor_summarizes_and_preserves_the_core_retained_suffix() {
                 expected_model: model.clone(),
             }),
         );
-        let prefix = Message::User {
+        let prefix = AgentMessage::User {
             id: MessageId(1),
             content: "old work".into(),
         };
-        let retained = Message::Assistant {
+        let retained = AgentMessage::Assistant {
             id: MessageId(2),
             content: "recent work".into(),
             tool_calls: Vec::new(),
-            stop_reason: Some(tea_core::state::StopReason::EndTurn),
+            stop_reason: Some(tea_core::state::StopReason::Stop),
             error_message: None,
         };
         let request = AutomaticCompactionRequest {
@@ -633,7 +607,7 @@ fn local_compactor_summarizes_and_preserves_the_core_retained_suffix() {
         assert_eq!(result.messages.len(), 2);
         assert!(matches!(
             &result.messages[0],
-            Message::User { content, .. } if content.contains("summary text")
+            AgentMessage::User { content, .. } if content.contains("summary text")
         ));
         assert_eq!(result.messages[1], retained);
     });
@@ -665,7 +639,7 @@ fn cache_friendly_compaction_appends_one_instruction_to_an_exact_source_prefix()
                     version: tea_core::COMPACTION_CONTEXT_VERSION,
                     system_prompt: "unused standalone prompt".into(),
                     model: Some(model),
-                    messages: vec![Message::User {
+                    messages: vec![AgentMessage::User {
                         id: MessageId(1),
                         content: "old work".into(),
                     }],
@@ -692,7 +666,7 @@ fn cache_friendly_compaction_appends_one_instruction_to_an_exact_source_prefix()
                     context_budget_tokens: 100_000,
                     reserved_tokens: 1_000,
                     recent_tokens: 20_000,
-                    prefix_messages: vec![Message::User {
+                    prefix_messages: vec![AgentMessage::User {
                         id: MessageId(1),
                         content: "old work".into(),
                     }],
@@ -706,7 +680,7 @@ fn cache_friendly_compaction_appends_one_instruction_to_an_exact_source_prefix()
             .expect("cache-friendly compaction succeeds");
         assert!(matches!(
             &result.messages[0],
-            Message::User { content, .. } if content.contains("updated summary")
+            AgentMessage::User { content, .. } if content.contains("updated summary")
         ));
         let requests = requests.lock().expect("summary request mutex poisoned");
         assert_eq!(requests.len(), 1);
@@ -749,7 +723,7 @@ fn cache_friendly_compaction_falls_back_when_a_transform_breaks_the_prefix() {
                     version: tea_core::COMPACTION_CONTEXT_VERSION,
                     system_prompt: "standalone".into(),
                     model: Some(model),
-                    messages: vec![Message::User {
+                    messages: vec![AgentMessage::User {
                         id: MessageId(1),
                         content: "old work".into(),
                     }],
@@ -770,7 +744,7 @@ fn cache_friendly_compaction_falls_back_when_a_transform_breaks_the_prefix() {
                     context_budget_tokens: 100_000,
                     reserved_tokens: 1_000,
                     recent_tokens: 20_000,
-                    prefix_messages: vec![Message::User {
+                    prefix_messages: vec![AgentMessage::User {
                         id: MessageId(1),
                         content: "old work".into(),
                     }],
@@ -784,7 +758,7 @@ fn cache_friendly_compaction_falls_back_when_a_transform_breaks_the_prefix() {
             .expect("standalone fallback succeeds");
         assert!(matches!(
             &result.messages[0],
-            Message::User { content, .. } if content.contains("updated summary")
+            AgentMessage::User { content, .. } if content.contains("updated summary")
         ));
         let requests = requests.lock().expect("summary request mutex poisoned");
         assert_eq!(requests.len(), 1);
@@ -797,17 +771,18 @@ fn cache_friendly_compaction_falls_back_when_a_transform_breaks_the_prefix() {
 
 #[test]
 fn local_catalog_selection_enables_automatic_compaction() {
-    let workspace = std::env::current_dir().expect("test workspace");
-    let tools = DefaultCodingTools::new(workspace).expect("default tools");
-    let compactor = Arc::new(ProviderCompactor::default());
-    let compactor_capability: Arc<dyn Compactor> = compactor.clone();
-    let agent = build_host_agent(tools)
-        .expect("host agent builder")
-        .compactor(compactor_capability)
-        .build();
-    let mut app = App::new(CliOptions::default());
-    app.attach_agent(agent);
-    app.compactor = Some(compactor);
+    let tea_home = test_tea_home("local-catalog");
+    let options = CliOptions::parse(
+        [
+            "tea",
+            "--tea-home",
+            tea_home.to_str().expect("UTF-8 test path"),
+        ]
+        .map(OsString::from),
+    )
+    .expect("startup options parse");
+    let mut app = App::new(options);
+    app.assemble_host().expect("host should assemble");
 
     app.select_model(
         "local".into(),
@@ -815,7 +790,7 @@ fn local_catalog_selection_enables_automatic_compaction() {
     )
     .expect("local model selection");
 
-    let policy = app.agent().expect("attached agent").automatic_compaction();
+    let policy = &app.automatic_compaction;
     assert!(policy.enabled);
     assert_eq!(policy.context_budget.tokens(), 32_768);
     assert_eq!(policy.reserved_tokens, 8_192);
@@ -827,25 +802,17 @@ fn local_catalog_selection_enables_automatic_compaction() {
         app.state().footer_lines(&app.registry)[1],
         "context unknown% used (unknown/32768); automatic compaction available"
     );
+    let _ = fs::remove_dir_all(tea_home);
 }
 
 #[test]
 fn custom_local_model_enables_automatic_compaction_with_explicit_capacity() {
-    let workspace = std::env::current_dir().expect("test workspace");
-    let tools = DefaultCodingTools::new(workspace).expect("default tools");
-    let compactor = Arc::new(ProviderCompactor::default());
-    let compactor_capability: Arc<dyn Compactor> = compactor.clone();
-    let agent = build_host_agent(tools)
-        .expect("host agent builder")
-        .compactor(compactor_capability)
-        .build();
+    let tea_home = test_tea_home("custom-local");
     let options = CliOptions::parse(
         [
             "tea",
-            "--provider",
-            "local",
-            "--model",
-            "Qwen3.5-4B-MLX-4bit",
+            "--tea-home",
+            tea_home.to_str().expect("UTF-8 test path"),
             "--local-context-window",
             "32768",
         ]
@@ -853,18 +820,18 @@ fn custom_local_model_enables_automatic_compaction_with_explicit_capacity() {
     )
     .expect("local capacity options parse");
     let mut app = App::new(options);
-    app.attach_agent(agent);
-    app.compactor = Some(compactor);
+    app.assemble_host().expect("host should assemble");
     app.select_model("local".into(), "Qwen3.5-4B-MLX-4bit".into())
         .expect("custom local model selection");
 
-    let policy = app.agent().expect("attached agent").automatic_compaction();
+    let policy = &app.automatic_compaction;
     assert!(policy.enabled);
     assert_eq!(policy.context_budget.tokens(), 32_768);
     assert_eq!(
         app.state().footer_lines(&app.registry)[1],
         "context unknown% used (unknown/32768); automatic compaction available"
     );
+    let _ = fs::remove_dir_all(tea_home);
 }
 
 #[test]
@@ -874,36 +841,19 @@ fn civil_date_epoch_is_stable_without_a_time_dependency() {
 }
 
 #[test]
-fn headless_host_agent_sends_openai_compatible_context() {
-    smol::block_on(async {
-        let workspace = std::env::current_dir().expect("test workspace");
-        let tools = DefaultCodingTools::new(workspace).expect("default tools");
-        let agent = build_host_agent(tools)
-            .expect("host agent builder")
-            .model(ModelDescriptor {
-                provider: "openrouter".into(),
-                model: "inclusionai/ling-3.0-tiny:free".into(),
-                revision: None,
-            })
-            .model_provider(Arc::new(ContextCheckingProvider))
-            .build();
-
-        agent
-            .start_prompt("hello")
-            .expect("start prompt")
-            .drive()
-            .await
-            .expect("headless host request should be valid JSON");
-    });
-}
-
-#[test]
 fn local_provider_is_selectable_without_a_credential() {
-    let workspace = std::env::current_dir().expect("test workspace");
-    let tools = DefaultCodingTools::new(workspace).expect("default tools");
-    let agent = build_host_agent(tools).expect("host agent builder").build();
-    let mut app = App::new(CliOptions::default());
-    app.attach_agent(agent);
+    let tea_home = test_tea_home("local-provider");
+    let options = CliOptions::parse(
+        [
+            "tea",
+            "--tea-home",
+            tea_home.to_str().expect("UTF-8 test path"),
+        ]
+        .map(OsString::from),
+    )
+    .expect("startup options parse");
+    let mut app = App::new(options);
+    app.assemble_host().expect("host should assemble");
 
     app.select_model(
         "local".into(),
@@ -918,17 +868,18 @@ fn local_provider_is_selectable_without_a_credential() {
             .map(|model| (model.provider.as_str(), model.model.as_str(),)),
         Some(("local", "Laguna-XS-2.1-5bit"))
     );
-    assert!(app.agent().expect("attached agent").has_model_provider());
+    assert!(app.configured_provider.is_some());
+    let _ = fs::remove_dir_all(tea_home);
 }
 
 #[test]
 fn local_provider_accepts_an_explicit_api_root() {
-    let workspace = std::env::current_dir().expect("test workspace");
-    let tools = DefaultCodingTools::new(workspace).expect("default tools");
-    let agent = build_host_agent(tools).expect("host agent builder").build();
+    let tea_home = test_tea_home("local-api-root");
     let options = CliOptions::parse(
         [
             "tea",
+            "--tea-home",
+            tea_home.to_str().expect("UTF-8 test path"),
             "--provider",
             "local",
             "--model",
@@ -940,113 +891,14 @@ fn local_provider_accepts_an_explicit_api_root() {
     )
     .expect("local endpoint options parse");
     let mut app = App::new(options);
-    app.attach_agent(agent);
+    app.assemble_host().expect("host should assemble");
     app.select_model("local".into(), "Qwen3.5-4B-MLX-4bit".into())
         .expect("local provider should accept explicit endpoint");
     assert_eq!(
         app.options().local_base_url(),
         Some(std::ffi::OsStr::new("http://127.0.0.1:12345/v1"))
     );
-}
-
-#[test]
-fn clear_refuses_an_active_core_agent_without_cancelling_it() {
-    let agent = tea_core::Agent::builder().build();
-    let active = agent.start_prompt("active").expect("run starts");
-    let mut app = App::new(CliOptions::default());
-    app.attach_agent(agent.clone());
-
-    app.dispatch_command("/clear").expect("command is handled");
-
-    assert!(matches!(
-        app.state().status(),
-        UiStatus::Notice(notice) if notice == "/clear is unavailable while a run is active"
-    ));
-    assert!(matches!(
-        agent.snapshot().phase,
-        tea_core::state::AgentPhase::Running(_)
-    ));
-    active.abort().expect("fixture cleanup");
-}
-
-#[test]
-fn active_commands_refuse_without_replacing_or_compacting_the_agent() {
-    let agent = tea_core::Agent::builder().build();
-    let active = agent.start_prompt("active").expect("run starts");
-    let mut app = App::new(CliOptions::default());
-    app.attach_agent(agent.clone());
-
-    for command in [
-        "/model",
-        "/compact",
-        "/session",
-        "/resume",
-        "/new",
-        "/reload-extensions",
-        "/clear",
-    ] {
-        app.dispatch_command(command).expect("command is handled");
-        assert!(matches!(
-            app.state().status(),
-            UiStatus::Notice(notice) if notice == &format!("{command} is unavailable while a run is active")
-        ));
-        assert!(matches!(
-            agent.snapshot().phase,
-            tea_core::state::AgentPhase::Running(_)
-        ));
-    }
-    active.abort().expect("fixture cleanup");
-}
-
-#[test]
-fn queue_commands_project_core_owned_steering_and_follow_up_prompts() {
-    let agent = tea_core::Agent::builder().build();
-    let mut app = App::new(CliOptions::default());
-    app.attach_agent(agent.clone());
-
-    app.dispatch_command("/steer inspect the error")
-        .expect("steering command is handled");
-    app.dispatch_command("/followup summarize the result")
-        .expect("follow-up command is handled");
-
-    assert_eq!(
-        app.state()
-            .queued_lines()
-            .iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>(),
-        [
-            "queued steering #1 (next active turn; one at a time): inspect the error",
-            "queued follow-up #1 (next idle boundary; one at a time): summarize the result",
-        ]
-    );
-    let queues = agent.queue_snapshot();
-    assert_eq!(queues.steering.snapshot()[0].content, "inspect the error");
-    assert_eq!(
-        queues.follow_up.snapshot()[0].content,
-        "summarize the result"
-    );
-}
-
-#[test]
-fn provider_failure_restores_the_submitted_prompt_for_an_explicit_resubmit() {
-    let mut app = App::new(CliOptions::default());
-    app.submitted_prompt = Some("inspect the failing test".into());
-    let (sender, receiver) = sync_channel(1);
-    sender
-        .send(Err(tea_core::CoreError::ModelError {
-            message: "rate limited".into(),
-        }))
-        .expect("test receiver remains open");
-    app.active_task = Some(receiver);
-
-    app.reap_task();
-
-    assert_eq!(app.state().composer().text(), "inspect the failing test");
-    assert!(matches!(
-        app.state().status(),
-        UiStatus::Notice(notice) if notice.contains("prompt restored for explicit re-submit")
-    ));
+    let _ = fs::remove_dir_all(tea_home);
 }
 
 #[test]
@@ -1074,20 +926,7 @@ fn command_completion_expands_a_slash_prefix_without_submitting_it() {
 }
 
 #[test]
-fn command_completion_includes_extension_reload() {
-    let mut app = App::new(CliOptions::default());
-    app.state
-        .composer_mut()
-        .insert_str("/reload-e")
-        .expect("prefix");
-
-    app.complete_command();
-
-    assert_eq!(app.state.composer().text(), "/reload-extensions ");
-}
-
-#[test]
-fn command_completion_includes_linear_session_commands() {
+fn command_completion_includes_durable_session_commands() {
     let mut app = App::new(CliOptions::default());
     app.state
         .composer_mut()

@@ -11,14 +11,15 @@
 //! arguments from the pre-dispatch tool-start event, so callers must wrap
 //! their sink in [`tea_trace::RedactingSink`] before persistence.
 
+use crate::effect::RunProvenance;
 use crate::event::{AgentEvent, AgentEventKind, EventObserver, ObserverFuture};
 use crate::scheduler::CancellationToken;
 use crate::state::{AgentMessage, MessageId, StopReason, ToolCallId};
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 use tea_trace::{
-    Compaction, CompactionStage, EndReason, EpisodeEnd, EpisodeHeader, IsolatedSink, Tool,
-    TraceEvent, TraceSink, Turn,
+    CacheEvidence, Compaction, CompactionStage, EndReason, EpisodeEnd, EpisodeHeader,
+    IsolatedSink, Tool, TraceEvent, TraceProvenance, TraceSink, Turn,
 };
 
 /// An awaited core observer that records a compact linear trace episode.
@@ -29,6 +30,8 @@ use tea_trace::{
 /// does not own session or persistence identity.
 pub struct TraceObserver<S> {
     episode_id: String,
+    provenance: TraceProvenance,
+    provider_surface_digest: Option<String>,
     state: Mutex<TraceState<S>>,
 }
 
@@ -36,6 +39,7 @@ struct TraceState<S> {
     sink: IsolatedSink<S>,
     current_turn: Option<PendingTurn>,
     pending_tools: BTreeMap<ToolCallId, Tool>,
+    pending_cache_evidence: BTreeMap<u64, CacheEvidence>,
     last_committed_compaction: Option<String>,
     end_reason: EndReason,
     error: Option<String>,
@@ -43,20 +47,38 @@ struct TraceState<S> {
 
 struct PendingTurn {
     index: u32,
+    core_turn_id: u64,
     input: String,
     output: Option<String>,
     last_input_message: Option<MessageId>,
+    cache_evidence: Option<CacheEvidence>,
 }
 
 impl<S: TraceSink> TraceObserver<S> {
     /// Creates an observer writing to `sink` under the host-assigned episode ID.
     pub fn new(episode_id: impl Into<String>, sink: S) -> Self {
+        Self::new_with_provenance(episode_id, RunProvenance::default(), sink)
+    }
+
+    /// Creates an observer with the exact host-owned attribution carried by
+    /// the core run's effect boundary. The observer remains passive: it
+    /// copies only identifier strings into the trace header and never owns
+    /// the durable session or experiment state behind them.
+    pub fn new_with_provenance(
+        episode_id: impl Into<String>,
+        provenance: RunProvenance,
+        sink: S,
+    ) -> Self {
+        let provider_surface_digest = provenance.provider_surface_digest.clone();
         Self {
             episode_id: episode_id.into(),
+            provenance: trace_provenance(provenance),
+            provider_surface_digest,
             state: Mutex::new(TraceState {
                 sink: IsolatedSink::new(sink),
                 current_turn: None,
                 pending_tools: BTreeMap::new(),
+                pending_cache_evidence: BTreeMap::new(),
                 last_committed_compaction: None,
                 end_reason: EndReason::Completed,
                 error: None,
@@ -109,6 +131,9 @@ impl<S: TraceSink> TraceObserver<S> {
                 turn_id,
                 observation,
             } => {
+                let mut evidence = evidence_from_request_observation(observation);
+                evidence.provider_surface_digest = self.provider_surface_digest.clone();
+                record_cache_evidence(&mut state, turn_id.0, evidence);
                 if let Some(compaction_id) = state.last_committed_compaction.take() {
                     let mut compaction = Compaction::new(
                         compaction_id,
@@ -123,13 +148,13 @@ impl<S: TraceSink> TraceObserver<S> {
             AgentEventKind::CompactionStart { .. }
             | AgentEventKind::CompactionResult { .. }
             | AgentEventKind::CompactionEnd { .. } => {
-                // The compact V0 trace schema has no context-replacement record. The
+                // The compact v1 trace schema has no context-replacement record. The
                 // authoritative lifecycle event stream remains available to the host.
             }
             AgentEventKind::AutomaticCompactionStart { .. }
             | AgentEventKind::ContextEstimate { .. }
             | AgentEventKind::ProviderRequestSkipped { .. } => {
-                // These are structured observability events. The compact V0
+                // These are structured observability events. The compact v1
                 // trace remains content-oriented; hosts that need policy
                 // metrics retain the core lifecycle stream.
             }
@@ -141,19 +166,23 @@ impl<S: TraceSink> TraceObserver<S> {
             AgentEventKind::AgentStart => {
                 state.current_turn = None;
                 state.pending_tools.clear();
+                state.pending_cache_evidence.clear();
                 state.last_committed_compaction = None;
                 state.end_reason = EndReason::Completed;
                 state.error = None;
-                state.sink.append(TraceEvent::from(EpisodeHeader::new(
-                    self.episode_id.clone(),
-                )));
+                state.sink.append(TraceEvent::from(
+                    EpisodeHeader::new(self.episode_id.clone())
+                        .with_provenance(self.provenance.clone()),
+                ));
             }
             AgentEventKind::TurnStart { turn_id } => {
                 state.current_turn = Some(PendingTurn {
                     index: trace_turn_index(turn_id.0),
+                    core_turn_id: turn_id.0,
                     input: String::new(),
                     output: None,
                     last_input_message: None,
+                    cache_evidence: state.pending_cache_evidence.remove(&turn_id.0),
                 });
             }
             AgentEventKind::MessageStart { message }
@@ -197,7 +226,7 @@ impl<S: TraceSink> TraceObserver<S> {
                 state.sink.append(TraceEvent::from(tool));
             }
             AgentEventKind::ToolExecutionUpdate { .. } => {
-                // The compact V0 trace stores the settled tool record only.
+                // The compact v1 trace stores the settled tool record only.
                 // Streaming updates remain available through core observers.
             }
             AgentEventKind::ToolFailureObserved {
@@ -209,21 +238,31 @@ impl<S: TraceSink> TraceObserver<S> {
             AgentEventKind::TurnEnd { turn_id, reason } => {
                 let pending = state.current_turn.take().unwrap_or(PendingTurn {
                     index: trace_turn_index(turn_id.0),
+                    core_turn_id: turn_id.0,
                     input: String::new(),
                     output: None,
                     last_input_message: None,
+                    cache_evidence: state.pending_cache_evidence.remove(&turn_id.0),
                 });
                 let mut turn = Turn::new(pending.index, pending.input)
                     .with_stop_reason(stop_reason_name(*reason));
                 if let Some(output) = pending.output {
                     turn = turn.with_output(output);
                 }
+                if let Some(cache_evidence) = pending.cache_evidence {
+                    turn = turn.with_cache_evidence(cache_evidence);
+                }
                 state.sink.append(TraceEvent::from(turn));
                 state.end_reason = end_reason(*reason);
             }
-            AgentEventKind::ModelTurnUsage { .. } => {
-                // Accounting is retained by the core snapshot and remains available to
-                // observers; the compact V0 trace schema does not persist usage fields.
+            AgentEventKind::ModelTurnUsage { accounting } => {
+                let evidence = CacheEvidence {
+                    provider_cache_read_tokens: accounting.usage.cache_read_tokens,
+                    provider_cache_write_tokens: accounting.usage.cache_write_tokens,
+                    provider_surface_digest: self.provider_surface_digest.clone(),
+                    ..CacheEvidence::default()
+                };
+                record_cache_evidence(&mut state, accounting.turn_id.0, evidence);
             }
             AgentEventKind::AgentEnd { .. } => {
                 let reason = state.end_reason.clone();
@@ -236,6 +275,86 @@ impl<S: TraceSink> TraceObserver<S> {
             }
         }
     }
+}
+
+fn trace_provenance(provenance: RunProvenance) -> TraceProvenance {
+    TraceProvenance {
+        session_id: provenance.session_id,
+        lane_id: provenance.lane_id,
+        operation_id: provenance.operation_id,
+        epoch_id: provenance.epoch_id,
+        core_run_id: provenance.core_run_id,
+        harness_snapshot_id: provenance.harness_snapshot_id,
+        harness_revision_id: provenance.harness_revision_id,
+        model_harness_profile_id: provenance.model_harness_profile_id,
+        experiment_id: provenance.experiment_id,
+    }
+}
+
+fn evidence_from_request_observation(
+    observation: &crate::scheduler::AdapterRequestObservation,
+) -> CacheEvidence {
+    // Adapters intentionally do not expose request bodies to the trace
+    // observer. The core contributes only a content-free deterministic prefix
+    // measurement at request construction; provider usage is joined below by
+    // exact turn ID and remains separate evidence.
+    CacheEvidence {
+        deterministic_common_prefix_bytes: observation.deterministic_common_prefix_bytes,
+        deterministic_common_prefix_tokens_estimate: observation
+            .deterministic_common_prefix_tokens_estimate,
+        ..CacheEvidence::default()
+    }
+}
+
+fn record_cache_evidence<S>(state: &mut TraceState<S>, turn_id: u64, evidence: CacheEvidence) {
+    if cache_evidence_is_empty(&evidence) {
+        return;
+    }
+    if let Some(current) = state
+        .current_turn
+        .as_mut()
+        .filter(|turn| turn.core_turn_id == turn_id)
+    {
+        merge_cache_evidence(&mut current.cache_evidence, evidence);
+        return;
+    }
+    let pending = state.pending_cache_evidence.entry(turn_id).or_default();
+    merge_cache_evidence_value(pending, evidence);
+}
+
+fn merge_cache_evidence(target: &mut Option<CacheEvidence>, update: CacheEvidence) {
+    if let Some(existing) = target {
+        merge_cache_evidence_value(existing, update);
+    } else {
+        *target = Some(update);
+    }
+}
+
+fn merge_cache_evidence_value(target: &mut CacheEvidence, update: CacheEvidence) {
+    if update.deterministic_common_prefix_bytes.is_some() {
+        target.deterministic_common_prefix_bytes = update.deterministic_common_prefix_bytes;
+    }
+    if update.deterministic_common_prefix_tokens_estimate.is_some() {
+        target.deterministic_common_prefix_tokens_estimate =
+            update.deterministic_common_prefix_tokens_estimate;
+    }
+    if update.provider_cache_read_tokens.is_some() {
+        target.provider_cache_read_tokens = update.provider_cache_read_tokens;
+    }
+    if update.provider_cache_write_tokens.is_some() {
+        target.provider_cache_write_tokens = update.provider_cache_write_tokens;
+    }
+    if update.provider_surface_digest.is_some() {
+        target.provider_surface_digest = update.provider_surface_digest;
+    }
+}
+
+fn cache_evidence_is_empty(evidence: &CacheEvidence) -> bool {
+    evidence.deterministic_common_prefix_bytes.is_none()
+        && evidence.deterministic_common_prefix_tokens_estimate.is_none()
+        && evidence.provider_cache_read_tokens.is_none()
+        && evidence.provider_cache_write_tokens.is_none()
+        && evidence.provider_surface_digest.is_none()
 }
 
 /// Translates a core lifecycle record into the additive V1 trace record.
@@ -462,7 +581,7 @@ mod tests {
     };
     use crate::event::AgentEvent;
     use crate::scheduler::AdapterRequestObservation;
-    use crate::state::{AgentToolCall, MessageId, RunId, TurnId};
+    use crate::state::{AgentToolCall, MessageId, ModelTurnAccounting, RunId, TurnId, Usage};
     use crate::tool::{AgentToolResult, ToolUpdate};
 
     fn observe<S: TraceSink + Send + 'static>(observer: &TraceObserver<S>, kind: AgentEventKind) {
@@ -596,7 +715,7 @@ mod tests {
                         trigger: CompactionTrigger::Automatic,
                         reason: CompactionReason::Threshold,
                         phase: CompactionPhase::BeforeModelRequest,
-                        strategy: CompactionStrategy::cache_replay_summary_v0(42),
+                        strategy: CompactionStrategy::cache_replay_summary_v1(42),
                         source_history_revision: 9,
                         attempt: 1,
                         automatic_ordinal: Some(1),
@@ -648,7 +767,7 @@ mod tests {
                 .all(|record| record.compaction_id == id.to_string()));
             assert_eq!(
                 compactions[0].strategy_id.as_deref(),
-                Some("cache_replay_summary_v0")
+                Some("cache_replay_summary_v1")
             );
             assert_eq!(
                 compactions[1].terminal_outcome.as_deref(),
@@ -678,5 +797,85 @@ mod tests {
         observe(&observer, AgentEventKind::AgentStart);
         observe(&observer, AgentEventKind::AgentEnd { messages: vec![] });
         assert_eq!(observer.failed_events(), 2);
+    }
+
+    #[test]
+    fn durable_provenance_and_provider_cache_usage_stay_attached_to_the_exact_turn() {
+        let observer = TraceObserver::new_with_provenance(
+            "episode-provenance",
+            RunProvenance {
+                session_id: Some("session-1".into()),
+                lane_id: Some("main".into()),
+                operation_id: Some("operation-1".into()),
+                epoch_id: Some("epoch-1".into()),
+                core_run_id: Some("core-run-1".into()),
+                harness_snapshot_id: Some("snapshot-1".into()),
+                harness_revision_id: Some("revision-1".into()),
+                model_harness_profile_id: Some("profile-1".into()),
+                provider_surface_digest: Some("surface-1".into()),
+                experiment_id: Some("experiment-1".into()),
+            },
+            Vec::<TraceEvent>::new(),
+        );
+        observe(&observer, AgentEventKind::AgentStart);
+        observe(&observer, AgentEventKind::TurnStart { turn_id: TurnId(1) });
+        observe(
+            &observer,
+            AgentEventKind::ProviderRequestObserved {
+                turn_id: TurnId(1),
+                observation: AdapterRequestObservation {
+                    deterministic_common_prefix_bytes: Some(148),
+                    deterministic_common_prefix_tokens_estimate: Some(37),
+                    ..AdapterRequestObservation::default()
+                },
+            },
+        );
+        observe(
+            &observer,
+            AgentEventKind::ModelTurnUsage {
+                accounting: ModelTurnAccounting {
+                    run_id: RunId(1),
+                    turn_id: TurnId(1),
+                    model: None,
+                    usage: Usage {
+                        cache_read_tokens: Some(34),
+                        cache_write_tokens: Some(8),
+                        ..Usage::default()
+                    },
+                },
+            },
+        );
+        observe(
+            &observer,
+            AgentEventKind::TurnEnd {
+                turn_id: TurnId(1),
+                reason: StopReason::Stop,
+            },
+        );
+
+        observer.with_sink(|events| {
+            let TraceEvent::EpisodeHeader(header) = &events[0] else {
+                panic!("the first trace record must be the episode header");
+            };
+            let provenance = header
+                .provenance
+                .as_ref()
+                .expect("durable host provenance is retained in the header");
+            assert_eq!(provenance.core_run_id.as_deref(), Some("core-run-1"));
+            assert_eq!(provenance.experiment_id.as_deref(), Some("experiment-1"));
+
+            let TraceEvent::Turn(turn) = &events[1] else {
+                panic!("the completed turn follows the header");
+            };
+            let cache = turn
+                .cache_evidence
+                .as_ref()
+                .expect("cache evidence remains tied to the matching turn");
+            assert_eq!(cache.provider_surface_digest.as_deref(), Some("surface-1"));
+            assert_eq!(cache.deterministic_common_prefix_bytes, Some(148));
+            assert_eq!(cache.deterministic_common_prefix_tokens_estimate, Some(37));
+            assert_eq!(cache.provider_cache_read_tokens, Some(34));
+            assert_eq!(cache.provider_cache_write_tokens, Some(8));
+        });
     }
 }

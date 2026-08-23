@@ -35,8 +35,8 @@ const ISOLATED_POLICY_COUNT: usize = 256;
 
 const SIMPLE_POLICY: &str = r#"
     return {
-        system_prompt_append = "benchmark policy",
-        before_tool_call = function(_) return "allow" end,
+        prompt_sections = { { id = "benchmark", content = "benchmark policy" } },
+        before_tool = function(_) return "allow" end,
     }
 "#;
 
@@ -106,13 +106,13 @@ fn startup_and_teardown() -> Result<(), String> {
     for _ in 0..STARTUP_SAMPLES {
         let started = Instant::now();
         let policy = LuaPolicy::load(SIMPLE_POLICY).map_err(|error| error.to_string())?;
-        black_box(policy.system_prompt_append());
+        black_box(policy.prompt_sections());
         startup.push(started.elapsed());
         drop(policy);
 
         let started = Instant::now();
         let policy = LuaPolicy::load(SIMPLE_POLICY).map_err(|error| error.to_string())?;
-        black_box(policy.system_prompt_append());
+        black_box(policy.prompt_sections());
         drop(policy);
         lifecycle.push(started.elapsed());
     }
@@ -146,7 +146,7 @@ fn isolated_policies() -> Result<(), String> {
     let mut policies = Vec::with_capacity(ISOLATED_POLICY_COUNT);
     for index in 0..ISOLATED_POLICY_COUNT {
         let source = format!(
-            "return {{ system_prompt_append = \"isolated-policy-{index}\", before_tool_call = function(_) return \"allow\" end }}"
+            "return {{ prompt_sections = {{ {{ id = \"isolated-{index}\", content = \"isolated-policy-{index}\" }} }}, before_tool = function(_) return \"allow\" end }}"
         );
         policies.push(LuaPolicy::load(&source).map_err(|error| error.to_string())?);
     }
@@ -156,10 +156,10 @@ fn isolated_policies() -> Result<(), String> {
     let verification_started = Instant::now();
     for (index, policy) in policies.iter().enumerate() {
         let expected = format!("isolated-policy-{index}");
-        if policy.system_prompt_append() != expected {
+        let actual = policy.prompt_sections().first().map(|section| section.content.as_str());
+        if actual != Some(expected.as_str()) {
             return Err(format!(
-                "policy {index} observed {:?}, expected {expected:?}",
-                policy.system_prompt_append()
+                "policy {index} observed {actual:?}, expected {expected:?}",
             ));
         }
         check_allow(policy, &call)?;

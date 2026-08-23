@@ -3,10 +3,10 @@ use crate::terminal::TerminalError;
 use std::fmt;
 use tea_core::provider::RegistryError;
 use tea_core::CoreError;
+use tea_harness::HarnessError;
+use tea_session::{ArtifactError, SessionError as DurableSessionError};
 
 use super::cli::CliError;
-use super::session::SessionError;
-use super::tea::TeaLoadError;
 
 /// Local application failures. Provider and core failures retain their typed source.
 #[derive(Debug)]
@@ -21,12 +21,14 @@ pub enum AppError {
     Setup(String),
     /// Registry model resolution or adapter construction failed.
     Registry(RegistryError),
-    /// Tea extension discovery or authoring boundary failed.
-    Tea(TeaLoadError),
-    /// Versioned linear-session persistence failed at the TUI-owned boundary.
-    Session(SessionError),
     /// A core state-machine operation failed.
     Core(CoreError),
+    /// The durable session/harness boundary rejected or could not safely drive an operation.
+    Harness(HarnessError),
+    /// The durable JSONL session could not be created or mutated before a harness owned it.
+    DurableSession(DurableSessionError),
+    /// A concrete immutable artifact-store operation failed at host setup.
+    Artifact(ArtifactError),
 }
 
 impl fmt::Display for AppError {
@@ -37,9 +39,10 @@ impl fmt::Display for AppError {
             Self::Editor(error) => error.fmt(formatter),
             Self::Setup(message) => formatter.write_str(message),
             Self::Registry(error) => error.fmt(formatter),
-            Self::Tea(error) => error.fmt(formatter),
-            Self::Session(error) => error.fmt(formatter),
             Self::Core(error) => error.fmt(formatter),
+            Self::Harness(error) => error.fmt(formatter),
+            Self::DurableSession(error) => error.fmt(formatter),
+            Self::Artifact(error) => error.fmt(formatter),
         }
     }
 }
@@ -51,9 +54,10 @@ impl std::error::Error for AppError {
             Self::Terminal(error) => Some(error),
             Self::Editor(error) => Some(error),
             Self::Registry(error) => Some(error),
-            Self::Tea(error) => Some(error),
-            Self::Session(error) => Some(error),
             Self::Core(error) => Some(error),
+            Self::Harness(error) => Some(error),
+            Self::DurableSession(error) => Some(error),
+            Self::Artifact(error) => Some(error),
             Self::Setup(_) => None,
         }
     }
@@ -83,20 +87,26 @@ impl From<RegistryError> for AppError {
     }
 }
 
-impl From<TeaLoadError> for AppError {
-    fn from(error: TeaLoadError) -> Self {
-        Self::Tea(error)
-    }
-}
-
-impl From<SessionError> for AppError {
-    fn from(error: SessionError) -> Self {
-        Self::Session(error)
-    }
-}
-
 impl From<CoreError> for AppError {
     fn from(error: CoreError) -> Self {
         Self::Core(error)
+    }
+}
+
+impl From<HarnessError> for AppError {
+    fn from(error: HarnessError) -> Self {
+        Self::Harness(error)
+    }
+}
+
+impl From<DurableSessionError> for AppError {
+    fn from(error: DurableSessionError) -> Self {
+        Self::DurableSession(error)
+    }
+}
+
+impl From<ArtifactError> for AppError {
+    fn from(error: ArtifactError) -> Self {
+        Self::Artifact(error)
     }
 }

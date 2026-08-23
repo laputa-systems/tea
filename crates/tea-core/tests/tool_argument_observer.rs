@@ -6,8 +6,10 @@ use tea_core::event::{AgentEvent, AgentEventKind, EventObserver, ObserverFuture}
 use tea_core::scheduler::{
     CancellationToken, ModelFuture, ModelProvider, ModelRequest, ModelStream, ModelStreamEvent,
 };
-use tea_core::state::{AgentPhase, AssistantToolCall, SerializedJson, StopReason, ToolCallId};
-use tea_core::tool::{AgentTool, ToolCall, ToolContext, ToolFuture, ToolResult, ToolUpdateSink};
+use tea_core::state::{AgentPhase, AgentToolCall, SerializedJson, StopReason, ToolCallId};
+use tea_core::tool::{
+    AgentTool, AgentToolResult, ToolCall, ToolContext, ToolFuture, ToolUpdateSink,
+};
 use tea_core::Agent;
 
 struct ScriptedProvider {
@@ -103,7 +105,7 @@ impl AgentTool for RecordingTool {
             .lock()
             .expect("tool record mutex")
             .push(format!("execute:{}:{}", call.id, call.arguments.as_str()));
-        Box::pin(std::future::ready(Ok(ToolResult {
+        Box::pin(std::future::ready(Ok(AgentToolResult {
             tool_call_id: call.id,
             content: "ok".into(),
             details: None,
@@ -123,7 +125,7 @@ fn tool_start_observer_receives_exact_arguments_before_dispatch_and_settlement()
         let provider = Arc::new(ScriptedProvider::new([
             ModelStream {
                 events: vec![
-                    ModelStreamEvent::ToolCall(AssistantToolCall {
+                    ModelStreamEvent::ToolCall(AgentToolCall {
                         id: ToolCallId::new("call-audit").expect("non-empty call ID"),
                         name: "audit".into(),
                         arguments: SerializedJson::new(r#"{"secret":"value"}"#),
@@ -134,7 +136,7 @@ fn tool_start_observer_receives_exact_arguments_before_dispatch_and_settlement()
             ModelStream {
                 events: vec![
                     ModelStreamEvent::TextDelta("done".into()),
-                    ModelStreamEvent::End(StopReason::EndTurn),
+                    ModelStreamEvent::End(StopReason::Stop),
                 ],
             },
         ]));

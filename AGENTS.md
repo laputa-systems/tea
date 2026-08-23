@@ -11,15 +11,15 @@ Start with [docs/overview.md](docs/overview.md). The main routes are:
   the repository.
 - [Default coding profile](docs/default-coding-profile.md) and
   [provider adapters](docs/provider-adapters.md) for optional runtime layers.
-- [Tracing](docs/trace.md) and [Luau extensions](docs/luau-extensions.md) for
+- [Tracing](docs/trace.md) and [Luau ABI v1](docs/luau-abi-v1.md) for
   optional observability and policy layers.
 - [Terminal host](docs/tui.md) for the repository-owned `tea` TUI.
 - [Quality evaluation](evals/README.md) and [verification](docs/verification.md)
-  for compatibility and quality evidence.
+  for contract and quality evidence.
 - [fixture format](crates/tea-core/fixtures/fixture-format.md) and
   [fixture guide](crates/tea-core/fixtures/README.md)
-  for fixture-based compatibility work.
-- [Luau extensions](docs/luau-extensions.md) for the optional capability-scoped
+  for fixture-based contract work.
+- [Luau ABI v1](docs/luau-abi-v1.md) for the optional capability-scoped
   policy plane.
 
 ## Working contract

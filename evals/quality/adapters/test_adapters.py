@@ -19,7 +19,7 @@ QUALITY_FIXTURE = "evals/quality/cases/core/unknown-tool/manifest.json"
 class AdapterProtocolTest(unittest.TestCase):
     def run_adapter(self, name: str, fixture: str) -> tuple[int, dict[str, object], str]:
         adapter = ROOT / "evals" / "quality" / "adapters" / name / "adapter.py"
-        request = {"protocol": "tea-quality-adapter/v0", "operation": "run", "fixture": fixture}
+        request = {"protocol": "tea-quality-adapter/v1", "operation": "run", "fixture": fixture}
         environment = dict(os.environ)
         environment["PYTHONDONTWRITEBYTECODE"] = "1"
         completed = subprocess.run(
@@ -42,7 +42,7 @@ class AdapterProtocolTest(unittest.TestCase):
     def test_rust_direct_declarative_fixture(self) -> None:
         status, response, _ = self.run_adapter("rust-core", FIXTURE)
         self.assertEqual(status, 0)
-        self.assertEqual(response["protocol"], "tea-quality-adapter/v0")
+        self.assertEqual(response["protocol"], "tea-quality-adapter/v1")
         self.assertEqual(response["adapter"], "rust-core")
         self.assertEqual(response["metadata"]["toolchain"], "nightly-2026-07-24")
         self.assertEqual(response["result"]["fixture_id"], "single-turn-text")

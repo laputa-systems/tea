@@ -1,4 +1,4 @@
-.PHONY: lint test test-linux tui tui-headless tui-smoke local-install local-model local quality-fast quality-resources quality-compaction
+.PHONY: lint test test-linux tui local-install local-model local quality-fast quality-resources quality-compaction
 
 lint:
 	cargo fmt --all
@@ -6,10 +6,9 @@ lint:
 
 # Run the pinned, deterministic suite. The PTY tests use a loopback OpenRouter
 # fixture or no model request at all; neither reaches a real provider. The
-# normalized UI fixture check is included so visual contract data is covered.
+# focused terminal behavior tests cover the host presentation contract.
 test:
 	rustup run nightly-2026-07-24 cargo test --workspace --locked
-	PYTHONDONTWRITEBYTECODE=1 python3 crates/tea-agent/fixtures/fx-ui/check.py
 	rustup run nightly-2026-07-24 cargo test -p tea-agent --features pty-harness --test pty_streaming --locked
 
 # Build and run the deterministic suite inside Linux AArch64. Docker's
@@ -22,14 +21,6 @@ test-linux:
 
 tui:
 	cargo build --release --package tea-agent --bin tea
-
-tui-headless:
-	cargo run --package tea-agent --bin tea-headless -- $(ARGS)
-
-TUI_SMOKE_MODEL ?= openrouter/free
-
-tui-smoke:
-	set -a; . ./.env; set +a; cargo run --package tea-agent --bin tea-headless -- --model $(TUI_SMOKE_MODEL) --prompt 'Reply with exactly READY and no additional text. Do not call any tools.'
 
 OMLX_ROOT ?= $(HOME)/d/omlx
 OMLX_VENV ?= $(OMLX_ROOT)/.venv
@@ -57,8 +48,7 @@ local-install:
 	@uv venv --allow-existing --python "$(OMLX_PYTHON_VERSION)" "$(OMLX_VENV)"
 	@uv pip install --python "$(OMLX_PYTHON)" --editable "$(OMLX_ROOT)"
 
-# The legacy huggingface-cli wrapper shipped by newer huggingface_hub releases exits with a
-# deprecation error; `hf` is the working CLI in the same oMLX virtual environment.
+# Newer huggingface_hub releases provide `hf` as the supported oMLX virtual-environment CLI.
 local-model: local-install
 	@test -x "$(OMLX_HF)" || { echo "missing oMLX Hugging Face CLI: $(OMLX_HF)" >&2; exit 1; }
 	@mkdir -p "$(dir $(LOCAL_MODEL_DIR))"

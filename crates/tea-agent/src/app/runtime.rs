@@ -2,47 +2,45 @@ use crate::grid::Grid;
 use crate::render;
 use crate::terminal::TerminalGuard;
 use std::ffi::OsStr;
-use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{sync_channel, Receiver, TryRecvError};
 use std::time::Duration;
-use tea_core::compaction::CompactionHandle;
-use tea_core::event::AgentEventKind;
+use tea_core::compaction::AutomaticCompactionPolicy;
 use tea_core::provider::ProviderRegistry;
-use tea_core::state::AgentPhase;
-use tea_core::{
-    Agent, AgentConfiguration, CoreError, DefaultCodingTools, LosslessEventSubscription, RunHandle,
-};
+use tea_core::{AgentConfiguration, CoreError, DefaultCodingTools};
+use tea_harness::{HarnessError, HarnessEvent, TeaEvent, TeaEventSubscription};
 
 use super::cli::CliOptions;
 use super::compaction::ProviderCompactor;
 use super::error::AppError;
-use super::host::{build_host_agent_with_thinking, compose_tea_configuration};
+use super::host::host_configuration;
 use super::preferences::load_last_model;
-use super::session::{SessionRecord, SessionStore};
 use super::state::{AppState, UiStatus};
 use super::support::composer_cursor;
-use super::tea::{load_tea_extensions, resolve_tea_home, TeaExtensions};
 use std::sync::Arc;
 
-/// Assembled v0 terminal application.
-#[derive(Debug)]
+/// Assembled v1 terminal application.
 pub struct App {
     pub(super) options: CliOptions,
     pub(super) state: AppState,
-    pub(super) core: Option<Agent>,
+    /// Immutable prompt, tools, and hooks captured by every durable epoch.
+    pub(super) configuration: Option<AgentConfiguration>,
     pub(super) compactor: Option<Arc<ProviderCompactor>>,
+    /// Host-selected policy captured with the next immutable durable epoch.
+    pub(super) automatic_compaction: AutomaticCompactionPolicy,
+    /// Provider selected by the host for the next immutable durable epoch.
+    pub(super) configured_provider: Option<Arc<dyn tea_core::scheduler::ModelProvider>>,
+    /// The one session-owned durable supervisor for the current terminal session.
+    pub(super) durable_harness: Option<Arc<super::durable::HostHarness>>,
+    /// Bounded application events for the durable supervisor.
+    pub(super) durable_subscription: Option<TeaEventSubscription>,
+    /// Completion channel for the current durable operation.
+    pub(super) durable_task: Option<Receiver<Result<(), HarnessError>>>,
     pub(super) tea_home: Option<PathBuf>,
-    pub(super) tea_extensions: TeaExtensions,
-    pub(super) session_store: Option<SessionStore>,
-    pub(super) current_session: Option<SessionRecord>,
-    pub(super) tea_base_configuration: Option<AgentConfiguration>,
     pub(super) registry: ProviderRegistry,
     pub(super) workspace: Option<PathBuf>,
-    pub(super) subscription: Option<LosslessEventSubscription>,
-    pub(super) active_task: Option<Receiver<Result<(), CoreError>>>,
     /// The idle prompt handed to the current run, retained only to restore local input after a
-    /// failed or cancelled operation. The core remains the transcript source of truth.
+    /// failed or cancelled operation. The durable session remains the transcript source of truth.
     pub(super) submitted_prompt: Option<String>,
     pub(super) previous_grid: Option<Grid>,
     pub(super) quitting: bool,
@@ -54,26 +52,25 @@ impl App {
         Self {
             options,
             state: AppState::new(),
-            core: None,
+            configuration: None,
             compactor: None,
+            automatic_compaction: AutomaticCompactionPolicy::disabled(),
+            configured_provider: None,
+            durable_harness: None,
+            durable_subscription: None,
+            durable_task: None,
             tea_home: None,
-            tea_extensions: TeaExtensions::default(),
-            session_store: None,
-            current_session: None,
-            tea_base_configuration: None,
             registry: ProviderRegistry::new(),
             workspace: None,
-            subscription: None,
-            active_task: None,
             submitted_prompt: None,
             previous_grid: None,
             quitting: false,
         }
     }
 
-    /// Initialize the core boundary and run the terminal loop on Smol.
+    /// Initialize the durable host configuration and run the terminal loop on Smol.
     pub fn run(&mut self) -> Result<(), AppError> {
-        self.assemble_agent()?;
+        self.assemble_host()?;
         let mut terminal = crate::terminal::TerminalGuard::enter()?;
         smol::block_on(self.event_loop(&mut terminal))
     }
@@ -89,11 +86,13 @@ impl App {
                 "-p/--prompt requires --provider and --model".into(),
             ));
         }
-        self.assemble_agent()?;
-        let agent = self.agent_or_setup()?.clone();
-        let subscription = agent.subscribe_lossless();
-        let run = agent.start_prompt(prompt)?;
-        smol::block_on(stream_prompt(run, subscription))
+        self.assemble_host()?;
+        let harness = self.ensure_durable_harness()?;
+        let subscription = self
+            .durable_subscription
+            .take()
+            .ok_or_else(|| AppError::Setup("durable event subscription is not initialized".into()))?;
+        smol::block_on(super::durable::stream_host_prompt(harness, subscription, prompt))
     }
 
     /// Borrow startup options.
@@ -111,63 +110,8 @@ impl App {
         &mut self.state
     }
 
-    /// Attach an explicitly configured agent for non-terminal integration tests.
-    pub fn attach_agent(&mut self, agent: Agent) {
-        self.state.set_snapshot(agent.snapshot());
-        self.state.set_queue_snapshot(&agent);
-        self.subscription = Some(agent.subscribe_lossless());
-        self.core = Some(agent);
-    }
-
-    /// Borrow the attached core agent, if one exists.
-    pub fn agent(&self) -> Option<&Agent> {
-        self.core.as_ref()
-    }
-
-    /// Reload the explicit Tea registry into the current agent's future-run configuration.
-    ///
-    /// Core rejects this operation while a run is active. The previous configuration remains in
-    /// place if discovery, policy loading, or the idle replacement fails.
-    pub fn reload_tea_extensions(&mut self) -> Result<(), AppError> {
-        self.reload_tea_extensions_inner(true)
-    }
-
-    fn reload_tea_extensions_after_settlement(&mut self) {
-        // Tests and embedding integrations may attach an already-built agent without selecting
-        // the TUI's Tea base configuration. Such an agent has no Tea snapshot to refresh.
-        if self.tea_base_configuration.is_none() {
-            return;
-        }
-        if let Err(error) = self.reload_tea_extensions_inner(false) {
-            self.state.notice(format!(
-                "Tea extensions were not reloaded; the previous snapshot remains active: {error}"
-            ));
-        }
-    }
-
-    fn reload_tea_extensions_inner(&mut self, announce: bool) -> Result<(), AppError> {
-        let home = resolve_tea_home(self.options.tea_home())?;
-        let extensions = load_tea_extensions(&home)?;
-        let agent = self
-            .core
-            .as_ref()
-            .ok_or_else(|| AppError::Setup("agent is not initialized".into()))?;
-        let base = self
-            .tea_base_configuration
-            .as_ref()
-            .ok_or_else(|| AppError::Setup("Tea base configuration is not initialized".into()))?;
-        let configuration = compose_tea_configuration(base.clone(), &extensions, &home)?;
-        agent.replace_configuration(configuration)?;
-        self.tea_home = Some(home);
-        self.tea_extensions = extensions;
-        if announce {
-            self.state.notice("Tea extensions reloaded");
-        }
-        Ok(())
-    }
-
-    pub(super) fn assemble_agent(&mut self) -> Result<(), AppError> {
-        if self.core.is_some() {
+    pub(super) fn assemble_host(&mut self) -> Result<(), AppError> {
+        if self.configuration.is_some() {
             return Ok(());
         }
         let workspace = match self.options.cwd() {
@@ -179,37 +123,12 @@ impl App {
         let tools = DefaultCodingTools::new(&workspace)
             .map_err(|error| AppError::Setup(format!("invalid --cwd: {error}")))?;
         self.workspace = Some(tools.workspace().as_path().to_path_buf());
-        let builder = build_host_agent_with_thinking(tools, self.options.thinking_level())?;
+        let configuration = host_configuration(tools)?;
         let compactor = Arc::new(ProviderCompactor::default());
-        let compactor_capability: Arc<dyn tea_core::compaction::Compactor> = compactor.clone();
-        let builder = builder.compactor(compactor_capability);
         self.compactor = Some(compactor);
         let home = resolve_tea_home(self.options.tea_home())?;
-        let extensions = load_tea_extensions(&home)?;
-        let agent = builder.build();
-        let base = agent.configuration();
-        let configuration = compose_tea_configuration(base.clone(), &extensions, &home)?;
-        agent.replace_configuration(configuration)?;
-        self.attach_agent(agent);
-        self.tea_base_configuration = Some(base);
+        self.configuration = Some(configuration);
         self.tea_home = Some(home);
-        self.tea_extensions = extensions;
-        let workspace = self
-            .workspace
-            .as_ref()
-            .ok_or_else(|| AppError::Setup("workspace is not initialized".into()))?;
-        self.session_store = Some(
-            SessionStore::new(
-                self.tea_home
-                    .as_ref()
-                    .expect("Tea home was just initialized"),
-            )
-            .for_workspace(workspace),
-        );
-        self.current_session = Some(
-            SessionRecord::new(None, self.options.thinking_level())
-                .with_workspace(workspace.to_string_lossy()),
-        );
         self.state.welcome_line();
 
         let explicit_provider = self.options.provider().map(OsStr::to_owned);
@@ -264,7 +183,7 @@ impl App {
         loop {
             self.drain_events();
             self.reap_task();
-            if self.quitting && self.active_task.is_none() {
+            if self.quitting && self.durable_task.is_none() {
                 break;
             }
             self.redraw(terminal)?;
@@ -279,50 +198,57 @@ impl App {
     }
 
     fn drain_events(&mut self) {
-        let Some(subscription) = self.subscription.as_ref() else {
-            return;
-        };
-        loop {
-            match subscription.try_recv() {
-                Ok(event) => self.state.apply_event(&event),
-                Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
+        if let Some(subscription) = self.durable_subscription.as_ref() {
+            loop {
+                match subscription.try_recv() {
+                    Ok(TeaEvent::Agent(event)) => self.state.apply_event(&event),
+                    Ok(TeaEvent::Harness(HarnessEvent::CandidateRejected {
+                        stage,
+                        code,
+                        diagnostic,
+                        ..
+                    })) => self.state.notice(format!(
+                        "harness candidate rejected at {stage:?} ({}) : {diagnostic}",
+                        code.as_str()
+                    )),
+                    Ok(TeaEvent::Harness(_)
+                    | TeaEvent::Session(_)
+                    | TeaEvent::Artifact(_)) => {}
+                    Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
+                }
             }
-        }
-        if let Some(agent) = &self.core {
-            self.state.set_snapshot(agent.snapshot());
-            self.state.set_queue_snapshot(agent);
+            // A managed durable epoch is the authoritative transcript and
+            // accounting source for this terminal session. Do not overwrite
+            // its projection with the idle configuration agent below.
+            return;
         }
     }
 
     pub(super) fn reap_task(&mut self) {
-        let Some(receiver) = self.active_task.as_ref() else {
+        if let Some(receiver) = self.durable_task.as_ref() {
+            match receiver.try_recv() {
+                Ok(Ok(())) => {
+                    self.durable_task = None;
+                    self.submitted_prompt = None;
+                    self.state.status = UiStatus::Idle;
+                }
+                Ok(Err(HarnessError::Core(CoreError::Cancelled))) => {
+                    self.durable_task = None;
+                    self.restore_submitted_prompt("cancelled; prompt restored for explicit re-submit");
+                }
+                Ok(Err(error)) => {
+                    self.durable_task = None;
+                    self.restore_submitted_prompt(format!(
+                        "{error}; prompt restored for explicit re-submit"
+                    ));
+                }
+                Err(TryRecvError::Disconnected) => {
+                    self.durable_task = None;
+                    self.state.notice("durable operation task ended unexpectedly");
+                }
+                Err(TryRecvError::Empty) => {}
+            }
             return;
-        };
-        match receiver.try_recv() {
-            Ok(Ok(())) => {
-                self.active_task = None;
-                self.submitted_prompt = None;
-                self.state.status = UiStatus::Idle;
-                self.reload_tea_extensions_after_settlement();
-                self.persist_session();
-            }
-            Ok(Err(CoreError::Cancelled)) => {
-                self.active_task = None;
-                self.restore_submitted_prompt("cancelled; prompt restored for explicit re-submit");
-                self.reload_tea_extensions_after_settlement();
-            }
-            Ok(Err(error)) => {
-                self.active_task = None;
-                self.restore_submitted_prompt(format!(
-                    "{error}; prompt restored for explicit re-submit"
-                ));
-                self.reload_tea_extensions_after_settlement();
-            }
-            Err(TryRecvError::Disconnected) => {
-                self.active_task = None;
-                self.state.notice("operation task ended unexpectedly");
-            }
-            Err(TryRecvError::Empty) => {}
         }
     }
 
@@ -355,115 +281,162 @@ impl App {
         Ok(())
     }
 
-    pub(super) fn spawn_run(&mut self, run: RunHandle) {
-        self.spawn_operation(async move { run.drive().await });
-    }
-
-    pub(super) fn spawn_compaction(&mut self, compaction: CompactionHandle) {
-        self.spawn_operation(async move { compaction.drive().await });
-    }
-
-    fn spawn_operation<F>(&mut self, operation: F)
-    where
-        F: std::future::Future<Output = Result<(), CoreError>> + Send + 'static,
-    {
+    /// Begin one new prompt through the session-owned durable supervisor.
+    pub(super) fn spawn_durable_prompt(
+        &mut self,
+        harness: Arc<super::durable::HostHarness>,
+        input: String,
+    ) {
         let (sender, receiver) = sync_channel(1);
         smol::spawn(async move {
-            let _ = sender.send(operation.await);
+            let _ = sender.send(harness.run_prompt(input).await.map(|_| ()));
         })
         .detach();
-        self.active_task = Some(receiver);
+        self.durable_task = Some(receiver);
         self.state.status = UiStatus::Active;
     }
 
-    pub(super) fn agent_or_setup(&self) -> Result<&Agent, AppError> {
-        self.core
-            .as_ref()
-            .ok_or_else(|| AppError::Setup("agent is not initialized".into()))
+    /// Drive the one recovery plan derived from an opened durable session.
+    pub(super) fn spawn_durable_recovery(
+        &mut self,
+        harness: Arc<super::durable::HostHarness>,
+    ) {
+        let (sender, receiver) = sync_channel(1);
+        smol::spawn(async move {
+            let _ = sender.send(harness.resume().await.map(|_| ()));
+        })
+        .detach();
+        self.durable_task = Some(receiver);
+        self.state.status = UiStatus::Active;
     }
 
     pub(super) fn agent_is_active(&self) -> bool {
-        self.core
+        self.durable_harness
             .as_ref()
-            .is_some_and(|agent| !matches!(agent.snapshot().phase, AgentPhase::Idle))
+            .is_some_and(|harness| harness.is_active())
+            || self.durable_task.is_some()
     }
 
-    /// Persist the last fully settled canonical conversation. A failed save is a presentation
-    /// notice only; it never changes core settlement or replaces the previous valid file.
-    pub(super) fn persist_session(&mut self) -> bool {
-        let (Some(store), Some(record), Some(agent)) = (
-            self.session_store.clone(),
-            self.current_session.as_mut(),
-            self.core.as_ref(),
-        ) else {
-            return true;
-        };
-        let snapshot = agent.snapshot();
-        if !matches!(snapshot.phase, AgentPhase::Idle) {
-            return false;
+    /// Lazily create the one immutable managed harness for this terminal
+    /// session after provider/model selection. Construction persists the
+    /// initial revision before returning, so callers can immediately route a
+    /// prompt through it without an unmanaged execution path.
+    pub(super) fn ensure_durable_harness(
+        &mut self,
+    ) -> Result<Arc<super::durable::HostHarness>, AppError> {
+        if let Some(harness) = &self.durable_harness {
+            return Ok(Arc::clone(harness));
         }
-        // Match Pi's deferred-file behavior: an untouched/new session has no persisted file.
-        if snapshot.messages.is_empty() {
-            return true;
-        }
-        record.messages = snapshot.messages;
-        record.model = snapshot.model;
-        record.thinking_level = snapshot.thinking_level;
-        if let Some(workspace) = self.workspace.as_ref() {
-            record.cwd = workspace.to_string_lossy().into_owned();
-        }
-        if let Err(error) = store.save(record) {
-            self.state.notice(format!("session was not saved: {error}"));
-            return false;
-        }
-        true
+        let configuration = self
+            .configuration
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| AppError::Setup("host configuration is not initialized".into()))?;
+        let model = self
+            .state
+            .selected_model
+            .clone()
+            .ok_or_else(|| AppError::Setup("model is not selected".into()))?;
+        let provider = self
+            .configured_provider
+            .clone()
+            .ok_or_else(|| AppError::Setup("provider is not configured".into()))?;
+        let workspace = self
+            .workspace
+            .as_ref()
+            .ok_or_else(|| AppError::Setup("workspace is not initialized".into()))?;
+        let home = self
+            .tea_home
+            .as_ref()
+            .ok_or_else(|| AppError::Setup("Tea home is not initialized".into()))?;
+        let automatic_compaction = self.automatic_compaction.clone();
+        let harness = super::durable::create_host_harness(
+            home,
+            workspace,
+            configuration,
+            model,
+            provider,
+            self.options.thinking_level(),
+            self.compactor.clone(),
+            automatic_compaction,
+        )?;
+        self.durable_subscription = Some(harness.subscribe_events()?);
+        self.durable_harness = Some(Arc::clone(&harness));
+        Ok(harness)
     }
-}
 
-async fn stream_prompt(
-    run: RunHandle,
-    subscription: LosslessEventSubscription,
-) -> Result<(), AppError> {
-    let mut drive = Box::pin(run.drive());
-    loop {
-        drain_prompt_events(&subscription)?;
-        if let Some(result) = smol::future::poll_once(&mut drive).await {
-            drain_prompt_events(&subscription)?;
-            result.map_err(AppError::from)?;
-            let mut stdout = io::stdout().lock();
-            stdout
-                .write_all(b"\n")
-                .map_err(|error| AppError::Setup(format!("could not write response: {error}")))?;
-            stdout
-                .flush()
-                .map_err(|error| AppError::Setup(format!("could not flush response: {error}")))?;
-            return Ok(());
+    /// Replace the idle terminal's current durable writer with an existing
+    /// session selected from the explicit workspace-scoped picker. Recovery
+    /// begins immediately when the reducer reports an open operation.
+    pub(super) fn reopen_durable_session(&mut self, id: &str) -> Result<(), AppError> {
+        if self.agent_is_active() {
+            return Err(AppError::Setup(
+                "session changes require an idle durable harness".into(),
+            ));
         }
-        smol::future::yield_now().await;
-    }
-}
+        let configuration = self
+            .configuration
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| AppError::Setup("host configuration is not initialized".into()))?;
+        let model = self
+            .state
+            .selected_model
+            .clone()
+            .ok_or_else(|| AppError::Setup("model is not selected".into()))?;
+        let provider = self
+            .configured_provider
+            .clone()
+            .ok_or_else(|| AppError::Setup("provider is not configured".into()))?;
+        let workspace = self
+            .workspace
+            .as_ref()
+            .ok_or_else(|| AppError::Setup("workspace is not initialized".into()))?
+            .clone();
+        let home = self
+            .tea_home
+            .as_ref()
+            .ok_or_else(|| AppError::Setup("Tea home is not initialized".into()))?
+            .clone();
+        let automatic_compaction = self.automatic_compaction.clone();
 
-fn drain_prompt_events(subscription: &LosslessEventSubscription) -> Result<(), AppError> {
-    let mut stdout = io::stdout().lock();
-    let mut wrote = false;
-    while let Ok(event) = subscription.try_recv() {
-        if let AgentEventKind::MessageUpdate {
-            text_delta: Some(text),
-            ..
-        } = event.kind
-        {
-            stdout
-                .write_all(text.as_bytes())
-                .map_err(|error| AppError::Setup(format!("could not write response: {error}")))?;
-            wrote = true;
+        // Drop the prior idle writer before opening another session. This is
+        // also what lets a user select the currently displayed session again
+        // without fighting its own advisory writer lock.
+        self.durable_subscription = None;
+        self.durable_harness = None;
+        let harness = super::durable::reopen_host_harness(
+            &home,
+            &workspace,
+            id,
+            configuration,
+            model,
+            provider,
+            self.compactor.clone(),
+            automatic_compaction,
+        )?;
+        let snapshot = harness.snapshot()?;
+        let messages = super::durable::project_host_messages(&snapshot)?;
+        self.state.restore_messages(&messages);
+        self.durable_subscription = Some(harness.subscribe_events()?);
+        let recovery = tea_session::reduce_lane(snapshot, tea_session::LaneId::main())
+            .map_err(|error| AppError::Setup(error.to_string()))?
+            .lane_state
+            .active_operation
+            .is_some();
+        self.durable_harness = Some(Arc::clone(&harness));
+        self.submitted_prompt = None;
+        self.state.close_surface();
+        if recovery {
+            self.spawn_durable_recovery(harness);
+            self.state.notice("resumed durable session recovery");
+        } else {
+            self.state.status = UiStatus::Idle;
+            self.state.notice(format!("resumed durable session {id}"));
         }
+        Ok(())
     }
-    if wrote {
-        stdout
-            .flush()
-            .map_err(|error| AppError::Setup(format!("could not flush response: {error}")))?;
-    }
-    Ok(())
+
 }
 
 pub(super) fn os_text(value: &OsStr, flag: &str) -> Result<String, AppError> {
@@ -471,4 +444,19 @@ pub(super) fn os_text(value: &OsStr, flag: &str) -> Result<String, AppError> {
         .to_str()
         .map(str::to_owned)
         .ok_or_else(|| AppError::Setup(format!("{flag} must be valid UTF-8")))
+}
+
+/// Resolve the terminal-owned durable-state root without exposing home lookup
+/// to `tea-core` or the durable crates.
+fn resolve_tea_home(override_path: Option<&Path>) -> Result<PathBuf, AppError> {
+    if let Some(path) = override_path {
+        if path.as_os_str().is_empty() {
+            return Err(AppError::Setup("--tea-home must not be empty".into()));
+        }
+        return Ok(path.to_path_buf());
+    }
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .ok_or_else(|| AppError::Setup("could not resolve the user home directory".into()))?;
+    Ok(PathBuf::from(home).join(".tea"))
 }

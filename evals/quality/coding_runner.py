@@ -31,7 +31,7 @@ from .coding_cases import (
 
 ROOT = Path(__file__).resolve().parents[2]
 PROFILE = ROOT / "crates" / "tea-core" / "profile" / "default-profile.json"
-RESULT_SCHEMA = "tea-coding-eval-result/v0"
+RESULT_SCHEMA = "tea-coding-eval-result/v1"
 CODING_SCHEMA = "tea-quality-coding-run/v1"
 
 
@@ -110,7 +110,7 @@ def _profile_capabilities() -> list[dict[str, Any]]:
 def _adapter_task(case: dict[str, Any], capabilities: list[dict[str, Any]]) -> dict[str, Any]:
     task = case["task"]
     return {
-        "schema_version": "tea-coding-eval-task/v0",
+        "schema_version": "tea-coding-eval-task/v1",
         "task_id": case["id"],
         "task_version": 1,
         "kind": "coding",

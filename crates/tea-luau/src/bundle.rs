@@ -11,7 +11,11 @@ use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
 
-/// The first version of the bundle ABI.
+/// The sole supported bundle ABI.
+///
+/// A bundle declares deterministic named prompt sections, bounded lifecycle
+/// callbacks, typed context proposals, and the `before_tool` decision hook.
+/// Older append-style declarations are deliberately not accepted.
 pub const BUNDLE_ABI_VERSION: u32 = 1;
 
 /// A canonical, bundle-local module path.

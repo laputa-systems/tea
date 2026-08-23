@@ -3,6 +3,12 @@
 version = 4
 
 [[package]]
+name = "arrayref"
+version = "0.3.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "76a2e8124351fda1ef8aaaa3bbd7ebbcb486bbcd4225aca0aa0d84bb2db8fecb"
+
+[[package]]
 name = "arrayvec"
 version = "0.7.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -146,6 +152,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b588b76d00fde79687d7646a9b5bdf3cc0f655e0bbd080335a95d7e96f3587da"
 
 [[package]]
+name = "blake3"
+version = "1.8.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "76ae7bad254120e9e4c63bafc385310756f90c484eac0e36b8317cf09cb92a77"
+dependencies = [
+ "arrayref",
+ "arrayvec",
+ "cc",
+ "cfg-if",
+ "constant_time_eq",
+ "cpufeatures",
+]
+
+[[package]]
 name = "blocking"
 version = "1.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -199,6 +219,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4ca0197aee26d1ae37445ee532fefce43251d24cc7c166799f4d46817f1d3973"
 dependencies = [
  "crossbeam-utils",
+]
+
+[[package]]
+name = "constant_time_eq"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3d52eff69cd5e647efe296129160853a42795992097e8af39800e1060caeea9b"
+
+[[package]]
+name = "cpufeatures"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8b2a41393f66f16b0823bb79094d54ac5fbd34ab292ddafb9a0456ac9f87d201"
+dependencies = [
+ "libc",
 ]
 
 [[package]]
@@ -802,20 +837,22 @@ dependencies = [
 
 [[package]]
 name = "tea-agent"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "laputa-hi-lite",
  "laputa-ptytest",
  "rustix",
  "smol",
  "tea-core",
+ "tea-harness",
  "tea-luau",
  "tea-protocol",
+ "tea-session",
 ]
 
 [[package]]
 name = "tea-core"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "h12tiny-client-sync",
  "http",
@@ -827,8 +864,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "tea-evolve"
+version = "1.0.0"
+dependencies = [
+ "tea-harness",
+ "tea-session",
+]
+
+[[package]]
+name = "tea-harness"
+version = "1.0.0"
+dependencies = [
+ "smol",
+ "tea-core",
+ "tea-luau",
+ "tea-protocol",
+ "tea-session",
+ "tea-trace",
+]
+
+[[package]]
 name = "tea-luau"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "mlua",
  "tea-core",
@@ -837,14 +894,23 @@ dependencies = [
 
 [[package]]
 name = "tea-protocol"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "miniserde",
 ]
 
 [[package]]
+name = "tea-session"
+version = "1.0.0"
+dependencies = [
+ "blake3",
+ "rustix",
+ "tea-protocol",
+]
+
+[[package]]
 name = "tea-trace"
-version = "0.1.0"
+version = "1.0.0"
 
 [[package]]
 name = "unicode-ident"

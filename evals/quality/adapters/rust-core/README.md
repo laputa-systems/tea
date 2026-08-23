@@ -9,7 +9,7 @@ capability.
 `adapter.py` reads one JSON request from stdin:
 
 ```json
-{"protocol":"tea-quality-adapter/v0","operation":"run","fixture":"crates/tea-core/fixtures/declarative/single-turn-text.json"}
+{"protocol":"tea-quality-adapter/v1","operation":"run","fixture":"crates/tea-core/fixtures/declarative/single-turn-text.json"}
 ```
 
 `fixture` is required and is resolved relative to the repository root when it

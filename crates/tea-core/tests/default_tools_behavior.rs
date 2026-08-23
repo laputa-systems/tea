@@ -68,7 +68,7 @@ fn execute(
     tool: &dyn AgentTool,
     name: &str,
     arguments: &str,
-) -> Result<tea_core::tool::ToolResult, ToolError> {
+) -> Result<tea_core::tool::AgentToolResult, ToolError> {
     smol::block_on(tool.execute(call(name, arguments), context(), ToolUpdateSink::disabled()))
 }
 

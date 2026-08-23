@@ -1,7 +1,7 @@
 //! Opt-in provider coding-evaluation adapter for the Rust default profile.
 //!
 //! This binary is intentionally outside the library boundary: it is invoked only by the final
-//! V0 evaluation controller through a caller-owned secret-injection boundary. It supplies a
+//! v1 evaluation controller through a caller-owned secret-injection boundary. It supplies a
 //! concrete transport to exercise the otherwise provider-free core, while retaining the core's
 //! explicit workspace, profile, and Smol-owned execution boundaries.
 
@@ -20,7 +20,7 @@ use tea_core::state::{AgentMessage, ModelDescriptor};
 use tea_core::{Agent, DefaultCodingTools};
 use tea_protocol::{JsonNumber, JsonValue};
 
-const RESULT_SCHEMA: &str = "tea-coding-eval-result/v0";
+const RESULT_SCHEMA: &str = "tea-coding-eval-result/v1";
 
 /// Explicit command-line arguments supplied by `evals/controller.py`.
 struct Args {

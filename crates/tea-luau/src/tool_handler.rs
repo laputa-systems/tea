@@ -17,7 +17,7 @@ mod specs;
 
 pub use bindings::{
     BindingError, CapabilityBindings, CapabilityError, CapabilityFuture, CapabilityRequest,
-    CapabilityResponse, LuauCapability,
+    CapabilityResponse, LuauCapability, PureCapability, PURE_CAPABILITY_V1,
 };
 pub use runtime::LuaToolHandler;
 pub use specs::{HandlerLimits, ToolHandlerInitError, ToolHandlerSpec};

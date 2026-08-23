@@ -9,6 +9,39 @@
 use crate::scheduler::{AdapterRequestObservation, ModelRequest};
 use tea_protocol::JsonValue;
 
+/// Content-free deterministic comparison of adjacent logical provider inputs.
+///
+/// This is deliberately separate from provider cache usage: it measures the
+/// core-owned request surface before any provider-specific transport envelope
+/// is applied and therefore never claims a cache hit.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DeterministicPrefixEvidence {
+    /// Longest shared byte prefix of the two canonical logical requests.
+    pub common_prefix_bytes: u64,
+    /// Stable rough token estimate for the shared logical prefix.
+    pub common_prefix_tokens_estimate: u64,
+}
+
+/// Measure the exact shared prefix of two adjacent logical provider requests.
+///
+/// `None` means no preceding request exists in this core run. A returned zero
+/// is meaningful evidence that a predecessor existed but shared no bytes.
+pub fn deterministic_request_prefix_evidence(
+    previous: Option<&ModelRequest>,
+    current: &ModelRequest,
+) -> Option<DeterministicPrefixEvidence> {
+    let previous = previous?;
+    let previous = canonical_request_surface_bytes(previous);
+    let current = canonical_request_surface_bytes(current);
+    let common_prefix_bytes = common_prefix_len(&previous, &current) as u64;
+    Some(DeterministicPrefixEvidence {
+        common_prefix_bytes,
+        // This is explicitly an estimate. It avoids claiming a tokenizer the
+        // provider may not expose while keeping adjacent traces comparable.
+        common_prefix_tokens_estimate: common_prefix_bytes.saturating_add(3) / 4,
+    })
+}
+
 /// The source of cache accounting attached to a request observation.
 ///
 /// A matching byte prefix is useful diagnostic evidence, but it never proves
@@ -264,6 +297,47 @@ fn tool_definition_bytes(request: &ModelRequest) -> Vec<u8> {
         .into_bytes()
 }
 
+fn canonical_request_surface_bytes(request: &ModelRequest) -> Vec<u8> {
+    let tools = tool_definition_bytes(request);
+    let mut bytes = Vec::with_capacity(
+        request
+            .system_prompt
+            .len()
+            .saturating_add(tools.len())
+            .saturating_add(request.context.len())
+            .saturating_add(128),
+    );
+    bytes.extend_from_slice(b"tea-core-request-surface-v1\0");
+    append_length_delimited(&mut bytes, request.system_prompt.as_bytes());
+    append_length_delimited(&mut bytes, &tools);
+    match &request.model {
+        Some(model) => {
+            bytes.push(1);
+            append_length_delimited(&mut bytes, model.provider.as_bytes());
+            append_length_delimited(&mut bytes, model.model.as_bytes());
+            match &model.revision {
+                Some(revision) => {
+                    bytes.push(1);
+                    append_length_delimited(&mut bytes, revision.as_bytes());
+                }
+                None => bytes.push(0),
+            }
+        }
+        None => bytes.push(0),
+    }
+    append_length_delimited(&mut bytes, format!("{:?}", request.thinking_level).as_bytes());
+    // Context deliberately occupies the tail: an append-only context change
+    // then preserves an equally append-only canonical request prefix.
+    bytes.extend_from_slice(b"context\0");
+    bytes.extend_from_slice(request.context.as_bytes());
+    bytes
+}
+
+fn append_length_delimited(output: &mut Vec<u8>, value: &[u8]) {
+    output.extend_from_slice(&(value.len() as u64).to_le_bytes());
+    output.extend_from_slice(value);
+}
+
 fn common_prefix_len(left: &[u8], right: &[u8]) -> usize {
     left.iter()
         .zip(right)
@@ -326,5 +400,19 @@ mod tests {
         let measurement = measure_prompt_cacheability(Some(&previous), &current);
         assert_eq!(measurement.common_context_prefix_bytes, 0);
         assert!(measurement.cache_domain_changed);
+    }
+
+    #[test]
+    fn deterministic_prefix_counts_the_stable_surface_and_appended_context_tail() {
+        let previous = request("[one]");
+        let current = request("[one][two]");
+        let evidence = deterministic_request_prefix_evidence(Some(&previous), &current)
+            .expect("a predecessor produces deterministic evidence");
+        assert!(evidence.common_prefix_bytes > previous.context.len() as u64);
+        assert_eq!(
+            evidence.common_prefix_tokens_estimate,
+            evidence.common_prefix_bytes.saturating_add(3) / 4
+        );
+        assert_eq!(deterministic_request_prefix_evidence(None, &current), None);
     }
 }

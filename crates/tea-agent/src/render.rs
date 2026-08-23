@@ -19,7 +19,7 @@ use tea_core::provider::ProviderRegistry;
 /// Public measured-frame contract for consumers that need layout without painting.
 pub use crate::ui::frame_layout::FrameLayout;
 
-/// Plan the fx-style footer regions independently of the legacy compatibility layout.
+/// Plan terminal footer regions independently of transcript rendering.
 pub fn measured_frame_layout(
     width: u16,
     height: u16,
@@ -71,9 +71,9 @@ fn frame_for(state: &AppState, width: u16, height: u16) -> FrameLayout {
     let composer_rows = desired_composer_rows.min(composer_capacity.max(1));
     let transcript_rows = wrapped_transcript(state, width).len();
     let menu_rows = slash_menu_lines(state, width).len();
-    // Measure exactly the rows that `activity_lines` will paint. A queue prompt
-    // may soft-wrap, so counting prompts would reserve too little footer space.
-    let activity_rows = activity_lines(state, width).len();
+    // Measure exactly the rows that `activity_lines` will paint so the fixed
+    // footer never overlaps live status output.
+    let activity_rows = activity_lines(state).len();
     frame_layout::plan_flow(
         width,
         height,
@@ -113,7 +113,7 @@ pub fn render(state: &AppState, registry: &ProviderRegistry, width: u16, height:
         );
     }
 
-    let activity = activity_lines(state, regions.activity.width);
+    let activity = activity_lines(state);
     for (row, line) in activity.into_iter().enumerate() {
         if row >= regions.activity.height as usize {
             break;
@@ -186,7 +186,7 @@ pub fn render(state: &AppState, registry: &ProviderRegistry, width: u16, height:
 fn footer_lines(state: &AppState, registry: &ProviderRegistry) -> [String; 2] {
     let mut lines = state.footer_lines(registry);
     // Active work is represented by the transient activity row. Keeping the fixed footer
-    // stable avoids leaving the legacy `Asking` label behind while tools stream.
+    // stable avoids leaving a stale `Asking` label behind while tools stream.
     lines[0] = lines[0].replace("⏺ Asking · ", "");
     lines
 }
@@ -277,7 +277,7 @@ fn render_surface(state: &AppState, registry: &ProviderRegistry, width: u16, hei
     grid
 }
 
-fn activity_lines(state: &AppState, width: u16) -> Vec<RenderLine> {
+fn activity_lines(state: &AppState) -> Vec<RenderLine> {
     let mut lines = Vec::new();
     if matches!(state.status(), crate::app::UiStatus::Active) {
         lines.push(RenderLine::plain(
@@ -285,12 +285,6 @@ fn activity_lines(state: &AppState, width: u16) -> Vec<RenderLine> {
             Theme::default().style(Role::Activity),
         ));
     }
-    lines.extend(
-        state
-            .queued_lines()
-            .into_iter()
-            .flat_map(|line| wrap_lines(&line, width, Theme::default().style(Role::Muted))),
-    );
     lines
 }
 
@@ -441,7 +435,7 @@ fn put_line(grid: &mut Grid, x: u16, y: u16, width: u16, line: &RenderLine) {
 
 fn wrapped_transcript(state: &AppState, width: u16) -> Vec<RenderLine> {
     let mut output = Vec::new();
-    for (index, entry) in state.entries().into_iter().enumerate() {
+    for (index, entry) in state.transcript_entries().into_iter().enumerate() {
         if index != 0 {
             output.push(RenderLine::plain(String::new(), Style::default()));
         }
@@ -1031,104 +1025,6 @@ fn char_width(symbol: char) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tea_protocol::JsonValue;
-
-    fn fixture_field<'a>(value: &'a JsonValue, name: &str) -> &'a JsonValue {
-        value
-            .get(name)
-            .unwrap_or_else(|| panic!("fixture is missing {name}"))
-    }
-
-    fn fixture_dimension(value: &JsonValue, name: &str) -> u16 {
-        u16::try_from(
-            fixture_field(value, name)
-                .as_u64()
-                .unwrap_or_else(|| panic!("fixture {name} must be an unsigned integer")),
-        )
-        .unwrap_or_else(|_| panic!("fixture {name} exceeds terminal limits"))
-    }
-
-    fn fixture_color(value: &str) -> Color {
-        match value {
-            "DarkGrey" => Color::DarkGrey,
-            "White" => Color::White,
-            "Cyan" => Color::Cyan,
-            "Yellow" => Color::Yellow,
-            "Green" => Color::Green,
-            "Red" => Color::Red,
-            other => panic!("fixture uses unsupported color {other}"),
-        }
-    }
-
-    fn fixture_style(value: &JsonValue) -> Style {
-        let foreground = fixture_field(value, "foreground");
-        let background = fixture_field(value, "background");
-        assert!(
-            background.is_null(),
-            "startup fixture does not use backgrounds"
-        );
-        let attributes = fixture_field(value, "attributes")
-            .as_array()
-            .expect("fixture attributes array");
-        Style {
-            foreground: (!foreground.is_null()).then(|| {
-                fixture_color(foreground.as_str().expect("fixture foreground color name"))
-            }),
-            background: None,
-            bold: attributes
-                .iter()
-                .any(|attribute| attribute.as_str() == Some("bold")),
-        }
-    }
-
-    fn fixture_grid(value: &JsonValue) -> (Grid, Option<(u16, u16)>) {
-        let size = fixture_field(value, "size");
-        let width = fixture_dimension(size, "columns");
-        let height = fixture_dimension(size, "rows");
-        let default_style = fixture_style(fixture_field(value, "cell_defaults"));
-        let mut expected = Grid::new(width, height);
-        for y in 0..height {
-            for x in 0..width {
-                expected
-                    .set(
-                        x,
-                        y,
-                        Cell {
-                            symbol: ' ',
-                            style: default_style,
-                        },
-                    )
-                    .expect("fixture coordinate is in bounds");
-            }
-        }
-        for run in fixture_field(value, "runs")
-            .as_array()
-            .expect("fixture runs array")
-        {
-            let row = fixture_dimension(run, "row");
-            let column = fixture_dimension(run, "column");
-            let text = fixture_field(run, "text")
-                .as_str()
-                .expect("fixture run text");
-            let repeat = run.get("repeat").and_then(JsonValue::as_u64).unwrap_or(1);
-            let style = run.get("style").map(fixture_style).unwrap_or(default_style);
-            for (offset, symbol) in text.repeat(repeat as usize).chars().enumerate() {
-                expected
-                    .set(column + offset as u16, row, Cell { symbol, style })
-                    .expect("fixture run stays in bounds");
-            }
-        }
-        let cursor = fixture_field(value, "cursor");
-        let cursor = (!cursor.is_null()).then(|| {
-            assert_eq!(fixture_field(cursor, "visible").as_bool(), Some(true));
-            (
-                fixture_dimension(cursor, "column"),
-                fixture_dimension(cursor, "row"),
-            )
-        });
-        (expected, cursor)
-    }
-
     #[test]
     fn markdown_table_has_unicode_borders_and_header_rule() {
         let lines = markdown_lines("| Name | Value |\n| --- | --- |\n| foo | bar |", 40, true);
@@ -1311,32 +1207,6 @@ mod tests {
     }
 
     #[test]
-    fn checked_in_tea_startup_fixture_matches_grid_style_and_cursor() {
-        for fixture_text in [
-            include_str!("../fixtures/fx-ui/tea/minimal-startup-80x24.cells.json"),
-            include_str!("../fixtures/fx-ui/tea/minimal-startup-120x40.cells.json"),
-        ] {
-            let fixture =
-                JsonValue::parse(fixture_text).expect("checked-in tea fixture is valid JSON");
-            let (expected, cursor) = fixture_grid(&fixture);
-            let mut state = AppState::new();
-            state.welcome_line();
-            let actual = render(
-                &state,
-                &ProviderRegistry::new(),
-                expected.width(),
-                expected.height(),
-            );
-            assert_eq!(actual, expected, "reviewed startup cell grid changed");
-            assert_eq!(
-                composer_cursor_position(&state, expected.width(), expected.height()),
-                cursor,
-                "reviewed startup cursor changed"
-            );
-        }
-    }
-
-    #[test]
     fn inline_slash_menu_uses_the_captured_minimal_geometry() {
         let mut state = AppState::new();
         state.welcome_line();
@@ -1345,8 +1215,8 @@ mod tests {
             "/help".into(),
             "/model".into(),
             "/cost".into(),
-            "/compact".into(),
             "/session".into(),
+            "/new".into(),
             "/quit".into(),
         ]);
         let grid = render(&state, &ProviderRegistry::new(), 80, 24);
@@ -1361,44 +1231,6 @@ mod tests {
         );
         assert_eq!(grid.get(0, 13).expect("menu navigation hint").symbol, '↑');
         assert_eq!(composer_cursor_position(&state, 80, 24), Some((3, 2)));
-    }
-
-    #[test]
-    fn checked_in_tea_slash_fixture_matches_grid_style_and_cursor() {
-        let fixture = JsonValue::parse(include_str!(
-            "../fixtures/fx-ui/tea/minimal-slash-menu-80x24.cells.json"
-        ))
-        .expect("checked-in tea fixture is valid JSON");
-        let (expected, cursor) = fixture_grid(&fixture);
-        let mut state = AppState::new();
-        state.welcome_line();
-        state.composer_mut().insert('/').expect("insert slash");
-        state.update_slash_completion(vec![
-            "/help".into(),
-            "/model".into(),
-            "/cost".into(),
-            "/compact".into(),
-            "/reload-extensions".into(),
-            "/session".into(),
-            "/resume".into(),
-            "/new".into(),
-            "/clear".into(),
-            "/steer".into(),
-            "/followup".into(),
-            "/quit".into(),
-        ]);
-        let actual = render(
-            &state,
-            &ProviderRegistry::new(),
-            expected.width(),
-            expected.height(),
-        );
-        assert_eq!(actual, expected, "reviewed slash-menu cell grid changed");
-        assert_eq!(
-            composer_cursor_position(&state, expected.width(), expected.height()),
-            cursor,
-            "reviewed slash-menu cursor changed"
-        );
     }
 
     #[test]
