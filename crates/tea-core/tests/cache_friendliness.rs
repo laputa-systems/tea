@@ -1,12 +1,12 @@
 //! Deterministic cacheability baseline for adjacent core model requests.
 
 use std::sync::{Arc, Mutex};
+use tea_core::Agent;
 use tea_core::measurement::measure_prompt_cacheability;
 use tea_core::scheduler::{
     CancellationToken, ModelFuture, ModelProvider, ModelRequest, ModelStream, ModelStreamEvent,
 };
 use tea_core::state::{ModelDescriptor, StopReason, ThinkingLevel};
-use tea_core::Agent;
 
 #[derive(Clone, Default)]
 struct RecordingProvider {
@@ -66,16 +66,23 @@ fn adjacent_text_turns_keep_the_prior_context_prefix() {
         .windows(2)
         .map(|pair| measure_prompt_cacheability(Some(&pair[0]), &pair[1]))
         .collect::<Vec<_>>();
-    assert!(measurements
-        .iter()
-        .all(|measurement| !measurement.cache_domain_changed));
-    assert!(measurements
-        .iter()
-        .all(|measurement| measurement.common_context_prefix_bytes > 0));
+    assert!(
+        measurements
+            .iter()
+            .all(|measurement| !measurement.cache_domain_changed)
+    );
+    assert!(
+        measurements
+            .iter()
+            .all(|measurement| measurement.common_context_prefix_bytes > 0)
+    );
     eprintln!(
         "cache baseline: requests={}, context_bytes={:?}, common_prefix_bytes={:?}, ratios_ppm={:?}",
         requests.len(),
-        requests.iter().map(|request| request.context.len()).collect::<Vec<_>>(),
+        requests
+            .iter()
+            .map(|request| request.context.len())
+            .collect::<Vec<_>>(),
         measurements
             .iter()
             .map(|measurement| measurement.common_context_prefix_bytes)

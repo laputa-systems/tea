@@ -1,7 +1,7 @@
 # Core terminology
 
 The v1 core is an executor- and provider-agnostic epoch engine. It is not a
-session store: `tea_harness::DurableHarness` owns durable operation recovery and
+session store: `tea_core::runtime::SessionRuntime` owns durable operation recovery and
 creates one core `Agent` for each durable epoch.
 
 | Domain concept | Rust target | Contract |

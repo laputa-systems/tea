@@ -12,7 +12,7 @@ use std::time::Duration;
 const ROWS: u16 = 24;
 const COLUMNS: u16 = 100;
 const LOCAL_PROVIDER: &str = "local";
-const LOCAL_MODEL: &str = tea_core::provider::local::LAGUNA_XS_2_1_MODEL;
+const LOCAL_MODEL: &str = tea_providers::local::LAGUNA_XS_2_1_MODEL;
 const FIXTURE_MODEL: &str = "pty-fixture-model";
 
 // These real-binary scenarios each own a terminal and a loopback server. Keep
@@ -110,7 +110,8 @@ fn start_overflow_fixture() -> StreamingFixture {
             .expect("overflow fixture should accept one request");
         let mut request = [0_u8; 4096];
         let _ = socket.read(&mut request);
-        let first = br#"data: {"choices":[{"delta":{"content":"overflow start\n"},"finish_reason":null}]}
+        let first =
+            br#"data: {"choices":[{"delta":{"content":"overflow start\n"},"finish_reason":null}]}
 
 "#;
         let body = "committed overflow row\\n".repeat(32);
@@ -126,7 +127,9 @@ fn start_overflow_fixture() -> StreamingFixture {
                 .as_bytes(),
             )
             .expect("overflow fixture headers should write");
-        socket.write_all(first).expect("first overflow delta writes");
+        socket
+            .write_all(first)
+            .expect("first overflow delta writes");
         socket.flush().expect("first overflow delta flushes");
         first_delta_sent
             .send(())
@@ -152,17 +155,14 @@ fn real_binary_renders_streamed_text_before_the_fixture_settles() {
     let fixture = StreamingFixture::start();
     let scenario = Scenario::new("streaming provider fixture")
         .expect("valid scenario label")
-        .command(
-            CommandSpec::new(env!("CARGO_BIN_EXE_tea"))
-                .args([
-                    "--provider",
-                    LOCAL_PROVIDER,
-                    "--model",
-                    FIXTURE_MODEL,
-                    "--local-base-url",
-                    fixture.url.as_str(),
-                ]),
-        )
+        .command(CommandSpec::new(env!("CARGO_BIN_EXE_tea")).args([
+            "--provider",
+            LOCAL_PROVIDER,
+            "--model",
+            FIXTURE_MODEL,
+            "--local-base-url",
+            fixture.url.as_str(),
+        ]))
         .size(Size::new(COLUMNS, ROWS).expect("constant terminal size"))
         .environment(TestEnv::hermetic().expect("create hermetic test environment"))
         .protocol_profile(ProtocolProfile::xterm_minimal_v1());
@@ -175,7 +175,7 @@ fn real_binary_renders_streamed_text_before_the_fixture_settles() {
             "model readiness",
             |screen| {
                 screen.contains("tea")
-                && screen.contains(&format!("{LOCAL_PROVIDER}/{FIXTURE_MODEL}"))
+                    && screen.contains(&format!("{LOCAL_PROVIDER}/{FIXTURE_MODEL}"))
             },
         )
         .expect("model selection should render");
@@ -331,7 +331,7 @@ fn real_binary_keeps_native_multiline_editing_and_history_inside_a_pty() {
             terminal.deadline(Duration::from_secs(3)),
             "local model readiness",
             |screen| {
-                    screen.contains("tea")
+                screen.contains("tea")
                     && screen.contains(&format!("{LOCAL_PROVIDER}/{LOCAL_MODEL}"))
                     && screen.row(2).is_some_and(|row| row.starts_with("┃"))
             },
@@ -340,11 +340,9 @@ fn real_binary_keeps_native_multiline_editing_and_history_inside_a_pty() {
     let startup = terminal.screen();
     assert!(startup.row(0).is_some_and(|row| row.starts_with("tea v")));
     assert!(startup.row(2).is_some_and(|row| row.starts_with("┃")));
-    assert!(startup
-        .row(4)
-        .is_some_and(|row| {
-            row.starts_with(&format!("{LOCAL_PROVIDER}/{LOCAL_MODEL} · effort off"))
-        }));
+    assert!(startup.row(4).is_some_and(|row| {
+        row.starts_with(&format!("{LOCAL_PROVIDER}/{LOCAL_MODEL} · effort off"))
+    }));
     let cursor = startup.cursor();
     assert_eq!((cursor.row, cursor.column, cursor.visible), (2, 2, true));
     assert!(
@@ -521,16 +519,14 @@ fn real_binary_keeps_an_overflowing_settled_transcript_in_main_screen_flow() {
     let fixture = start_overflow_fixture();
     let scenario = Scenario::new("overflowing transcript fixture")
         .expect("valid scenario label")
-        .command(
-            CommandSpec::new(env!("CARGO_BIN_EXE_tea")).args([
-                "--provider",
-                LOCAL_PROVIDER,
-                "--model",
-                FIXTURE_MODEL,
-                "--local-base-url",
-                fixture.url.as_str(),
-            ]),
-        )
+        .command(CommandSpec::new(env!("CARGO_BIN_EXE_tea")).args([
+            "--provider",
+            LOCAL_PROVIDER,
+            "--model",
+            FIXTURE_MODEL,
+            "--local-base-url",
+            fixture.url.as_str(),
+        ]))
         .size(Size::new(40, 10).expect("constant terminal size"))
         .environment(TestEnv::hermetic().expect("create hermetic test environment"))
         .protocol_profile(ProtocolProfile::xterm_minimal_v1());
@@ -538,13 +534,18 @@ fn real_binary_keeps_an_overflowing_settled_transcript_in_main_screen_flow() {
     let baseline = terminal.terminal_baseline();
 
     terminal
-        .wait_for_screen(terminal.deadline(Duration::from_secs(3)), "ready", |screen| {
-            screen.contains(&format!("{LOCAL_PROVIDER}/{FIXTURE_MODEL}"))
-        })
+        .wait_for_screen(
+            terminal.deadline(Duration::from_secs(3)),
+            "ready",
+            |screen| screen.contains(&format!("{LOCAL_PROVIDER}/{FIXTURE_MODEL}")),
+        )
         .expect("overflow fixture should become ready");
     assert!(!terminal.terminal_state().modes.alternate_screen);
     terminal
-        .send_text(terminal.deadline(Duration::from_secs(3)), "overflow transcript")
+        .send_text(
+            terminal.deadline(Duration::from_secs(3)),
+            "overflow transcript",
+        )
         .expect("type overflow prompt");
     terminal
         .wait_for_screen(
@@ -589,9 +590,11 @@ fn real_binary_keeps_an_overflowing_settled_transcript_in_main_screen_flow() {
         .send_text(terminal.deadline(Duration::from_secs(3)), "/")
         .expect("terminal remains interactive after overflowing output");
     terminal
-        .wait_for_screen(terminal.deadline(Duration::from_secs(3)), "interactive", |screen| {
-            screen.contains("/help")
-        })
+        .wait_for_screen(
+            terminal.deadline(Duration::from_secs(3)),
+            "interactive",
+            |screen| screen.contains("/help"),
+        )
         .expect("slash completion remains interactive");
     terminal
         .send_key(terminal.deadline(Duration::from_secs(3)), Key::Ctrl('c'))

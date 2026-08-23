@@ -1,6 +1,6 @@
 # Harness recovery
 
-A Tea terminal session reopens through tea-session and tea-harness; it never
+A Tea terminal session reopens through tea-session and `tea_core::runtime`; it never
 reconstructs an in-memory transcript as a source of truth.
 
 1. JsonlSession::inspect can verify the v1 session prefix without mutation.
@@ -9,9 +9,9 @@ reconstructs an in-memory transcript as a source of truth.
    JsonlSession::repair_torn_tail operation.
 2. reduce_lane derives the main lane's semantic state and any required
    recovery plan.
-3. HarnessManager restores its immutable catalog from a
+3. HarnessResolver restores its immutable catalog from a
    SessionFact::HarnessCatalog artifact.
-4. DurableHarness::reopen_with_artifact_store resolves the committed
+4. SessionRuntime::reopen_with_artifact_store resolves the committed
    harness revision, snapshot, model-harness profile, and policy mode from
    durable state.
 5. The supervisor completes or safely resumes the next durable operation

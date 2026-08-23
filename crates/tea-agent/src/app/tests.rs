@@ -17,13 +17,14 @@ use tea_core::scheduler::{
 use tea_core::state::{AgentMessage, MessageId, SerializedJson, ToolCallId};
 use tea_core::tool::ToolUpdate;
 use tea_core::tool::{ToolDefinition, ToolExecutionMode};
-use tea_core::{AgentToolResult, ModelDescriptor, ThinkingLevel, Usage};
+use tea_core::state::{ModelDescriptor, ThinkingLevel, Usage};
+use tea_core::tool::AgentToolResult;
 use tea_session::{
     ArtifactStore, CustomEntry, DurabilityMode, EntryId, HarnessCatalogFact, JsonValue,
     JsonlSession, LaneId, Metadata, PayloadRef, ProvisionedEntry, SessionEntry, SessionFact,
     SessionHeader, SessionId, SessionWriter,
 };
-use tea_tui::{Color, Size, StyledLine, Style};
+use tea_tui::{Color, Size, Style, StyledLine};
 
 fn test_tea_home(label: &str) -> PathBuf {
     static NEXT_HOME: AtomicU64 = AtomicU64::new(1);
@@ -652,13 +653,11 @@ fn startup_does_not_open_model_picker_without_a_saved_selection() {
 #[test]
 fn restoration_error_has_a_wrapped_red_footer_line() {
     let mut state = AppState::new();
-    state.error(
-        "last model could not be restored: OPENROUTER_API_KEY is required for OpenRouter",
-    );
+    state.error("last model could not be restored: OPENROUTER_API_KEY is required for OpenRouter");
 
     let presentation = crate::render::main_presentation(
         &state,
-        &tea_core::provider::ProviderRegistry::new(),
+        &tea_providers::ProviderRegistry::new(),
         Size {
             width: 40,
             height: 8,
@@ -666,9 +665,18 @@ fn restoration_error_has_a_wrapped_red_footer_line() {
         0,
     );
 
-    assert_eq!(presentation.live[2].text(), "provider/model unknown · effort off");
-    assert_eq!(presentation.live[3].text(), "last model could not be restored:");
-    assert_eq!(presentation.live[4].text(), "OPENROUTER_API_KEY is required for");
+    assert_eq!(
+        presentation.live[2].text(),
+        "provider/model unknown · effort off"
+    );
+    assert_eq!(
+        presentation.live[3].text(),
+        "last model could not be restored:"
+    );
+    assert_eq!(
+        presentation.live[4].text(),
+        "OPENROUTER_API_KEY is required for"
+    );
     assert_eq!(presentation.live[5].text(), "OpenRouter");
     assert_eq!(
         style_at(&presentation.live[4], 0).foreground,
@@ -721,14 +729,16 @@ fn sending_after_provider_configuration_error_does_not_open_model_picker() {
         .error("last model could not be restored: OPENROUTER_API_KEY is required for OpenRouter");
     app.state.composer_mut().replace_from_editor("fresh prompt");
 
-    app.submit_composer().expect("submitting a prompt should not fail");
+    app.submit_composer()
+        .expect("submitting a prompt should not fail");
 
     assert_eq!(app.state.surface(), UiSurface::None);
     assert_eq!(app.state.composer().text(), "fresh prompt");
     assert!(matches!(app.state.status(), UiStatus::Error(_)));
 
     app.state.composer_mut().replace_from_editor("/model");
-    app.submit_composer().expect("model recovery command should work");
+    app.submit_composer()
+        .expect("model recovery command should work");
     assert_eq!(app.state.surface(), UiSurface::ModelPicker);
 }
 
@@ -749,7 +759,7 @@ fn selected_model_is_saved_and_restored_without_starting_the_picker() {
     first
         .select_model(
             "local".into(),
-            tea_core::provider::local::LAGUNA_XS_2_1_MODEL.into(),
+            tea_providers::local::LAGUNA_XS_2_1_MODEL.into(),
         )
         .expect("local model should be selectable");
     assert!(tea_home.join("last-model.json").is_file());
@@ -764,7 +774,7 @@ fn selected_model_is_saved_and_restored_without_starting_the_picker() {
             .selected_model
             .as_ref()
             .map(|model| (model.provider.as_str(), model.model.as_str(),)),
-        Some(("local", tea_core::provider::local::LAGUNA_XS_2_1_MODEL))
+        Some(("local", tea_providers::local::LAGUNA_XS_2_1_MODEL))
     );
     let _ = fs::remove_dir_all(tea_home);
 }
@@ -779,17 +789,17 @@ fn event_projection_keeps_streaming_text_as_one_raw_line() {
         stop_reason: None,
         error_message: None,
     };
-    state.apply_event(&tea_core::AgentEvent {
-        run_id: tea_core::RunId(1),
-        sequence: tea_core::EventSequence(1),
+    state.apply_event(&tea_core::event::AgentEvent {
+        run_id: tea_core::state::RunId(1),
+        sequence: tea_core::event::EventSequence(1),
         kind: tea_core::event::AgentEventKind::MessageUpdate {
             message: message.clone(),
             text_delta: Some("hel".into()),
         },
     });
-    state.apply_event(&tea_core::AgentEvent {
-        run_id: tea_core::RunId(1),
-        sequence: tea_core::EventSequence(2),
+    state.apply_event(&tea_core::event::AgentEvent {
+        run_id: tea_core::state::RunId(1),
+        sequence: tea_core::event::EventSequence(2),
         kind: tea_core::event::AgentEventKind::MessageUpdate {
             message,
             text_delta: Some("lo".into()),
@@ -806,14 +816,14 @@ fn event_projection_keeps_streaming_text_as_one_raw_line() {
 fn event_projection_groups_a_tool_lifecycle_in_one_readable_row() {
     let mut state = AppState::new();
     let call_id = ToolCallId::new("call-1").expect("fixture ID");
-    let event = |sequence, kind| tea_core::AgentEvent {
-        run_id: tea_core::RunId(1),
-        sequence: tea_core::EventSequence(sequence),
+    let event = |sequence, kind| tea_core::event::AgentEvent {
+        run_id: tea_core::state::RunId(1),
+        sequence: tea_core::event::EventSequence(sequence),
         kind,
     };
     state.apply_event(&event(
         1,
-        tea_core::AgentEventKind::ToolExecutionStart {
+        tea_core::event::AgentEventKind::ToolExecutionStart {
             tool_call_id: call_id.clone(),
             tool_name: "shell".into(),
             arguments: SerializedJson::new(r#"{"command":"cargo test"}"#),
@@ -821,7 +831,7 @@ fn event_projection_groups_a_tool_lifecycle_in_one_readable_row() {
     ));
     state.apply_event(&event(
         2,
-        tea_core::AgentEventKind::ToolExecutionUpdate {
+        tea_core::event::AgentEventKind::ToolExecutionUpdate {
             tool_call_id: call_id.clone(),
             tool_name: "shell".into(),
             update: ToolUpdate {
@@ -832,7 +842,7 @@ fn event_projection_groups_a_tool_lifecycle_in_one_readable_row() {
     ));
     state.apply_event(&event(
         3,
-        tea_core::AgentEventKind::ToolExecutionEnd {
+        tea_core::event::AgentEventKind::ToolExecutionEnd {
             tool_call_id: call_id.clone(),
             tool_name: "shell".into(),
             result: AgentToolResult {
@@ -869,9 +879,9 @@ fn ctrl_o_opens_a_full_transcript_detail_viewer_and_preserves_live_state() {
         },
     );
     let call_id = ToolCallId::new("call-compact").expect("fixture ID");
-    state.apply_event(&tea_core::AgentEvent {
-        run_id: tea_core::RunId(1),
-        sequence: tea_core::EventSequence(1),
+    state.apply_event(&tea_core::event::AgentEvent {
+        run_id: tea_core::state::RunId(1),
+        sequence: tea_core::event::EventSequence(1),
         kind: tea_core::event::AgentEventKind::ToolExecutionStart {
             tool_call_id: call_id,
             tool_name: "read".into(),
@@ -892,7 +902,7 @@ fn ctrl_o_opens_a_full_transcript_detail_viewer_and_preserves_live_state() {
     }));
     let presentation = crate::render::surface_presentation(
         &state,
-        &tea_core::provider::ProviderRegistry::new(),
+        &tea_providers::ProviderRegistry::new(),
         Size {
             width: 40,
             height: 10,
@@ -928,7 +938,7 @@ fn temporary_surface_payload_does_not_enter_or_survive_transcript_close() {
     );
     let presentation = crate::render::surface_presentation(
         &state,
-        &tea_core::provider::ProviderRegistry::new(),
+        &tea_providers::ProviderRegistry::new(),
         Size {
             width: 20,
             height: 6,
@@ -953,10 +963,10 @@ fn temporary_surface_payload_does_not_enter_or_survive_transcript_close() {
 #[test]
 fn event_projection_makes_provider_failure_and_abort_explicit() {
     let mut state = AppState::new();
-    state.apply_event(&tea_core::AgentEvent {
-        run_id: tea_core::RunId(1),
-        sequence: tea_core::EventSequence(1),
-        kind: tea_core::AgentEventKind::MessageEnd {
+    state.apply_event(&tea_core::event::AgentEvent {
+        run_id: tea_core::state::RunId(1),
+        sequence: tea_core::event::EventSequence(1),
+        kind: tea_core::event::AgentEventKind::MessageEnd {
             message: AgentMessage::Assistant {
                 id: MessageId(2),
                 content: String::new(),
@@ -966,11 +976,11 @@ fn event_projection_makes_provider_failure_and_abort_explicit() {
             },
         },
     });
-    state.apply_event(&tea_core::AgentEvent {
-        run_id: tea_core::RunId(1),
-        sequence: tea_core::EventSequence(2),
-        kind: tea_core::AgentEventKind::TurnEnd {
-            turn_id: tea_core::TurnId(1),
+    state.apply_event(&tea_core::event::AgentEvent {
+        run_id: tea_core::state::RunId(1),
+        sequence: tea_core::event::EventSequence(2),
+        kind: tea_core::event::AgentEventKind::TurnEnd {
+            turn_id: tea_core::state::TurnId(1),
             reason: tea_core::state::StopReason::Aborted,
         },
     });
@@ -1011,13 +1021,13 @@ fn accounting_does_not_render_unknown_as_zero() {
 #[test]
 fn usage_events_update_footer_projection_without_transcript_noise() {
     let mut state = AppState::new();
-    state.apply_event(&tea_core::AgentEvent {
-        run_id: tea_core::RunId(1),
-        sequence: tea_core::EventSequence(1),
+    state.apply_event(&tea_core::event::AgentEvent {
+        run_id: tea_core::state::RunId(1),
+        sequence: tea_core::event::EventSequence(1),
         kind: tea_core::event::AgentEventKind::ModelTurnUsage {
             accounting: tea_core::state::ModelTurnAccounting {
-                run_id: tea_core::RunId(1),
-                turn_id: tea_core::TurnId(1),
+                run_id: tea_core::state::RunId(1),
+                turn_id: tea_core::state::TurnId(1),
                 model: None,
                 usage: Usage {
                     output_tokens: Some(3),
@@ -1026,13 +1036,13 @@ fn usage_events_update_footer_projection_without_transcript_noise() {
             },
         },
     });
-    state.apply_event(&tea_core::AgentEvent {
-        run_id: tea_core::RunId(1),
-        sequence: tea_core::EventSequence(2),
+    state.apply_event(&tea_core::event::AgentEvent {
+        run_id: tea_core::state::RunId(1),
+        sequence: tea_core::event::EventSequence(2),
         kind: tea_core::event::AgentEventKind::ModelTurnUsage {
             accounting: tea_core::state::ModelTurnAccounting {
-                run_id: tea_core::RunId(1),
-                turn_id: tea_core::TurnId(2),
+                run_id: tea_core::state::RunId(1),
+                turn_id: tea_core::state::TurnId(2),
                 model: None,
                 usage: Usage {
                     input_tokens: Some(5),
@@ -1044,18 +1054,10 @@ fn usage_events_update_footer_projection_without_transcript_noise() {
         },
     });
     assert!(state.transcript().is_empty());
-    assert!(state
-        .footer_lines(&tea_core::provider::ProviderRegistry::new())[1]
-        .contains("↑5"));
-    assert!(state
-        .footer_lines(&tea_core::provider::ProviderRegistry::new())[1]
-        .contains("↓3"));
-    assert!(state
-        .footer_lines(&tea_core::provider::ProviderRegistry::new())[1]
-        .contains("R7"));
-    assert!(state
-        .footer_lines(&tea_core::provider::ProviderRegistry::new())[1]
-        .contains("$0.25"));
+    assert!(state.footer_lines(&tea_providers::ProviderRegistry::new())[1].contains("↑5"));
+    assert!(state.footer_lines(&tea_providers::ProviderRegistry::new())[1].contains("↓3"));
+    assert!(state.footer_lines(&tea_providers::ProviderRegistry::new())[1].contains("R7"));
+    assert!(state.footer_lines(&tea_providers::ProviderRegistry::new())[1].contains("$0.25"));
 }
 
 #[test]
@@ -1075,17 +1077,16 @@ fn thinking_command_without_a_value_reports_usage() {
     app.dispatch_command("/thinking")
         .expect("thinking command should dispatch");
 
-    assert!(matches!(app.state().status(), UiStatus::Notice(text) if text.contains("/thinking <off|minimal")));
+    assert!(
+        matches!(app.state().status(), UiStatus::Notice(text) if text.contains("/thinking <off|minimal"))
+    );
 }
 
 #[test]
 fn footer_reports_unknown_context_and_unavailable_compaction_without_guessing() {
     let state = AppState::new();
-    let registry = tea_core::provider::ProviderRegistry::new();
-    assert_eq!(
-        state.footer_lines(&registry)[1],
-        "ctx ?%/?"
-    );
+    let registry = tea_providers::ProviderRegistry::new();
+    assert_eq!(state.footer_lines(&registry)[1], "ctx ?%/?");
 }
 
 #[test]
@@ -1096,11 +1097,8 @@ fn footer_reports_catalog_context_capacity_for_selected_model() {
         model: "poolside/laguna-xs-2.1:free".into(),
         revision: None,
     });
-    let registry = tea_core::provider::ProviderRegistry::new();
-    assert_eq!(
-        state.footer_lines(&registry)[1],
-        "ctx ?%/262k"
-    );
+    let registry = tea_providers::ProviderRegistry::new();
+    assert_eq!(state.footer_lines(&registry)[1], "ctx ?%/262k");
 }
 
 #[test]
@@ -1116,11 +1114,8 @@ fn footer_reports_context_percentage_and_enabled_compaction() {
         tokens: Some(131_072),
         message_count: 4,
     });
-    let registry = tea_core::provider::ProviderRegistry::new();
-    assert_eq!(
-        state.footer_lines(&registry)[1],
-        "ctx 50%/262k (auto)"
-    );
+    let registry = tea_providers::ProviderRegistry::new();
+    assert_eq!(state.footer_lines(&registry)[1], "ctx 50%/262k (auto)");
 }
 
 #[test]
@@ -1128,7 +1123,7 @@ fn local_compactor_summarizes_and_preserves_the_core_retained_suffix() {
     smol::block_on(async {
         let model = ModelDescriptor {
             provider: "local".into(),
-            model: tea_core::provider::local::LAGUNA_XS_2_1_MODEL.into(),
+            model: tea_providers::local::LAGUNA_XS_2_1_MODEL.into(),
             revision: None,
         };
         let compactor = ProviderCompactor::default();
@@ -1163,7 +1158,7 @@ fn local_compactor_summarizes_and_preserves_the_core_retained_suffix() {
         let result = compactor
             .compact_automatic(
                 CompactionContext {
-                    version: tea_core::COMPACTION_CONTEXT_VERSION,
+                    version: tea_core::compaction::COMPACTION_CONTEXT_VERSION,
                     system_prompt: String::new(),
                     model: Some(model),
                     messages: vec![prefix, retained.clone()],
@@ -1190,7 +1185,7 @@ fn cache_friendly_compaction_appends_one_instruction_to_an_exact_source_prefix()
     smol::block_on(async {
         let model = ModelDescriptor {
             provider: "local".into(),
-            model: tea_core::provider::local::LAGUNA_XS_2_1_MODEL.into(),
+            model: tea_providers::local::LAGUNA_XS_2_1_MODEL.into(),
             revision: None,
         };
         let requests = Arc::new(Mutex::new(Vec::new()));
@@ -1208,7 +1203,7 @@ fn cache_friendly_compaction_appends_one_instruction_to_an_exact_source_prefix()
         let result = compactor
             .compact_automatic(
                 CompactionContext {
-                    version: tea_core::COMPACTION_CONTEXT_VERSION,
+                    version: tea_core::compaction::COMPACTION_CONTEXT_VERSION,
                     system_prompt: "unused standalone prompt".into(),
                     model: Some(model),
                     messages: vec![AgentMessage::User {
@@ -1277,7 +1272,7 @@ fn cache_friendly_compaction_falls_back_when_a_transform_breaks_the_prefix() {
     smol::block_on(async {
         let model = ModelDescriptor {
             provider: "local".into(),
-            model: tea_core::provider::local::LAGUNA_XS_2_1_MODEL.into(),
+            model: tea_providers::local::LAGUNA_XS_2_1_MODEL.into(),
             revision: None,
         };
         let requests = Arc::new(Mutex::new(Vec::new()));
@@ -1292,7 +1287,7 @@ fn cache_friendly_compaction_falls_back_when_a_transform_breaks_the_prefix() {
         let result = compactor
             .compact_automatic(
                 CompactionContext {
-                    version: tea_core::COMPACTION_CONTEXT_VERSION,
+                    version: tea_core::compaction::COMPACTION_CONTEXT_VERSION,
                     system_prompt: "standalone".into(),
                     model: Some(model),
                     messages: vec![AgentMessage::User {
@@ -1358,7 +1353,7 @@ fn local_catalog_selection_enables_automatic_compaction() {
 
     app.select_model(
         "local".into(),
-        tea_core::provider::local::LAGUNA_XS_2_1_MODEL.into(),
+        tea_providers::local::LAGUNA_XS_2_1_MODEL.into(),
     )
     .expect("local model selection");
 
@@ -1429,7 +1424,7 @@ fn local_provider_is_selectable_without_a_credential() {
 
     app.select_model(
         "local".into(),
-        tea_core::provider::local::LAGUNA_XS_2_1_MODEL.into(),
+        tea_providers::local::LAGUNA_XS_2_1_MODEL.into(),
     )
     .expect("local provider should configure without a key");
 
@@ -1522,9 +1517,18 @@ fn restored_session_user_messages_rebuild_prompt_history() {
     ]);
 
     state.begin_history_navigation();
-    assert_eq!(state.history_previous().as_deref(), Some("durable latest prompt"));
-    assert_eq!(state.history_previous().as_deref(), Some("durable first prompt"));
-    assert_eq!(state.history_previous().as_deref(), Some("durable first prompt"));
+    assert_eq!(
+        state.history_previous().as_deref(),
+        Some("durable latest prompt")
+    );
+    assert_eq!(
+        state.history_previous().as_deref(),
+        Some("durable first prompt")
+    );
+    assert_eq!(
+        state.history_previous().as_deref(),
+        Some("durable first prompt")
+    );
 }
 
 #[test]
@@ -1578,7 +1582,7 @@ fn reverse_history_search_renders_highlighted_session_message_excerpts() {
 
     let presentation = crate::render::main_presentation(
         &state,
-        &tea_core::provider::ProviderRegistry::new(),
+        &tea_providers::ProviderRegistry::new(),
         Size {
             width: 80,
             height: 12,
@@ -1624,8 +1628,14 @@ fn queued_message_coalesces_and_restores_only_into_an_empty_composer() {
 fn mock_provider_uses_a_default_model_without_credentials() {
     let tea_home = test_tea_home("mock-provider");
     let options = CliOptions::parse(
-        ["tea", "--provider", "mock", "--tea-home", tea_home.to_str().expect("UTF-8 path")]
-            .map(OsString::from),
+        [
+            "tea",
+            "--provider",
+            "mock",
+            "--tea-home",
+            tea_home.to_str().expect("UTF-8 path"),
+        ]
+        .map(OsString::from),
     )
     .expect("mock startup options parse");
     let mut app = App::new(options);

@@ -13,11 +13,12 @@ use tea_core::compaction::{
     CompactionRequestLayout, CompactionResult, CompactionStrategy, Compactor, ProviderContext,
 };
 use tea_core::hooks::{ContextEnvelope, HookSet};
-use tea_core::provider::openai::OpenAiContextHook;
 use tea_core::scheduler::{CancellationToken, ModelProvider, ModelRequest, ModelStreamEvent};
-use tea_core::state::{AgentMessage, MessageId, ModelDescriptor, StopReason, ThinkingLevel};
-use tea_core::Usage;
+use tea_core::state::{
+    AgentMessage, MessageId, ModelDescriptor, StopReason, ThinkingLevel, Usage,
+};
 use tea_protocol::JsonValue;
+use tea_providers::openai::OpenAiContextHook;
 
 const SUMMARY_SYSTEM_PROMPT: &str = r#"You compact coding-agent conversation history.
 Produce a concise structured summary that preserves everything needed to continue the work.

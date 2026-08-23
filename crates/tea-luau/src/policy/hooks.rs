@@ -1,9 +1,15 @@
 //! HookSet adapter for the policy-owned pre-tool decision.
 
-use super::{LuaPolicy, PolicyError, PolicyMemoryProposal};
+use super::{
+    LuaPolicy, PolicyError, PolicyMemoryProposal, PolicyMemoryRetention, PolicyMemoryVisibility,
+};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use tea_core::error::HookError;
+use tea_core::harness::extension::{
+    CollectedExtensionMemoryProposal, ExtensionMemoryCollector, ExtensionMemoryProposal,
+    ExtensionMemoryRetention, ExtensionMemoryVisibility,
+};
 use tea_core::hooks::{
     AfterToolCall, AgentLoopTurnUpdate, BeforeToolCall, ContextEnvelope, HookFuture, HookSet,
     Replacement,
@@ -105,7 +111,13 @@ impl PolicyMemoryCollector {
 struct PolicyMemoryBinding {
     plugin_id: String,
     registry_index: usize,
-    collector: Arc<PolicyMemoryCollector>,
+    collector: MemoryCollector,
+}
+
+#[derive(Clone)]
+enum MemoryCollector {
+    Policy(Arc<PolicyMemoryCollector>),
+    Extension(Arc<ExtensionMemoryCollector>),
 }
 
 impl LuaPolicyHookSet {
@@ -135,7 +147,26 @@ impl LuaPolicyHookSet {
             memory: Some(PolicyMemoryBinding {
                 plugin_id: plugin_id.into(),
                 registry_index,
-                collector,
+                collector: MemoryCollector::Policy(collector),
+            }),
+        }
+    }
+
+    /// Compose a policy with the core-owned extension-memory hand-off.
+    pub fn new_with_extension_memory(
+        policy: Arc<LuaPolicy>,
+        plugin_id: impl Into<String>,
+        registry_index: usize,
+        collector: Arc<ExtensionMemoryCollector>,
+        inner: Arc<dyn HookSet>,
+    ) -> Self {
+        Self {
+            policy,
+            inner,
+            memory: Some(PolicyMemoryBinding {
+                plugin_id: plugin_id.into(),
+                registry_index,
+                collector: MemoryCollector::Extension(collector),
             }),
         }
     }
@@ -289,14 +320,46 @@ fn record_memory(
     let (Some(binding), Some(proposal)) = (binding, proposal) else {
         return Ok(());
     };
-    binding.collector.record(
-        call.id.as_str(),
-        binding.registry_index,
-        CollectedPolicyMemoryProposal {
-            plugin_id: binding.plugin_id.clone(),
-            proposal,
-        },
-    )
+    match &binding.collector {
+        MemoryCollector::Policy(collector) => collector.record(
+            call.id.as_str(),
+            binding.registry_index,
+            CollectedPolicyMemoryProposal {
+                plugin_id: binding.plugin_id.clone(),
+                proposal,
+            },
+        ),
+        MemoryCollector::Extension(collector) => collector
+            .record(
+                call.id.as_str(),
+                binding.registry_index,
+                CollectedExtensionMemoryProposal {
+                    extension_id: binding.plugin_id.clone(),
+                    proposal: ExtensionMemoryProposal {
+                        kind: proposal.kind,
+                        content: proposal.content,
+                        provenance: proposal.provenance,
+                        visibility: match proposal.visibility {
+                            PolicyMemoryVisibility::ModelVisible => {
+                                ExtensionMemoryVisibility::ModelVisible
+                            }
+                            PolicyMemoryVisibility::ExternalOnly => {
+                                ExtensionMemoryVisibility::ExternalOnly
+                            }
+                        },
+                        retention: match proposal.retention {
+                            PolicyMemoryRetention::Session => ExtensionMemoryRetention::Session,
+                            PolicyMemoryRetention::Checkpoint => {
+                                ExtensionMemoryRetention::Checkpoint
+                            }
+                        },
+                    },
+                },
+            )
+            .map_err(|error| PolicyError::Runtime {
+                message: error.to_string(),
+            }),
+    }
 }
 
 /// Apply exactly the fields a core hook is allowed to replace. Keeping this

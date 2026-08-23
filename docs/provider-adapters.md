@@ -16,9 +16,9 @@ opaque caller providers or replay a stream after it has exposed events.
 
 | Feature | Module | Wire protocol | Intended use |
 | --- | --- | --- | --- |
-| `provider-openrouter` | `tea_core::provider::openrouter` | OpenRouter Chat Completions SSE plus inline usage/accounting | Opt-in incremental rustls + Graviola HTTPS transport with packet-bound model validation and response-stall timeouts. |
-| `provider-commandcode` | `tea_core::provider::commandcode` | Command Code `/alpha/generate` NDJSON | Opt-in rustls + Graviola HTTPS gateway transport; the evaluation runner selects it with `--provider commandcode`. |
-| `provider-local` | `tea_core::provider::local` | Caller-selected local OpenAI-compatible Chat Completions SSE endpoint | Opt-in incremental HTTP transport for oMLX and similar local servers; no credentials or endpoint discovery. |
+| `provider-openrouter` | `tea_providers::openrouter` | OpenRouter Chat Completions SSE plus inline usage/accounting | Opt-in incremental rustls + Graviola HTTPS transport with packet-bound model validation and response-stall timeouts. |
+| `provider-commandcode` | `tea_providers::commandcode` | Command Code `/alpha/generate` NDJSON | Opt-in rustls + Graviola HTTPS gateway transport; the evaluation runner selects it with `--provider commandcode`. |
+| `provider-local` | `tea_providers::local` | Caller-selected local OpenAI-compatible Chat Completions SSE endpoint | Opt-in incremental HTTP transport for oMLX and similar local servers; no credentials or endpoint discovery. |
 
 The optional transports currently use the sibling `h12tiny-client-sync` source
 at `../h12tiny` because that client is not published on crates.io. The release
@@ -112,10 +112,10 @@ gateway's `workingDir`, `date`, and `environment` fields an explicit host
 decision:
 
 ```rust,no_run
-use tea_core::provider::commandcode::{
+use tea_providers::commandcode::{
     CommandCodeConfig, CommandCodeHostContext, CommandCodeProvider,
 };
-use tea_core::provider::RetryPolicy;
+use tea_providers::RetryPolicy;
 use std::time::Duration;
 
 let host = CommandCodeHostContext::new("/sandbox/project", "2026-08-14", "linux")?;
@@ -152,7 +152,7 @@ command-line harness practical.
 ## Context and stream mapping
 
 Hosts using either concrete adapter should install
-`tea_core::provider::openai::OpenAiContextHook` on the agent. It converts
+`tea_providers::openai::OpenAiContextHook` on the agent. It converts
 the core transcript to the standard Chat Completions message array consumed by
 both adapters. The core default `NoHooks` value is intentionally diagnostic
 Rust text and is not a provider wire format.
@@ -214,7 +214,7 @@ The local adapter accepts an explicit API root and model. Its convenience
 configuration targets the 5-bit `Laguna-XS-2.1-5bit` checkpoint served by oMLX:
 
 ```rust,no_run
-use tea_core::provider::local::{LocalConfig, LocalProvider};
+use tea_providers::local::{LocalConfig, LocalProvider};
 
 let config = LocalConfig::laguna_xs_2_1("http://127.0.0.1:8000/v1");
 config.validate()?;

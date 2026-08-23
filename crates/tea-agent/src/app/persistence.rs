@@ -9,6 +9,7 @@ use std::ffi::OsString;
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
+use tea_luau::LuauExtensionEngine;
 use tea_protocol::JsonValue;
 use tea_session::{
     verify_session, ArtifactId, ArtifactQuota, ArtifactStore, DurabilityMode, FileArtifactStore,
@@ -289,13 +290,16 @@ fn complete_artifact_roots(
             continue;
         };
         roots.extend(
-            tea_harness::verify_harness_catalog(catalog, Arc::clone(&artifacts)).map_err(
-                |error| {
-                    AppError::Setup(format!(
-                        "immutable harness catalog verification failed: {error}"
-                    ))
-                },
-            )?,
+            tea_core::harness::verify_harness_catalog_with_extension_engine(
+                catalog,
+                Arc::clone(&artifacts),
+                Arc::new(LuauExtensionEngine),
+            )
+            .map_err(|error| {
+                AppError::Setup(format!(
+                    "immutable harness catalog verification failed: {error}"
+                ))
+            })?,
         );
     }
     Ok(roots.into_iter().collect())

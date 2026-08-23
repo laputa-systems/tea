@@ -23,7 +23,7 @@ use crate::state::{
     RunState, StopReason, ThinkingLevel, ToolCallId, TurnId, Usage,
 };
 use crate::tool::{
-    project_tool_result_as_text, AgentTool, AgentToolResult, ToolCall, ToolFuture, ToolUpdate,
+    AgentTool, AgentToolResult, ToolCall, ToolFuture, ToolUpdate, project_tool_result_as_text,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -329,8 +329,8 @@ impl RunHandle {
     /// its calls, records their results, and then drives the next model turn.
     pub async fn drive(&self) -> Result<(), CoreError> {
         let result = self.drive_inner().await;
-        if let Err(error) = &result {
-            if !self.snapshot().phase.is_terminal() {
+        if let Err(error) = &result
+            && !self.snapshot().phase.is_terminal() {
                 if self.cancellation.is_cancelled() {
                     if self
                         .policy
@@ -352,7 +352,6 @@ impl RunHandle {
                     self.settle_failure(error).await;
                 }
             }
-        }
         result
     }
 
@@ -2442,8 +2441,8 @@ fn automatic_compaction_split(
     while start > 0 && matches!(messages[start], AgentMessage::ToolResult { .. }) {
         start -= 1;
     }
-    if matches!(messages[start], AgentMessage::Assistant { .. }) {
-        if let Some(turn_start) = (0..start)
+    if matches!(messages[start], AgentMessage::Assistant { .. })
+        && let Some(turn_start) = (0..start)
             .rev()
             .find(|index| matches!(messages[*index], AgentMessage::User { .. }))
         {
@@ -2453,7 +2452,6 @@ fn automatic_compaction_split(
                 messages[turn_start..start].to_vec(),
             );
         }
-    }
     (
         messages[..start].to_vec(),
         messages[start..].to_vec(),

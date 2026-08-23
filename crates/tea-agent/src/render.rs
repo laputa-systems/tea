@@ -7,16 +7,16 @@
 use crate::app::{AppState, NoticeSeverity, ToolProjection, ToolState, TranscriptEntry, UiSurface};
 #[cfg(test)]
 use crate::composer::Composer;
-#[cfg(test)]
-use tea_tui::Color;
-use tea_tui::Style;
 use crate::ui::frame_layout;
 use crate::ui::theme::{Role, Theme};
 use crate::ui::visual_layout::VisualLayout;
 use hi_lite::{Highlighter, Kind, Language};
 use std::sync::OnceLock;
 use std::time::Instant;
-use tea_core::provider::ProviderRegistry;
+use tea_providers::ProviderRegistry;
+#[cfg(test)]
+use tea_tui::Color;
+use tea_tui::Style;
 use tea_tui::{Cursor, Size, StyledLine};
 
 /// Public measured-frame contract for consumers that need layout without painting.
@@ -157,10 +157,8 @@ pub(crate) fn main_presentation(
         usize::from(size.height.saturating_sub(3).max(1))
     };
     let visual = composer_layout(state, width);
-    let composer_start = composer_view_start(
-        &visual,
-        desired_composer_rows.min(composer_capacity) as u16,
-    );
+    let composer_start =
+        composer_view_start(&visual, desired_composer_rows.min(composer_capacity) as u16);
     let composer_row = lines.len();
     let theme = Theme::default();
     for (row, line) in visual.rows.iter().skip(composer_start).enumerate() {
@@ -168,7 +166,11 @@ pub(crate) fn main_presentation(
             break;
         }
         let text = line.text.strip_prefix("❯ ").unwrap_or(&line.text);
-        let prefix = if composer_start != 0 && row == 0 { "┃↑" } else { "┃ " };
+        let prefix = if composer_start != 0 && row == 0 {
+            "┃↑"
+        } else {
+            "┃ "
+        };
         lines.push(RenderLine::plain(
             format!("{prefix}{text}"),
             theme.style(Role::Text),
@@ -187,7 +189,9 @@ pub(crate) fn main_presentation(
 
     let cursor_row = composer_row.saturating_add(visual.cursor_row.saturating_sub(composer_start));
     let cursor = Some(Cursor {
-        column: visual.cursor_column.min(usize::from(width.saturating_sub(1))) as u16,
+        column: visual
+            .cursor_column
+            .min(usize::from(width.saturating_sub(1))) as u16,
         row: cursor_row.min(usize::from(u16::MAX)) as u16,
         visible: true,
     });
@@ -281,9 +285,7 @@ fn history_search_excerpt(
         let source_index = start + index;
         text.push(*character);
         styles.push(
-            (match_byte.is_some() && (match_start..match_end).contains(&source_index))
-                .then_some(match_style)
-                .unwrap_or(body_style),
+            if match_byte.is_some() && (match_start..match_end).contains(&source_index) { match_style } else { body_style },
         );
     }
     if trailing_ellipsis {
@@ -387,10 +389,7 @@ fn fit_live(
     // Drop old mutable transcript rows first. The composer must remain present
     // even on a tiny terminal; status rows can be clipped after it when there
     // is no possible layout that retains every footer line.
-    let start = lines
-        .len()
-        .saturating_sub(maximum)
-        .min(composer_row);
+    let start = lines.len().saturating_sub(maximum).min(composer_row);
     let end = start.saturating_add(maximum).min(lines.len());
     let cursor = cursor.map(|cursor| Cursor {
         row: cursor
@@ -466,10 +465,7 @@ fn wrap_footer_primary(text: &str, width: u16) -> Vec<RenderLine> {
                 .find(" · effort")
                 .map(|length| (start, start + length))
         })
-        .or_else(|| {
-            text.find(" · effort")
-                .map(|end| (0, end))
-        });
+        .or_else(|| text.find(" · effort").map(|end| (0, end)));
     let mut source_offset = 0;
     wrap_raw_text(text, width)
         .into_iter()
@@ -480,10 +476,8 @@ fn wrap_footer_primary(text: &str, width: u16) -> Vec<RenderLine> {
                     .find(character)
                     .map(|offset| source_offset + offset)
                     .unwrap_or(source_offset);
-                let style = model_range
-                    .is_some_and(|(start, end)| (start..end).contains(&found))
-                    .then_some(model)
-                    .unwrap_or(muted);
+                let style = if model_range
+                    .is_some_and(|(start, end)| (start..end).contains(&found)) { model } else { muted };
                 styles.push(style);
                 source_offset = found.saturating_add(character.len_utf8());
             }
@@ -512,11 +506,7 @@ fn activity_lines(state: &AppState) -> Vec<RenderLine> {
 fn thinking_spinner() -> &'static str {
     const FRAMES: [&str; 4] = ["|", "/", "-", "\\"];
     static STARTED: OnceLock<Instant> = OnceLock::new();
-    let frame = STARTED
-        .get_or_init(Instant::now)
-        .elapsed()
-        .as_millis()
-        / 120;
+    let frame = STARTED.get_or_init(Instant::now).elapsed().as_millis() / 120;
     FRAMES[frame as usize % FRAMES.len()]
 }
 
@@ -1245,34 +1235,34 @@ mod tests {
     #[test]
     fn transcript_keeps_user_message_above_assistant_code_block() {
         let mut state = AppState::new();
-        let user = tea_core::AgentMessage::User {
+        let user = tea_core::state::AgentMessage::User {
             id: tea_core::state::MessageId(1),
             content: "user message".into(),
         };
-        state.apply_event(&tea_core::AgentEvent {
-            run_id: tea_core::RunId(1),
-            sequence: tea_core::EventSequence(1),
+        state.apply_event(&tea_core::event::AgentEvent {
+            run_id: tea_core::state::RunId(1),
+            sequence: tea_core::event::EventSequence(1),
             kind: tea_core::event::AgentEventKind::MessageStart { message: user },
         });
         let assistant_text = "```rust\nfn main() {}\n```";
-        let assistant = tea_core::AgentMessage::Assistant {
+        let assistant = tea_core::state::AgentMessage::Assistant {
             id: tea_core::state::MessageId(2),
             content: assistant_text.into(),
             tool_calls: Vec::new(),
             stop_reason: Some(tea_core::state::StopReason::Stop),
             error_message: None,
         };
-        state.apply_event(&tea_core::AgentEvent {
-            run_id: tea_core::RunId(1),
-            sequence: tea_core::EventSequence(2),
+        state.apply_event(&tea_core::event::AgentEvent {
+            run_id: tea_core::state::RunId(1),
+            sequence: tea_core::event::EventSequence(2),
             kind: tea_core::event::AgentEventKind::MessageUpdate {
                 message: assistant.clone(),
                 text_delta: Some(assistant_text.into()),
             },
         });
-        state.apply_event(&tea_core::AgentEvent {
-            run_id: tea_core::RunId(1),
-            sequence: tea_core::EventSequence(3),
+        state.apply_event(&tea_core::event::AgentEvent {
+            run_id: tea_core::state::RunId(1),
+            sequence: tea_core::event::EventSequence(3),
             kind: tea_core::event::AgentEventKind::MessageEnd { message: assistant },
         });
 
@@ -1410,7 +1400,14 @@ mod tests {
         );
         assert_eq!(presentation.live[0].text(), "");
         assert_eq!(presentation.live[1].text(), "┃ ");
-        assert_eq!(presentation.cursor, Some(Cursor { column: 2, row: 1, visible: true }));
+        assert_eq!(
+            presentation.cursor,
+            Some(Cursor {
+                column: 2,
+                row: 1,
+                visible: true
+            })
+        );
     }
 
     #[test]
@@ -1452,7 +1449,10 @@ mod tests {
             0,
         );
 
-        assert_eq!(presentation.live[3].text(), state.footer_lines(&registry)[1]);
+        assert_eq!(
+            presentation.live[3].text(),
+            state.footer_lines(&registry)[1]
+        );
     }
 
     #[test]
@@ -1481,7 +1481,14 @@ mod tests {
         assert_eq!(presentation.live[2].text().chars().next(), Some('─'));
         assert!(presentation.live[3].text().starts_with("  /he"));
         assert_eq!(presentation.live[10].text().chars().next(), Some('↑'));
-        assert_eq!(presentation.cursor, Some(Cursor { column: 3, row: 1, visible: true }));
+        assert_eq!(
+            presentation.cursor,
+            Some(Cursor {
+                column: 3,
+                row: 1,
+                visible: true
+            })
+        );
     }
 
     #[test]
@@ -1502,12 +1509,8 @@ mod tests {
         );
         assert!(presentation.live[0].text().starts_with("┃↑"));
         for (width, height) in [(0, 0), (1, 1), (2, 2)] {
-            let presentation = main_presentation(
-                &state,
-                &ProviderRegistry::new(),
-                Size { width, height },
-                1,
-            );
+            let presentation =
+                main_presentation(&state, &ProviderRegistry::new(), Size { width, height }, 1);
             assert!(presentation.live.len() <= usize::from(height));
             if let Some(cursor) = presentation.cursor {
                 assert!(cursor.column < width && cursor.row < height);

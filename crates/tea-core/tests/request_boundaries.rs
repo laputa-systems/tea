@@ -1,5 +1,6 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
+use tea_core::Agent;
 use tea_core::error::HookError;
 use tea_core::hooks::{
     AfterToolCall, AgentLoopTurnUpdate, BeforeToolCall, ContextEnvelope, HookSet,
@@ -13,7 +14,6 @@ use tea_core::state::{
 use tea_core::tool::{
     AgentTool, AgentToolResult, ToolCall, ToolContext, ToolFuture, ToolUpdateSink,
 };
-use tea_core::Agent;
 
 #[derive(Debug)]
 struct RecordingProvider {

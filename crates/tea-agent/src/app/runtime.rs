@@ -4,10 +4,13 @@ use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{sync_channel, Receiver, TryRecvError};
 use std::time::Duration;
+use tea_core::coding::DefaultCodingTools;
 use tea_core::compaction::AutomaticCompactionPolicy;
-use tea_core::provider::ProviderRegistry;
-use tea_core::{AgentConfiguration, CoreError, DefaultCodingTools};
-use tea_harness::{HarnessError, HarnessEvent, SessionEvent, TeaEvent, TeaEventSubscription};
+use tea_core::harness::HarnessError;
+use tea_core::runtime::{HarnessEvent, SessionEvent, TeaEvent, TeaEventSubscription};
+use tea_core::agent::AgentConfiguration;
+use tea_core::error::CoreError;
+use tea_providers::ProviderRegistry;
 use tea_tui::Size;
 
 use super::cli::CliOptions;
@@ -17,8 +20,8 @@ use super::host::host_configuration;
 use super::mock;
 use super::preferences::load_last_model;
 use super::state::{AppState, UiStatus};
-use tea_core::ThinkingLevel;
 use std::sync::Arc;
+use tea_core::state::ThinkingLevel;
 
 /// Assembled v1 terminal application.
 pub struct App {
@@ -145,8 +148,7 @@ impl App {
         let home = resolve_tea_home(self.options.tea_home())?;
         self.configuration = Some(configuration);
         self.tea_home = Some(home);
-        self.state
-            .set_thinking_level(self.options.thinking_level());
+        self.state.set_thinking_level(self.options.thinking_level());
         self.state.welcome_line();
 
         let explicit_provider = self.options.provider().map(OsStr::to_owned);
@@ -333,12 +335,7 @@ impl App {
 
         let stable = render::stable_prefix(self.state.transcript());
         if stable > self.committed_entries {
-            let lines = render::committed_lines(
-                &self.state,
-                self.committed_entries,
-                stable,
-                width,
-            );
+            let lines = render::committed_lines(&self.state, self.committed_entries, stable, width);
             terminal
                 .renderer_mut()?
                 .commit(&lines)
@@ -389,8 +386,7 @@ impl App {
 
     pub(super) fn set_thinking_level(&mut self, level: ThinkingLevel) -> Result<(), AppError> {
         if self.agent_is_active() {
-            self.state
-                .notice("thinking changes require an idle agent");
+            self.state.notice("thinking changes require an idle agent");
             return Ok(());
         }
         if let Some(harness) = self.durable_harness.as_ref() {

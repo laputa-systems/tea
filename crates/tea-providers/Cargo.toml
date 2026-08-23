@@ -1,0 +1,52 @@
+[package]
+name = "tea-providers"
+version = "1.0.0"
+edition = "2024"
+description = "Concrete model transports and checked-in model catalogs for Tea"
+license = "MIT OR Apache-2.0"
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+default = []
+provider-commandcode = [
+    "dep:h12tiny-client-sync",
+    "dep:http",
+    "dep:percent-encoding",
+]
+provider-openrouter = [
+    "dep:h12tiny-client-sync",
+    "dep:http",
+    "dep:percent-encoding",
+]
+# Test-only endpoint injection for the offline HTTP/1.1 OpenRouter fixture.
+provider-openrouter-test-support = ["provider-openrouter"]
+provider-local = [
+    "dep:h12tiny-client-sync",
+    "dep:http",
+    "dep:percent-encoding",
+]
+eval-runner = ["dep:smol", "provider-commandcode", "provider-openrouter"]
+
+[dependencies]
+tea-core = { path = "../tea-core" }
+tea-protocol = { path = "../tea-protocol" }
+smol = { workspace = true, optional = true }
+h12tiny-client-sync = {
+    package = "h12tiny-client-sync",
+    version = "0.1",
+    default-features = false,
+    features = ["tls"],
+    optional = true,
+}
+http = { version = "1", optional = true }
+percent-encoding = { version = "2", optional = true }
+
+[dev-dependencies]
+smol = { workspace = true }
+
+[[bin]]
+name = "tea-eval"
+path = "src/bin/tea-eval.rs"
+required-features = ["eval-runner"]

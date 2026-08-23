@@ -14,10 +14,13 @@ pub mod bundle;
 pub mod bundle_runtime;
 /// Versioned, capability-scoped extension ABI values and host gates.
 pub mod capability;
+/// Luau implementation of the core-owned extension engine contract.
+pub mod extension_engine;
 /// Coroutine-backed Luau tool handlers adapted to the core tool scheduler.
 pub mod tool_handler;
 
 mod policy;
+pub use extension_engine::LuauExtensionEngine;
 pub use policy::{
     CollectedPolicyMemoryProposal, LuaPolicy, LuaPolicyHookSet, PolicyAfterToolOutput,
     PolicyContextAnnotation, PolicyContextEntry, PolicyContextInput, PolicyContextProjectionPatch,

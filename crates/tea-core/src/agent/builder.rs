@@ -1,11 +1,9 @@
 //! Agent configuration builder.
 
 use super::{Agent, AgentConfiguration, AgentInner, IdleNotifier, ObserverRegistration};
-use crate::default_tools::DefaultCodingTools;
 use crate::effect::{EffectGate, NoopEffectGate, RunProvenance};
 use crate::event::EventObserver;
 use crate::hooks::{HookSet, NoHooks};
-use crate::profile::PiDefaultCodingProfile;
 use crate::queue::{AgentQueues, QueueMode};
 use crate::scheduler::ModelProvider;
 use crate::state::{AgentState, ModelDescriptor, ThinkingLevel};
@@ -188,31 +186,6 @@ impl AgentBuilder {
     pub fn follow_up_mode(mut self, mode: QueueMode) -> Self {
         self.follow_up_mode = mode;
         self
-    }
-
-    /// Apply a captured profile's prompt.  Executable tools still come from the caller.
-    pub fn profile(mut self, profile: &PiDefaultCodingProfile) -> Self {
-        self.system_prompt = profile.system_prompt();
-        self
-    }
-
-    /// Apply the pinned Pi coding prompt and its explicit executable default tools.
-    ///
-    /// `tools` is constructed by the embedding with an explicit workspace and
-    /// capability adapter. This convenience method never discovers a cwd,
-    /// home directory, Pi installation, or authority on the caller's behalf.
-    /// Subsequent [`Self::tool`] calls replace/extend individual tools and
-    /// [`Self::remove_tool`] deliberately removes them.
-    pub fn pinned_default_coding_profile(
-        mut self,
-        tools: DefaultCodingTools,
-    ) -> Result<Self, crate::error::ProfileError> {
-        let profile = PiDefaultCodingProfile::pinned_default()?;
-        let registry = tools.registry();
-        profile.validate_registry(&registry)?;
-        self.system_prompt = profile.system_prompt_for_workspace(tools.workspace().as_path());
-        self.tools = registry;
-        Ok(self)
     }
 
     /// Build an owned agent.

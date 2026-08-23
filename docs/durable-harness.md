@@ -9,20 +9,20 @@ The relevant layers are intentionally narrow:
 
 ~~~text
 tea-agent terminal
-  -> DurableHarness
+  -> tea_core::runtime::SessionRuntime
       -> tea-session semantic log and immutable objects
-      -> HarnessManager catalog, snapshots, candidates, revisions
+      -> tea_core::harness::HarnessResolver catalog, snapshots, candidates, revisions
       -> tea-core provider/tool execution
       -> redacted trace artifact
 ~~~
 
-Before an effect crosses into the core, DurableHarness records the durable
+Before an effect crosses into the core, `SessionRuntime` records the durable
 operation and epoch. Provider requests and tool calls use the effect gate, so
 intent and settled outcome are represented in session state. Reconnect state is
 derived from one atomic session snapshot plus post-commit live events.
 
-Every epoch resolves the committed revision through HarnessManager. The active
-template, prompt sections, tools, hooks, capability bindings, artifact policy,
+Every epoch resolves the committed revision through `HarnessResolver`. The active
+runtime services, prompt sections, tools, hooks, capability bindings, artifact policy,
 and model-harness profile are all immutable for that epoch. A candidate can
 change the next boundary only after validation and durable activation.
 

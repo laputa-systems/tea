@@ -1,7 +1,7 @@
 use std::sync::Arc;
-use tea_core::profile::PiDefaultCodingProfile;
-use tea_core::provider::{openai::OpenAiContextHook, ProviderRegistry};
-use tea_core::{AgentConfiguration, DefaultCodingTools};
+use tea_core::coding::{DefaultCodingTools, PiDefaultCodingProfile};
+use tea_core::agent::AgentConfiguration;
+use tea_providers::{openai::OpenAiContextHook, ModelDescriptor, ProviderRegistry};
 
 use super::error::AppError;
 
@@ -30,10 +30,10 @@ pub(super) fn host_configuration(
 pub(super) struct ModelCandidate {
     pub(super) provider: &'static str,
     pub(super) provider_name: &'static str,
-    pub(super) model: Option<tea_core::provider::ModelDescriptor>,
+    pub(super) model: Option<ModelDescriptor>,
 }
 
-const MOCK_MODEL: tea_core::provider::ModelDescriptor = tea_core::provider::ModelDescriptor {
+const MOCK_MODEL: ModelDescriptor = ModelDescriptor {
     id: super::mock::DEFAULT_MODEL_ID,
     display_name: "Safe TUI playground",
     context_window: Some(super::mock::CONTEXT_WINDOW),

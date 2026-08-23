@@ -1,6 +1,5 @@
 use super::super::*;
 
-#[cfg(feature = "trace")]
 #[test]
 fn trace_observer_does_not_change_observable_agent_behavior() {
     smol::block_on(async {

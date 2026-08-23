@@ -2,7 +2,9 @@ use crate::terminal::{KeyCode, KeyEvent, KeyModifiers};
 use std::num::NonZeroU64;
 use std::sync::Arc;
 use tea_core::compaction::{AutomaticCompactionPolicy, ContextBudgetSource, OverflowRecovery};
-use tea_core::provider::{ConfiguredProvider, ProviderConfiguration};
+use tea_core::agent::AgentConfiguration;
+use tea_core::state::Usage;
+use tea_providers::{ConfiguredProvider, ProviderConfiguration};
 
 use super::durable::list_host_sessions;
 use super::error::AppError;
@@ -301,7 +303,7 @@ impl App {
         self.state.selected_model = Some(descriptor.clone());
         self.state.context_estimate = None;
         self.state.close_surface();
-        self.state.reported_usage = tea_core::Usage::default();
+        self.state.reported_usage = Usage::default();
         // A model/provider change is a new immutable durable profile. Do not
         // mutate an existing session's active snapshot in place; the next
         // prompt creates a fresh session unless the user explicitly resumes
@@ -323,7 +325,7 @@ impl App {
     fn configuration_for_provider(
         &self,
         provider: &str,
-    ) -> Result<tea_core::AgentConfiguration, AppError> {
+    ) -> Result<AgentConfiguration, AppError> {
         if provider == mock::PROVIDER_ID {
             return Ok(mock::configuration());
         }
@@ -331,7 +333,7 @@ impl App {
             .workspace
             .as_ref()
             .ok_or_else(|| AppError::Setup("workspace is not initialized".into()))?;
-        let tools = tea_core::DefaultCodingTools::new(workspace)
+        let tools = tea_core::coding::DefaultCodingTools::new(workspace)
             .map_err(|error| AppError::Setup(format!("invalid --cwd: {error}")))?;
         super::host::host_configuration(tools)
     }
@@ -353,7 +355,7 @@ impl App {
                 let key = std::env::var("OPENROUTER_API_KEY").map_err(|_| {
                     AppError::Setup("OPENROUTER_API_KEY is required for OpenRouter".into())
                 })?;
-                let config = tea_core::provider::openrouter::OpenRouterConfig::try_new(key, model)
+                let config = tea_providers::openrouter::OpenRouterConfig::try_new(key, model)
                     .map_err(|error| AppError::Setup(error.to_string()))?;
                 ProviderConfiguration::OpenRouter(config)
             }
@@ -365,14 +367,14 @@ impl App {
                     .workspace
                     .as_ref()
                     .ok_or_else(|| AppError::Setup("workspace is not initialized".into()))?;
-                let host = tea_core::provider::commandcode::CommandCodeHostContext::new(
+                let host = tea_providers::commandcode::CommandCodeHostContext::new(
                     workspace.to_string_lossy(),
                     utc_date(),
                     std::env::consts::OS,
                 )
                 .map_err(|error| AppError::Setup(error.to_string()))?;
                 ProviderConfiguration::CommandCode(
-                    tea_core::provider::commandcode::CommandCodeConfig::new(key, model, host)
+                    tea_providers::commandcode::CommandCodeConfig::new(key, model, host)
                         .map_err(|error| AppError::Setup(error.to_string()))?,
                 )
             }
@@ -382,8 +384,8 @@ impl App {
                     .local_base_url()
                     .map(|value| super::runtime::os_text(value, "--local-base-url"))
                     .transpose()?
-                    .unwrap_or_else(|| tea_core::provider::local::DEFAULT_BASE_URL.to_owned());
-                let config = tea_core::provider::local::LocalConfig::try_new(base_url, model)
+                    .unwrap_or_else(|| tea_providers::local::DEFAULT_BASE_URL.to_owned());
+                let config = tea_providers::local::LocalConfig::try_new(base_url, model)
                     .map_err(|error| AppError::Setup(error.to_string()))?;
                 ProviderConfiguration::Local(config)
             }

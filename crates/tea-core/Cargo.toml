@@ -1,8 +1,8 @@
 [package]
 name = "tea-core"
 version = "1.0.0"
-edition = "2021"
-description = "Nightly Rust state-machine kernel for the Tea runtime"
+edition = "2024"
+description = "Provider-independent Tea engine with agent, runtime, harness, coding, and evolution domains"
 license = "MIT OR Apache-2.0"
 
 [lib]
@@ -11,41 +11,12 @@ path = "src/lib.rs"
 [features]
 default = []
 fixture-runner = ["dep:smol"]
-provider-commandcode = [
-    "dep:h12tiny-client-sync",
-    "dep:http",
-    "dep:percent-encoding",
-]
-provider-openrouter = [
-    "dep:h12tiny-client-sync",
-    "dep:http",
-    "dep:percent-encoding",
-]
-# Test-only endpoint injection for an offline HTTP/1.1 OpenRouter fixture. This feature is never
-# enabled by the production TUI build.
-provider-openrouter-test-support = ["provider-openrouter"]
-provider-local = [
-    "dep:h12tiny-client-sync",
-    "dep:http",
-    "dep:percent-encoding",
-]
-eval-runner = ["dep:smol", "provider-commandcode", "provider-openrouter"]
-trace = ["dep:tea-trace"]
 
 [dependencies]
 tea-protocol = { path = "../tea-protocol" }
-tea-trace = { path = "../tea-trace", optional = true }
+tea-session = { path = "../tea-session" }
+tea-trace = { path = "../tea-trace" }
 smol = { workspace = true, optional = true }
-# The provider transports use h12tiny's blocking HTTP/1.1-only client from crates.io.
-h12tiny-client-sync = {
-    package = "h12tiny-client-sync",
-    version = "0.1",
-    default-features = false,
-    features = ["tls"],
-    optional = true,
-}
-http = { version = "1", optional = true }
-percent-encoding = { version = "2", optional = true }
 
 [dev-dependencies]
 smol = { workspace = true }
@@ -58,11 +29,6 @@ rustybench = "=0.1.0"
 name = "tea-fixtures"
 path = "src/bin/tea-fixtures.rs"
 required-features = ["fixture-runner"]
-
-[[bin]]
-name = "tea-eval"
-path = "src/bin/tea-eval.rs"
-required-features = ["eval-runner"]
 
 [[bench]]
 name = "quality_memory"

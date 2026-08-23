@@ -97,6 +97,9 @@ Apply these rules in this order:
    `seq`. This makes provider chunk boundaries non-semantic. A fixture may opt into exact stream
    boundaries with `stream_comparison: "exact"`; then each declared update remains observable.
    Tool execution updates and lifecycle order are never reordered or discarded.
+9. Omit `ProviderRequestObserved` from the lifecycle event array. It is runtime telemetry, while
+   a fixture that opts into context hooks records the normalized request at the provider boundary
+   in `request_trace`; the two representations must not duplicate one semantic request.
 
 Normalization is not a license to hide behavior. Provider error codes, stop reasons, tool names,
 tool arguments, tool-result error flags, message content, usage, cancellation outcome, and event

@@ -481,8 +481,19 @@ mod tests {
     fn commits_are_main_screen_rows_written_once() {
         let mut output = Vec::new();
         let mut terminal = InlineTerminal::new(&mut output);
-        terminal.commit(&[line("settled"), line("history")]).unwrap();
-        terminal.draw_live(&[line("composer")], Size { width: 20, height: 5 }, None).unwrap();
+        terminal
+            .commit(&[line("settled"), line("history")])
+            .unwrap();
+        terminal
+            .draw_live(
+                &[line("composer")],
+                Size {
+                    width: 20,
+                    height: 5,
+                },
+                None,
+            )
+            .unwrap();
         let output = String::from_utf8(output).unwrap();
         assert_eq!(output.matches("settled").count(), 1);
         assert_eq!(output.matches("history").count(), 1);
@@ -495,8 +506,34 @@ mod tests {
     fn live_redraw_returns_to_its_origin_without_duplicate_history() {
         let mut output = Vec::new();
         let mut terminal = InlineTerminal::new(&mut output);
-        terminal.draw_live(&[line("first"), line("tail")], Size { width: 20, height: 5 }, Some(Cursor { column: 0, row: 1, visible: true })).unwrap();
-        terminal.draw_live(&[line("second")], Size { width: 20, height: 5 }, Some(Cursor { column: 0, row: 0, visible: true })).unwrap();
+        terminal
+            .draw_live(
+                &[line("first"), line("tail")],
+                Size {
+                    width: 20,
+                    height: 5,
+                },
+                Some(Cursor {
+                    column: 0,
+                    row: 1,
+                    visible: true,
+                }),
+            )
+            .unwrap();
+        terminal
+            .draw_live(
+                &[line("second")],
+                Size {
+                    width: 20,
+                    height: 5,
+                },
+                Some(Cursor {
+                    column: 0,
+                    row: 0,
+                    visible: true,
+                }),
+            )
+            .unwrap();
         let output = String::from_utf8(output).unwrap();
         assert_eq!(output.matches("first").count(), 1);
         assert_eq!(output.matches("second").count(), 1);
@@ -508,8 +545,30 @@ mod tests {
     fn tiny_sizes_and_full_width_rows_are_safe() {
         let mut output = Vec::new();
         let mut terminal = InlineTerminal::new(&mut output);
-        terminal.draw_live(&[line("abcdef")], Size { width: 0, height: 0 }, None).unwrap();
-        terminal.draw_live(&[line("abcd")], Size { width: 4, height: 1 }, Some(Cursor { column: 3, row: 0, visible: true })).unwrap();
+        terminal
+            .draw_live(
+                &[line("abcdef")],
+                Size {
+                    width: 0,
+                    height: 0,
+                },
+                None,
+            )
+            .unwrap();
+        terminal
+            .draw_live(
+                &[line("abcd")],
+                Size {
+                    width: 4,
+                    height: 1,
+                },
+                Some(Cursor {
+                    column: 3,
+                    row: 0,
+                    visible: true,
+                }),
+            )
+            .unwrap();
         let output = String::from_utf8(output).unwrap();
         assert!(output.contains("abcd\x1b[0m\r\n"));
         assert!(!output.contains("?7h"));
@@ -521,8 +580,26 @@ mod tests {
     fn modal_surface_pairs_alternate_screen_without_touching_main_mode() {
         let mut output = Vec::new();
         let mut terminal = InlineTerminal::new(&mut output);
-        terminal.draw_live(&[line("main")], Size { width: 20, height: 5 }, None).unwrap();
-        terminal.draw_surface(&[line("modal")], Size { width: 20, height: 5 }, None).unwrap();
+        terminal
+            .draw_live(
+                &[line("main")],
+                Size {
+                    width: 20,
+                    height: 5,
+                },
+                None,
+            )
+            .unwrap();
+        terminal
+            .draw_surface(
+                &[line("modal")],
+                Size {
+                    width: 20,
+                    height: 5,
+                },
+                None,
+            )
+            .unwrap();
         assert!(terminal.alternate_screen_active());
         terminal.leave_surface().unwrap();
         assert!(!terminal.alternate_screen_active());

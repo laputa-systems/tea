@@ -1,10 +1,10 @@
 //! Tool preparation, execution, update delivery, and result insertion for one run.
 
 use super::{
-    apply_after_tool_call, error_tool_result, error_tool_result_from_error, next_parallel_step,
-    next_tool_step, ParallelToolStep, PendingToolExecution, PendingToolUpdate, PendingToolUpdates,
+    ParallelToolStep, PendingToolExecution, PendingToolUpdate, PendingToolUpdates,
     PreparedToolCall, PreparedToolExecution, RunHandle, TerminalToolFailure, ToolBatchOutcome,
-    ToolStep,
+    ToolStep, apply_after_tool_call, error_tool_result, error_tool_result_from_error,
+    next_parallel_step, next_tool_step,
 };
 use crate::agent::AgentInner;
 use crate::effect::{

@@ -2,7 +2,7 @@
 //!
 //! This crate owns semantic session state, operation facts, and immutable
 //! artifacts. It deliberately has no provider, tool, executor, or Luau VM
-//! dependency. `tea-harness` will drive those effects above this boundary.
+//! dependency. `tea_core::runtime` drives those effects above this boundary.
 
 mod artifact;
 mod gc;

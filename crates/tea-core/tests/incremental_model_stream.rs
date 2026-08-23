@@ -9,13 +9,13 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
+use tea_core::Agent;
 use tea_core::event::AgentEventKind;
 use tea_core::scheduler::{
     CancellationToken, ModelEventFuture, ModelEventStream, ModelFuture, ModelProvider,
     ModelRequest, ModelStreamEvent,
 };
 use tea_core::state::{RunPhase, StopReason};
-use tea_core::Agent;
 
 #[derive(Debug, Default)]
 struct Gate {

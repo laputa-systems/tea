@@ -1,5 +1,5 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tea_core::{ThinkingLevel, Usage};
+use tea_core::state::{ThinkingLevel, Usage};
 
 /// Format only provider-reported values; missing fields remain absent rather than zero.
 pub fn format_usage(usage: &Usage) -> String {

@@ -8,7 +8,8 @@ use tea_core::scheduler::{
     CancellationToken, ModelFuture, ModelProvider, ModelRequest, ModelStream, ModelStreamEvent,
 };
 use tea_core::state::StopReason;
-use tea_core::{Agent, CoreError};
+use tea_core::error::CoreError;
+use tea_core::Agent;
 
 struct FixtureProvider {
     streams: Mutex<Vec<ModelStream>>,

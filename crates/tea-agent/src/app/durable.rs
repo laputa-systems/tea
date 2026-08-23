@@ -1,7 +1,7 @@
 //! Durable session construction and one-shot streaming for the terminal host.
 //!
 //! The host owns filesystem placement and provider configuration, while
-//! `tea-session` owns the append-only WAL and `tea-harness` owns execution.
+//! `tea-session` owns the append-only WAL and `tea-core` owns execution.
 //! This module deliberately starts every one-shot request through the same
 //! managed harness boundary used by an interactive session; it never creates
 //! a second, direct-core persistence path.
@@ -15,24 +15,27 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tea_core::compaction::AutomaticCompactionPolicy;
 use tea_core::event::AgentEventKind;
+use tea_core::harness::{
+    HarnessActor, HarnessRepository, HarnessResolver, HarnessResourceLimits, HarnessSnapshotSpec,
+    ModelHarnessProfile, SelfExtensionMode, ToolPresentationDescriptor,
+    SELF_EXTENSION_MODE_METADATA_KEY,
+};
+use tea_core::runtime::{
+    HarnessIdentity, RuntimeServices, SessionRuntime, TeaEvent, TeaEventSubscription,
+};
 use tea_core::scheduler::ModelProvider;
 use tea_core::state::{
     AgentMessage, AgentToolCall, MessageId, ModelDescriptor, SerializedJson, ThinkingLevel,
-    ToolCallId,
+    ToolCallId, Usage,
 };
 use tea_core::tool::ToolExecutionMode;
-use tea_core::AgentConfiguration;
-use tea_harness::{
-    CoreEpochTemplate, DurableHarness, HarnessActor, HarnessIdentity, HarnessManager,
-    HarnessRepository, HarnessResourceLimits, HarnessSnapshotSpec, ModelHarnessProfile,
-    SelfExtensionMode, TeaEvent, TeaEventSubscription, ToolPresentationDescriptor,
-    SELF_EXTENSION_MODE_METADATA_KEY,
-};
+use tea_core::agent::AgentConfiguration;
+use tea_luau::LuauExtensionEngine;
 use tea_protocol::JsonValue;
 use tea_session::{
-    CanonicalHashWriter, Digest, DurabilityMode, EntryId, HarnessRevisionChangedEntry,
+    reduce_lane, CanonicalHashWriter, Digest, DurabilityMode, EntryId, HarnessRevisionChangedEntry,
     JsonlSession, LaneId, ModelChangedEntry, PayloadRef, ProvisionedEntry, SessionEntry,
-    SessionHeader, SessionId, SessionSnapshot, SessionWriter, ThinkingChangedEntry, reduce_lane,
+    SessionHeader, SessionId, SessionSnapshot, SessionWriter, ThinkingChangedEntry,
     SESSION_FORMAT_VERSION,
 };
 
@@ -41,7 +44,7 @@ use super::error::AppError;
 use super::support::{parse_thinking_level as parse_thinking_level_name, thinking_level_name};
 
 /// Concrete durable supervisor used by the terminal application.
-pub(super) type HostHarness = DurableHarness<JsonlSession>;
+pub(super) type HostHarness = SessionRuntime<JsonlSession>;
 
 /// Bounded metadata shown by the terminal session picker. The complete
 /// durable snapshot remains behind the writer/reopen boundary.
@@ -133,7 +136,10 @@ pub(super) fn create_host_harness(
         };
         let artifacts: Arc<dyn tea_session::ArtifactStore> =
             Arc::new(session.artifact_store().map_err(AppError::from)?);
-        let mut repository = HarnessRepository::new(Arc::clone(&artifacts));
+        let mut repository = HarnessRepository::with_extension_engine(
+            Arc::clone(&artifacts),
+            Arc::new(LuauExtensionEngine),
+        );
         let snapshot = repository
             .stage_snapshot(snapshot_spec.clone())
             .map_err(|error| AppError::Setup(error.to_string()))?;
@@ -178,12 +184,12 @@ pub(super) fn create_host_harness(
             },
         )?;
         let manager = Arc::new(
-            HarnessManager::new(repository, template, Default::default())
+            HarnessResolver::new(repository, template, Default::default())
                 .self_extension_mode(SelfExtensionMode::Off),
         );
         let identity = HarnessIdentity::new(revision.revision_id, snapshot.id, profile.profile_id);
         let harness =
-            DurableHarness::new_with_artifact_store(session, manager, identity, artifacts)?;
+            SessionRuntime::new_with_artifact_store(session, manager, identity, artifacts)?;
         if let Err(error) = write_host_session_metadata(&directory, &harness.snapshot()?) {
             eprintln!(
                 "warning: durable session metadata cache was not written for {}: {error}",
@@ -338,7 +344,9 @@ pub(super) fn reopen_host_harness(
         .as_deref()
         .map(|value| {
             parse_thinking_level_name(value).ok_or_else(|| {
-                AppError::Setup(format!("durable session has unsupported thinking level {value:?}"))
+                AppError::Setup(format!(
+                    "durable session has unsupported thinking level {value:?}"
+                ))
             })
         })
         .transpose()?
@@ -352,14 +360,17 @@ pub(super) fn reopen_host_harness(
         automatic_compaction,
     );
     let manager = Arc::new(
-        HarnessManager::new(
-            HarnessRepository::new(Arc::clone(&artifacts)),
+        HarnessResolver::new(
+            HarnessRepository::with_extension_engine(
+                Arc::clone(&artifacts),
+                Arc::new(LuauExtensionEngine),
+            ),
             template,
             Default::default(),
         )
         .self_extension_mode(header.self_extension_mode),
     );
-    let harness = DurableHarness::reopen_with_artifact_store(session, manager, artifacts)?;
+    let harness = SessionRuntime::reopen_with_artifact_store(session, manager, artifacts)?;
     harness.verify_durable_state()?;
     Ok(Arc::new(harness))
 }
@@ -525,8 +536,8 @@ fn epoch_template(
     thinking_level: ThinkingLevel,
     compactor: Option<Arc<ProviderCompactor>>,
     automatic_compaction: AutomaticCompactionPolicy,
-) -> CoreEpochTemplate {
-    let mut template = CoreEpochTemplate::from_agent_configuration(provider, configuration)
+) -> RuntimeServices {
+    let mut template = RuntimeServices::from_agent_configuration(provider, configuration)
         .model(model)
         .thinking_level(thinking_level)
         .automatic_compaction(automatic_compaction);
@@ -986,8 +997,8 @@ fn projected_tool_content(result: &tea_session::ToolResultEntry) -> String {
         })
 }
 
-pub(super) fn core_usage(usage: &tea_session::Usage) -> tea_core::Usage {
-    tea_core::Usage {
+pub(super) fn core_usage(usage: &tea_session::Usage) -> Usage {
+    Usage {
         input_tokens: usage.input_tokens,
         output_tokens: usage.output_tokens,
         reasoning_tokens: usage.reasoning_tokens,
@@ -1061,13 +1072,13 @@ mod tests {
     use super::super::host::host_configuration;
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use tea_core::coding::DefaultCodingTools;
     use tea_core::hooks::NoHooks;
     use tea_core::scheduler::{
         CancellationToken, ModelFuture, ModelRequest, ModelStream, ModelStreamEvent,
     };
     use tea_core::state::StopReason;
     use tea_core::tool::ToolRegistry;
-    use tea_core::DefaultCodingTools;
 
     #[derive(Debug)]
     struct StopProvider;

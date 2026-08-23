@@ -11,7 +11,8 @@ opening a workspace. `DefaultCodingTools` accepts the explicit workspace root an
 adapter. The capture fixes `/fixture/workspace` only for reproducibility;
 `system_prompt_for_workspace` substitutes that one declared placeholder with the caller's already
 canonicalized workspace. For the ergonomic combined path, use
-`Agent::builder().pinned_default_coding_profile(default_tools)?`; follow it with `.tool(...)` to
+`PiDefaultCodingProfile::pinned_default()?`; compose its prompt and validated tool registry into
+`Agent::builder()` rather than using a coding-specific builder shortcut. Follow that composition with `.tool(...)` to
 replace/add a capability or `.remove_tool(...)` to omit one before `.build()`. Replacing a tool
 under the same name preserves the captured prompt contract. If a caller removes or adds a
 prompt-visible default capability, it must also supply a corresponding explicit system prompt;
@@ -28,7 +29,7 @@ The profile may be omitted entirely. A sterile profile can provide no tools and 
 replace `read`, `bash`, `edit`, `write`, `grep`, `find`, or `ls` independently. The runtime never
 knows whether an operation is local, remote, sandboxed, logged, denied, or virtual.
 
-The executable v1 factories live in `tea_core::default_tools::DefaultCodingTools`. Constructing
+The executable v1 factories live in `tea_core::coding::tools::DefaultCodingTools`. Constructing
 one requires an existing workspace directory; the constructor canonicalizes that directory and
 every operation rejects lexical, canonical, and symlink escapes. `coding_tools()` returns the
 captured active order (`read`, `bash`, `edit`, `write`), `all_tools()` returns all seven pinned

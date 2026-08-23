@@ -3,7 +3,7 @@
 Tea can evolve a session-local harness without giving a model ambient authority
 or an in-place configuration mutation.
 
-HarnessManager owns immutable trees, snapshots, candidates, and revisions. The
+HarnessResolver owns immutable trees, snapshots, candidates, and revisions. The
 tea_harness host tool accepts one guarded patch plus an explicit
 evidence/effect/risk hypothesis. It stages a closed Luau source tree, validates
 the resulting snapshot, and records a candidate. A candidate becomes active

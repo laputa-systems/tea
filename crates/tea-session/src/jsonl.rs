@@ -535,7 +535,7 @@ impl JsonlSession {
     /// Open the immutable object store colocated with this v1 session.
     ///
     /// Callers that construct a durable harness over this writer should pass
-    /// this store to `DurableHarness::new_with_artifact_store`, so every
+    /// this store to `SessionRuntime::new_with_artifact_store`, so every
     /// `tea-artifact://` locator remains valid after the JSONL writer reopens.
     pub fn artifact_store(&self) -> Result<crate::FileArtifactStore, crate::ArtifactError> {
         crate::FileArtifactStore::open(self.directory.join("objects"))

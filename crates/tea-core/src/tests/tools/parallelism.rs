@@ -854,15 +854,18 @@ fn exclusive_tool_rejects_the_entire_mixed_batch_before_any_effect_starts() {
 
         run.drive().await?;
 
-        assert!(ordinary_calls
-            .lock()
-            .expect("ordinary calls mutex")
-            .is_empty());
+        assert!(
+            ordinary_calls
+                .lock()
+                .expect("ordinary calls mutex")
+                .is_empty()
+        );
         assert_eq!(*exclusive_calls.lock().expect("exclusive calls mutex"), 0);
-        assert!(!run
-            .events()
-            .iter()
-            .any(|event| { matches!(event.kind, AgentEventKind::ToolExecutionStart { .. }) }));
+        assert!(
+            !run.events()
+                .iter()
+                .any(|event| { matches!(event.kind, AgentEventKind::ToolExecutionStart { .. }) })
+        );
         let results = agent
             .snapshot()
             .messages

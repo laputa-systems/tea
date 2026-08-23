@@ -16,7 +16,8 @@ use tea_core::state::{AgentMessage, AgentPhase, ModelDescriptor, SerializedJson,
 use tea_core::tool::{
     AgentTool, AgentToolResult, ToolCall, ToolContext, ToolFuture, ToolUpdateSink,
 };
-use tea_core::{Agent, CoreError};
+use tea_core::error::CoreError;
+use tea_core::Agent;
 use tea_protocol::JsonValue;
 
 use super::fixture::{
@@ -525,6 +526,13 @@ pub(super) async fn run_fixture(fixture: Fixture) -> Result<JsonValue, String> {
                 .filter(|event| matches!(event.kind, AgentEventKind::TurnStart { .. }))
                 .count() as u64;
             for event in &run_events {
+                // Provider-request observation is an internal bridge for
+                // durable/runtime consumers. Declarative fixtures retain the
+                // established agent lifecycle grammar; their separate request
+                // capture owns provider request assertions.
+                if matches!(event.kind, AgentEventKind::ProviderRequestObserved { .. }) {
+                    continue;
+                }
                 events.push(normalize_event(event_sequence, event, turn_offset)?);
                 event_sequence = event_sequence.saturating_add(1);
             }

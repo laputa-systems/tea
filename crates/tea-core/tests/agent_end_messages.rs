@@ -1,6 +1,8 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
+use tea_core::Agent;
 use tea_core::event::AgentEventKind;
+use tea_core::run::RunHandle;
 use tea_core::scheduler::{
     CancellationToken, ModelFuture, ModelProvider, ModelRequest, ModelStream, ModelStreamEvent,
 };
@@ -8,7 +10,6 @@ use tea_core::state::{AgentMessage, AgentToolCall, SerializedJson, StopReason, T
 use tea_core::tool::{
     AgentTool, AgentToolResult, ToolCall, ToolContext, ToolFuture, ToolUpdateSink,
 };
-use tea_core::Agent;
 
 #[derive(Debug)]
 struct ScriptedProvider {
@@ -76,7 +77,7 @@ impl AgentTool for TerminatingTool {
     }
 }
 
-fn agent_end_messages(agent_run: &tea_core::RunHandle) -> Vec<AgentMessage> {
+fn agent_end_messages(agent_run: &RunHandle) -> Vec<AgentMessage> {
     agent_run
         .events()
         .into_iter()

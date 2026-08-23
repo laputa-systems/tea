@@ -88,36 +88,33 @@ fn validate_value(
         }
     }
 
-    if let Some(enum_values) = object.get("enum").and_then(JsonValue::as_array) {
-        if !enum_values.iter().any(|candidate| candidate == value) {
+    if let Some(enum_values) = object.get("enum").and_then(JsonValue::as_array)
+        && !enum_values.iter().any(|candidate| candidate == value) {
             errors.push(ValidationFailure {
                 path: display_path(path),
                 message: "must be one of the enumerated values".to_owned(),
             });
         }
-    }
-    if let Some(const_value) = object.get("const") {
-        if const_value != value {
+    if let Some(const_value) = object.get("const")
+        && const_value != value {
             errors.push(ValidationFailure {
                 path: display_path(path),
                 message: "must equal the schema constant".to_owned(),
             });
         }
-    }
 
     if let Some(schemas) = object.get("allOf").and_then(JsonValue::as_array) {
         for schema in schemas {
             validate_value(schema, value, path, errors);
         }
     }
-    if let Some(schemas) = object.get("anyOf").and_then(JsonValue::as_array) {
-        if !schemas.iter().any(|schema| is_valid(schema, value)) {
+    if let Some(schemas) = object.get("anyOf").and_then(JsonValue::as_array)
+        && !schemas.iter().any(|schema| is_valid(schema, value)) {
             errors.push(ValidationFailure {
                 path: display_path(path),
                 message: "must match at least one schema".to_owned(),
             });
         }
-    }
     if let Some(schemas) = object.get("oneOf").and_then(JsonValue::as_array) {
         let matches = schemas
             .iter()
@@ -130,14 +127,13 @@ fn validate_value(
             });
         }
     }
-    if let Some(schema) = object.get("not") {
-        if is_valid(schema, value) {
+    if let Some(schema) = object.get("not")
+        && is_valid(schema, value) {
             errors.push(ValidationFailure {
                 path: display_path(path),
                 message: "must not match the schema".to_owned(),
             });
         }
-    }
 
     match value {
         JsonValue::Object(value) => validate_object(object, value, path, errors),
@@ -222,8 +218,8 @@ fn validate_array(
             );
         }
     }
-    if let Some(unique) = schema.get("uniqueItems").and_then(JsonValue::as_bool) {
-        if unique
+    if let Some(unique) = schema.get("uniqueItems").and_then(JsonValue::as_bool)
+        && unique
             && value
                 .iter()
                 .enumerate()
@@ -234,7 +230,6 @@ fn validate_array(
                 message: "must contain unique items".to_owned(),
             });
         }
-    }
     check_count(schema, "minItems", value.len(), path, "items", errors);
     check_count(schema, "maxItems", value.len(), path, "items", errors);
 }
@@ -446,30 +441,26 @@ fn validate_schema(schema: &JsonValue) -> Result<(), String> {
     if let Some(not) = object.get("not") {
         validate_schema(not)?;
     }
-    if let Some(enum_values) = object.get("enum") {
-        if enum_values.as_array().is_none() {
+    if let Some(enum_values) = object.get("enum")
+        && enum_values.as_array().is_none() {
             return Err("enum must be an array".to_owned());
         }
-    }
     for keyword in ["minItems", "maxItems", "minLength", "maxLength"] {
-        if let Some(value) = object.get(keyword) {
-            if value.as_u64().is_none() {
+        if let Some(value) = object.get(keyword)
+            && value.as_u64().is_none() {
                 return Err(format!("{keyword} must be a nonnegative integer"));
             }
-        }
     }
     for keyword in ["minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum"] {
-        if let Some(value) = object.get(keyword) {
-            if value.as_f64().is_none() {
+        if let Some(value) = object.get(keyword)
+            && value.as_f64().is_none() {
                 return Err(format!("{keyword} must be a number"));
             }
-        }
     }
-    if let Some(unique_items) = object.get("uniqueItems") {
-        if unique_items.as_bool().is_none() {
+    if let Some(unique_items) = object.get("uniqueItems")
+        && unique_items.as_bool().is_none() {
             return Err("uniqueItems must be a boolean".to_owned());
         }
-    }
     Ok(())
 }
 

@@ -22,10 +22,10 @@ revision: prompts, plugin source trees, capability bindings, tool presentation,
 and policy fingerprints.
 
 **Harness manager** — The session-local resolver that validates immutable
-lineage, resolves a revision into a core epoch template, and persists the
+lineage, resolves a revision into a provider-independent `ResolvedHarness`, and persists the
 catalog needed for reopen.
 
-**Durable harness** — `tea_harness::DurableHarness`. The only host execution
+**Durable harness** — `tea_core::runtime::SessionRuntime`. The only host execution
 surface for durable prompts, recovery, artifact verification, and collection.
 
 **Artifact** — Immutable content-addressed bytes stored outside the session

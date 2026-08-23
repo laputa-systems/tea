@@ -4,6 +4,7 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
+use tea_core::Agent;
 use tea_core::event::AgentEventKind;
 use tea_core::scheduler::{
     CancellationToken, ModelFuture, ModelProvider, ModelRequest, ModelStream, ModelStreamEvent,
@@ -13,7 +14,6 @@ use tea_core::tool::{
     AgentTool, AgentToolResult, ToolCall, ToolContext, ToolExecutionMode, ToolFuture, ToolUpdate,
     ToolUpdateSink,
 };
-use tea_core::Agent;
 
 #[derive(Debug)]
 struct ScriptedProvider {
@@ -207,9 +207,11 @@ fn callback_update_is_emitted_while_parallel_tools_are_still_pending() {
             )
         })
         .expect("callback update should be emitted before either tool settles");
-    assert!(!events
-        .iter()
-        .any(|event| { matches!(event.kind, AgentEventKind::ToolExecutionEnd { .. }) }));
+    assert!(
+        !events
+            .iter()
+            .any(|event| { matches!(event.kind, AgentEventKind::ToolExecutionEnd { .. }) })
+    );
     assert!(update_index > 0);
 
     updates_gate.release();

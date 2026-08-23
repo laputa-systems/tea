@@ -429,8 +429,10 @@ impl App {
             return Ok(());
         };
         self.set_thinking_level(level)?;
-        self.state
-            .notice(format!("reasoning effort set to {}", thinking_level_name(level)));
+        self.state.notice(format!(
+            "reasoning effort set to {}",
+            thinking_level_name(level)
+        ));
         Ok(())
     }
 }

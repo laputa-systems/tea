@@ -1,6 +1,6 @@
 # Harness evolution
 
-tea-evolve is the durable, capability-neutral control plane for evaluating
+`tea_core::evolution` is the durable, capability-neutral control plane for evaluating
 immutable harness candidates. It cannot run an agent, mutate a session, invoke
 a provider, or activate a revision by itself.
 

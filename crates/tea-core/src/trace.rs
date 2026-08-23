@@ -764,9 +764,11 @@ mod tests {
                 })
                 .collect();
             assert_eq!(compactions.len(), 3);
-            assert!(compactions
-                .iter()
-                .all(|record| record.compaction_id == id.to_string()));
+            assert!(
+                compactions
+                    .iter()
+                    .all(|record| record.compaction_id == id.to_string())
+            );
             assert_eq!(
                 compactions[0].strategy_id.as_deref(),
                 Some("cache_replay_summary_v1")

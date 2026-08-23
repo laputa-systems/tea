@@ -3,16 +3,19 @@ use std::sync::{Arc, Mutex};
 use tea_core::compaction::{
     AutomaticCompactionPolicy, AutomaticCompactionReason, AutomaticCompactionRequest,
     CompactionContext, CompactionError, CompactionFuture, CompactionRejection, CompactionResult,
-    CompactionTerminalOutcome, Compactor, ContextBudgetSource, OverflowRecovery,
+    CompactionLifecycleRecord, CompactionTerminalOutcome, Compactor, ContextBudgetSource,
+    OverflowRecovery,
 };
 use tea_core::scheduler::{
     CancellationToken, ModelFuture, ModelProvider, ModelRequest, ModelStream, ModelStreamEvent,
 };
-use tea_core::state::{AgentToolCall, SerializedJson, StopReason, ToolCallId, Usage};
+use tea_core::event::{AgentEventKind, AutomaticCompactionOutcome};
+use tea_core::state::{AgentMessage, AgentToolCall, SerializedJson, StopReason, ToolCallId, Usage};
 use tea_core::tool::{
     AgentTool, AgentToolResult, ToolCall, ToolContext, ToolFuture, ToolUpdateSink,
 };
-use tea_core::{Agent, AgentMessage, CoreError};
+use tea_core::error::CoreError;
+use tea_core::Agent;
 
 #[derive(Default)]
 struct RecordingProvider {
@@ -541,9 +544,11 @@ fn overflow_error_keeps_the_last_valid_usage_checkpoint_for_compaction() {
         agent.start_prompt("start")?.drive().await?;
         let request = compactor.calls.lock().expect("compactor mutex poisoned")[0].clone();
         assert_eq!(request.reason, AutomaticCompactionReason::Overflow);
-        assert!(request
-            .estimated_tokens_before
-            .is_some_and(|tokens| tokens > 800));
+        assert!(
+            request
+                .estimated_tokens_before
+                .is_some_and(|tokens| tokens > 800)
+        );
         Ok::<(), CoreError>(())
     })
     .expect("overflow must not reset valid usage accounting");
@@ -674,10 +679,10 @@ fn cancelled_automatic_compaction_leaves_the_pre_transaction_transcript_unchange
         assert!(matches!(messages[2], AgentMessage::ToolResult { ref content, .. } if content == "raw tool output"));
         assert!(matches!(
             run.events().iter().find_map(|event| match &event.kind {
-                tea_core::AgentEventKind::AutomaticCompactionEnd { outcome, .. } => Some(outcome),
+                AgentEventKind::AutomaticCompactionEnd { outcome, .. } => Some(outcome),
                 _ => None,
             }),
-            Some(tea_core::AutomaticCompactionOutcome::Cancelled)
+            Some(AutomaticCompactionOutcome::Cancelled)
         ));
         Ok::<(), CoreError>(())
     })
@@ -737,8 +742,8 @@ fn automatic_rejection_gates_are_typed_and_non_mutating() {
             ));
             assert!(run.events().iter().any(|event| matches!(
                 event.kind,
-                tea_core::AgentEventKind::CompactionLifecycle {
-                    record: tea_core::CompactionLifecycleRecord::Terminal {
+                AgentEventKind::CompactionLifecycle {
+                    record: CompactionLifecycleRecord::Terminal {
                         outcome: CompactionTerminalOutcome::Rejected(rejection),
                         ..
                     }

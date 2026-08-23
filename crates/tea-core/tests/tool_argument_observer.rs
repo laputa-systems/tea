@@ -2,6 +2,7 @@
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
+use tea_core::Agent;
 use tea_core::event::{AgentEvent, AgentEventKind, EventObserver, ObserverFuture};
 use tea_core::scheduler::{
     CancellationToken, ModelFuture, ModelProvider, ModelRequest, ModelStream, ModelStreamEvent,
@@ -10,7 +11,6 @@ use tea_core::state::{AgentPhase, AgentToolCall, SerializedJson, StopReason, Too
 use tea_core::tool::{
     AgentTool, AgentToolResult, ToolCall, ToolContext, ToolFuture, ToolUpdateSink,
 };
-use tea_core::Agent;
 
 struct ScriptedProvider {
     streams: Mutex<VecDeque<ModelStream>>,
@@ -172,9 +172,10 @@ fn tool_start_observer_receives_exact_arguments_before_dispatch_and_settlement()
         assert_eq!(start.as_str(), r#"{"secret":"value"}"#);
         assert_eq!(run.snapshot().phase, tea_core::state::RunPhase::Succeeded);
         assert_eq!(agent.snapshot().phase, AgentPhase::Idle);
-        assert!(run
-            .events()
-            .last()
-            .is_some_and(|event| matches!(event.kind, AgentEventKind::AgentEnd { .. })));
+        assert!(
+            run.events()
+                .last()
+                .is_some_and(|event| matches!(event.kind, AgentEventKind::AgentEnd { .. }))
+        );
     });
 }

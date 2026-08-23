@@ -445,7 +445,7 @@ const MAX_CONTEXT_PATCH_ANNOTATIONS: usize = 32;
 const MAX_CONTEXT_ANNOTATION_BYTES: usize = 4 * 1024;
 
 /// Decode the metadata-only ABI-v1 context policy result. Entry IDs are
-/// intentionally opaque strings here: `tea-harness` maps them to one branch
+/// intentionally opaque strings here: `tea_core::runtime` maps them to one branch
 /// and rejects references outside that branch or any protected invariant.
 pub(super) fn parse_context_projection(
     value: Value,

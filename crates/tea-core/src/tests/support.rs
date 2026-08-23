@@ -433,11 +433,10 @@ impl EventObserver for AbortOnAgentStartObserver {
         event: &'a AgentEvent,
         _cancellation: CancellationToken,
     ) -> ObserverFuture<'a> {
-        if matches!(event.kind, AgentEventKind::AgentStart) {
-            if let Some(agent) = self.agent.lock().expect("test agent mutex").clone() {
+        if matches!(event.kind, AgentEventKind::AgentStart)
+            && let Some(agent) = self.agent.lock().expect("test agent mutex").clone() {
                 agent.abort();
             }
-        }
         Box::pin(std::future::ready(Ok(())))
     }
 }

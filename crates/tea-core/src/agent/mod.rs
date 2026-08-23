@@ -14,7 +14,7 @@ use crate::scheduler::{CancellationToken, ModelProvider};
 use crate::state::{AgentMessage, AgentPhase, AgentSnapshot, AgentState, ModelDescriptor};
 use crate::tool::ToolRegistry;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{channel, sync_channel, Receiver, Sender, SyncSender, TryRecvError};
+use std::sync::mpsc::{Receiver, Sender, SyncSender, TryRecvError, channel, sync_channel};
 use std::sync::{Arc, Mutex, RwLock};
 use std::task::{Poll, Waker};
 

@@ -11,21 +11,29 @@ the core state machine.
 tea-protocol  -> serializable model/message/tool/event/error values
         ^
         |
-tea-core      -> Agent state, Run lifecycle, loop, queues, hooks, tool scheduler
+tea-session   -> durable session format, reducers, and immutable artifact store
+        |
+tea-core      -> Agent, durable runtime, harness lineage, coding profile, evolution
         |
         +--> tea-trace   (optional immutable event consumer)
+        ^                         ^
+        |                         |
+tea-providers -> concrete provider adapters   tea-luau -> optional policy adapter
         |
-        +--> tea-luau    (optional policy adapter; depends on core only)
+tea-agent     -> explicit terminal/application composition root
 ```
 
 The workspace crates are:
 
 | Crate | Owns | Must not own |
 | --- | --- | --- |
-| `tea-protocol` | `ModelDescriptor`, messages/content, tool definitions/results, events, usage, stop reasons, typed wire errors | Scheduler state, provider SDKs, Luau types, filesystem APIs |
-| `tea-core` | Agent FSM, one-active-run ownership, context conversion boundary, model stream trait, tool validation/scheduling, hooks/queues, cancellation and settlement | HTTP/provider implementations, cwd/home/config discovery, sessions, TUI, VM/runtime, Tokio executor |
+| `tea-protocol` | Shared `JsonValue`, canonical JSON encoding, and JSON conversion seams | Runtime IDs/messages/events, scheduler state, provider SDKs, Luau types, filesystem APIs |
+| `tea-session` | Versioned session format, reducers, immutable artifact storage, export/reopen verification | Agent/provider execution, provider SDKs, policy VMs, UI state |
+| `tea-core` | Agent FSM, durable `runtime::SessionRuntime`, immutable `harness` lineage, coding profile/tools, evolution control, context conversion, tool scheduling, hooks/queues, cancellation and settlement | HTTP/provider implementations, cwd/home/config discovery, TUI, Luau VM/runtime, Tokio executor |
 | `tea-trace` | Immutable event-to-linear-episode recorder, redaction and caller-selected JSONL/CBOR sinks | Agent state, session tree, replay mutations, sink-driven behavior |
+| `tea-providers` | Concrete provider wire adapters and evaluation runner | Core state, durable session writes, UI ownership |
 | `tea-luau` (optional policy) | Hermetic VM, capability manifest/modules, policy hooks/tools, script error/limit translation | Core lifecycle/state/scheduling, ambient OS authority, event-loop ownership |
+| `tea-agent` | Application composition of provider adapter, Luau extension engine, core runtime, and terminal host | Reusable core/domain contracts |
 
 `PiDefaultCodingProfile` is owned by `tea-core` alongside the explicit profile/tool adapters.
 The profile implementation and its checked-in capture depend only on the core/protocol boundaries
@@ -70,13 +78,27 @@ and numeric bounds); unsupported draft-specific keywords are rejected as invalid
 rather than ignored. A tool receives a call ID, validated JSON, cancellation, and an update sink.
 Standard coding tools are ordinary tools behind explicit profile operation ports.
 
-The optional `tea_core::provider` module is a separate adapter layer behind explicit Cargo
+The optional `tea_providers` crate is a separate adapter layer behind explicit Cargo
 features. `provider-openrouter`, `provider-commandcode`, and `provider-local` are opt-in blocking
 HTTP/1.1 transports backed by Rustls/Graviola, with caller-supplied keys and no ambient configuration
 discovery; the provider-owned worker thread keeps that blocking I/O outside the core executor. The
 evaluation runner selects one only through its explicit provider argument. They do not change the default
 build or the `ModelProvider` contract. See
 [provider adapters](provider-adapters.md) for their wire and context boundaries.
+
+## Durable harness composition
+
+`tea_core::harness` owns immutable source trees, snapshots, revisions, candidates,
+profiles, capability bindings, and the `HarnessResolver`. Resolving a revision produces
+a provider-independent `ResolvedHarness`: prompt, extension tools, hooks, and pinned
+policy values. `tea_core::runtime::SessionRuntime` owns session writes, recovery,
+activation, effects, artifacts, and event publication. It combines a `ResolvedHarness`
+with host-owned `RuntimeServices` (provider transport, trusted base tools, model
+selection, and compactor) only to construct an epoch `Agent`.
+
+The `tea-agent` crate is the explicit composition root: it selects `tea-providers`
+and `tea-luau::LuauExtensionEngine` and passes both through the narrow core ports.
+Consequently `tea-core` has no dependency on either concrete provider code or Luau.
 
 ## Ownership and state transitions
 

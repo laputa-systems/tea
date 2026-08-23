@@ -844,9 +844,9 @@ dependencies = [
  "rustix",
  "smol",
  "tea-core",
- "tea-harness",
  "tea-luau",
  "tea-protocol",
+ "tea-providers",
  "tea-session",
  "tea-tui",
 ]
@@ -855,30 +855,8 @@ dependencies = [
 name = "tea-core"
 version = "1.0.0"
 dependencies = [
- "h12tiny-client-sync",
- "http",
- "percent-encoding",
  "rustybench",
  "smol",
- "tea-protocol",
- "tea-trace",
-]
-
-[[package]]
-name = "tea-evolve"
-version = "1.0.0"
-dependencies = [
- "tea-harness",
- "tea-session",
-]
-
-[[package]]
-name = "tea-harness"
-version = "1.0.0"
-dependencies = [
- "smol",
- "tea-core",
- "tea-luau",
  "tea-protocol",
  "tea-session",
  "tea-trace",
@@ -898,6 +876,18 @@ name = "tea-protocol"
 version = "1.0.0"
 dependencies = [
  "miniserde",
+]
+
+[[package]]
+name = "tea-providers"
+version = "1.0.0"
+dependencies = [
+ "h12tiny-client-sync",
+ "http",
+ "percent-encoding",
+ "smol",
+ "tea-core",
+ "tea-protocol",
 ]
 
 [[package]]

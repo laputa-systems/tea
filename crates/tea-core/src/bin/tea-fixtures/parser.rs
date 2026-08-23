@@ -291,7 +291,7 @@ fn parse_tool_response(value: &JsonValue) -> Result<FixtureToolResponse, String>
                 kind => {
                     return Err(format!(
                         "host tool call enqueue_during_execution.kind must be steer or follow_up, got {kind:?}"
-                    ))
+                    ));
                 }
             }
         }
@@ -324,7 +324,7 @@ fn parse_tool_response(value: &JsonValue) -> Result<FixtureToolResponse, String>
             None => false,
             Some(JsonValue::Bool(value)) => *value,
             Some(_) => {
-                return Err("host tool call field \"cancel_after_update\" must be a boolean".into())
+                return Err("host tool call field \"cancel_after_update\" must be a boolean".into());
             }
         },
         enqueue_during_execution,

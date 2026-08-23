@@ -1,9 +1,9 @@
 use crate::editor::EditorError;
 use crate::terminal::TerminalError;
 use std::fmt;
-use tea_core::provider::RegistryError;
-use tea_core::CoreError;
-use tea_harness::HarnessError;
+use tea_core::harness::HarnessError;
+use tea_core::error::CoreError;
+use tea_providers::RegistryError;
 use tea_session::{ArtifactError, SessionError as DurableSessionError};
 
 use super::cli::CliError;

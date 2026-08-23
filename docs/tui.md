@@ -1,6 +1,6 @@
 # Terminal host
 
-The tea terminal is a presentation layer over one managed DurableHarness. It
+The tea terminal is a presentation layer over one managed SessionRuntime. It
 does not own a transcript format, an extension registry, or a second agent
 loop.
 
@@ -11,7 +11,7 @@ longer keeps a rendered transcript viewport. The presentation projection has a
 small explicit frontier:
 
 ```text
-DurableHarness/session
+SessionRuntime/session
         ↓
 semantic AppState transcript
         ↓

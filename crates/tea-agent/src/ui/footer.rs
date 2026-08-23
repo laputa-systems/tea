@@ -1,7 +1,7 @@
 //! Footer projection helpers.
 
 use crate::app::AppState;
-use tea_core::provider::ProviderRegistry;
+use tea_providers::ProviderRegistry;
 
 /// The two compact footer lines owned by tea's presentation state.
 #[derive(Clone, Debug, Eq, PartialEq)]

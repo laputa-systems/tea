@@ -2,11 +2,11 @@ use crate::composer::Composer;
 use std::collections::BTreeMap;
 use std::num::NonZeroU64;
 use tea_core::event::{
-    AgentEventKind, AutomaticCompactionOutcome, CompactionOutcome, ProviderRequestSkipReason,
+    AgentEvent, AgentEventKind, AutomaticCompactionOutcome, CompactionOutcome,
+    ProviderRequestSkipReason,
 };
-use tea_core::provider::ProviderRegistry;
-use tea_core::state::{AgentMessage, ToolCallId};
-use tea_core::{AgentEvent, ModelDescriptor, ThinkingLevel, Usage};
+use tea_core::state::{AgentMessage, ModelDescriptor, ThinkingLevel, ToolCallId, Usage};
+use tea_providers::ProviderRegistry;
 
 use super::commands;
 use super::durable::DurableSessionSummary;
@@ -230,7 +230,7 @@ impl AppState {
         match &event.kind {
             AgentEventKind::AgentStart => self.status = UiStatus::Active,
             AgentEventKind::MessageStart { message } => {
-                if let tea_core::AgentMessage::User { content, .. } = message {
+                if let AgentMessage::User { content, .. } = message {
                     self.push_entry(
                         sequence,
                         TranscriptEntry::User {
@@ -243,7 +243,7 @@ impl AppState {
                 message,
                 text_delta,
             } => {
-                if let (tea_core::AgentMessage::Assistant { .. }, Some(delta)) =
+                if let (AgentMessage::Assistant { .. }, Some(delta)) =
                     (message, text_delta)
                 {
                     if let Some(index) = self.streaming_line {
@@ -265,7 +265,7 @@ impl AppState {
                 }
             }
             AgentEventKind::MessageEnd { message } => {
-                if let tea_core::AgentMessage::Assistant {
+                if let AgentMessage::Assistant {
                     content,
                     error_message,
                     ..
@@ -720,10 +720,16 @@ impl AppState {
             stats.push(format!("${cost}"));
         }
         if let Some(tokens) = self.reported_usage.input_tokens {
-            stats.push(format!("↑{}", super::support::format_compact_tokens(tokens)));
+            stats.push(format!(
+                "↑{}",
+                super::support::format_compact_tokens(tokens)
+            ));
         }
         if let Some(tokens) = self.reported_usage.output_tokens {
-            stats.push(format!("↓{}", super::support::format_compact_tokens(tokens)));
+            stats.push(format!(
+                "↓{}",
+                super::support::format_compact_tokens(tokens)
+            ));
         }
         if let Some(tokens) = self.reported_usage.reasoning_tokens {
             stats.push(format!(
@@ -732,10 +738,16 @@ impl AppState {
             ));
         }
         if let Some(tokens) = self.reported_usage.cache_read_tokens {
-            stats.push(format!("R{}", super::support::format_compact_tokens(tokens)));
+            stats.push(format!(
+                "R{}",
+                super::support::format_compact_tokens(tokens)
+            ));
         }
         if let Some(tokens) = self.reported_usage.cache_write_tokens {
-            stats.push(format!("W{}", super::support::format_compact_tokens(tokens)));
+            stats.push(format!(
+                "W{}",
+                super::support::format_compact_tokens(tokens)
+            ));
         }
         if let (Some(input), Some(read), Some(write)) = (
             self.reported_usage.input_tokens,
@@ -744,10 +756,7 @@ impl AppState {
         ) {
             let prompt_tokens = input.saturating_add(read).saturating_add(write);
             if prompt_tokens != 0 {
-                stats.push(format!(
-                    "CH{}%",
-                    read.saturating_mul(100) / prompt_tokens
-                ));
+                stats.push(format!("CH{}%", read.saturating_mul(100) / prompt_tokens));
             }
         }
         [hint, stats.join(" · ")]
@@ -1104,7 +1113,6 @@ impl AppState {
             .saturating_add(lines)
             .min(self.surface_lines.len().saturating_sub(1));
     }
-
 }
 
 fn full_transcript_detail_lines(entries: &[TranscriptEntry]) -> Vec<String> {

@@ -8,8 +8,7 @@ members = [
     "crates/tea-protocol",
     "crates/tea-trace",
     "crates/tea-session",
-    "crates/tea-harness",
-    "crates/tea-evolve",
+    "crates/tea-providers",
 ]
 
 # Crate manifests own their dependencies. The runtime policy is executor-

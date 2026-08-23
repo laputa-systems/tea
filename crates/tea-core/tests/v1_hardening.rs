@@ -10,8 +10,8 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use tea_core::agent::Agent;
+use tea_core::coding::{PiDefaultCodingProfile, ProfileSpec};
 use tea_core::event::AgentEventKind;
-use tea_core::profile::{PiDefaultCodingProfile, ProfileSpec};
 use tea_core::scheduler::{
     CancellationToken, ModelFuture, ModelProvider, ModelRequest, ModelStream, ModelStreamEvent,
 };
@@ -493,7 +493,7 @@ fn profile_composition_matrix_keeps_prompt_explicit_while_tools_replace_or_remov
         schema: schema(),
     });
     let replaced = Agent::builder()
-        .profile(&profile)
+        .system_prompt(profile.system_prompt())
         .tools(registry.clone())
         .tool(replacement)
         .build();
@@ -514,7 +514,7 @@ fn profile_composition_matrix_keeps_prompt_explicit_while_tools_replace_or_remov
     );
 
     let removed = Agent::builder()
-        .profile(&profile)
+        .system_prompt(profile.system_prompt())
         .tools(registry)
         .remove_tool("beta")
         .build();

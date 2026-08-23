@@ -5,10 +5,11 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
-use tea_core::default_tools::{
+use tea_core::coding::DefaultCodingTools;
+use tea_core::coding::{
     CodingOperations, CommandOutput, DirectoryEntry, EntryMetadata, GrepOptions, OperationError,
     OperationFuture,
 };
@@ -16,7 +17,6 @@ use tea_core::error::ToolError;
 use tea_core::scheduler::CancellationToken;
 use tea_core::state::{SerializedJson, ToolCallId};
 use tea_core::tool::{AgentTool, ToolCall, ToolContext, ToolUpdateSink};
-use tea_core::DefaultCodingTools;
 
 static NEXT_WORKSPACE: AtomicU64 = AtomicU64::new(0);
 
@@ -120,7 +120,7 @@ impl CodingOperations for FailingOperations {
         _root: &'a Path,
         _pattern: &'a str,
         _options: GrepOptions,
-    ) -> OperationFuture<'a, Vec<tea_core::default_tools::GrepMatch>> {
+    ) -> OperationFuture<'a, Vec<tea_core::coding::GrepMatch>> {
         self.fail()
     }
 
@@ -129,7 +129,7 @@ impl CodingOperations for FailingOperations {
         _command: &'a str,
         _cwd: &'a Path,
         _timeout_seconds: Option<f64>,
-        _environment: &'a tea_core::default_tools::CommandEnvironment,
+        _environment: &'a tea_core::coding::CommandEnvironment,
         _cancellation: CancellationToken,
         _updates: ToolUpdateSink,
     ) -> OperationFuture<'a, CommandOutput> {
@@ -160,9 +160,10 @@ fn standard_tools_succeed_in_an_explicit_temp_workspace() {
     )
     .unwrap();
     assert!(bash.content.starts_with("hello"));
-    assert!(bash
-        .content
-        .contains(tools.workspace().as_path().to_string_lossy().as_ref()));
+    assert!(
+        bash.content
+            .contains(tools.workspace().as_path().to_string_lossy().as_ref())
+    );
 
     let edit = execute(
         tools.edit().as_ref(),
@@ -174,9 +175,11 @@ fn standard_tools_succeed_in_an_explicit_temp_workspace() {
         edit.content,
         "Successfully replaced 1 block(s) in src/lib.rs."
     );
-    assert!(fs::read_to_string(workspace.path().join("src/lib.rs"))
-        .unwrap()
-        .contains("changed"));
+    assert!(
+        fs::read_to_string(workspace.path().join("src/lib.rs"))
+            .unwrap()
+            .contains("changed")
+    );
 
     let write = execute(
         tools.write().as_ref(),

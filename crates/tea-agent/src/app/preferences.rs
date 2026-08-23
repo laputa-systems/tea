@@ -9,7 +9,7 @@ use std::fs::OpenOptions;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use tea_core::ModelDescriptor;
+use tea_core::state::ModelDescriptor;
 use tea_protocol::{JsonNumber, JsonValue};
 
 const PREFERENCE_FILE: &str = "last-model.json";

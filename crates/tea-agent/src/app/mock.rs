@@ -7,7 +7,6 @@
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tea_core::provider::{openai::OpenAiContextHook, ConfiguredProvider};
 use tea_core::scheduler::{
     CancellationToken, ModelEventFuture, ModelEventStream, ModelFuture, ModelProvider,
     ModelRequest, ModelStreamEvent,
@@ -17,8 +16,9 @@ use tea_core::tool::{
     AgentTool, AgentToolResult, ToolCall, ToolContext, ToolFuture, ToolRegistry, ToolUpdate,
     ToolUpdateSink,
 };
-use tea_core::AgentConfiguration;
+use tea_core::agent::AgentConfiguration;
 use tea_protocol::JsonValue;
+use tea_providers::{openai::OpenAiContextHook, ConfiguredProvider};
 
 pub(super) const PROVIDER_ID: &str = "mock";
 pub(super) const DEFAULT_MODEL_ID: &str = "mock";
@@ -129,12 +129,10 @@ impl ModelProvider for MockProvider {
                 }
             }
         };
-        Box::pin(std::future::ready(
-            Ok(Box::new(MockStream {
-                events,
-                initial_delay: Some(self.thinking_delay()),
-            }) as _),
-        ))
+        Box::pin(std::future::ready(Ok(Box::new(MockStream {
+            events,
+            initial_delay: Some(self.thinking_delay()),
+        }) as _)))
     }
 }
 
@@ -145,10 +143,7 @@ impl MockProvider {
             .duration_since(UNIX_EPOCH)
             .map(|duration| duration.subsec_nanos() as usize)
             .unwrap_or_default();
-        sequence
-            .wrapping_mul(1_103_515_245)
-            .wrapping_add(nanos)
-            % 3
+        sequence.wrapping_mul(1_103_515_245).wrapping_add(nanos) % 3
     }
 
     fn thinking_delay(&self) -> Duration {
