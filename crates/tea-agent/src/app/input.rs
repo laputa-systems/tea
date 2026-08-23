@@ -7,7 +7,7 @@ use super::commands;
 use super::error::AppError;
 use super::runtime::App;
 use super::state::UiSurface;
-use super::support::format_footer_usage;
+use super::support::{parse_thinking_level, thinking_level_name};
 
 #[derive(Clone, Copy)]
 enum QueueDelivery {
@@ -312,9 +312,7 @@ impl App {
                     self.open_model_picker();
                 }
             }
-            "/cost" => {
-                self.show_cost_surface();
-            }
+            "/thinking" => self.dispatch_thinking(words.next(), words.next())?,
             "/steer" => self.enqueue_command_prompt(
                 input.strip_prefix("/steer").unwrap_or_default(),
                 QueueDelivery::Steering,
@@ -387,14 +385,32 @@ impl App {
         Ok(())
     }
 
-    fn show_cost_surface(&mut self) {
-        self.state.set_surface_lines(
-            UiSurface::Cost,
-            vec![format!(
-                "cost total: {}",
-                format_footer_usage(&self.state.reported_usage)
-            )],
-        );
+    fn dispatch_thinking(
+        &mut self,
+        value: Option<&str>,
+        extra: Option<&str>,
+    ) -> Result<(), AppError> {
+        let Some(value) = value else {
+            self.state.notice(format!(
+                "usage: /thinking <off|minimal|low|medium|high|xhigh|max> (current {})",
+                thinking_level_name(self.state.thinking_level())
+            ));
+            return Ok(());
+        };
+        if extra.is_some() {
+            self.state.notice("usage: /thinking <level>");
+            return Ok(());
+        }
+        let Some(level) = parse_thinking_level(value) else {
+            self.state.notice(format!(
+                "unknown thinking level {value}; expected off, minimal, low, medium, high, xhigh, or max"
+            ));
+            return Ok(());
+        };
+        self.set_thinking_level(level)?;
+        self.state
+            .notice(format!("reasoning effort set to {}", thinking_level_name(level)));
+        Ok(())
     }
 }
 
@@ -402,7 +418,7 @@ fn help_surface_lines() -> Vec<String> {
     const GROUPS: &[(&str, &[&str])] = &[
         ("General", &["/help", "/quit"]),
         ("Session", &["/new", "/session", "/resume"]),
-        ("Runtime", &["/model", "/cost"]),
+        ("Runtime", &["/model", "/thinking"]),
         ("Queue", &["/steer", "/followup"]),
     ];
 

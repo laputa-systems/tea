@@ -443,15 +443,19 @@ pub struct Usage {
 }
 
 impl Usage {
-    /// Accumulate known categories without converting unknown measurements to zero.
+    /// Accumulate known categories without converting unknown measurements to zero. Exact
+    /// reported costs are added as decimal text.
     pub fn saturating_add_assign(&mut self, other: &Self) {
         self.input_tokens = add_optional(self.input_tokens, other.input_tokens);
         self.output_tokens = add_optional(self.output_tokens, other.output_tokens);
         self.reasoning_tokens = add_optional(self.reasoning_tokens, other.reasoning_tokens);
         self.cache_read_tokens = add_optional(self.cache_read_tokens, other.cache_read_tokens);
         self.cache_write_tokens = add_optional(self.cache_write_tokens, other.cache_write_tokens);
-        if other.cost.is_some() {
-            self.cost = other.cost.clone();
+        if let Some(cost) = other.cost.as_deref() {
+            self.cost = Some(match self.cost.as_deref() {
+                Some(previous) => decimal_add(previous, cost),
+                None => cost.to_owned(),
+            });
         }
     }
 }
@@ -463,6 +467,79 @@ fn add_optional(left: Option<u64>, right: Option<u64>) -> Option<u64> {
         (None, Some(right)) => Some(right),
         (None, None) => None,
     }
+}
+
+fn decimal_add(lhs: &str, rhs: &str) -> String {
+    let (left_digits, left_scale) = decimal_parts(lhs);
+    let (right_digits, right_scale) = decimal_parts(rhs);
+    let scale = left_scale.max(right_scale);
+    let mut left = left_digits;
+    let mut right = right_digits;
+    left.extend(std::iter::repeat_n('0', scale - left_scale));
+    right.extend(std::iter::repeat_n('0', scale - right_scale));
+    let mut output = String::new();
+    let mut carry = 0u8;
+    let mut left = left.bytes().rev();
+    let mut right = right.bytes().rev();
+    loop {
+        let left = left.next();
+        let right = right.next();
+        if left.is_none() && right.is_none() {
+            break;
+        }
+        let sum = left.unwrap_or(b'0') - b'0' + right.unwrap_or(b'0') - b'0' + carry;
+        output.push(char::from(b'0' + sum % 10));
+        carry = sum / 10;
+    }
+    if carry != 0 {
+        output.push(char::from(b'0' + carry));
+    }
+    let mut output: String = output.chars().rev().collect();
+    if scale != 0 {
+        if output.len() <= scale {
+            let zeros = "0".repeat(scale + 1 - output.len());
+            output = format!("{zeros}{output}");
+        }
+        output.insert(output.len() - scale, '.');
+    }
+    decimal_normalize(&output)
+}
+
+fn decimal_parts(value: &str) -> (String, usize) {
+    let (coefficient, exponent) = value
+        .split_once(['e', 'E'])
+        .map(|(coefficient, exponent)| (coefficient, exponent.parse::<i64>().unwrap_or(0)))
+        .unwrap_or((value, 0));
+    let (whole, fraction) = coefficient.split_once('.').unwrap_or((coefficient, ""));
+    let mut digits = String::with_capacity(whole.len() + fraction.len());
+    digits.push_str(whole.trim_start_matches('+'));
+    digits.push_str(fraction);
+    let scale = (fraction.len() as i64 - exponent).max(0) as usize;
+    let mut digits = digits.trim_start_matches('0').to_owned();
+    if digits.is_empty() {
+        digits.push('0');
+    }
+    (digits, scale)
+}
+
+fn decimal_normalize(value: &str) -> String {
+    let (digits, scale) = decimal_parts(value);
+    if scale == 0 {
+        return digits;
+    }
+    let mut output = if digits.len() <= scale {
+        format!("0.{}{}", "0".repeat(scale - digits.len()), digits)
+    } else {
+        let position = digits.len() - scale;
+        format!("{}.{}", &digits[..position], &digits[position..])
+    };
+    while output.ends_with('0') {
+        output.pop();
+    }
+    if output.ends_with('.') {
+        output.pop();
+    }
+    output
 }
 
 /// One operation record in the lane-owned write-ahead log.

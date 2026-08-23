@@ -86,6 +86,10 @@ impl CliOptions {
         self.thinking.unwrap_or_default()
     }
 
+    pub(super) fn set_thinking_level(&mut self, level: ThinkingLevel) {
+        self.thinking = Some(level);
+    }
+
     fn set(&mut self, slot: OptionSlot, value: OsString) -> Result<(), CliError> {
         let destination = match slot {
             OptionSlot::Provider => &mut self.provider,

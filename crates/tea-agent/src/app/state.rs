@@ -6,7 +6,7 @@ use tea_core::event::{
 };
 use tea_core::provider::ProviderRegistry;
 use tea_core::state::{AgentMessage, ToolCallId};
-use tea_core::{AgentEvent, ModelDescriptor, Usage};
+use tea_core::{AgentEvent, ModelDescriptor, ThinkingLevel, Usage};
 
 use super::commands;
 use super::durable::DurableSessionSummary;
@@ -64,7 +64,6 @@ pub enum UiSurface {
     ModelPicker,
     CustomModel,
     SessionPicker,
-    Cost,
     /// Full-transcript/detail inspection surface.
     ToolDetail,
 }
@@ -92,6 +91,8 @@ pub enum UiStatus {
     Active,
     /// A concise local notice is displayed.
     Notice(String),
+    /// A local error is displayed with error styling.
+    Error(String),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -147,7 +148,7 @@ pub struct AppState {
     /// Draft saved when history navigation first leaves the live composer.
     pub(super) history_draft: Option<String>,
     pub(super) surface: UiSurface,
-    /// Payload for data-bearing temporary surfaces such as help and cost.
+    /// Payload for data-bearing temporary surfaces such as help.
     pub(super) surface_lines: Vec<String>,
     /// First unwrapped payload line shown by the temporary surface viewer.
     /// It is separate from transcript scrolling so return-to-live preserves
@@ -156,6 +157,8 @@ pub struct AppState {
     pub(super) slash_completion: Option<SlashCompletion>,
     /// Field-wise provider accounting observed directly from the lossless event stream.
     pub(super) reported_usage: Usage,
+    /// Reasoning effort used by future prompts.
+    pub(super) thinking_level: ThinkingLevel,
 }
 
 /// State for the literal-prefix slash completion menu.
@@ -330,10 +333,10 @@ impl AppState {
                 );
                 self.active_tool_lines.remove(tool_call_id);
             }
-            // Usage is projected by the attached snapshot/footer and `/cost`; a transcript row
+            // Usage is projected by the attached snapshot/footer; a transcript row
             // would duplicate accounting and blur unknown values with zeroes.
             AgentEventKind::ModelTurnUsage { accounting } => {
-                self.reported_usage.merge(accounting.usage.clone());
+                self.reported_usage.accumulate(accounting.usage.clone());
             }
             AgentEventKind::CompactionStart { .. } => {
                 self.status = UiStatus::Active;
@@ -638,7 +641,7 @@ impl AppState {
     pub(crate) fn footer_lines(&self, registry: &ProviderRegistry) -> [String; 2] {
         let selected = self.selected_model.as_ref();
         let model = selected
-            .map(|model| compact_model_label(&model.model))
+            .map(|model| format!("{}/{}", model.provider, model.model))
             .unwrap_or_else(|| "provider/model unknown".into());
         let hint = if self.composer.text().starts_with('/') {
             format!(
@@ -651,9 +654,16 @@ impl AppState {
             )
         } else {
             match &self.status {
-                UiStatus::Idle => format!("yolo · {model}"),
-                UiStatus::Active => format!("⏺ Asking · yolo · {model}"),
-                UiStatus::Notice(ref notice) => format!("yolo · {model} · {notice}"),
+                UiStatus::Active => format!(
+                    "⏺ Asking · {model} · effort {}",
+                    super::support::thinking_level_name(self.thinking_level)
+                ),
+                UiStatus::Idle | UiStatus::Notice(_) | UiStatus::Error(_) => {
+                    format!(
+                        "{model} · effort {}",
+                        super::support::thinking_level_name(self.thinking_level)
+                    )
+                }
             }
         };
         let capacity = self
@@ -664,48 +674,75 @@ impl AppState {
                     .and_then(|model| registry.provider(&model.provider)?.model(&model.model))
                     .and_then(|model| model.context_window)
             });
-        let compaction = if self.automatic_compaction_enabled {
-            "automatic compaction available"
-        } else {
-            "automatic compaction unavailable"
-        };
-        let context = match &self.context_estimate {
-            Some(estimate) => format!(
-                "context {}% used ({}/{}; {} messages); {compaction}",
-                format_context_percent(estimate.tokens, capacity),
-                estimate
-                    .tokens
-                    .map(|tokens| tokens.to_string())
-                    .unwrap_or_else(|| "unknown".into()),
-                capacity
-                    .map(|tokens| tokens.to_string())
-                    .unwrap_or_else(|| "unknown".into()),
-                estimate.message_count
-            ),
-            None => format!(
-                "context unknown% used (unknown/{}); {compaction}",
-                capacity
-                    .map(|tokens| tokens.to_string())
-                    .unwrap_or_else(|| "unknown".into())
-            ),
-        };
-        let telemetry = self
-            .reported_usage
-            .is_reported()
-            .then_some(&self.reported_usage)
-            .filter(|usage| {
-                usage.input_tokens.is_some()
-                    || usage.output_tokens.is_some()
-                    || usage.reasoning_tokens.is_some()
-                    || usage.cache_read_tokens.is_some()
-                    || usage.cache_write_tokens.is_some()
-                    || usage.cost.is_some()
-            })
-            .map(super::support::format_footer_usage);
-        let context = telemetry
-            .map(|usage| format!("{context}; {usage}"))
-            .unwrap_or(context);
-        [hint, context]
+        let context = format!(
+            "ctx {}%/{}{}",
+            self.context_estimate
+                .as_ref()
+                .and_then(|estimate| estimate.tokens)
+                .map(|tokens| format_context_percent(Some(tokens), capacity))
+                .unwrap_or_else(|| "?".into()),
+            capacity
+                .map(super::support::format_compact_tokens)
+                .unwrap_or_else(|| "?".into()),
+            if self.automatic_compaction_enabled {
+                " (auto)"
+            } else {
+                ""
+            }
+        );
+        let mut stats = vec![context];
+        if let Some(cost) = self.reported_usage.cost.as_deref() {
+            stats.push(format!("${cost}"));
+        }
+        if let Some(tokens) = self.reported_usage.input_tokens {
+            stats.push(format!("↑{}", super::support::format_compact_tokens(tokens)));
+        }
+        if let Some(tokens) = self.reported_usage.output_tokens {
+            stats.push(format!("↓{}", super::support::format_compact_tokens(tokens)));
+        }
+        if let Some(tokens) = self.reported_usage.reasoning_tokens {
+            stats.push(format!(
+                "reason {}",
+                super::support::format_compact_tokens(tokens)
+            ));
+        }
+        if let Some(tokens) = self.reported_usage.cache_read_tokens {
+            stats.push(format!("R{}", super::support::format_compact_tokens(tokens)));
+        }
+        if let Some(tokens) = self.reported_usage.cache_write_tokens {
+            stats.push(format!("W{}", super::support::format_compact_tokens(tokens)));
+        }
+        if let (Some(input), Some(read), Some(write)) = (
+            self.reported_usage.input_tokens,
+            self.reported_usage.cache_read_tokens,
+            self.reported_usage.cache_write_tokens,
+        ) {
+            let prompt_tokens = input.saturating_add(read).saturating_add(write);
+            if prompt_tokens != 0 {
+                stats.push(format!(
+                    "CH{}%",
+                    read.saturating_mul(100) / prompt_tokens
+                ));
+            }
+        }
+        [hint, stats.join(" · ")]
+    }
+
+    pub(crate) fn set_thinking_level(&mut self, level: ThinkingLevel) {
+        self.thinking_level = level;
+    }
+
+    pub(crate) fn thinking_level(&self) -> ThinkingLevel {
+        self.thinking_level
+    }
+
+    /// Return the transient footer notice separately from the stable model line.
+    pub(crate) fn footer_notice(&self) -> Option<(&str, bool)> {
+        match &self.status {
+            UiStatus::Notice(notice) => Some((notice, false)),
+            UiStatus::Error(error) => Some((error, true)),
+            UiStatus::Idle | UiStatus::Active => None,
+        }
     }
 
     /// Return v1 picker lines for the renderer, if an overlay is active.
@@ -814,6 +851,10 @@ impl AppState {
 
     pub(super) fn notice(&mut self, text: impl Into<String>) {
         self.status = UiStatus::Notice(text.into());
+    }
+
+    pub(super) fn error(&mut self, text: impl Into<String>) {
+        self.status = UiStatus::Error(text.into());
     }
 
     pub(crate) fn welcome_line(&mut self) {
@@ -1007,16 +1048,4 @@ fn format_context_percent(tokens: Option<u64>, capacity: Option<u64>) -> String 
         }
         _ => "unknown".into(),
     }
-}
-
-fn compact_model_label(model: &str) -> String {
-    let bare = model.rsplit('/').next().unwrap_or(model);
-    bare.strip_prefix("claude-").map_or_else(
-        || bare.to_owned(),
-        |name| {
-            name.replace("opus-", "opus ")
-                .replace("sonnet-", "sonnet ")
-                .replace("haiku-", "haiku ")
-        },
-    )
 }

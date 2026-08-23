@@ -32,12 +32,13 @@ use tea_protocol::JsonValue;
 use tea_session::{
     CanonicalHashWriter, Digest, DurabilityMode, EntryId, HarnessRevisionChangedEntry,
     JsonlSession, LaneId, ModelChangedEntry, PayloadRef, ProvisionedEntry, SessionEntry,
-    SessionHeader, SessionId, SessionSnapshot, SessionWriter, ThinkingChangedEntry,
+    SessionHeader, SessionId, SessionSnapshot, SessionWriter, ThinkingChangedEntry, reduce_lane,
     SESSION_FORMAT_VERSION,
 };
 
 use super::compaction::ProviderCompactor;
 use super::error::AppError;
+use super::support::{parse_thinking_level as parse_thinking_level_name, thinking_level_name};
 
 /// Concrete durable supervisor used by the terminal application.
 pub(super) type HostHarness = DurableHarness<JsonlSession>;
@@ -329,11 +330,24 @@ pub(super) fn reopen_host_harness(
     }
     let artifacts: Arc<dyn tea_session::ArtifactStore> =
         Arc::new(session.artifact_store().map_err(AppError::from)?);
+    let reduction = reduce_lane(snapshot.clone(), LaneId::main())
+        .map_err(|error| AppError::Setup(error.to_string()))?;
+    let thinking_level = reduction
+        .effective_configuration
+        .thinking_level
+        .as_deref()
+        .map(|value| {
+            parse_thinking_level_name(value).ok_or_else(|| {
+                AppError::Setup(format!("durable session has unsupported thinking level {value:?}"))
+            })
+        })
+        .transpose()?
+        .unwrap_or(header.thinking_level);
     let template = epoch_template(
         provider,
         configuration,
         selected_model,
-        header.thinking_level,
+        thinking_level,
         compactor,
         automatic_compaction,
     );
@@ -941,18 +955,6 @@ fn host_session_metadata(
     })
 }
 
-fn thinking_level_name(level: ThinkingLevel) -> &'static str {
-    match level {
-        ThinkingLevel::Off => "off",
-        ThinkingLevel::Minimal => "minimal",
-        ThinkingLevel::Low => "low",
-        ThinkingLevel::Medium => "medium",
-        ThinkingLevel::High => "high",
-        ThinkingLevel::XHigh => "xhigh",
-        ThinkingLevel::Max => "max",
-    }
-}
-
 fn parse_thinking_level(value: &str) -> Result<ThinkingLevel, AppError> {
     match value {
         "off" => Ok(ThinkingLevel::Off),
@@ -984,7 +986,7 @@ fn projected_tool_content(result: &tea_session::ToolResultEntry) -> String {
         })
 }
 
-fn core_usage(usage: &tea_session::Usage) -> tea_core::Usage {
+pub(super) fn core_usage(usage: &tea_session::Usage) -> tea_core::Usage {
     tea_core::Usage {
         input_tokens: usage.input_tokens,
         output_tokens: usage.output_tokens,

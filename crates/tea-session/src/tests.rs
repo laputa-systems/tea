@@ -4279,3 +4279,23 @@ fn append_parent_chain<S: SessionWriter>(
     )?;
     Ok(vec![first, second])
 }
+
+#[test]
+fn usage_totals_add_decimal_costs_without_filling_unknown_fields() {
+    let mut total = Usage {
+        input_tokens: Some(2),
+        cost: Some("0.20".into()),
+        ..Usage::default()
+    };
+    total.saturating_add_assign(&Usage {
+        input_tokens: Some(3),
+        output_tokens: Some(4),
+        cost: Some("0.005".into()),
+        ..Usage::default()
+    });
+
+    assert_eq!(total.input_tokens, Some(5));
+    assert_eq!(total.output_tokens, Some(4));
+    assert_eq!(total.reasoning_tokens, None);
+    assert_eq!(total.cost.as_deref(), Some("0.205"));
+}

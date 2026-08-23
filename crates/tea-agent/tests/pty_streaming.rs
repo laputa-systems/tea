@@ -109,7 +109,10 @@ fn real_binary_renders_openrouter_text_before_the_mock_response_settles() {
         .wait_for_screen(
             terminal.deadline(Duration::from_secs(3)),
             "model readiness",
-            |screen| screen.contains("tea") && screen.contains("yolo · gpt-5.6-luna"),
+            |screen| {
+                screen.contains("tea")
+                && screen.contains("openrouter/openai/gpt-5.6-luna")
+            },
         )
         .expect("model selection should render");
     let active = terminal.terminal_state();
@@ -134,7 +137,7 @@ fn real_binary_renders_openrouter_text_before_the_mock_response_settles() {
             "narrow redraw",
             |screen| {
                 screen.size() == Size::new(40, 10).expect("constant narrow terminal size")
-                    && screen.contains("yolo · gpt-5.6-luna")
+                    && screen.contains("openrouter/openai/gpt-5.6-luna")
             },
         )
         .expect("application remains rendered after terminal resize");
@@ -183,7 +186,7 @@ fn real_binary_renders_openrouter_text_before_the_mock_response_settles() {
         .wait_for_screen(
             terminal.deadline(Duration::from_secs(3)),
             "idle after completion",
-            |screen| screen.contains("yolo · gpt-5.6-luna"),
+            |screen| screen.contains("openrouter/openai/gpt-5.6-luna"),
         )
         .expect("application should become idle");
     terminal
@@ -261,7 +264,7 @@ fn real_binary_keeps_native_multiline_editing_and_history_inside_a_pty() {
             "local model readiness",
             |screen| {
                 screen.contains("tea")
-                    && screen.contains("yolo · Laguna-XS-2.1-5bit")
+                    && screen.contains("local/Laguna-XS-2.1-5bit")
                     && screen.row(2).is_some_and(|row| row.starts_with("┃"))
             },
         )

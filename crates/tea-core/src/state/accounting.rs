@@ -55,6 +55,22 @@ impl Usage {
             self.cost = update.cost;
         }
     }
+
+    /// Accumulate one provider report into session totals without turning unknown fields into
+    /// zero. Reported decimal costs are added exactly as decimal text.
+    pub fn accumulate(&mut self, update: Self) {
+        add_usage(&mut self.input_tokens, update.input_tokens);
+        add_usage(&mut self.output_tokens, update.output_tokens);
+        add_usage(&mut self.reasoning_tokens, update.reasoning_tokens);
+        add_usage(&mut self.cache_read_tokens, update.cache_read_tokens);
+        add_usage(&mut self.cache_write_tokens, update.cache_write_tokens);
+        if let Some(cost) = update.cost.as_deref() {
+            self.cost = Some(match self.cost.as_deref() {
+                Some(previous) => decimal_add(previous, cost),
+                None => cost.to_owned(),
+            });
+        }
+    }
 }
 
 /// Accounting attached to one settled model turn.
@@ -134,8 +150,15 @@ fn decimal_add(lhs: &str, rhs: &str) -> String {
     right.extend(std::iter::repeat_n('0', scale - right_scale));
     let mut output = String::new();
     let mut carry = 0u8;
-    for (left, right) in left.bytes().rev().zip(right.bytes().rev()) {
-        let sum = left - b'0' + right - b'0' + carry;
+    let mut left = left.bytes().rev();
+    let mut right = right.bytes().rev();
+    loop {
+        let left = left.next();
+        let right = right.next();
+        if left.is_none() && right.is_none() {
+            break;
+        }
+        let sum = left.unwrap_or(b'0') - b'0' + right.unwrap_or(b'0') - b'0' + carry;
         output.push(char::from(b'0' + sum % 10));
         carry = sum / 10;
     }
@@ -188,4 +211,28 @@ fn decimal_normalize(value: &str) -> String {
         output.pop();
     }
     output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Usage;
+
+    #[test]
+    fn accumulation_adds_reported_fields_without_filling_unknowns() {
+        let mut total = Usage {
+            input_tokens: Some(2),
+            cost: Some("0.20".into()),
+            ..Usage::default()
+        };
+        total.accumulate(Usage {
+            input_tokens: Some(3),
+            output_tokens: Some(4),
+            cost: Some("0.005".into()),
+            ..Usage::default()
+        });
+        assert_eq!(total.input_tokens, Some(5));
+        assert_eq!(total.output_tokens, Some(4));
+        assert_eq!(total.reasoning_tokens, None);
+        assert_eq!(total.cost.as_deref(), Some("0.205"));
+    }
 }

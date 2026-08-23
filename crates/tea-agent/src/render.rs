@@ -54,7 +54,12 @@ impl RenderLine {
     }
 }
 
-fn frame_for(state: &AppState, width: u16, height: u16) -> FrameLayout {
+fn frame_for(
+    state: &AppState,
+    registry: &ProviderRegistry,
+    width: u16,
+    height: u16,
+) -> FrameLayout {
     let desired_composer_rows =
         VisualLayout::measure(state.composer().text(), state.composer().cursor(), width)
             .rows
@@ -74,6 +79,7 @@ fn frame_for(state: &AppState, width: u16, height: u16) -> FrameLayout {
     // Measure exactly the rows that `activity_lines` will paint so the fixed
     // footer never overlaps live status output.
     let activity_rows = activity_lines(state).len();
+    let footer_rows = footer_render_line_count(state, registry, width);
     frame_layout::plan_flow(
         width,
         height,
@@ -81,7 +87,7 @@ fn frame_for(state: &AppState, width: u16, height: u16) -> FrameLayout {
         activity_rows,
         composer_rows,
         menu_rows,
-        usize::from(menu_rows == 0),
+        if menu_rows == 0 { footer_rows } else { 0 },
     )
 }
 
@@ -92,7 +98,7 @@ pub fn render(state: &AppState, registry: &ProviderRegistry, width: u16, height:
     }
     let mut grid = Grid::new(width, height);
     let theme = Theme::default();
-    let regions = frame_for(state, width, height);
+    let regions = frame_for(state, registry, width, height);
     let transcript = wrapped_transcript(state, regions.transcript.width);
     let visible_rows = regions.transcript.height as usize;
     let start = if state.follows_output() {
@@ -150,17 +156,19 @@ pub fn render(state: &AppState, registry: &ProviderRegistry, width: u16, height:
     }
 
     if regions.hint.height != 0 {
-        for (row, status) in footer_lines(state, registry).into_iter().enumerate() {
+        for (row, status) in footer_render_lines(state, registry, regions.hint.width)
+            .into_iter()
+            .enumerate()
+        {
             if row >= regions.hint.height as usize {
                 break;
             }
-            put_text(
+            put_line(
                 &mut grid,
                 regions.hint.x,
                 regions.hint.y + row as u16,
                 regions.hint.width,
                 &status,
-                theme.style(Role::Muted),
             );
         }
     }
@@ -191,6 +199,76 @@ fn footer_lines(state: &AppState, registry: &ProviderRegistry) -> [String; 2] {
     lines
 }
 
+fn footer_render_line_count(state: &AppState, registry: &ProviderRegistry, width: u16) -> usize {
+    let [primary, secondary] = footer_lines(state, registry);
+    wrap_raw_text(&primary, width).len()
+        + state
+        .footer_notice()
+        .map(|(notice, _)| wrap_raw_text(notice, width).len())
+        .unwrap_or(0)
+        + wrap_raw_text(&secondary, width).len()
+}
+
+fn footer_render_lines(
+    state: &AppState,
+    registry: &ProviderRegistry,
+    width: u16,
+) -> Vec<RenderLine> {
+    let [primary, secondary] = footer_lines(state, registry);
+    let mut lines = wrap_footer_primary(&primary, width);
+    if let Some((notice, is_error)) = state.footer_notice() {
+        let style = if is_error {
+            Theme::default().style(Role::Error)
+        } else {
+            Theme::default().style(Role::Muted)
+        };
+        lines.extend(wrap_lines(notice, width, style));
+    }
+    lines.extend(wrap_lines(
+        &secondary,
+        width,
+        Theme::default().style(Role::Muted),
+    ));
+    lines
+}
+
+fn wrap_footer_primary(text: &str, width: u16) -> Vec<RenderLine> {
+    let muted = Theme::default().style(Role::Muted);
+    let model = Theme::default().style(Role::Model);
+    let model_range = text
+        .find("⏺ Asking · ")
+        .and_then(|prefix| {
+            let start = prefix + "⏺ Asking · ".len();
+            text[start..]
+                .find(" · effort")
+                .map(|length| (start, start + length))
+        })
+        .or_else(|| {
+            text.find(" · effort")
+                .map(|end| (0, end))
+        });
+    let mut source_offset = 0;
+    wrap_raw_text(text, width)
+        .into_iter()
+        .map(|line| {
+            let mut styles = Vec::with_capacity(line.chars().count());
+            for character in line.chars() {
+                let found = text[source_offset..]
+                    .find(character)
+                    .map(|offset| source_offset + offset)
+                    .unwrap_or(source_offset);
+                let style = model_range
+                    .is_some_and(|(start, end)| (start..end).contains(&found))
+                    .then_some(model)
+                    .unwrap_or(muted);
+                styles.push(style);
+                source_offset = found.saturating_add(character.len_utf8());
+            }
+            RenderLine::styled(line, muted, styles)
+        })
+        .collect()
+}
+
 fn render_surface(state: &AppState, registry: &ProviderRegistry, width: u16, height: u16) -> Grid {
     let mut grid = Grid::new(width, height);
     let theme = Theme::default();
@@ -204,11 +282,6 @@ fn render_surface(state: &AppState, registry: &ProviderRegistry, width: u16, hei
                 "  /help  show keybindings and commands".into(),
             ]
         }),
-        UiSurface::Cost if payload.is_some() => payload.clone().unwrap_or_default(),
-        UiSurface::Cost => {
-            let [primary, secondary] = footer_lines(state, registry);
-            vec!["Cost and context".into(), String::new(), primary, secondary]
-        }
         UiSurface::ToolDetail => payload.unwrap_or_else(|| vec!["No transcript yet.".into()]),
         UiSurface::ModelPicker | UiSurface::CustomModel | UiSurface::SessionPicker => state
             .picker_lines_visible(registry, usize::MAX)
@@ -329,7 +402,8 @@ fn slash_menu_lines(state: &AppState, width: u16) -> Vec<RenderLine> {
 
 /// Return the count and available row count used by scrolling calculations.
 pub fn transcript_metrics(state: &AppState, width: u16, height: u16) -> (usize, usize) {
-    let regions = frame_for(state, width, height);
+    let registry = ProviderRegistry::new();
+    let regions = frame_for(state, &registry, width, height);
     (
         wrapped_transcript(state, regions.transcript.width).len(),
         regions.transcript.height as usize,
@@ -349,7 +423,8 @@ pub fn composer_cursor_position(state: &AppState, width: u16, height: u16) -> Op
     if !matches!(state.surface(), UiSurface::None) {
         return (width > 2).then_some((2, 0));
     }
-    let regions = frame_for(state, width, height);
+    let registry = ProviderRegistry::new();
+    let regions = frame_for(state, &registry, width, height);
     if regions.composer.height == 0 {
         return None;
     }
@@ -1189,7 +1264,8 @@ mod tests {
         let mut state = AppState::new();
         state.welcome_line();
         let grid = render(&state, &ProviderRegistry::new(), 80, 24);
-        let regions = frame_for(&state, 80, 24);
+        let registry = ProviderRegistry::new();
+        let regions = frame_for(&state, &registry, 80, 24);
         assert_eq!(
             grid.get(regions.composer.x, regions.composer.y)
                 .expect("composer cell")
@@ -1206,6 +1282,43 @@ mod tests {
     }
 
     #[test]
+    fn footer_model_identity_uses_yellow_for_the_provider_model_segment() {
+        let state = AppState::new();
+        let registry = ProviderRegistry::new();
+        let grid = render(&state, &registry, 80, 8);
+        let regions = frame_for(&state, &registry, 80, 8);
+        let footer = state.footer_lines(&registry);
+        let primary = &footer[0];
+        let model_start = primary
+            .find("⏺ Asking · ")
+            .map(|prefix| prefix + "⏺ Asking · ".len())
+            .unwrap_or(0);
+        assert_eq!(
+            grid.get(regions.hint.x + model_start as u16, regions.hint.y)
+                .expect("model footer cell")
+                .style
+                .foreground,
+            Some(Color::Yellow)
+        );
+    }
+
+    #[test]
+    fn footer_renders_the_calm_session_stats_line() {
+        let state = AppState::new();
+        let registry = ProviderRegistry::new();
+        let grid = render(&state, &registry, 80, 8);
+        let regions = frame_for(&state, &registry, 80, 8);
+        let row = (0..regions.hint.width)
+            .filter_map(|column| grid.get(regions.hint.x + column, regions.hint.y + 1))
+            .map(|cell| cell.symbol)
+            .collect::<String>()
+            .trim_end()
+            .to_owned();
+
+        assert_eq!(row, state.footer_lines(&registry)[1]);
+    }
+
+    #[test]
     fn inline_slash_menu_uses_the_captured_minimal_geometry() {
         let mut state = AppState::new();
         state.welcome_line();
@@ -1213,7 +1326,7 @@ mod tests {
         state.update_slash_completion(vec![
             "/help".into(),
             "/model".into(),
-            "/cost".into(),
+            "/thinking".into(),
             "/session".into(),
             "/new".into(),
             "/quit".into(),
@@ -1240,7 +1353,7 @@ mod tests {
             .composer_mut()
             .replace_from_editor("one\ntwo\nthree\nfour\nfive");
         let grid = render(&state, &ProviderRegistry::new(), 20, 5);
-        let regions = frame_for(&state, 20, 5);
+        let regions = frame_for(&state, &ProviderRegistry::new(), 20, 5);
         assert_eq!(
             grid.get(0, regions.composer.y)
                 .expect("visible composer rail")

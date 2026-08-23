@@ -20,9 +20,9 @@ const COMMANDS: &[CommandSpec] = &[
         allowed_while_active: false,
     },
     CommandSpec {
-        name: "/cost",
-        help: "show provider-reported usage and cost",
-        allowed_while_active: true,
+        name: "/thinking",
+        help: "select reasoning effort",
+        allowed_while_active: false,
     },
     CommandSpec {
         name: "/session",
@@ -87,7 +87,7 @@ mod tests {
                 .all(|other| other.name != command.name));
         }
         assert_eq!(COMMANDS.len(), 9);
-        assert!(find("/steer").is_some_and(|command| command.allowed_while_active));
         assert!(find("/model").is_some_and(|command| !command.allowed_while_active));
+        assert!(find("/thinking").is_some_and(|command| !command.allowed_while_active));
     }
 }

@@ -17,6 +17,7 @@ use super::host::host_configuration;
 use super::preferences::load_last_model;
 use super::state::{AppState, UiStatus};
 use super::support::composer_cursor;
+use tea_core::ThinkingLevel;
 use std::sync::Arc;
 
 /// Assembled v1 terminal application.
@@ -132,6 +133,8 @@ impl App {
         let home = resolve_tea_home(self.options.tea_home())?;
         self.configuration = Some(configuration);
         self.tea_home = Some(home);
+        self.state
+            .set_thinking_level(self.options.thinking_level());
         self.state.welcome_line();
 
         let explicit_provider = self.options.provider().map(OsStr::to_owned);
@@ -167,16 +170,17 @@ impl App {
             {
                 let provider = model.provider.clone();
                 let model_id = model.model.clone();
+                self.state.selected_model = Some(model);
                 if let Err(error) = self.select_model(provider, model_id) {
                     self.state
-                        .notice(format!("last model could not be restored: {error}"));
+                        .error(format!("last model could not be restored: {error}"));
                 }
                 true
             }
             Ok(Some(_)) | Ok(None) => false,
             Err(error) => {
                 self.state
-                    .notice(format!("last model could not be read: {error}"));
+                    .error(format!("last model could not be read: {error}"));
                 true
             }
         }
@@ -316,6 +320,22 @@ impl App {
             || self.durable_task.is_some()
     }
 
+    pub(super) fn set_thinking_level(&mut self, level: ThinkingLevel) -> Result<(), AppError> {
+        if self.agent_is_active() {
+            self.state
+                .notice("thinking changes require an idle agent");
+            return Ok(());
+        }
+        if let Some(harness) = self.durable_harness.as_ref() {
+            harness
+                .replace_thinking_level(level)
+                .map_err(|error| AppError::Setup(error.to_string()))?;
+        }
+        self.options.set_thinking_level(level);
+        self.state.set_thinking_level(level);
+        Ok(())
+    }
+
     /// Lazily create the one immutable managed harness for this terminal
     /// session after provider/model selection. Construction persists the
     /// initial revision before returning, so callers can immediately route a
@@ -414,15 +434,15 @@ impl App {
             self.compactor.clone(),
             automatic_compaction,
         )?;
+        self.state.set_thinking_level(harness.thinking_level()?);
         let snapshot = harness.snapshot()?;
         let messages = super::durable::project_host_messages(&snapshot)?;
         self.state.restore_messages(&messages);
         self.durable_subscription = Some(harness.subscribe_events()?);
-        let recovery = tea_session::reduce_lane(snapshot, tea_session::LaneId::main())
-            .map_err(|error| AppError::Setup(error.to_string()))?
-            .lane_state
-            .active_operation
-            .is_some();
+        let reduction = tea_session::reduce_lane(snapshot, tea_session::LaneId::main())
+            .map_err(|error| AppError::Setup(error.to_string()))?;
+        self.state.reported_usage = super::durable::core_usage(&reduction.usage_totals);
+        let recovery = reduction.lane_state.active_operation.is_some();
         self.durable_harness = Some(Arc::clone(&harness));
         self.submitted_prompt = None;
         self.state.close_surface();

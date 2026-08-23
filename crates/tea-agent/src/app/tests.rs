@@ -1,6 +1,7 @@
 use super::compaction::ProviderCompactor;
 use super::state::ContextEstimate;
 use super::*;
+use crate::grid::Color;
 use std::ffi::OsString;
 use std::fs;
 use std::num::NonZeroU64;
@@ -637,6 +638,68 @@ fn startup_does_not_open_model_picker_without_a_saved_selection() {
 }
 
 #[test]
+fn restoration_error_has_a_wrapped_red_footer_line() {
+    let mut state = AppState::new();
+    state.error(
+        "last model could not be restored: OPENROUTER_API_KEY is required for OpenRouter",
+    );
+
+    let grid = crate::render::render(&state, &tea_core::provider::ProviderRegistry::new(), 40, 8);
+    let row = |y: u16| {
+        (0..40)
+            .filter_map(|column| grid.get(column, y))
+            .map(|cell| cell.symbol)
+            .collect::<String>()
+            .trim_end()
+            .to_owned()
+    };
+
+    assert_eq!(row(2), "provider/model unknown · effort off");
+    assert_eq!(row(3), "last model could not be restored:");
+    assert_eq!(row(4), "OPENROUTER_API_KEY is required for");
+    assert_eq!(row(5), "OpenRouter");
+    assert_eq!(
+        grid.get(0, 4)
+            .expect("error footer cell")
+            .style
+            .foreground,
+        Some(Color::Red)
+    );
+}
+
+#[test]
+fn failed_saved_model_restore_keeps_the_provider_and_model_visible() {
+    let tea_home = test_tea_home("failed-last-model");
+    let saved = ModelDescriptor {
+        provider: "missing-provider".into(),
+        model: "missing-model".into(),
+        revision: None,
+    };
+    super::preferences::save_last_model(&tea_home, &saved)
+        .expect("test model preference should save");
+    let options = CliOptions::parse(
+        [
+            "tea",
+            "--tea-home",
+            tea_home.to_str().expect("UTF-8 test path"),
+        ]
+        .map(OsString::from),
+    )
+    .expect("startup options parse");
+    let mut app = App::new(options);
+
+    app.assemble_host().expect("host should assemble");
+
+    assert_eq!(app.state().selected_model.as_ref(), Some(&saved));
+    assert_eq!(
+        app.state().footer_lines(&app.registry)[0],
+        "missing-provider/missing-model · effort off"
+    );
+    assert!(matches!(app.state().status(), UiStatus::Error(_)));
+    let _ = fs::remove_dir_all(tea_home);
+}
+
+#[test]
 fn selected_model_is_saved_and_restored_without_starting_the_picker() {
     let tea_home = test_tea_home("last-model");
     let options = CliOptions::parse(
@@ -892,19 +955,6 @@ fn accounting_does_not_render_unknown_as_zero() {
         }),
         "out 0"
     );
-    assert_eq!(
-        support::format_footer_usage(&Usage::default()),
-        "in unknown out unknown reasoning unknown cache-read unknown cache-write unknown cost unknown"
-    );
-    assert_eq!(
-        support::format_footer_usage(&Usage {
-            cache_read_tokens: Some(0),
-            cache_write_tokens: Some(7),
-            cost: Some("0.000001".into()),
-            ..Usage::default()
-        }),
-        "in unknown out unknown reasoning unknown cache-read 0 cache-write 7 cost 0.000001"
-    );
 }
 
 #[test]
@@ -925,8 +975,56 @@ fn usage_events_update_footer_projection_without_transcript_noise() {
             },
         },
     });
+    state.apply_event(&tea_core::AgentEvent {
+        run_id: tea_core::RunId(1),
+        sequence: tea_core::EventSequence(2),
+        kind: tea_core::event::AgentEventKind::ModelTurnUsage {
+            accounting: tea_core::state::ModelTurnAccounting {
+                run_id: tea_core::RunId(1),
+                turn_id: tea_core::TurnId(2),
+                model: None,
+                usage: Usage {
+                    input_tokens: Some(5),
+                    cache_read_tokens: Some(7),
+                    cost: Some("0.25".into()),
+                    ..Usage::default()
+                },
+            },
+        },
+    });
     assert!(state.transcript().is_empty());
-    assert!(state.footer_lines(&tea_core::provider::ProviderRegistry::new())[1].contains("out 3"));
+    assert!(state
+        .footer_lines(&tea_core::provider::ProviderRegistry::new())[1]
+        .contains("↑5"));
+    assert!(state
+        .footer_lines(&tea_core::provider::ProviderRegistry::new())[1]
+        .contains("↓3"));
+    assert!(state
+        .footer_lines(&tea_core::provider::ProviderRegistry::new())[1]
+        .contains("R7"));
+    assert!(state
+        .footer_lines(&tea_core::provider::ProviderRegistry::new())[1]
+        .contains("$0.25"));
+}
+
+#[test]
+fn thinking_command_changes_the_footer_effort_setting() {
+    let mut app = App::new(CliOptions::parse(["tea"].map(OsString::from)).expect("options"));
+
+    app.dispatch_command("/thinking high")
+        .expect("thinking command should dispatch");
+
+    assert!(app.state().footer_lines(&app.registry)[0].contains("effort high"));
+}
+
+#[test]
+fn thinking_command_without_a_value_reports_usage() {
+    let mut app = App::new(CliOptions::parse(["tea"].map(OsString::from)).expect("options"));
+
+    app.dispatch_command("/thinking")
+        .expect("thinking command should dispatch");
+
+    assert!(matches!(app.state().status(), UiStatus::Notice(text) if text.contains("/thinking <off|minimal")));
 }
 
 #[test]
@@ -935,7 +1033,7 @@ fn footer_reports_unknown_context_and_unavailable_compaction_without_guessing() 
     let registry = tea_core::provider::ProviderRegistry::new();
     assert_eq!(
         state.footer_lines(&registry)[1],
-        "context unknown% used (unknown/unknown); automatic compaction unavailable"
+        "ctx ?%/?"
     );
 }
 
@@ -950,7 +1048,7 @@ fn footer_reports_catalog_context_capacity_for_selected_model() {
     let registry = tea_core::provider::ProviderRegistry::new();
     assert_eq!(
         state.footer_lines(&registry)[1],
-        "context unknown% used (unknown/262144); automatic compaction unavailable"
+        "ctx ?%/262k"
     );
 }
 
@@ -970,7 +1068,7 @@ fn footer_reports_context_percentage_and_enabled_compaction() {
     let registry = tea_core::provider::ProviderRegistry::new();
     assert_eq!(
         state.footer_lines(&registry)[1],
-        "context 50% used (131072/262144; 4 messages); automatic compaction available"
+        "ctx 50%/262k (auto)"
     );
 }
 
@@ -1223,7 +1321,7 @@ fn local_catalog_selection_enables_automatic_compaction() {
     assert_eq!(policy.max_overflow_retries_per_run, 1);
     assert_eq!(
         app.state().footer_lines(&app.registry)[1],
-        "context unknown% used (unknown/32768); automatic compaction available"
+        "ctx ?%/33k (auto)"
     );
     let _ = fs::remove_dir_all(tea_home);
 }
@@ -1252,7 +1350,7 @@ fn custom_local_model_enables_automatic_compaction_with_explicit_capacity() {
     assert_eq!(policy.context_budget.tokens(), 32_768);
     assert_eq!(
         app.state().footer_lines(&app.registry)[1],
-        "context unknown% used (unknown/32768); automatic compaction available"
+        "ctx ?%/33k (auto)"
     );
     let _ = fs::remove_dir_all(tea_home);
 }

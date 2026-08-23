@@ -97,6 +97,11 @@ impl CoreEpochTemplate {
         self
     }
 
+    /// Return the default reasoning level carried by this epoch template.
+    pub fn thinking_level_value(&self) -> ThinkingLevel {
+        self.thinking_level
+    }
+
     /// Install immutable host policy hooks for this snapshot.
     pub fn hooks(mut self, hooks: Arc<dyn HookSet>) -> Self {
         self.hooks = hooks;

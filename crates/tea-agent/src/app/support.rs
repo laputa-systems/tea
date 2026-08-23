@@ -1,6 +1,6 @@
 use crate::render;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tea_core::Usage;
+use tea_core::{ThinkingLevel, Usage};
 
 use super::state::AppState;
 
@@ -32,32 +32,43 @@ pub fn format_usage(usage: &Usage) -> String {
     }
 }
 
-/// Format every persistent-footer accounting field without ever substituting zero for unknown.
-pub(super) fn format_footer_usage(usage: &Usage) -> String {
-    format!(
-        "in {} out {} reasoning {} cache-read {} cache-write {} cost {}",
-        usage
-            .input_tokens
-            .map(|value| value.to_string())
-            .unwrap_or_else(|| "unknown".into()),
-        usage
-            .output_tokens
-            .map(|value| value.to_string())
-            .unwrap_or_else(|| "unknown".into()),
-        usage
-            .reasoning_tokens
-            .map(|value| value.to_string())
-            .unwrap_or_else(|| "unknown".into()),
-        usage
-            .cache_read_tokens
-            .map(|value| value.to_string())
-            .unwrap_or_else(|| "unknown".into()),
-        usage
-            .cache_write_tokens
-            .map(|value| value.to_string())
-            .unwrap_or_else(|| "unknown".into()),
-        usage.cost.as_deref().unwrap_or("unknown"),
-    )
+pub(super) fn format_compact_tokens(value: u64) -> String {
+    if value < 1_000 {
+        value.to_string()
+    } else if value < 10_000 {
+        format!("{:.1}k", value as f64 / 1_000.0)
+    } else if value < 1_000_000 {
+        format!("{}k", (value + 500) / 1_000)
+    } else if value < 10_000_000 {
+        format!("{:.1}M", value as f64 / 1_000_000.0)
+    } else {
+        format!("{}M", (value + 500_000) / 1_000_000)
+    }
+}
+
+pub(super) const fn thinking_level_name(level: ThinkingLevel) -> &'static str {
+    match level {
+        ThinkingLevel::Off => "off",
+        ThinkingLevel::Minimal => "minimal",
+        ThinkingLevel::Low => "low",
+        ThinkingLevel::Medium => "medium",
+        ThinkingLevel::High => "high",
+        ThinkingLevel::XHigh => "xhigh",
+        ThinkingLevel::Max => "max",
+    }
+}
+
+pub(super) fn parse_thinking_level(value: &str) -> Option<ThinkingLevel> {
+    Some(match value {
+        "off" => ThinkingLevel::Off,
+        "minimal" => ThinkingLevel::Minimal,
+        "low" => ThinkingLevel::Low,
+        "medium" => ThinkingLevel::Medium,
+        "high" => ThinkingLevel::High,
+        "xhigh" => ThinkingLevel::XHigh,
+        "max" => ThinkingLevel::Max,
+        _ => return None,
+    })
 }
 
 pub(super) fn composer_cursor(state: &AppState, width: u16, height: u16) -> Option<(u16, u16)> {

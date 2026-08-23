@@ -140,6 +140,8 @@ pub struct DurableHarness<S> {
     /// source of durable state: loss or replacement across recovery is
     /// expected, and every durable fact still flows through `EpochRuntime`.
     active_agent: Mutex<Option<Agent>>,
+    /// Reasoning level applied to every future epoch in this session.
+    thinking_level: Mutex<ThinkingLevel>,
     /// Process-local live-event fanout. It never owns durable state.
     events: Arc<EventHub>,
     /// Serializes snapshot registration with post-commit publication so a UI
@@ -224,6 +226,7 @@ where
             rollover_budget: 1,
             active: AtomicBool::new(false),
             active_agent: Mutex::new(None),
+            thinking_level: Mutex::new(resolved.template.thinking_level_value()),
             events: Arc::new(EventHub::default()),
             publication: Mutex::new(()),
         })
@@ -361,6 +364,52 @@ where
             .map_err(|_| HarnessError::invalid_state("active core epoch mutex is poisoned"))?
             .clone();
         Ok(agent.map(|agent| agent.snapshot()))
+    }
+
+    /// Replace the reasoning level for future epochs and append the semantic change while idle.
+    pub fn replace_thinking_level(
+        &self,
+        thinking_level: ThinkingLevel,
+    ) -> Result<(), HarnessError> {
+        if self.active.load(Ordering::Acquire) {
+            return Err(HarnessError::invalid_state(
+                "thinking changes require an idle durable harness",
+            ));
+        }
+        let mut session = self.session_lock()?;
+        let snapshot = session.snapshot()?;
+        let entry_sequence = snapshot.next_sequence().0;
+        let reduction = reduce_lane(snapshot, LaneId::main())?;
+        if reduction.lane_state.active_operation.is_some() {
+            return Err(HarnessError::invalid_state(
+                "thinking changes require no open durable operation",
+            ));
+        }
+        let entry_id = EntryId::new(format!("thinking-change-{entry_sequence}"))
+            .map_err(|error| HarnessError::invalid_state(error.to_string()))?;
+        session.append_entry(
+            &LaneId::main(),
+            ProvisionedEntry {
+                id: entry_id,
+                body: SessionEntry::ThinkingChanged(tea_session::ThinkingChangedEntry {
+                    level: thinking_level_name(thinking_level).into(),
+                }),
+            },
+        )?;
+        *self
+            .thinking_level
+            .lock()
+            .map_err(|_| HarnessError::invalid_state("thinking level mutex is poisoned"))? =
+            thinking_level;
+        Ok(())
+    }
+
+    /// Return the reasoning level applied to future epochs.
+    pub fn thinking_level(&self) -> Result<ThinkingLevel, HarnessError> {
+        self.thinking_level
+            .lock()
+            .map(|level| *level)
+            .map_err(|_| HarnessError::invalid_state("thinking level mutex is poisoned"))
     }
 
     /// Build a reviewed, reference-aware artifact collection plan while the
@@ -717,7 +766,12 @@ where
         epoch_id: EpochId,
         recovery: Option<RecoveryToolDrive>,
     ) -> Result<DurableOperation, HarnessError> {
-        let configuration = self.epoch_configuration(&epoch_id)?;
+        let mut configuration = self.epoch_configuration(&epoch_id)?;
+        let thinking_level = *self
+            .thinking_level
+            .lock()
+            .map_err(|_| HarnessError::invalid_state("thinking level mutex is poisoned"))?;
+        configuration.template = configuration.template.clone().thinking_level(thinking_level);
         let messages = self.core_messages(&configuration, recovery.as_ref())?;
         let provider_surface_digest = configuration
             .harness_snapshot
@@ -2821,6 +2875,18 @@ fn thinking_discriminant(level: ThinkingLevel) -> u16 {
         ThinkingLevel::High => 4,
         ThinkingLevel::XHigh => 5,
         ThinkingLevel::Max => 6,
+    }
+}
+
+fn thinking_level_name(level: ThinkingLevel) -> &'static str {
+    match level {
+        ThinkingLevel::Off => "off",
+        ThinkingLevel::Minimal => "minimal",
+        ThinkingLevel::Low => "low",
+        ThinkingLevel::Medium => "medium",
+        ThinkingLevel::High => "high",
+        ThinkingLevel::XHigh => "xhigh",
+        ThinkingLevel::Max => "max",
     }
 }
 

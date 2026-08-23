@@ -10,6 +10,8 @@ pub enum Role {
     Plain,
     Accent,
     Muted,
+    /// Provider/model identity in the persistent footer.
+    Model,
     Text,
     Error,
     Success,
@@ -85,6 +87,7 @@ impl Theme {
             Role::Plain => self.text,
             Role::Accent => self.accent,
             Role::Muted => self.muted,
+            Role::Model => Color::Yellow,
             Role::Text => self.text,
             Role::Error => self.error,
             Role::Success => self.success,
