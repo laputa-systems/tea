@@ -278,8 +278,6 @@ fn render_surface(state: &AppState, registry: &ProviderRegistry, width: u16, hei
     let lines: Vec<String> = match state.surface() {
         UiSurface::Help => payload.clone().unwrap_or_else(|| {
             vec![
-                "Commands".into(),
-                String::new(),
                 "General".into(),
                 "  /help  show keybindings and commands".into(),
             ]
@@ -390,14 +388,6 @@ fn slash_menu_lines(state: &AppState, width: u16) -> Vec<RenderLine> {
         "─".repeat(usize::from(width)),
         theme.style(Role::Muted),
     )];
-    lines.push(RenderLine::plain(
-        format!(
-            "Results {} · Type to filter",
-            state.slash_completion_count()
-        ),
-        theme.style(Role::Text),
-    ));
-    lines.push(RenderLine::plain(String::new(), theme.style(Role::Text)));
     lines.extend(rows.into_iter().map(|(command, help, selected)| {
         RenderLine::plain(
             format!("  {command:<14} {help}"),
@@ -1369,13 +1359,13 @@ mod tests {
         assert_eq!(grid.get(0, 2).expect("composer rail").symbol, '┃');
         assert_eq!(grid.get(0, 3).expect("menu divider").symbol, '─');
         assert_eq!(
-            (0..9)
+            (0..5)
                 .filter_map(|column| grid.get(column, 4))
                 .map(|cell| cell.symbol)
                 .collect::<String>(),
-            "Results 6"
+            "  /he"
         );
-        assert_eq!(grid.get(0, 13).expect("menu navigation hint").symbol, '↑');
+        assert_eq!(grid.get(0, 11).expect("menu navigation hint").symbol, '↑');
         assert_eq!(composer_cursor_position(&state, 80, 24), Some((3, 2)));
     }
 

@@ -372,9 +372,11 @@ fn help_surface_lines() -> Vec<String> {
         ("Runtime", &["/model", "/thinking"]),
     ];
 
-    let mut lines = vec![format!("Commands {}", commands::all().len())];
-    for (heading, names) in GROUPS {
-        lines.push(String::new());
+    let mut lines = Vec::new();
+    for (index, (heading, names)) in GROUPS.iter().enumerate() {
+        if index != 0 {
+            lines.push(String::new());
+        }
         lines.push((*heading).into());
         for name in *names {
             let spec = commands::find(name).expect("help groups use registered commands");

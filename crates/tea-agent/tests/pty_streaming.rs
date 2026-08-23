@@ -270,9 +270,11 @@ fn real_binary_keeps_native_multiline_editing_and_history_inside_a_pty() {
         )
         .expect("local model selection should render");
     let startup = terminal.screen();
-    assert!(startup.row(0).is_some_and(|row| row.starts_with("𝒕ea v")));
+    assert!(startup.row(0).is_some_and(|row| row.starts_with("tea v")));
     assert!(startup.row(2).is_some_and(|row| row.starts_with("┃")));
-    assert!(startup.row(4).is_some_and(|row| row.starts_with("yolo ·")));
+    assert!(startup
+        .row(4)
+        .is_some_and(|row| row.starts_with("local/Laguna-XS-2.1-5bit · effort off")));
     let cursor = startup.cursor();
     assert_eq!((cursor.row, cursor.column, cursor.visible), (2, 2, true));
     assert!(
@@ -336,11 +338,9 @@ fn real_binary_keeps_native_multiline_editing_and_history_inside_a_pty() {
             "slash completion menu",
             |screen| {
                 screen.row(3).is_some_and(|row| row.starts_with('─'))
+                    && screen.row(4).is_some_and(|row| row.starts_with("  /help"))
                     && screen
-                        .row(4)
-                        .is_some_and(|row| row.starts_with("Results 9"))
-                    && screen
-                        .row(13)
+                        .row(11)
                         .is_some_and(|row| row.starts_with("↑↓ Navigate"))
             },
         )
@@ -354,7 +354,7 @@ fn real_binary_keeps_native_multiline_editing_and_history_inside_a_pty() {
             "moved slash completion selection",
             |screen| {
                 screen
-                    .cell(7, 2)
+                    .cell(5, 2)
                     .is_some_and(|cell| cell.attributes().foreground == PtyColor::Indexed(14))
             },
         )
@@ -388,7 +388,7 @@ fn real_binary_keeps_native_multiline_editing_and_history_inside_a_pty() {
             "help output",
             |screen| {
                 screen.row(0).is_some_and(|row| row.starts_with("┃"))
-                    && screen.contains("Commands 9")
+                    && screen.contains("General")
                     && screen.contains("show keybindings and commands")
                     && screen.row(14).is_some_and(|row| row.starts_with('─'))
                     && screen
@@ -404,7 +404,7 @@ fn real_binary_keeps_native_multiline_editing_and_history_inside_a_pty() {
         .wait_for_screen(
             terminal.deadline(Duration::from_secs(3)),
             "help surface closed",
-            |screen| screen.contains("𝒕ea") && !screen.contains("Commands 9"),
+            |screen| screen.contains("tea") && !screen.contains("General"),
         )
         .expect("Esc should remove temporary help content");
     terminal

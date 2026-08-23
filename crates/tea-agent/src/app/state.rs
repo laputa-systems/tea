@@ -623,13 +623,6 @@ impl AppState {
             .collect()
     }
 
-    /// Return the number of command candidates before the visible row cap.
-    pub(crate) fn slash_completion_count(&self) -> usize {
-        self.slash_completion
-            .as_ref()
-            .map_or(0, |menu| menu.matches.len())
-    }
-
     /// Return the requested transcript top row for manual scrolling.
     pub fn viewport_offset(&self) -> usize {
         self.viewport_offset
@@ -919,7 +912,7 @@ impl AppState {
     }
 
     /// Append a submitted active-operation message to the one visible next-message slot.
-    pub(super) fn queue_message(&mut self, message: String) {
+    pub(crate) fn queue_message(&mut self, message: String) {
         match &mut self.queued_message {
             Some(queued) => {
                 if !queued.is_empty() {

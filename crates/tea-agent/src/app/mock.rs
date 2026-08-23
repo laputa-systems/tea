@@ -174,7 +174,10 @@ impl ModelEventStream for MockStream {
             if let Some(delay) = delay {
                 let cancellation_wait = cancellation.clone();
                 smol::future::or(
-                    async move { smol::Timer::after(delay).await },
+                    // The race result is intentionally ignored; keep both branches `()`.
+                    async move {
+                        smol::Timer::after(delay).await;
+                    },
                     async move { cancellation_wait.cancelled().await },
                 )
                 .await;
