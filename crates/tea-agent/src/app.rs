@@ -11,6 +11,7 @@ mod durable;
 mod error;
 mod host;
 mod input;
+mod mock;
 mod persistence;
 mod picker;
 mod preferences;

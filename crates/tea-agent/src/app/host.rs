@@ -33,6 +33,12 @@ pub(super) struct ModelCandidate {
     pub(super) model: Option<tea_core::provider::ModelDescriptor>,
 }
 
+const MOCK_MODEL: tea_core::provider::ModelDescriptor = tea_core::provider::ModelDescriptor {
+    id: super::mock::DEFAULT_MODEL_ID,
+    display_name: "Safe TUI playground",
+    context_window: Some(super::mock::CONTEXT_WINDOW),
+};
+
 impl ModelCandidate {
     pub(super) fn label(self) -> String {
         match self.model {
@@ -74,6 +80,13 @@ pub(super) fn model_candidates(registry: &ProviderRegistry, filter: &str) -> Vec
                 model: None,
             });
         }
+    }
+    if "mock".contains(&filter) || "safe tui playground".contains(&filter) {
+        candidates.push(ModelCandidate {
+            provider: super::mock::PROVIDER_ID,
+            provider_name: "Mock",
+            model: Some(MOCK_MODEL),
+        });
     }
     candidates
 }

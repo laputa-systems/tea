@@ -40,16 +40,6 @@ const COMMANDS: &[CommandSpec] = &[
         allowed_while_active: false,
     },
     CommandSpec {
-        name: "/steer",
-        help: "queue a prompt for the active turn",
-        allowed_while_active: true,
-    },
-    CommandSpec {
-        name: "/followup",
-        help: "queue a prompt for the next idle boundary",
-        allowed_while_active: true,
-    },
-    CommandSpec {
         name: "/quit",
         help: "exit after cancellation and settlement",
         allowed_while_active: true,
@@ -86,8 +76,10 @@ mod tests {
                 .iter()
                 .all(|other| other.name != command.name));
         }
-        assert_eq!(COMMANDS.len(), 9);
+        assert_eq!(COMMANDS.len(), 7);
         assert!(find("/model").is_some_and(|command| !command.allowed_while_active));
         assert!(find("/thinking").is_some_and(|command| !command.allowed_while_active));
+        assert!(find("/steer").is_none());
+        assert!(find("/followup").is_none());
     }
 }

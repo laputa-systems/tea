@@ -9,12 +9,6 @@ use super::runtime::App;
 use super::state::UiSurface;
 use super::support::{parse_thinking_level, thinking_level_name};
 
-#[derive(Clone, Copy)]
-enum QueueDelivery {
-    Steering,
-    FollowUp,
-}
-
 impl App {
     pub(super) fn handle_terminal_event(
         &mut self,
@@ -145,11 +139,15 @@ impl App {
             }
             KeyCode::End => self.state.composer_mut().end(),
             KeyCode::Up => {
-                let width = terminal.size()?.0;
-                if !self.state.composer_mut().move_visual_line_up(width) {
-                    self.state.begin_history_navigation();
-                    if let Some(history) = self.state.history_previous() {
-                        self.state.composer_mut().replace_from_editor(history);
+                if self.state.restore_queued_message() {
+                    self.state.notice("queued message restored");
+                } else {
+                    let width = terminal.size()?.0;
+                    if !self.state.composer_mut().move_visual_line_up(width) {
+                        self.state.begin_history_navigation();
+                        if let Some(history) = self.state.history_previous() {
+                            self.state.composer_mut().replace_from_editor(history);
+                        }
                     }
                 }
             }
@@ -211,25 +209,20 @@ impl App {
         if input.starts_with('/') {
             self.dispatch_command(&input)
         } else {
-            let active_harness = self
-                .durable_harness
-                .as_ref()
-                .filter(|harness| harness.is_active())
-                .cloned();
-            if let Some(harness) = active_harness {
-                match harness.enqueue_steering(input.clone()) {
-                    Ok(_) => self.state.notice("steering queued"),
-                    Err(error) => {
-                        self.state.composer_mut().replace_from_editor(input);
-                        self.state.notice(error.to_string());
-                    }
-                }
+            if self.agent_is_active() {
+                self.state.queue_message(input);
+                self.state.notice("next message queued");
                 return Ok(());
             }
-            if self.durable_task.is_some() {
-                self.state.composer_mut().replace_from_editor(input);
-                self.state.notice("waiting for durable operation startup");
-            } else if self.configured_provider.is_none() {
+            let input = if self.state.queued_message().is_some() {
+                self.state.queue_message(input);
+                self.state
+                    .take_queued_message()
+                    .expect("a queued message was just stored")
+            } else {
+                input
+            };
+            if self.configured_provider.is_none() {
                 self.state.notice("select a model first");
                 self.open_model_picker();
             } else {
@@ -313,14 +306,6 @@ impl App {
                 }
             }
             "/thinking" => self.dispatch_thinking(words.next(), words.next())?,
-            "/steer" => self.enqueue_command_prompt(
-                input.strip_prefix("/steer").unwrap_or_default(),
-                QueueDelivery::Steering,
-            )?,
-            "/followup" => self.enqueue_command_prompt(
-                input.strip_prefix("/followup").unwrap_or_default(),
-                QueueDelivery::FollowUp,
-            )?,
             "/session" | "/resume" => {
                 if let Err(error) = self.open_session_picker() {
                     self.state.notice(error.to_string());
@@ -348,40 +333,6 @@ impl App {
             }
             command => self.state.notice(format!("unknown command {command}")),
         }
-        Ok(())
-    }
-
-    fn enqueue_command_prompt(
-        &mut self,
-        content: &str,
-        delivery: QueueDelivery,
-    ) -> Result<(), AppError> {
-        let content = content.trim();
-        if content.is_empty() {
-            self.state.notice(match delivery {
-                QueueDelivery::Steering => "usage: /steer <prompt>",
-                QueueDelivery::FollowUp => "usage: /followup <prompt>",
-            });
-            return Ok(());
-        }
-        let active_harness = self
-            .durable_harness
-            .as_ref()
-            .filter(|harness| harness.is_active())
-            .cloned();
-        if let Some(harness) = active_harness {
-            match delivery {
-                QueueDelivery::Steering => harness.enqueue_steering(content)?,
-                QueueDelivery::FollowUp => harness.enqueue_follow_up(content)?,
-            };
-            self.state.notice(match delivery {
-                QueueDelivery::Steering => "steering queued",
-                QueueDelivery::FollowUp => "follow-up queued",
-            });
-            return Ok(());
-        }
-        self.state
-            .notice("queue commands require an active durable operation");
         Ok(())
     }
 
@@ -419,7 +370,6 @@ fn help_surface_lines() -> Vec<String> {
         ("General", &["/help", "/quit"]),
         ("Session", &["/new", "/session", "/resume"]),
         ("Runtime", &["/model", "/thinking"]),
-        ("Queue", &["/steer", "/followup"]),
     ];
 
     let mut lines = vec![format!("Commands {}", commands::all().len())];

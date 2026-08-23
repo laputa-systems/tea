@@ -147,6 +147,9 @@ pub struct AppState {
     pub(super) history_index: Option<usize>,
     /// Draft saved when history navigation first leaves the live composer.
     pub(super) history_draft: Option<String>,
+    /// One local next-message slot. It remains editable until the active durable
+    /// operation settles, so the terminal never advertises a mutable core queue.
+    pub(super) queued_message: Option<String>,
     pub(super) surface: UiSurface,
     /// Payload for data-bearing temporary surfaces such as help.
     pub(super) surface_lines: Vec<String>,
@@ -913,6 +916,41 @@ impl AppState {
         }
         self.history_index = Some(next);
         self.history.get(next).cloned()
+    }
+
+    /// Append a submitted active-operation message to the one visible next-message slot.
+    pub(super) fn queue_message(&mut self, message: String) {
+        match &mut self.queued_message {
+            Some(queued) => {
+                if !queued.is_empty() {
+                    queued.push_str("\n\n");
+                }
+                queued.push_str(&message);
+            }
+            None => self.queued_message = Some(message),
+        }
+    }
+
+    /// Borrow the local next-message slot for presentation.
+    pub(crate) fn queued_message(&self) -> Option<&str> {
+        self.queued_message.as_deref()
+    }
+
+    /// Take the full local next-message slot for durable prompt admission.
+    pub(super) fn take_queued_message(&mut self) -> Option<String> {
+        self.queued_message.take()
+    }
+
+    /// Restore the next-message slot only when doing so cannot replace a draft.
+    pub(super) fn restore_queued_message(&mut self) -> bool {
+        if !self.composer.text().is_empty() {
+            return false;
+        }
+        let Some(message) = self.take_queued_message() else {
+            return false;
+        };
+        self.composer.replace_from_editor(message);
+        true
     }
 
     pub(super) fn clear_transcript(&mut self) {

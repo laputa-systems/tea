@@ -7,6 +7,7 @@ use tea_core::provider::{ConfiguredProvider, ProviderConfiguration};
 use super::durable::list_host_sessions;
 use super::error::AppError;
 use super::host::model_candidates;
+use super::mock;
 use super::preferences::save_last_model;
 use super::runtime::App;
 use super::state::{Picker, UiSurface};
@@ -82,6 +83,7 @@ impl App {
         self.durable_task = None;
         self.state.clear_transcript();
         self.state.clear_history();
+        self.state.take_queued_message();
         self.state.composer_mut().clear();
         self.state.context_estimate = None;
         self.state.close_surface();
@@ -262,20 +264,26 @@ impl App {
                 "--local-context-window requires --provider local".into(),
             ));
         }
+        let configuration = self.configuration_for_provider(&provider)?;
         let configured = self.configured_provider(&provider, &model)?;
         let descriptor = configured.descriptor.clone();
         let configured_provider = configured.provider;
         self.configured_provider = Some(Arc::clone(&configured_provider));
+        self.configuration = Some(configuration);
         if let Some(compactor) = &self.compactor {
             compactor.configure(descriptor.clone(), Arc::clone(&configured_provider));
         }
-        let context_window = self.options.local_context_window().or_else(|| {
-            self.registry
-                .provider(&provider)
-                .and_then(|entry| entry.model(&model))
-                .and_then(|model| model.context_window)
-                .and_then(NonZeroU64::new)
-        });
+        let context_window = if provider == mock::PROVIDER_ID {
+            NonZeroU64::new(mock::CONTEXT_WINDOW)
+        } else {
+            self.options.local_context_window().or_else(|| {
+                self.registry
+                    .provider(&provider)
+                    .and_then(|entry| entry.model(&model))
+                    .and_then(|model| model.context_window)
+                    .and_then(NonZeroU64::new)
+            })
+        };
         let policy = if self.compactor.is_some() {
             context_window
                 .map(automatic_compaction_policy)
@@ -307,11 +315,30 @@ impl App {
         Ok(())
     }
 
+    fn configuration_for_provider(
+        &self,
+        provider: &str,
+    ) -> Result<tea_core::AgentConfiguration, AppError> {
+        if provider == mock::PROVIDER_ID {
+            return Ok(mock::configuration());
+        }
+        let workspace = self
+            .workspace
+            .as_ref()
+            .ok_or_else(|| AppError::Setup("workspace is not initialized".into()))?;
+        let tools = tea_core::DefaultCodingTools::new(workspace)
+            .map_err(|error| AppError::Setup(format!("invalid --cwd: {error}")))?;
+        super::host::host_configuration(tools)
+    }
+
     fn configured_provider(
         &self,
         provider: &str,
         model: &str,
     ) -> Result<ConfiguredProvider, AppError> {
+        if provider == mock::PROVIDER_ID {
+            return Ok(mock::configured_provider(model));
+        }
         let descriptor = self
             .registry
             .resolve_model(provider, model.to_owned())?

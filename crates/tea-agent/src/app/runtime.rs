@@ -14,6 +14,7 @@ use super::cli::CliOptions;
 use super::compaction::ProviderCompactor;
 use super::error::AppError;
 use super::host::host_configuration;
+use super::mock;
 use super::preferences::load_last_model;
 use super::state::{AppState, UiStatus};
 use super::support::composer_cursor;
@@ -82,9 +83,12 @@ impl App {
         if prompt.trim().is_empty() {
             return Err(AppError::Setup("-p/--prompt must not be empty".into()));
         }
-        if self.options.provider().is_none() || self.options.model().is_none() {
+        if self.options.provider().is_none()
+            || (self.options.model().is_none()
+                && self.options.provider() != Some(OsStr::new(mock::PROVIDER_ID)))
+        {
             return Err(AppError::Setup(
-                "-p/--prompt requires --provider and --model".into(),
+                "-p/--prompt requires --provider and --model (except --provider mock)".into(),
             ));
         }
         self.assemble_host()?;
@@ -127,7 +131,11 @@ impl App {
         let tools = DefaultCodingTools::new(&workspace)
             .map_err(|error| AppError::Setup(format!("invalid --cwd: {error}")))?;
         self.workspace = Some(tools.workspace().as_path().to_path_buf());
-        let configuration = host_configuration(tools)?;
+        let configuration = if self.options.provider() == Some(OsStr::new(mock::PROVIDER_ID)) {
+            mock::configuration()
+        } else {
+            host_configuration(tools)?
+        };
         let compactor = Arc::new(ProviderCompactor::default());
         self.compactor = Some(compactor);
         let home = resolve_tea_home(self.options.tea_home())?;
@@ -142,6 +150,9 @@ impl App {
         match (explicit_provider.as_deref(), explicit_model.as_deref()) {
             (None, None) => {
                 self.restore_last_model(None);
+            }
+            (Some(provider), None) if provider == OsStr::new(mock::PROVIDER_ID) => {
+                self.select_model(mock::PROVIDER_ID.into(), mock::DEFAULT_MODEL_ID.into())?
             }
             (Some(provider), None) => {
                 if !self.restore_last_model(provider.to_str()) {
@@ -235,6 +246,7 @@ impl App {
                     self.durable_task = None;
                     self.submitted_prompt = None;
                     self.state.status = UiStatus::Idle;
+                    self.start_queued_prompt();
                 }
                 Ok(Err(HarnessError::Core(CoreError::Cancelled))) => {
                     self.durable_task = None;
@@ -254,6 +266,28 @@ impl App {
                         .notice("durable operation task ended unexpectedly");
                 }
                 Err(TryRecvError::Empty) => {}
+            }
+        }
+    }
+
+    fn start_queued_prompt(&mut self) {
+        let Some(input) = self.state.take_queued_message() else {
+            return;
+        };
+        if self.configured_provider.is_none() {
+            self.state.composer_mut().replace_from_editor(input);
+            self.state.notice("select a model first");
+            self.open_model_picker();
+            return;
+        }
+        match self.ensure_durable_harness() {
+            Ok(harness) => {
+                self.submitted_prompt = Some(input.clone());
+                self.spawn_durable_prompt(harness, input);
+            }
+            Err(error) => {
+                self.state.composer_mut().replace_from_editor(input);
+                self.state.notice(error.to_string());
             }
         }
     }

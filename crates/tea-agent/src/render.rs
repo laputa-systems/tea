@@ -14,6 +14,8 @@ use crate::ui::frame_layout;
 use crate::ui::theme::{Role, Theme};
 use crate::ui::visual_layout::VisualLayout;
 use hi_lite::{Highlighter, Kind, Language};
+use std::sync::OnceLock;
+use std::time::Instant;
 use tea_core::provider::ProviderRegistry;
 
 /// Public measured-frame contract for consumers that need layout without painting.
@@ -354,11 +356,28 @@ fn activity_lines(state: &AppState) -> Vec<RenderLine> {
     let mut lines = Vec::new();
     if matches!(state.status(), crate::app::UiStatus::Active) {
         lines.push(RenderLine::plain(
-            "• Thinking",
+            format!("• Thinking {}", thinking_spinner()),
+            Theme::default().style(Role::Activity),
+        ));
+    }
+    if let Some(message) = state.queued_message() {
+        lines.push(RenderLine::plain(
+            format!("• Queued next: {}", message.replace('\n', " ")),
             Theme::default().style(Role::Activity),
         ));
     }
     lines
+}
+
+fn thinking_spinner() -> &'static str {
+    const FRAMES: [&str; 4] = ["|", "/", "-", "\\"];
+    static STARTED: OnceLock<Instant> = OnceLock::new();
+    let frame = STARTED
+        .get_or_init(Instant::now)
+        .elapsed()
+        .as_millis()
+        / 120;
+    FRAMES[frame as usize % FRAMES.len()]
 }
 
 fn slash_menu_lines(state: &AppState, width: u16) -> Vec<RenderLine> {
@@ -1257,6 +1276,21 @@ mod tests {
         assert_eq!(regions.composer.height, 1);
         assert_eq!(regions.composer.y, 2);
         assert_eq!(regions.activity.height, 0);
+    }
+
+    #[test]
+    fn activity_shows_the_full_next_message_slot() {
+        let mut state = AppState::new();
+        state.queue_message("first instruction".into());
+        state.queue_message("second instruction".into());
+
+        assert_eq!(
+            activity_lines(&state)
+                .into_iter()
+                .map(|line| line.text)
+                .collect::<Vec<_>>(),
+            ["• Queued next: first instruction  second instruction"]
+        );
     }
 
     #[test]

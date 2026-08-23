@@ -59,6 +59,15 @@ constraints, unresolved work, and the next concrete actions. Return only the upd
 the same Markdown sections as the system instructions; do not call tools."#;
 const CACHE_FRIENDLY_CONTEXT_SAFETY_MARGIN: u64 = 4_096;
 
+/// Identify the two request shapes this host emits for provider-backed compaction.
+///
+/// Provider adapters cannot otherwise distinguish a regular conversation request
+/// from the standalone summary request or the cache-friendly summary update.
+pub(super) fn is_compaction_request(request: &ModelRequest) -> bool {
+    request.system_prompt == SUMMARY_SYSTEM_PROMPT
+        || request.context.contains(UPDATE_SUMMARIZATION_INSTRUCTIONS)
+}
+
 /// A compactor whose provider/model pair follows the TUI's idle model selection.
 pub(super) struct ProviderCompactor {
     provider: RwLock<Option<Arc<dyn ModelProvider>>>,

@@ -1429,11 +1429,68 @@ fn prompt_history_returns_to_the_live_draft_after_navigation() {
     state.record_history("second prompt");
     state.record_history("second prompt");
 
+    state.composer_mut().replace_from_editor("unfinished draft");
+    state.begin_history_navigation();
     assert_eq!(state.history_previous().as_deref(), Some("second prompt"));
     assert_eq!(state.history_previous().as_deref(), Some("first prompt"));
     assert_eq!(state.history_next().as_deref(), Some("second prompt"));
-    assert_eq!(state.history_next().as_deref(), Some(""));
+    assert_eq!(state.history_next().as_deref(), Some("unfinished draft"));
     assert_eq!(state.history_next(), None);
+}
+
+#[test]
+fn queued_message_coalesces_and_restores_only_into_an_empty_composer() {
+    let mut state = AppState::new();
+    state.queue_message("first instruction".into());
+    state.queue_message("second instruction".into());
+    assert_eq!(
+        state.queued_message(),
+        Some("first instruction\n\nsecond instruction")
+    );
+
+    state.composer_mut().replace_from_editor("live draft");
+    assert!(!state.restore_queued_message());
+    assert_eq!(state.composer().text(), "live draft");
+
+    state.composer_mut().clear();
+    assert!(state.restore_queued_message());
+    assert_eq!(
+        state.composer().text(),
+        "first instruction\n\nsecond instruction"
+    );
+    assert_eq!(state.queued_message(), None);
+}
+
+#[test]
+fn mock_provider_uses_a_default_model_without_credentials() {
+    let tea_home = test_tea_home("mock-provider");
+    let options = CliOptions::parse(
+        ["tea", "--provider", "mock", "--tea-home", tea_home.to_str().expect("UTF-8 path")]
+            .map(OsString::from),
+    )
+    .expect("mock startup options parse");
+    let mut app = App::new(options);
+
+    app.assemble_host().expect("mock host should assemble");
+
+    assert_eq!(
+        app.state().selected_model.as_ref(),
+        Some(&ModelDescriptor {
+            provider: "mock".into(),
+            model: "mock".into(),
+            revision: None,
+        })
+    );
+    assert_eq!(
+        app.configuration
+            .as_ref()
+            .expect("mock configuration")
+            .tools
+            .names()
+            .collect::<Vec<_>>(),
+        ["edit"]
+    );
+    let _ = fs::remove_dir_all(tea_home);
 }
 
 #[test]
