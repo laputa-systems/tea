@@ -27,6 +27,7 @@ tea-luau = { path = "../tea-luau" }
 tea-protocol = { path = "../tea-protocol" }
 tea-session = { path = "../tea-session" }
 tea-harness = { path = "../tea-harness" }
+tea-tui = { path = "../tea-tui" }
 smol = { workspace = true }
 rustix = { version = "=1.1.4", default-features = false, features = ["event", "std", "termios"] }
 

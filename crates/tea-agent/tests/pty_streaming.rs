@@ -5,6 +5,7 @@ use ptytest::{
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::Mutex;
 use std::thread;
 use std::time::Duration;
 
@@ -13,6 +14,11 @@ const COLUMNS: u16 = 100;
 const LOCAL_PROVIDER: &str = "local";
 const LOCAL_MODEL: &str = tea_core::provider::local::LAGUNA_XS_2_1_MODEL;
 const FIXTURE_MODEL: &str = "pty-fixture-model";
+
+// These real-binary scenarios each own a terminal and a loopback server. Keep
+// their timing barriers independent instead of making one PTY's progress
+// depend on another test thread receiving CPU time.
+static PTY_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 struct StreamingFixture {
     first_delta: Receiver<()>,
@@ -91,8 +97,58 @@ data: [DONE]
     }
 }
 
+fn start_overflow_fixture() -> StreamingFixture {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("overflow fixture should bind");
+    let address = listener
+        .local_addr()
+        .expect("overflow fixture should expose its address");
+    let (first_delta_sent, first_delta) = mpsc::channel();
+    let (release_response, wait_for_release) = mpsc::channel();
+    let server = thread::spawn(move || {
+        let (mut socket, _) = listener
+            .accept()
+            .expect("overflow fixture should accept one request");
+        let mut request = [0_u8; 4096];
+        let _ = socket.read(&mut request);
+        let first = br#"data: {"choices":[{"delta":{"content":"overflow start\n"},"finish_reason":null}]}
+
+"#;
+        let body = "committed overflow row\\n".repeat(32);
+        let final_records = format!(
+            "data: {{\"choices\":[{{\"delta\":{{\"content\":\"{body}overflow final\"}},\"finish_reason\":\"stop\"}}],\"usage\":{{\"prompt_tokens\":2,\"completion_tokens\":2}}}}\n\ndata: [DONE]\n\n"
+        );
+        socket
+            .write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    first.len() + final_records.len()
+                )
+                .as_bytes(),
+            )
+            .expect("overflow fixture headers should write");
+        socket.write_all(first).expect("first overflow delta writes");
+        socket.flush().expect("first overflow delta flushes");
+        first_delta_sent
+            .send(())
+            .expect("test waits for the first overflow delta");
+        wait_for_release
+            .recv()
+            .expect("test releases the overflowing completion");
+        socket
+            .write_all(final_records.as_bytes())
+            .expect("overflow final records write");
+    });
+    StreamingFixture {
+        first_delta,
+        release_response,
+        server,
+        url: format!("http://{address}/v1"),
+    }
+}
+
 #[test]
 fn real_binary_renders_streamed_text_before_the_fixture_settles() {
+    let _lock = PTY_TEST_LOCK.lock().expect("PTY test lock is not poisoned");
     let fixture = StreamingFixture::start();
     let scenario = Scenario::new("streaming provider fixture")
         .expect("valid scenario label")
@@ -125,8 +181,8 @@ fn real_binary_renders_streamed_text_before_the_fixture_settles() {
         .expect("model selection should render");
     let active = terminal.terminal_state();
     assert!(
-        active.modes.alternate_screen,
-        "TerminalGuard enters the alternate screen"
+        !active.modes.alternate_screen,
+        "normal conversation remains on the main screen"
     );
     assert!(
         active.modes.bracketed_paste,
@@ -194,7 +250,10 @@ fn real_binary_renders_streamed_text_before_the_fixture_settles() {
         .wait_for_screen(
             terminal.deadline(Duration::from_secs(3)),
             "idle after completion",
-            |screen| screen.contains(&format!("{LOCAL_PROVIDER}/{FIXTURE_MODEL}")),
+            |screen| {
+                screen.contains(&format!("{LOCAL_PROVIDER}/{FIXTURE_MODEL}"))
+                    && !screen.contains("Thinking")
+            },
         )
         .expect("application should become idle");
     terminal
@@ -252,6 +311,7 @@ fn real_binary_renders_streamed_text_before_the_fixture_settles() {
 
 #[test]
 fn real_binary_keeps_native_multiline_editing_and_history_inside_a_pty() {
+    let _lock = PTY_TEST_LOCK.lock().expect("PTY test lock is not poisoned");
     let scenario = Scenario::new("native composer interaction")
         .expect("valid scenario label")
         .command(CommandSpec::new(env!("CARGO_BIN_EXE_tea")).args([
@@ -328,6 +388,10 @@ fn real_binary_keeps_native_multiline_editing_and_history_inside_a_pty() {
             },
         )
         .expect("model selector should show a selectable compiled model");
+    assert!(
+        terminal.terminal_state().modes.alternate_screen,
+        "a temporary model-picker surface borrows the alternate screen"
+    );
     terminal
         .send_key(terminal.deadline(Duration::from_secs(3)), Key::Escape)
         .expect("close model selector");
@@ -338,6 +402,10 @@ fn real_binary_keeps_native_multiline_editing_and_history_inside_a_pty() {
             |screen| !screen.contains("Models"),
         )
         .expect("Esc should close the model selector");
+    assert!(
+        !terminal.terminal_state().modes.alternate_screen,
+        "closing a temporary surface returns to main-screen conversation"
+    );
 
     terminal
         .send_text(terminal.deadline(Duration::from_secs(3)), "/")
@@ -442,6 +510,104 @@ fn real_binary_keeps_native_multiline_editing_and_history_inside_a_pty() {
     terminal
         .assert_terminal_restored(&baseline)
         .expect("normal exit restores applicable terminal modes");
+    terminal
+        .finish(terminal.deadline(Duration::from_secs(3)))
+        .expect("reap tea");
+}
+
+#[test]
+fn real_binary_keeps_an_overflowing_settled_transcript_in_main_screen_flow() {
+    let _lock = PTY_TEST_LOCK.lock().expect("PTY test lock is not poisoned");
+    let fixture = start_overflow_fixture();
+    let scenario = Scenario::new("overflowing transcript fixture")
+        .expect("valid scenario label")
+        .command(
+            CommandSpec::new(env!("CARGO_BIN_EXE_tea")).args([
+                "--provider",
+                LOCAL_PROVIDER,
+                "--model",
+                FIXTURE_MODEL,
+                "--local-base-url",
+                fixture.url.as_str(),
+            ]),
+        )
+        .size(Size::new(40, 10).expect("constant terminal size"))
+        .environment(TestEnv::hermetic().expect("create hermetic test environment"))
+        .protocol_profile(ProtocolProfile::xterm_minimal_v1());
+    let mut terminal = PtyTest::spawn(scenario).expect("tea should start in a PTY");
+    let baseline = terminal.terminal_baseline();
+
+    terminal
+        .wait_for_screen(terminal.deadline(Duration::from_secs(3)), "ready", |screen| {
+            screen.contains(&format!("{LOCAL_PROVIDER}/{FIXTURE_MODEL}"))
+        })
+        .expect("overflow fixture should become ready");
+    assert!(!terminal.terminal_state().modes.alternate_screen);
+    terminal
+        .send_text(terminal.deadline(Duration::from_secs(3)), "overflow transcript")
+        .expect("type overflow prompt");
+    terminal
+        .wait_for_screen(
+            terminal.deadline(Duration::from_secs(3)),
+            "typed overflow prompt",
+            |screen| screen.contains("overflow transcript"),
+        )
+        .expect("overflow prompt should reach the composer before submission");
+    terminal
+        .send_key(terminal.deadline(Duration::from_secs(3)), Key::Enter)
+        .expect("submit overflow prompt");
+    fixture.wait_for_first_delta();
+    terminal
+        .wait_for_screen(
+            terminal.deadline(Duration::from_secs(3)),
+            "first overflow delta",
+            |screen| screen.contains("overflow start"),
+        )
+        .expect("the mutable suffix should stream before settlement");
+    fixture.release();
+    terminal
+        .wait_for_screen(
+            terminal.deadline(Duration::from_secs(3)),
+            "overflow completion",
+            |screen| {
+                let final_rows = (0..10)
+                    .filter(|row| {
+                        screen
+                            .row(*row)
+                            .is_some_and(|line| line.contains("overflow final"))
+                    })
+                    .count();
+                screen.contains("overflow final")
+                    && screen.contains(&format!("{LOCAL_PROVIDER}/{FIXTURE_MODEL}"))
+                    && (0..10).any(|row| screen.row(row).is_some_and(|line| line.starts_with('┃')))
+                    && final_rows == 1
+            },
+        )
+        .expect("settled overflowing content should leave one coherent live tail");
+    assert!(!terminal.terminal_state().modes.alternate_screen);
+    terminal
+        .send_text(terminal.deadline(Duration::from_secs(3)), "/")
+        .expect("terminal remains interactive after overflowing output");
+    terminal
+        .wait_for_screen(terminal.deadline(Duration::from_secs(3)), "interactive", |screen| {
+            screen.contains("/help")
+        })
+        .expect("slash completion remains interactive");
+    terminal
+        .send_key(terminal.deadline(Duration::from_secs(3)), Key::Ctrl('c'))
+        .expect("clear slash draft");
+    terminal
+        .send_key(terminal.deadline(Duration::from_secs(3)), Key::Ctrl('c'))
+        .expect("exit cleanly");
+    assert_eq!(
+        terminal
+            .wait_for_exit(terminal.deadline(Duration::from_secs(3)))
+            .expect("wait for tea exit"),
+        ExitStatus::Code(0)
+    );
+    terminal
+        .assert_terminal_restored(&baseline)
+        .expect("overflow exit restores terminal modes");
     terminal
         .finish(terminal.deadline(Duration::from_secs(3)))
         .expect("reap tea");

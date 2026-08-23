@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/tea-core",
     "crates/tea-agent",
+    "crates/tea-tui",
     "crates/tea-luau",
     "crates/tea-protocol",
     "crates/tea-trace",

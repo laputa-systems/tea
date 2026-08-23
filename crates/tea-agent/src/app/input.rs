@@ -105,7 +105,6 @@ impl App {
             match Editor::open(terminal, &current) {
                 Ok(replacement) => {
                     self.state.composer_mut().replace_from_editor(replacement);
-                    self.previous_grid = None;
                 }
                 Err(error) => self.state.notice(error.to_string()),
             }
@@ -117,7 +116,6 @@ impl App {
         }
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('o') {
             self.state.toggle_tool_detail();
-            self.previous_grid = None;
             return Ok(());
         }
         match key.code {
@@ -134,9 +132,7 @@ impl App {
             KeyCode::Left => self.state.composer_mut().move_left(),
             KeyCode::Right => self.state.composer_mut().move_right(),
             KeyCode::Home => self.state.composer_mut().home(),
-            KeyCode::End if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.state.follow_end()
-            }
+            KeyCode::End if key.modifiers.contains(KeyModifiers::CONTROL) => {}
             KeyCode::End => self.state.composer_mut().end(),
             KeyCode::Up => {
                 if self.state.restore_queued_message() {
@@ -159,8 +155,7 @@ impl App {
                     }
                 }
             }
-            KeyCode::PageUp => self.state.page_up(5),
-            KeyCode::PageDown => self.state.page_down(5),
+            KeyCode::PageUp | KeyCode::PageDown => {}
             KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
                 self.state.composer_mut().insert_newline()
             }

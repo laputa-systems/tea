@@ -1,6 +1,9 @@
-//! Rustix-backed terminal ownership, ANSI rendering, and input decoding.
+//! Rustix-backed terminal ownership and input decoding.
+//!
+//! Portable presentation is delegated to [`tea_tui::InlineTerminal`]; this
+//! module remains the sole owner of raw mode, resize/input polling, and
+//! bracketed-paste lifecycle.
 
-use crate::grid::{Color, FrameDiff, Style};
 use rustix::event::{poll, PollFd, PollFlags, Timespec};
 use rustix::io::Errno;
 use rustix::termios::{tcgetattr, tcgetwinsize, tcsetattr, OptionalActions, Termios};
@@ -8,6 +11,7 @@ use std::collections::VecDeque;
 use std::fmt;
 use std::io::{self, stdin, stdout, Read, Stdin, Stdout, Write};
 use std::time::{Duration, Instant};
+use tea_tui::InlineTerminal;
 
 const PASTE_START: &[u8] = b"\x1b[200~";
 const PASTE_END: &[u8] = b"\x1b[201~";
@@ -118,13 +122,15 @@ impl From<Errno> for TerminalError {
     }
 }
 
-/// RAII owner of raw mode, the alternate screen, cursor visibility, and bracketed paste.
+/// RAII owner of raw mode, terminal input, and bracketed paste.
+///
+/// Normal conversation stays on the main screen. The contained portable
+/// renderer enters the alternate screen only for explicit temporary surfaces.
 pub struct TerminalGuard {
     input: Stdin,
-    output: Stdout,
+    renderer: InlineTerminal<Stdout>,
     original_termios: Option<Termios>,
     active: bool,
-    cursor_position: Option<(u16, u16)>,
     last_size: Option<(u16, u16)>,
     decoder: InputDecoder,
 }
@@ -143,10 +149,9 @@ impl TerminalGuard {
     pub fn enter() -> Result<Self, TerminalError> {
         let mut guard = Self {
             input: stdin(),
-            output: stdout(),
+            renderer: InlineTerminal::new(stdout()),
             original_termios: None,
             active: false,
-            cursor_position: None,
             last_size: None,
             decoder: InputDecoder::default(),
         };
@@ -180,7 +185,6 @@ impl TerminalGuard {
         };
         self.original_termios = Some(original);
         self.active = true;
-        self.cursor_position = None;
         self.last_size = Some(size);
         self.decoder = InputDecoder::default();
         Ok(())
@@ -191,6 +195,7 @@ impl TerminalGuard {
         if !self.active {
             return Ok(());
         }
+        let presentation_result = self.renderer.finish();
         let command_result = self
             .write_mode_sequences(false)
             .and_then(|()| self.flush_io());
@@ -200,8 +205,8 @@ impl TerminalGuard {
             .map(|termios| tcsetattr(&self.input, OptionalActions::Now, &termios))
             .unwrap_or(Ok(()));
         self.active = false;
-        self.cursor_position = None;
         self.last_size = None;
+        presentation_result.map_err(TerminalError::Io)?;
         command_result.map_err(TerminalError::Io)?;
         raw_result.map_err(TerminalError::from)
     }
@@ -266,104 +271,28 @@ impl TerminalGuard {
 
     /// Return the currently available terminal dimensions.
     pub fn size(&self) -> Result<(u16, u16), TerminalError> {
-        let size = tcgetwinsize(&self.output)?;
+        let size = tcgetwinsize(&self.input)?;
         Ok((size.ws_col, size.ws_row))
     }
 
-    /// Flush changed cells and leave the native cursor at the local composer cursor.
-    pub fn draw(
-        &mut self,
-        diff: &FrameDiff,
-        cursor_position: Option<(u16, u16)>,
-    ) -> Result<(), TerminalError> {
+    /// Borrow the portable renderer that owns mutable-tail bookkeeping.
+    pub fn renderer_mut(&mut self) -> Result<&mut InlineTerminal<Stdout>, TerminalError> {
         if !self.active {
             return Err(TerminalError::Inactive);
         }
-        if diff.changes.is_empty() && self.cursor_position == cursor_position {
-            return Ok(());
-        }
-        if diff.full_redraw {
-            write!(self.output, "\x1b[2J\x1b[H")?;
-        }
-        for change in &diff.changes {
-            if diff.full_redraw && change.cell == crate::grid::Cell::blank() {
-                continue;
-            }
-            write!(
-                self.output,
-                "\x1b[{};{}H",
-                change.y.saturating_add(1),
-                change.x.saturating_add(1)
-            )?;
-            apply_style(&mut self.output, change.cell.style)?;
-            write!(self.output, "{}", change.cell.symbol)?;
-        }
-        write!(self.output, "\x1b[0m")?;
-        if let Some((x, y)) = cursor_position {
-            write!(
-                self.output,
-                "\x1b[{};{}H\x1b[?25h",
-                y.saturating_add(1),
-                x.saturating_add(1)
-            )?;
-        } else {
-            write!(self.output, "\x1b[?25l")?;
-        }
-        self.flush()?;
-        self.cursor_position = cursor_position;
-        Ok(())
-    }
-
-    /// Flush output owned by the guard.
-    pub fn flush(&mut self) -> Result<(), TerminalError> {
-        self.output.flush().map_err(TerminalError::Io)
+        Ok(&mut self.renderer)
     }
 
     fn flush_io(&mut self) -> Result<(), io::Error> {
-        self.output.flush()
+        self.renderer.writer_mut().flush()
     }
 
     fn write_mode_sequences(&mut self, active: bool) -> Result<(), io::Error> {
         if active {
-            write!(self.output, "\x1b[?1049h\x1b[?25l\x1b[?2004h")
+            write!(self.renderer.writer_mut(), "\x1b[?25l\x1b[?2004h")
         } else {
-            write!(self.output, "\x1b[?2004l\x1b[?25h\x1b[?1049l")
+            write!(self.renderer.writer_mut(), "\x1b[?2004l\x1b[?25h")
         }
-    }
-}
-
-fn apply_style(output: &mut Stdout, style: Style) -> Result<(), io::Error> {
-    write!(output, "\x1b[0m")?;
-    if let Some(foreground) = style.foreground {
-        write!(output, "\x1b[38;5;{}m", color_index(foreground))?;
-    }
-    if let Some(background) = style.background {
-        write!(output, "\x1b[48;5;{}m", color_index(background))?;
-    }
-    if style.bold {
-        write!(output, "\x1b[1m")?;
-    }
-    Ok(())
-}
-
-const fn color_index(color: Color) -> u8 {
-    match color {
-        Color::Black => 0,
-        Color::DarkGrey => 8,
-        Color::Red => 9,
-        Color::DarkRed => 1,
-        Color::Green => 10,
-        Color::DarkGreen => 2,
-        Color::Yellow => 11,
-        Color::DarkYellow => 3,
-        Color::Blue => 12,
-        Color::DarkBlue => 4,
-        Color::Magenta => 13,
-        Color::DarkMagenta => 5,
-        Color::Cyan => 14,
-        Color::DarkCyan => 6,
-        Color::White => 15,
-        Color::Grey => 7,
     }
 }
 

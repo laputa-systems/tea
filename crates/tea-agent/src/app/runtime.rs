@@ -1,6 +1,5 @@
-use crate::grid::Grid;
 use crate::render;
-use crate::terminal::TerminalGuard;
+use crate::terminal::{TerminalError, TerminalGuard};
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{sync_channel, Receiver, TryRecvError};
@@ -9,6 +8,7 @@ use tea_core::compaction::AutomaticCompactionPolicy;
 use tea_core::provider::ProviderRegistry;
 use tea_core::{AgentConfiguration, CoreError, DefaultCodingTools};
 use tea_harness::{HarnessError, HarnessEvent, TeaEvent, TeaEventSubscription};
+use tea_tui::Size;
 
 use super::cli::CliOptions;
 use super::compaction::ProviderCompactor;
@@ -17,7 +17,6 @@ use super::host::host_configuration;
 use super::mock;
 use super::preferences::load_last_model;
 use super::state::{AppState, UiStatus};
-use super::support::composer_cursor;
 use tea_core::ThinkingLevel;
 use std::sync::Arc;
 
@@ -44,7 +43,11 @@ pub struct App {
     /// The idle prompt handed to the current run, retained only to restore local input after a
     /// failed or cancelled operation. The durable session remains the transcript source of truth.
     pub(super) submitted_prompt: Option<String>,
-    pub(super) previous_grid: Option<Grid>,
+    /// Number of front-contiguous semantic entries already written once into
+    /// native terminal scrollback for this presentation generation.
+    pub(super) committed_entries: usize,
+    /// Last semantic projection replacement rendered by this terminal host.
+    pub(super) rendered_projection_generation: u64,
     pub(super) quitting: bool,
 }
 
@@ -65,7 +68,8 @@ impl App {
             registry: ProviderRegistry::new(),
             workspace: None,
             submitted_prompt: None,
-            previous_grid: None,
+            committed_entries: 0,
+            rendered_projection_generation: 0,
             quitting: false,
         }
     }
@@ -303,21 +307,41 @@ impl App {
 
     fn redraw(&mut self, terminal: &mut TerminalGuard) -> Result<(), AppError> {
         let (width, height) = terminal.size()?;
-        let (visible_lines, transcript_rows) =
-            render::transcript_metrics(&self.state, width, height);
-        self.state
-            .set_viewport_metrics(visible_lines, transcript_rows);
-        let current = render::render(&self.state, &self.registry, width, height);
-        let diff = current.diff(self.previous_grid.as_ref());
-        let cursor = composer_cursor(&self.state, width, height);
-        if let Err(error) = terminal.draw(&diff, cursor) {
-            // The terminal may have received part of a frame before a flush failed. The cell grid
-            // retained by the app can no longer be trusted as the terminal's actual state, so
-            // force the next successful draw to be a full repaint.
-            self.previous_grid = None;
-            return Err(error.into());
+        let size = Size { width, height };
+        if self.rendered_projection_generation != self.state.projection_generation() {
+            self.committed_entries = 0;
+            self.rendered_projection_generation = self.state.projection_generation();
         }
-        self.previous_grid = Some(current);
+
+        if !matches!(self.state.surface(), super::state::UiSurface::None) {
+            let presentation = render::surface_presentation(&self.state, &self.registry, size);
+            terminal
+                .renderer_mut()?
+                .draw_surface(&presentation.lines, size, presentation.cursor)
+                .map_err(TerminalError::Io)?;
+            return Ok(());
+        }
+
+        let stable = render::stable_prefix(self.state.transcript());
+        if stable > self.committed_entries {
+            let lines = render::committed_lines(
+                &self.state,
+                self.committed_entries,
+                stable,
+                width,
+            );
+            terminal
+                .renderer_mut()?
+                .commit(&lines)
+                .map_err(TerminalError::Io)?;
+            self.committed_entries = stable;
+        }
+        let presentation =
+            render::main_presentation(&self.state, &self.registry, size, self.committed_entries);
+        terminal
+            .renderer_mut()?
+            .draw_live(&presentation.live, size, presentation.cursor)
+            .map_err(TerminalError::Io)?;
         Ok(())
     }
 

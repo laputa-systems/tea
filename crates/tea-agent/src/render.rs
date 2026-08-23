@@ -1,4 +1,4 @@
-//! Presentation projection from [`crate::app::AppState`] to the local cell grid.
+//! Presentation projection from [`crate::app::AppState`] to terminal rows.
 //!
 //! The renderer owns presentation semantics above the core event boundary.
 //! Core events remain lossless; this layer decides how a user, assistant,
@@ -8,8 +8,8 @@ use crate::app::{AppState, NoticeSeverity, ToolProjection, ToolState, Transcript
 #[cfg(test)]
 use crate::composer::Composer;
 #[cfg(test)]
-use crate::grid::Color;
-use crate::grid::{Cell, Grid, Style};
+use tea_tui::Color;
+use tea_tui::Style;
 use crate::ui::frame_layout;
 use crate::ui::theme::{Role, Theme};
 use crate::ui::visual_layout::VisualLayout;
@@ -17,6 +17,7 @@ use hi_lite::{Highlighter, Kind, Language};
 use std::sync::OnceLock;
 use std::time::Instant;
 use tea_core::provider::ProviderRegistry;
+use tea_tui::{Cursor, Size, StyledLine};
 
 /// Public measured-frame contract for consumers that need layout without painting.
 pub use crate::ui::frame_layout::FrameLayout;
@@ -56,141 +57,260 @@ impl RenderLine {
     }
 }
 
-fn frame_for(
-    state: &AppState,
-    registry: &ProviderRegistry,
-    width: u16,
-    height: u16,
-) -> FrameLayout {
-    let desired_composer_rows =
-        VisualLayout::measure(state.composer().text(), state.composer().cursor(), width)
-            .rows
-            .len()
-            .max(1);
-    // The composer grows with its content but keeps a bounded viewport once a
-    // conversation exists. That leaves room for the transcript/status and
-    // makes the hidden-above rail an observable affordance on short terminals.
-    let composer_capacity = if state.transcript().is_empty() {
-        usize::from(height)
-    } else {
-        usize::from(height.saturating_sub(3).max(1))
-    };
-    let composer_rows = desired_composer_rows.min(composer_capacity.max(1));
-    let transcript_rows = wrapped_transcript(state, width).len();
-    let menu_rows = slash_menu_lines(state, width).len();
-    // Measure exactly the rows that `activity_lines` will paint so the fixed
-    // footer never overlaps live status output.
-    let activity_rows = activity_lines(state).len();
-    let footer_rows = footer_render_line_count(state, registry, width);
-    frame_layout::plan_flow(
-        width,
-        height,
-        transcript_rows,
-        activity_rows,
-        composer_rows,
-        menu_rows,
-        if menu_rows == 0 { footer_rows } else { 0 },
-    )
+/// Main-screen presentation split at the durable terminal projection frontier.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct MainPresentation {
+    pub(crate) commit: Vec<StyledLine>,
+    pub(crate) live: Vec<StyledLine>,
+    pub(crate) cursor: Option<Cursor>,
 }
 
-/// Render the current presentation state into a fresh frame.
-pub fn render(state: &AppState, registry: &ProviderRegistry, width: u16, height: u16) -> Grid {
-    if !matches!(state.surface(), UiSurface::None) {
-        return render_surface(state, registry, width, height);
+/// A temporary alternate-screen surface projection.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct SurfacePresentation {
+    pub(crate) lines: Vec<StyledLine>,
+    pub(crate) cursor: Option<Cursor>,
+}
+
+/// Return the largest front-contiguous transcript prefix that is safe to
+/// commit permanently to native terminal scrollback.
+pub(crate) fn stable_prefix(entries: &[TranscriptEntry]) -> usize {
+    entries
+        .iter()
+        .take_while(|entry| match entry {
+            TranscriptEntry::Welcome { .. }
+            | TranscriptEntry::User { .. }
+            | TranscriptEntry::Notice { .. }
+            | TranscriptEntry::Error { .. } => true,
+            TranscriptEntry::Assistant { streaming, .. } => !streaming,
+            TranscriptEntry::Tool(tool) => {
+                matches!(tool.state, ToolState::Completed | ToolState::Failed)
+            }
+        })
+        .count()
+}
+
+/// Render newly stable semantic entries as permanently committed physical rows.
+pub(crate) fn committed_lines(
+    state: &AppState,
+    start: usize,
+    end: usize,
+    width: u16,
+) -> Vec<StyledLine> {
+    let mut output = Vec::new();
+    for (index, entry) in state
+        .transcript()
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(end.saturating_sub(start))
+    {
+        if index != 0 {
+            output.push(styled(&RenderLine::plain(String::new(), Style::default())));
+        }
+        output.extend(entry_lines_for_entry(entry, width).iter().map(styled));
     }
-    let mut grid = Grid::new(width, height);
-    let theme = Theme::default();
-    let regions = frame_for(state, registry, width, height);
-    let transcript = wrapped_transcript(state, regions.transcript.width);
-    let visible_rows = regions.transcript.height as usize;
-    let start = if state.follows_output() {
-        transcript.len().saturating_sub(visible_rows)
+    output
+}
+
+/// Project only the semantic suffix that is not yet committed, followed by
+/// activity, composer, slash completion, and footer rows.
+pub(crate) fn main_presentation(
+    state: &AppState,
+    registry: &ProviderRegistry,
+    size: Size,
+    committed_entries: usize,
+) -> MainPresentation {
+    let width = size.width;
+    let entries = state.transcript();
+    let suffix_start = committed_entries.min(entries.len());
+    let suffix = &entries[suffix_start..];
+    let mut lines = Vec::new();
+
+    // A commit ends on a fresh terminal row. That row is the existing tea
+    // breathing/separator row, so it becomes part of the mutable tail rather
+    // than an application-owned historical viewport.
+    if suffix.is_empty() {
+        if suffix_start != 0 {
+            lines.push(RenderLine::plain(String::new(), Style::default()));
+        }
     } else {
-        state.viewport_offset().min(transcript.len())
+        if suffix_start != 0 {
+            lines.push(RenderLine::plain(String::new(), Style::default()));
+        }
+        for (index, entry) in suffix.iter().enumerate() {
+            if index != 0 {
+                lines.push(RenderLine::plain(String::new(), Style::default()));
+            }
+            lines.extend(entry_lines_for_entry(entry, width));
+        }
+        // Preserve the prior transcript-to-activity breathing row.
+        lines.push(RenderLine::plain(String::new(), Style::default()));
+    }
+
+    lines.extend(activity_lines(state));
+    let desired_composer_rows = composer_layout(state, width).rows.len().max(1);
+    let composer_capacity = if entries.is_empty() {
+        usize::from(size.height).max(1)
+    } else {
+        usize::from(size.height.saturating_sub(3).max(1))
     };
-    for (row, line) in transcript.iter().skip(start).enumerate() {
-        if row >= visible_rows {
-            break;
-        }
-        put_line(
-            &mut grid,
-            regions.transcript.x,
-            regions.transcript.y + row as u16,
-            regions.transcript.width,
-            line,
-        );
-    }
-
-    let activity = activity_lines(state);
-    for (row, line) in activity.into_iter().enumerate() {
-        if row >= regions.activity.height as usize {
-            break;
-        }
-        put_line(
-            &mut grid,
-            regions.activity.x,
-            regions.activity.y + row as u16,
-            regions.activity.width,
-            &line,
-        );
-    }
-
-    let visual = composer_layout(state, regions.composer.width);
-    let composer_start = composer_view_start(&visual, regions.composer.height);
-    for (row, line) in visual.rows.into_iter().skip(composer_start).enumerate() {
-        if row >= regions.composer.height as usize {
+    let visual = composer_layout(state, width);
+    let composer_start = composer_view_start(
+        &visual,
+        desired_composer_rows.min(composer_capacity) as u16,
+    );
+    let composer_row = lines.len();
+    let theme = Theme::default();
+    for (row, line) in visual.rows.iter().skip(composer_start).enumerate() {
+        if row >= composer_capacity {
             break;
         }
         let text = line.text.strip_prefix("❯ ").unwrap_or(&line.text);
-        let prefix = if composer_start != 0 && row == 0 {
-            "┃↑"
-        } else {
-            "┃ "
-        };
-        put_text(
-            &mut grid,
-            regions.composer.x,
-            regions.composer.y + row as u16,
-            regions.composer.width,
-            &format!("{prefix}{text}"),
+        let prefix = if composer_start != 0 && row == 0 { "┃↑" } else { "┃ " };
+        lines.push(RenderLine::plain(
+            format!("{prefix}{text}"),
             theme.style(Role::Text),
-        );
+        ));
     }
 
-    if regions.hint.height != 0 {
-        for (row, status) in footer_render_lines(state, registry, regions.hint.width)
+    if !state.slash_completion_rows(1).is_empty() {
+        lines.extend(slash_menu_lines(state, width));
+    } else {
+        let footer = footer_render_lines(state, registry, width);
+        if !footer.is_empty() {
+            lines.push(RenderLine::plain(String::new(), Style::default()));
+            lines.extend(footer);
+        }
+    }
+
+    let cursor_row = composer_row.saturating_add(visual.cursor_row.saturating_sub(composer_start));
+    let cursor = Some(Cursor {
+        column: visual.cursor_column.min(usize::from(width.saturating_sub(1))) as u16,
+        row: cursor_row.min(usize::from(u16::MAX)) as u16,
+        visible: true,
+    });
+    fit_live(lines, cursor, size, composer_row)
+}
+
+/// Project an explicit full-screen surface for the alternate screen.
+pub(crate) fn surface_presentation(
+    state: &AppState,
+    registry: &ProviderRegistry,
+    size: Size,
+) -> SurfacePresentation {
+    let width = size.width;
+    let height = size.height;
+    let theme = Theme::default();
+    let mut rows = vec![RenderLine::plain(String::new(), Style::default()); usize::from(height)];
+    let payload = state.surface_lines().map(<[String]>::to_vec);
+    let lines: Vec<String> = match state.surface() {
+        UiSurface::Help => payload.clone().unwrap_or_else(|| {
+            vec![
+                "General".into(),
+                "  /help  show keybindings and commands".into(),
+            ]
+        }),
+        UiSurface::ToolDetail => payload.unwrap_or_else(|| vec!["No transcript yet.".into()]),
+        UiSurface::ModelPicker | UiSurface::CustomModel | UiSurface::SessionPicker => state
+            .picker_lines_visible(registry, usize::MAX)
+            .unwrap_or_default(),
+        UiSurface::None => Vec::new(),
+    };
+    if height != 0 {
+        rows[0] = RenderLine::plain("┃ ", theme.style(Role::Text));
+    }
+    if height > 1 {
+        rows[1] = RenderLine::plain("─".repeat(usize::from(width)), theme.style(Role::Muted));
+    }
+    let content_limit = height.saturating_sub(2);
+    let mut y = 2_u16;
+    let surface_start = state.surface_offset().min(lines.len());
+    'payload: for line in lines.into_iter().skip(surface_start) {
+        for wrapped in wrap_lines(&line, width, theme.style(Role::Text)) {
+            if y >= content_limit {
+                break 'payload;
+            }
+            rows[usize::from(y)] = wrapped;
+            y = y.saturating_add(1);
+        }
+    }
+    if height > 2 {
+        let divider = height - 2;
+        rows[usize::from(divider)] =
+            RenderLine::plain("─".repeat(usize::from(width)), theme.style(Role::Muted));
+        let hint = match state.surface() {
+            UiSurface::Help => "↑↓ Navigate · Enter Open · Esc Close",
+            UiSurface::ToolDetail => "↑↓ Scroll · Ctrl+O Close · Esc Close",
+            UiSurface::ModelPicker | UiSurface::CustomModel | UiSurface::SessionPicker => {
+                "↑↓ Navigate · Enter Select · Esc Close"
+            }
+            UiSurface::None => "Esc Close",
+        };
+        rows[usize::from(height - 1)] = RenderLine::plain(hint, theme.style(Role::Muted));
+    }
+    SurfacePresentation {
+        lines: rows.into_iter().map(|line| styled(&line)).collect(),
+        cursor: (width > 2 && height != 0).then_some(Cursor {
+            column: 2,
+            row: 0,
+            visible: true,
+        }),
+    }
+}
+
+fn fit_live(
+    lines: Vec<RenderLine>,
+    cursor: Option<Cursor>,
+    size: Size,
+    composer_row: usize,
+) -> MainPresentation {
+    let maximum = usize::from(size.height);
+    if maximum == 0 {
+        return MainPresentation {
+            commit: Vec::new(),
+            live: Vec::new(),
+            cursor: None,
+        };
+    }
+    // Drop old mutable transcript rows first. The composer must remain present
+    // even on a tiny terminal; status rows can be clipped after it when there
+    // is no possible layout that retains every footer line.
+    let start = lines
+        .len()
+        .saturating_sub(maximum)
+        .min(composer_row);
+    let end = start.saturating_add(maximum).min(lines.len());
+    let cursor = cursor.map(|cursor| Cursor {
+        row: cursor
+            .row
+            .saturating_sub(start.min(usize::from(u16::MAX)) as u16)
+            .min(size.height.saturating_sub(1)),
+        ..cursor
+    });
+    MainPresentation {
+        commit: Vec::new(),
+        live: lines
             .into_iter()
-            .enumerate()
-        {
-            if row >= regions.hint.height as usize {
-                break;
-            }
-            put_line(
-                &mut grid,
-                regions.hint.x,
-                regions.hint.y + row as u16,
-                regions.hint.width,
-                &status,
-            );
-        }
+            .skip(start)
+            .take(end.saturating_sub(start))
+            .map(|line| styled(&line))
+            .collect(),
+        cursor,
     }
+}
 
-    if regions.menu.height != 0 {
-        let completion_rows = slash_menu_lines(state, regions.menu.width);
-        for (row, line) in completion_rows.into_iter().enumerate() {
-            if row >= regions.menu.height as usize {
-                break;
-            }
-            put_line(
-                &mut grid,
-                regions.menu.x,
-                regions.menu.y + row as u16,
-                regions.menu.width,
-                &line,
-            );
-        }
+fn styled(line: &RenderLine) -> StyledLine {
+    let styles = line
+        .character_styles
+        .as_ref()
+        .cloned()
+        .unwrap_or_else(|| vec![line.style; line.text.chars().count()]);
+    let mut output = StyledLine::default();
+    for (character, style) in line.text.chars().zip(styles) {
+        output.push(character.to_string(), style);
     }
-    grid
+    output
 }
 
 fn footer_lines(state: &AppState, registry: &ProviderRegistry) -> [String; 2] {
@@ -199,16 +319,6 @@ fn footer_lines(state: &AppState, registry: &ProviderRegistry) -> [String; 2] {
     // stable avoids leaving a stale `Asking` label behind while tools stream.
     lines[0] = lines[0].replace("⏺ Asking · ", "");
     lines
-}
-
-fn footer_render_line_count(state: &AppState, registry: &ProviderRegistry, width: u16) -> usize {
-    let [primary, secondary] = footer_lines(state, registry);
-    wrap_raw_text(&primary, width).len()
-        + state
-        .footer_notice()
-        .map(|(notice, _)| wrap_raw_text(notice, width).len())
-        .unwrap_or(0)
-        + wrap_raw_text(&secondary, width).len()
 }
 
 fn footer_render_lines(
@@ -271,85 +381,6 @@ fn wrap_footer_primary(text: &str, width: u16) -> Vec<RenderLine> {
         .collect()
 }
 
-fn render_surface(state: &AppState, registry: &ProviderRegistry, width: u16, height: u16) -> Grid {
-    let mut grid = Grid::new(width, height);
-    let theme = Theme::default();
-    let payload = state.surface_lines().map(<[String]>::to_vec);
-    let lines: Vec<String> = match state.surface() {
-        UiSurface::Help => payload.clone().unwrap_or_else(|| {
-            vec![
-                "General".into(),
-                "  /help  show keybindings and commands".into(),
-            ]
-        }),
-        UiSurface::ToolDetail => payload.unwrap_or_else(|| vec!["No transcript yet.".into()]),
-        UiSurface::ModelPicker | UiSurface::CustomModel | UiSurface::SessionPicker => state
-            .picker_lines_visible(registry, usize::MAX)
-            .unwrap_or_default(),
-        // Keep this branch forward-compatible with a future full-transcript surface. A
-        // temporary surface still owns the whole frame even when its content is not yet
-        // specialized here.
-        _ => Vec::new(),
-    };
-    if height == 0 {
-        return grid;
-    }
-    put_text(&mut grid, 0, 0, width, "┃ ", theme.style(Role::Text));
-    if height > 1 {
-        put_text(
-            &mut grid,
-            0,
-            1,
-            width,
-            &"─".repeat(usize::from(width)),
-            theme.style(Role::Muted),
-        );
-    }
-    let content_limit = height.saturating_sub(2);
-    let mut y = 2_u16;
-    let surface_start = state.surface_offset().min(lines.len());
-    for line in lines.into_iter().skip(surface_start) {
-        for wrapped in wrap_lines(&line, width, theme.style(Role::Text)) {
-            if y >= content_limit {
-                break;
-            }
-            put_line(&mut grid, 0, y, width, &wrapped);
-            y = y.saturating_add(1);
-        }
-        if y >= content_limit {
-            break;
-        }
-    }
-    if height > 2 {
-        let divider = height - 2;
-        put_text(
-            &mut grid,
-            0,
-            divider,
-            width,
-            &"─".repeat(usize::from(width)),
-            theme.style(Role::Muted),
-        );
-        let hint = match state.surface() {
-            UiSurface::Help => "↑↓ Navigate · Enter Open · Esc Close",
-            UiSurface::ToolDetail => "↑↓ Scroll · Ctrl+O Close · Esc Close",
-            UiSurface::ModelPicker | UiSurface::CustomModel | UiSurface::SessionPicker => {
-                "↑↓ Navigate · Enter Select · Esc Close"
-            }
-            _ => "Esc Close",
-        };
-        put_text(
-            &mut grid,
-            0,
-            height - 1,
-            width,
-            hint,
-            theme.style(Role::Muted),
-        );
-    }
-    grid
-}
-
 fn activity_lines(state: &AppState) -> Vec<RenderLine> {
     let mut lines = Vec::new();
     if matches!(state.status(), crate::app::UiStatus::Active) {
@@ -409,43 +440,9 @@ fn slash_menu_lines(state: &AppState, width: u16) -> Vec<RenderLine> {
     lines
 }
 
-/// Return the count and available row count used by scrolling calculations.
-pub fn transcript_metrics(state: &AppState, width: u16, height: u16) -> (usize, usize) {
-    let registry = ProviderRegistry::new();
-    let regions = frame_for(state, &registry, width, height);
-    (
-        wrapped_transcript(state, regions.transcript.width).len(),
-        regions.transcript.height as usize,
-    )
-}
-
 /// Return the number of visual rows occupied by the composer.
 pub fn composer_height(state: &AppState, width: u16) -> u16 {
     composer_layout(state, width).rows.len().max(1) as u16
-}
-
-/// Return the native cursor location for the visible composer.
-pub fn composer_cursor_position(state: &AppState, width: u16, height: u16) -> Option<(u16, u16)> {
-    if width == 0 || height == 0 {
-        return None;
-    }
-    if !matches!(state.surface(), UiSurface::None) {
-        return (width > 2).then_some((2, 0));
-    }
-    let registry = ProviderRegistry::new();
-    let regions = frame_for(state, &registry, width, height);
-    if regions.composer.height == 0 {
-        return None;
-    }
-    let visual = composer_layout(state, width);
-    let composer_start = composer_view_start(&visual, regions.composer.height);
-    let row = visual.cursor_row.saturating_sub(composer_start);
-    Some((
-        visual
-            .cursor_column
-            .min(usize::from(width.saturating_sub(1))) as u16,
-        regions.composer.y + (row as u16).min(regions.composer.height.saturating_sub(1)),
-    ))
 }
 
 fn composer_layout(state: &AppState, width: u16) -> VisualLayout {
@@ -460,72 +457,6 @@ fn composer_view_start(layout: &VisualLayout, visible_rows: u16) -> usize {
         .cursor_row
         .saturating_sub(usize::from(visible_rows).saturating_sub(1))
         .min(layout.rows.len().saturating_sub(usize::from(visible_rows)))
-}
-
-fn put_text(grid: &mut Grid, x: u16, y: u16, width: u16, text: &str, style: Style) {
-    let mut column = 0_u16;
-    for symbol in text.chars() {
-        if symbol == '\r' {
-            continue;
-        }
-        if symbol == '\n' {
-            break;
-        }
-        let symbol_width = char_width(symbol);
-        if symbol_width == 0 {
-            continue;
-        }
-        let symbol_width = symbol_width as u16;
-        if column.saturating_add(symbol_width) > width {
-            break;
-        }
-        let _ = grid.set(x.saturating_add(column), y, Cell { symbol, style });
-        if symbol_width == 2 && column + 1 < width {
-            let _ = grid.set(x.saturating_add(column + 1), y, Cell { symbol: ' ', style });
-        }
-        column = column.saturating_add(symbol_width);
-    }
-}
-
-fn put_line(grid: &mut Grid, x: u16, y: u16, width: u16, line: &RenderLine) {
-    let mut column = 0_u16;
-    for (index, symbol) in line.text.chars().enumerate() {
-        if symbol == '\r' {
-            continue;
-        }
-        if symbol == '\n' {
-            break;
-        }
-        let symbol_width = char_width(symbol);
-        if symbol_width == 0 {
-            continue;
-        }
-        let symbol_width = symbol_width as u16;
-        if column.saturating_add(symbol_width) > width {
-            break;
-        }
-        let style = line
-            .character_styles
-            .as_ref()
-            .and_then(|styles| styles.get(index).copied())
-            .unwrap_or(line.style);
-        let _ = grid.set(x.saturating_add(column), y, Cell { symbol, style });
-        if symbol_width == 2 && column + 1 < width {
-            let _ = grid.set(x.saturating_add(column + 1), y, Cell { symbol: ' ', style });
-        }
-        column = column.saturating_add(symbol_width);
-    }
-}
-
-fn wrapped_transcript(state: &AppState, width: u16) -> Vec<RenderLine> {
-    let mut output = Vec::new();
-    for (index, entry) in state.transcript_entries().into_iter().enumerate() {
-        if index != 0 {
-            output.push(RenderLine::plain(String::new(), Style::default()));
-        }
-        output.extend(entry_lines_for_entry(&entry, width));
-    }
-    output
 }
 
 fn entry_lines_for_entry(entry: &TranscriptEntry, width: u16) -> Vec<RenderLine> {
@@ -1133,6 +1064,25 @@ mod tests {
     }
 
     #[test]
+    fn stable_prefix_stops_at_the_first_mutable_entry() {
+        let mut entries = vec![
+            TranscriptEntry::User {
+                text: "prompt".into(),
+            },
+            TranscriptEntry::Assistant {
+                text: "partial".into(),
+                streaming: true,
+            },
+        ];
+        assert_eq!(stable_prefix(&entries), 1);
+        let TranscriptEntry::Assistant { streaming, .. } = &mut entries[1] else {
+            unreachable!()
+        };
+        *streaming = false;
+        assert_eq!(stable_prefix(&entries), 2);
+    }
+
+    #[test]
     fn wide_characters_consume_two_terminal_cells() {
         assert_eq!(display_width("界"), 2);
         assert_eq!(wrap_raw_text("a界b", 3), ["a界", "b"]);
@@ -1215,20 +1165,19 @@ mod tests {
             kind: tea_core::event::AgentEventKind::MessageEnd { message: assistant },
         });
 
-        let grid = render(&state, &ProviderRegistry::new(), 40, 12);
-        assert_eq!(row_text(&grid, 0), "┃ user message");
-        assert_eq!(row_text(&grid, 2), "┌");
-        assert_eq!(row_text(&grid, 3), "│ fn main() {}");
-        assert_eq!(row_text(&grid, 4), "└");
-    }
-
-    fn row_text(grid: &Grid, row: u16) -> String {
-        (0..grid.width())
-            .filter_map(|column| grid.get(column, row))
-            .map(|cell| cell.symbol)
-            .collect::<String>()
-            .trim_end()
-            .to_owned()
+        let presentation = main_presentation(
+            &state,
+            &ProviderRegistry::new(),
+            Size {
+                width: 40,
+                height: 12,
+            },
+            0,
+        );
+        assert_eq!(presentation.live[0].text(), "┃ user message");
+        assert_eq!(presentation.live[2].text(), "┌");
+        assert_eq!(presentation.live[3].text(), "│ fn main() {}");
+        assert_eq!(presentation.live[4].text(), "└");
     }
 
     #[test]
@@ -1339,30 +1288,33 @@ mod tests {
     fn live_startup_frame_uses_the_minimal_transcript_flow_rail() {
         let mut state = AppState::new();
         state.welcome_line();
-        let grid = render(&state, &ProviderRegistry::new(), 80, 24);
-        let registry = ProviderRegistry::new();
-        let regions = frame_for(&state, &registry, 80, 24);
-        assert_eq!(
-            grid.get(regions.composer.x, regions.composer.y)
-                .expect("composer cell")
-                .symbol,
-            '┃'
+        let presentation = main_presentation(
+            &state,
+            &ProviderRegistry::new(),
+            Size {
+                width: 80,
+                height: 24,
+            },
+            1,
         );
-        assert_eq!(regions.composer.y, 2);
-        assert_ne!(
-            grid.get(0, regions.composer.y)
-                .expect("composer cell")
-                .symbol,
-            '❯'
-        );
+        assert_eq!(presentation.live[0].text(), "");
+        assert_eq!(presentation.live[1].text(), "┃ ");
+        assert_eq!(presentation.cursor, Some(Cursor { column: 2, row: 1, visible: true }));
     }
 
     #[test]
     fn footer_model_identity_uses_yellow_for_the_provider_model_segment() {
         let state = AppState::new();
         let registry = ProviderRegistry::new();
-        let grid = render(&state, &registry, 80, 8);
-        let regions = frame_for(&state, &registry, 80, 8);
+        let presentation = main_presentation(
+            &state,
+            &registry,
+            Size {
+                width: 80,
+                height: 8,
+            },
+            0,
+        );
         let footer = state.footer_lines(&registry);
         let primary = &footer[0];
         let model_start = primary
@@ -1370,10 +1322,7 @@ mod tests {
             .map(|prefix| prefix + "⏺ Asking · ".len())
             .unwrap_or(0);
         assert_eq!(
-            grid.get(regions.hint.x + model_start as u16, regions.hint.y)
-                .expect("model footer cell")
-                .style
-                .foreground,
+            style_at(&presentation.live[2], model_start).foreground,
             Some(Color::Yellow)
         );
     }
@@ -1382,16 +1331,17 @@ mod tests {
     fn footer_renders_the_calm_session_stats_line() {
         let state = AppState::new();
         let registry = ProviderRegistry::new();
-        let grid = render(&state, &registry, 80, 8);
-        let regions = frame_for(&state, &registry, 80, 8);
-        let row = (0..regions.hint.width)
-            .filter_map(|column| grid.get(regions.hint.x + column, regions.hint.y + 1))
-            .map(|cell| cell.symbol)
-            .collect::<String>()
-            .trim_end()
-            .to_owned();
+        let presentation = main_presentation(
+            &state,
+            &registry,
+            Size {
+                width: 80,
+                height: 8,
+            },
+            0,
+        );
 
-        assert_eq!(row, state.footer_lines(&registry)[1]);
+        assert_eq!(presentation.live[3].text(), state.footer_lines(&registry)[1]);
     }
 
     #[test]
@@ -1407,18 +1357,20 @@ mod tests {
             "/new".into(),
             "/quit".into(),
         ]);
-        let grid = render(&state, &ProviderRegistry::new(), 80, 24);
-        assert_eq!(grid.get(0, 2).expect("composer rail").symbol, '┃');
-        assert_eq!(grid.get(0, 3).expect("menu divider").symbol, '─');
-        assert_eq!(
-            (0..5)
-                .filter_map(|column| grid.get(column, 4))
-                .map(|cell| cell.symbol)
-                .collect::<String>(),
-            "  /he"
+        let presentation = main_presentation(
+            &state,
+            &ProviderRegistry::new(),
+            Size {
+                width: 80,
+                height: 24,
+            },
+            1,
         );
-        assert_eq!(grid.get(0, 11).expect("menu navigation hint").symbol, '↑');
-        assert_eq!(composer_cursor_position(&state, 80, 24), Some((3, 2)));
+        assert_eq!(presentation.live[1].text().chars().next(), Some('┃'));
+        assert_eq!(presentation.live[2].text().chars().next(), Some('─'));
+        assert!(presentation.live[3].text().starts_with("  /he"));
+        assert_eq!(presentation.live[10].text().chars().next(), Some('↑'));
+        assert_eq!(presentation.cursor, Some(Cursor { column: 3, row: 1, visible: true }));
     }
 
     #[test]
@@ -1428,29 +1380,39 @@ mod tests {
         state
             .composer_mut()
             .replace_from_editor("one\ntwo\nthree\nfour\nfive");
-        let grid = render(&state, &ProviderRegistry::new(), 20, 5);
-        let regions = frame_for(&state, &ProviderRegistry::new(), 20, 5);
-        assert_eq!(
-            grid.get(0, regions.composer.y)
-                .expect("visible composer rail")
-                .symbol,
-            '┃'
+        let presentation = main_presentation(
+            &state,
+            &ProviderRegistry::new(),
+            Size {
+                width: 20,
+                height: 5,
+            },
+            1,
         );
-        assert_eq!(
-            grid.get(1, regions.composer.y)
-                .expect("hidden composer marker")
-                .symbol,
-            '↑'
-        );
+        assert!(presentation.live[0].text().starts_with("┃↑"));
         for (width, height) in [(0, 0), (1, 1), (2, 2)] {
-            let grid = render(&state, &ProviderRegistry::new(), width, height);
-            assert_eq!((grid.width(), grid.height()), (width, height));
-            if let Some((x, y)) = composer_cursor_position(&state, width, height) {
-                assert!(
-                    x < width && y < height,
-                    "cursor must address a drawable cell"
-                );
+            let presentation = main_presentation(
+                &state,
+                &ProviderRegistry::new(),
+                Size { width, height },
+                1,
+            );
+            assert!(presentation.live.len() <= usize::from(height));
+            if let Some(cursor) = presentation.cursor {
+                assert!(cursor.column < width && cursor.row < height);
             }
         }
+    }
+
+    fn style_at(line: &StyledLine, index: usize) -> Style {
+        let mut consumed = 0;
+        for span in line.spans() {
+            let count = span.text.chars().count();
+            if index < consumed + count {
+                return span.style;
+            }
+            consumed += count;
+        }
+        panic!("style index {index} is outside line {:?}", line.text());
     }
 }

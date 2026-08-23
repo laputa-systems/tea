@@ -1,6 +1,6 @@
 //! Bounded frame planning for the terminal projection.
 
-use crate::grid::Rect;
+use tea_tui::Rect;
 
 /// Measured regions of a frame. The footer owns the composer, menu, and hint rows.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

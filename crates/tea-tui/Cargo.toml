@@ -1,0 +1,12 @@
+[package]
+name = "tea-tui"
+version = "1.0.0"
+edition = "2021"
+description = "Small scrollback-native terminal presentation primitives for tea"
+license = "MIT OR Apache-2.0"
+
+[lib]
+path = "src/lib.rs"
+
+[lints]
+workspace = true

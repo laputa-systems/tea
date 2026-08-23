@@ -124,10 +124,9 @@ pub struct AppState {
     pub(super) transcript_sequences: Vec<Option<u64>>,
     pub(super) composer: Composer,
     pub(super) status: UiStatus,
-    pub(super) viewport_offset: usize,
-    pub(super) follow_output: bool,
-    pub(super) visible_transcript_lines: usize,
-    pub(super) transcript_rows: usize,
+    /// Monotonic marker for a semantic transcript replacement. The renderer
+    /// uses it to begin a fresh terminal projection without comparing text.
+    pub(super) projection_generation: u64,
     pub(super) selected_model: Option<ModelDescriptor>,
     /// Presentation projection of the selected model's durable compaction policy.
     pub(super) automatic_compaction_enabled: bool,
@@ -182,10 +181,7 @@ pub(super) struct ContextEstimate {
 impl AppState {
     /// Create an empty projection.
     pub fn new() -> Self {
-        Self {
-            follow_output: true,
-            ..Self::default()
-        }
+        Self::default()
     }
 
     /// Open or close the temporary full-transcript/detail surface.
@@ -623,14 +619,17 @@ impl AppState {
             .collect()
     }
 
-    /// Return the requested transcript top row for manual scrolling.
-    pub fn viewport_offset(&self) -> usize {
-        self.viewport_offset
+    /// Return the current semantic-projection generation.
+    pub(crate) const fn projection_generation(&self) -> u64 {
+        self.projection_generation
     }
 
-    /// Whether output should continue to follow the newest event.
-    pub fn follows_output(&self) -> bool {
-        self.follow_output
+    /// Whether the semantic projection has already observed a terminal agent
+    /// state, even if the host task is finishing its final bookkeeping turn.
+    pub(super) fn session_projection_is_settled(&self) -> bool {
+        self.streaming_line.is_none()
+            && self.active_tool_lines.is_empty()
+            && !matches!(self.status, UiStatus::Active)
     }
 
     /// Return the compact, event-derived telemetry lines for the fixed footer.
@@ -952,36 +951,13 @@ impl AppState {
         self.streaming_line = None;
         self.active_tool_lines.clear();
         self.reported_usage = Usage::default();
-        self.viewport_offset = 0;
-        self.follow_output = true;
+        self.projection_generation = self.projection_generation.wrapping_add(1);
     }
 
     pub(super) fn clear_history(&mut self) {
         self.history.clear();
         self.history_index = None;
         self.history_draft = None;
-    }
-
-    pub(super) fn page_up(&mut self, lines: usize) {
-        let current = if self.follow_output {
-            self.visible_transcript_lines
-                .saturating_sub(self.transcript_rows)
-        } else {
-            self.viewport_offset
-        };
-        self.follow_output = false;
-        self.viewport_offset = current.saturating_sub(lines);
-    }
-
-    pub(super) fn page_down(&mut self, lines: usize) {
-        self.viewport_offset = self.viewport_offset.saturating_add(lines);
-        if self.viewport_offset
-            >= self
-                .visible_transcript_lines
-                .saturating_sub(self.transcript_rows)
-        {
-            self.follow_output = true;
-        }
     }
 
     /// Scroll a temporary surface without changing live transcript follow state.
@@ -997,19 +973,6 @@ impl AppState {
             .min(self.surface_lines.len().saturating_sub(1));
     }
 
-    pub(super) fn follow_end(&mut self) {
-        self.follow_output = true;
-        self.viewport_offset = self.transcript.len();
-    }
-
-    pub(super) fn set_viewport_metrics(
-        &mut self,
-        visible_transcript_lines: usize,
-        transcript_rows: usize,
-    ) {
-        self.visible_transcript_lines = visible_transcript_lines;
-        self.transcript_rows = transcript_rows;
-    }
 }
 
 fn full_transcript_detail_lines(entries: &[TranscriptEntry]) -> Vec<String> {

@@ -4,6 +4,39 @@ The tea terminal is a presentation layer over one managed DurableHarness. It
 does not own a transcript format, an extension registry, or a second agent
 loop.
 
+## Scrollback-native presentation
+
+The terminal keeps the semantic typed transcript in `AppState`, but it no
+longer keeps a rendered transcript viewport. The presentation projection has a
+small explicit frontier:
+
+```text
+DurableHarness/session
+        ↓
+semantic AppState transcript
+        ↓
+presentation projection
+        ├── stable prefix → native terminal scrollback
+        └── mutable suffix → bounded live tail
+```
+
+Welcome, user, notice, error, settled assistant, and settled tool entries
+advance the contiguous stable prefix. Their fully styled, width-aware rows are
+written once to the main screen. Streaming assistant and in-progress tool rows,
+activity, composer, slash completion, and footer remain in the live tail and
+may be redrawn. Historical rows are not reflowed after a resize; only the live
+tail is relaid out.
+
+Normal conversation always uses the main screen, so terminal-emulator history
+navigation is native. `/new` replaces the semantic session projection but does
+not erase rows already written to terminal scrollback. Reopening a session
+starts a fresh projection and prints its restored stable prefix again.
+
+Help, model/custom-model/session pickers, and tool detail are true temporary
+full-screen surfaces. They borrow the alternate screen only while open; closing
+one restores the untouched main screen and its current live tail. Slash
+completion remains inline rather than becoming a modal surface.
+
 ## Startup
 
 The terminal accepts explicit workspace, provider, model, thinking, compaction,

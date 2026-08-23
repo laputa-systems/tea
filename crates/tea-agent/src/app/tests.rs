@@ -1,7 +1,6 @@
 use super::compaction::ProviderCompactor;
 use super::state::ContextEstimate;
 use super::*;
-use crate::grid::Color;
 use std::ffi::OsString;
 use std::fs;
 use std::num::NonZeroU64;
@@ -24,6 +23,7 @@ use tea_session::{
     JsonlSession, LaneId, Metadata, PayloadRef, ProvisionedEntry, SessionEntry, SessionFact,
     SessionHeader, SessionId, SessionWriter,
 };
+use tea_tui::{Color, Size, StyledLine, Style};
 
 fn test_tea_home(label: &str) -> PathBuf {
     static NEXT_HOME: AtomicU64 = AtomicU64::new(1);
@@ -34,6 +34,18 @@ fn test_tea_home(label: &str) -> PathBuf {
     ));
     fs::create_dir_all(&root).expect("test Tea home should be created");
     root
+}
+
+fn style_at(line: &StyledLine, index: usize) -> Style {
+    let mut consumed = 0;
+    for span in line.spans() {
+        let count = span.text.chars().count();
+        if index < consumed + count {
+            return span.style;
+        }
+        consumed += count;
+    }
+    panic!("style index {index} is outside line {:?}", line.text());
 }
 
 #[derive(Debug)]
@@ -644,25 +656,22 @@ fn restoration_error_has_a_wrapped_red_footer_line() {
         "last model could not be restored: OPENROUTER_API_KEY is required for OpenRouter",
     );
 
-    let grid = crate::render::render(&state, &tea_core::provider::ProviderRegistry::new(), 40, 8);
-    let row = |y: u16| {
-        (0..40)
-            .filter_map(|column| grid.get(column, y))
-            .map(|cell| cell.symbol)
-            .collect::<String>()
-            .trim_end()
-            .to_owned()
-    };
+    let presentation = crate::render::main_presentation(
+        &state,
+        &tea_core::provider::ProviderRegistry::new(),
+        Size {
+            width: 40,
+            height: 8,
+        },
+        0,
+    );
 
-    assert_eq!(row(2), "provider/model unknown · effort off");
-    assert_eq!(row(3), "last model could not be restored:");
-    assert_eq!(row(4), "OPENROUTER_API_KEY is required for");
-    assert_eq!(row(5), "OpenRouter");
+    assert_eq!(presentation.live[2].text(), "provider/model unknown · effort off");
+    assert_eq!(presentation.live[3].text(), "last model could not be restored:");
+    assert_eq!(presentation.live[4].text(), "OPENROUTER_API_KEY is required for");
+    assert_eq!(presentation.live[5].text(), "OpenRouter");
     assert_eq!(
-        grid.get(0, 4)
-            .expect("error footer cell")
-            .style
-            .foreground,
+        style_at(&presentation.live[4], 0).foreground,
         Some(Color::Red)
     );
 }
@@ -881,15 +890,22 @@ fn ctrl_o_opens_a_full_transcript_detail_viewer_and_preserves_live_state() {
             && lines.iter().any(|line| line == "Tool: read (Started)")
             && lines.iter().any(|line| line.contains("src/lib.rs"))
     }));
-    let grid = crate::render::render(&state, &tea_core::provider::ProviderRegistry::new(), 40, 10);
-    let title = (0..40)
-        .filter_map(|column| grid.get(column, 2))
-        .map(|cell| cell.symbol)
-        .collect::<String>();
-    assert!(title.starts_with("Full detail"));
+    let presentation = crate::render::surface_presentation(
+        &state,
+        &tea_core::provider::ProviderRegistry::new(),
+        Size {
+            width: 40,
+            height: 10,
+        },
+    );
+    assert!(presentation.lines[2].text().starts_with("Full detail"));
     assert_eq!(
-        crate::render::composer_cursor_position(&state, 40, 10),
-        Some((2, 0))
+        presentation.cursor,
+        Some(tea_tui::Cursor {
+            column: 2,
+            row: 0,
+            visible: true,
+        })
     );
     state.page_surface_down(2);
     assert_eq!(state.surface_offset(), 2);
@@ -910,13 +926,24 @@ fn temporary_surface_payload_does_not_enter_or_survive_transcript_close() {
         state.surface_lines().map(|lines| lines.to_vec()),
         Some(vec!["help text".to_owned()])
     );
-    let grid = crate::render::render(&state, &tea_core::provider::ProviderRegistry::new(), 20, 6);
-    assert_eq!(grid.get(0, 0).expect("surface rail").symbol, '┃');
-    assert_eq!(grid.get(0, 1).expect("surface divider").symbol, '─');
-    assert_eq!(grid.get(0, 2).expect("surface payload").symbol, 'h');
+    let presentation = crate::render::surface_presentation(
+        &state,
+        &tea_core::provider::ProviderRegistry::new(),
+        Size {
+            width: 20,
+            height: 6,
+        },
+    );
+    assert_eq!(presentation.lines[0].text().chars().next(), Some('┃'));
+    assert_eq!(presentation.lines[1].text().chars().next(), Some('─'));
+    assert_eq!(presentation.lines[2].text().chars().next(), Some('h'));
     assert_eq!(
-        crate::render::composer_cursor_position(&state, 20, 6),
-        Some((2, 0))
+        presentation.cursor,
+        Some(tea_tui::Cursor {
+            column: 2,
+            row: 0,
+            visible: true,
+        })
     );
     state.close_surface();
     assert_eq!(state.surface(), UiSurface::None);

@@ -1,8 +1,5 @@
-use crate::render;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tea_core::{ThinkingLevel, Usage};
-
-use super::state::AppState;
 
 /// Format only provider-reported values; missing fields remain absent rather than zero.
 pub fn format_usage(usage: &Usage) -> String {
@@ -69,13 +66,6 @@ pub(super) fn parse_thinking_level(value: &str) -> Option<ThinkingLevel> {
         "max" => ThinkingLevel::Max,
         _ => return None,
     })
-}
-
-pub(super) fn composer_cursor(state: &AppState, width: u16, height: u16) -> Option<(u16, u16)> {
-    if state.picker.is_some() {
-        return None;
-    }
-    render::composer_cursor_position(state, width, height)
 }
 
 /// Format today's UTC civil date without adding a date/time dependency.

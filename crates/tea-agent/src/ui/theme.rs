@@ -1,6 +1,6 @@
 //! The small, non-persisted palette used by the tea terminal projection.
 
-use crate::grid::{Color, Style};
+use tea_tui::{Color, Style};
 
 /// Named presentation roles. Keeping roles separate from terminal colors makes snapshots
 /// readable and prevents renderer code from accidentally inventing a second palette.

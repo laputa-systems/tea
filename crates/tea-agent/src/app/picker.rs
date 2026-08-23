@@ -74,7 +74,11 @@ impl App {
     }
 
     pub(super) fn new_session(&mut self) -> Result<(), AppError> {
-        if self.agent_is_active() {
+        // A completed durable task can race the immediately following key
+        // event. Reap its terminal channel before judging the session boundary
+        // so `/new` does not discard the user's explicit command as "active".
+        self.reap_task();
+        if self.agent_is_active() && !self.state.session_projection_is_settled() {
             self.state.notice("new session requires an idle agent");
             return Ok(());
         }

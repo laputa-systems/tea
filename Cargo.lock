@@ -848,6 +848,7 @@ dependencies = [
  "tea-luau",
  "tea-protocol",
  "tea-session",
+ "tea-tui",
 ]
 
 [[package]]
@@ -910,6 +911,10 @@ dependencies = [
 
 [[package]]
 name = "tea-trace"
+version = "1.0.0"
+
+[[package]]
+name = "tea-tui"
 version = "1.0.0"
 
 [[package]]

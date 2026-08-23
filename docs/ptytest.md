@@ -13,6 +13,12 @@ picker behavior, multiline paste, history, resize, and terminal restoration.
 Keep timing control in the network fixture or a named domain event; do not
 introduce reader-thread or settle-delay synchronization.
 
+Normal conversation must report `alternate_screen = false`, with bracketed
+paste and a visible composer cursor enabled. Temporary full-screen surfaces
+report `alternate_screen = true` only while they are open, then return to the
+main screen. The PTY backend verifies visible terminal semantics; it does not
+model or claim terminal-emulator scrollback retention or historical reflow.
+
 Failure bundles are under `target/ptytest-failures/` and retain exact PTY bytes
 plus redacted text configuration. Future semantic snapshots live beside the
 owning test and update only through `PTYTEST_UPDATE_SNAPSHOTS=1`.
