@@ -13,8 +13,8 @@ path = "src/main.rs"
 path = "src/lib.rs"
 
 [features]
-# Compiles the real-binary PTY regression harness and its local OpenRouter endpoint override.
-pty-harness = ["tea-core/provider-openrouter-test-support"]
+# Compiles the real-binary PTY regression harness. The tests supply their own loopback endpoint.
+pty-harness = []
 
 [dependencies]
 laputa-hi-lite = "0.1"

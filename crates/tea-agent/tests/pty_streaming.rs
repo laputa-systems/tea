@@ -10,15 +10,18 @@ use std::time::Duration;
 
 const ROWS: u16 = 24;
 const COLUMNS: u16 = 100;
+const LOCAL_PROVIDER: &str = "local";
+const LOCAL_MODEL: &str = tea_core::provider::local::LAGUNA_XS_2_1_MODEL;
+const FIXTURE_MODEL: &str = "pty-fixture-model";
 
-struct OpenRouterFixture {
+struct StreamingFixture {
     first_delta: Receiver<()>,
     release_response: Sender<()>,
     server: thread::JoinHandle<()>,
     url: String,
 }
 
-impl OpenRouterFixture {
+impl StreamingFixture {
     fn start() -> Self {
         let listener =
             TcpListener::bind("127.0.0.1:0").expect("offline mock HTTP server should bind");
@@ -30,13 +33,13 @@ impl OpenRouterFixture {
         let server = thread::spawn(move || {
             let (mut socket, _) = listener
                 .accept()
-                .expect("OpenRouter request should connect");
+                .expect("streaming provider request should connect");
             let mut request = [0_u8; 4096];
             let _ = socket.read(&mut request);
-            let first = br#"data: {"id":"offline","choices":[{"delta":{"content":"first "},"finish_reason":null}]}
+            let first = br#"data: {"choices":[{"delta":{"content":"first "},"finish_reason":null}]}
 
 "#;
-            let second = br#"data: {"id":"offline","choices":[{"delta":{"content":"second"},"finish_reason":"stop"}],"usage":{"prompt_tokens":2,"completion_tokens":2}}
+            let second = br#"data: {"choices":[{"delta":{"content":"second"},"finish_reason":"stop"}],"usage":{"prompt_tokens":2,"completion_tokens":2}}
 
 data: [DONE]
 
@@ -68,14 +71,14 @@ data: [DONE]
             first_delta,
             release_response,
             server,
-            url: format!("http://{address}/v1/chat/completions"),
+            url: format!("http://{address}/v1"),
         }
     }
 
     fn wait_for_first_delta(&self) {
         self.first_delta
             .recv_timeout(Duration::from_secs(3))
-            .expect("tea should request the offline OpenRouter fixture");
+            .expect("tea should request the offline streaming fixture");
     }
 
     fn release(self) {
@@ -89,15 +92,20 @@ data: [DONE]
 }
 
 #[test]
-fn real_binary_renders_openrouter_text_before_the_mock_response_settles() {
-    let fixture = OpenRouterFixture::start();
-    let scenario = Scenario::new("OpenRouter streaming")
+fn real_binary_renders_streamed_text_before_the_fixture_settles() {
+    let fixture = StreamingFixture::start();
+    let scenario = Scenario::new("streaming provider fixture")
         .expect("valid scenario label")
         .command(
             CommandSpec::new(env!("CARGO_BIN_EXE_tea"))
-                .args(["--provider", "openrouter", "--model", "openai/gpt-5.6-luna"])
-                .secret_env("OPENROUTER_API_KEY", "offline-test-key")
-                .env("TEA_AGENT_TEST_OPENROUTER_URL", &fixture.url),
+                .args([
+                    "--provider",
+                    LOCAL_PROVIDER,
+                    "--model",
+                    FIXTURE_MODEL,
+                    "--local-base-url",
+                    fixture.url.as_str(),
+                ]),
         )
         .size(Size::new(COLUMNS, ROWS).expect("constant terminal size"))
         .environment(TestEnv::hermetic().expect("create hermetic test environment"))
@@ -111,7 +119,7 @@ fn real_binary_renders_openrouter_text_before_the_mock_response_settles() {
             "model readiness",
             |screen| {
                 screen.contains("tea")
-                && screen.contains("openrouter/openai/gpt-5.6-luna")
+                && screen.contains(&format!("{LOCAL_PROVIDER}/{FIXTURE_MODEL}"))
             },
         )
         .expect("model selection should render");
@@ -137,7 +145,7 @@ fn real_binary_renders_openrouter_text_before_the_mock_response_settles() {
             "narrow redraw",
             |screen| {
                 screen.size() == Size::new(40, 10).expect("constant narrow terminal size")
-                    && screen.contains("openrouter/openai/gpt-5.6-luna")
+                    && screen.contains(&format!("{LOCAL_PROVIDER}/{FIXTURE_MODEL}"))
             },
         )
         .expect("application remains rendered after terminal resize");
@@ -186,7 +194,7 @@ fn real_binary_renders_openrouter_text_before_the_mock_response_settles() {
         .wait_for_screen(
             terminal.deadline(Duration::from_secs(3)),
             "idle after completion",
-            |screen| screen.contains("openrouter/openai/gpt-5.6-luna"),
+            |screen| screen.contains(&format!("{LOCAL_PROVIDER}/{FIXTURE_MODEL}")),
         )
         .expect("application should become idle");
     terminal
@@ -248,9 +256,9 @@ fn real_binary_keeps_native_multiline_editing_and_history_inside_a_pty() {
         .expect("valid scenario label")
         .command(CommandSpec::new(env!("CARGO_BIN_EXE_tea")).args([
             "--provider",
-            "local",
+            LOCAL_PROVIDER,
             "--model",
-            "Laguna-XS-2.1-5bit",
+            LOCAL_MODEL,
         ]))
         .size(Size::new(80, 16).expect("constant terminal size"))
         .environment(TestEnv::hermetic().expect("create hermetic test environment"))
@@ -263,8 +271,8 @@ fn real_binary_keeps_native_multiline_editing_and_history_inside_a_pty() {
             terminal.deadline(Duration::from_secs(3)),
             "local model readiness",
             |screen| {
-                screen.contains("tea")
-                    && screen.contains("local/Laguna-XS-2.1-5bit")
+                    screen.contains("tea")
+                    && screen.contains(&format!("{LOCAL_PROVIDER}/{LOCAL_MODEL}"))
                     && screen.row(2).is_some_and(|row| row.starts_with("┃"))
             },
         )
@@ -274,7 +282,9 @@ fn real_binary_keeps_native_multiline_editing_and_history_inside_a_pty() {
     assert!(startup.row(2).is_some_and(|row| row.starts_with("┃")));
     assert!(startup
         .row(4)
-        .is_some_and(|row| row.starts_with("local/Laguna-XS-2.1-5bit · effort off")));
+        .is_some_and(|row| {
+            row.starts_with(&format!("{LOCAL_PROVIDER}/{LOCAL_MODEL} · effort off"))
+        }));
     let cursor = startup.cursor();
     assert_eq!((cursor.row, cursor.column, cursor.visible), (2, 2, true));
     assert!(
@@ -310,14 +320,14 @@ fn real_binary_keeps_native_multiline_editing_and_history_inside_a_pty() {
     terminal
         .wait_for_screen(
             terminal.deadline(Duration::from_secs(3)),
-            "cross-provider model selector",
+            "model selector",
             |screen| {
                 screen.contains("Models")
-                    && screen.contains("OpenRouter · openai/gpt-5.6-luna")
-                    && screen.contains("Local OpenAI-compatible server · Laguna-XS-2.1-5bit")
+                    && screen.row(15).is_some_and(|row| row.contains("Enter"))
+                    && screen.row(3).is_some_and(|row| row.starts_with("❯ "))
             },
         )
-        .expect("model selector should show compiled models across providers");
+        .expect("model selector should show a selectable compiled model");
     terminal
         .send_key(terminal.deadline(Duration::from_secs(3)), Key::Escape)
         .expect("close model selector");

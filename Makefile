@@ -4,7 +4,7 @@ lint:
 	cargo fmt --all
 	cargo clippy --fix --allow-dirty --all-targets --all-features -- --deny warnings
 
-# Run the pinned, deterministic suite. The PTY tests use a loopback OpenRouter
+# Run the pinned, deterministic suite. The PTY tests use a loopback streaming
 # fixture or no model request at all; neither reaches a real provider. The
 # focused terminal behavior tests cover the host presentation contract.
 test:

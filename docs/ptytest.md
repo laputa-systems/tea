@@ -1,7 +1,8 @@
 # PTY integration tests
 
 `crates/tea-agent/tests/pty_streaming.rs` drives the compiled TUI through
-`ptytest`; the offline OpenRouter fixture remains application-specific. Run it
+`ptytest`; the streaming case uses a caller-selected local OpenAI-compatible
+loopback fixture, so it never contacts or names an external provider. Run it
 with `cargo test -p tea-agent --features pty-harness --test pty_streaming`.
 
 The test uses a hermetic environment, an audited `xterm-minimal-v1` profile,

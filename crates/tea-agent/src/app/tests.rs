@@ -700,6 +700,30 @@ fn failed_saved_model_restore_keeps_the_provider_and_model_visible() {
 }
 
 #[test]
+fn sending_after_provider_configuration_error_does_not_open_model_picker() {
+    let options = CliOptions::parse(["tea"].map(OsString::from)).expect("options parse");
+    let mut app = App::new(options);
+    app.state.selected_model = Some(ModelDescriptor {
+        provider: "openrouter".into(),
+        model: "poolside/laguna-xs-2.1:free".into(),
+        revision: None,
+    });
+    app.state
+        .error("last model could not be restored: OPENROUTER_API_KEY is required for OpenRouter");
+    app.state.composer_mut().replace_from_editor("fresh prompt");
+
+    app.submit_composer().expect("submitting a prompt should not fail");
+
+    assert_eq!(app.state.surface(), UiSurface::None);
+    assert_eq!(app.state.composer().text(), "fresh prompt");
+    assert!(matches!(app.state.status(), UiStatus::Error(_)));
+
+    app.state.composer_mut().replace_from_editor("/model");
+    app.submit_composer().expect("model recovery command should work");
+    assert_eq!(app.state.surface(), UiSurface::ModelPicker);
+}
+
+#[test]
 fn selected_model_is_saved_and_restored_without_starting_the_picker() {
     let tea_home = test_tea_home("last-model");
     let options = CliOptions::parse(

@@ -200,15 +200,24 @@ impl App {
         self.state.slash_completion = None;
     }
 
-    fn submit_composer(&mut self) -> Result<(), AppError> {
+    pub(super) fn submit_composer(&mut self) -> Result<(), AppError> {
         let input = self.state.composer_mut().take();
         if input.trim().is_empty() {
             return Ok(());
         }
-        self.state.record_history(&input);
         if input.starts_with('/') {
+            self.state.record_history(&input);
             self.dispatch_command(&input)
         } else {
+            // A saved model can remain visible when its provider cannot be configured (for
+            // example, because a required API key is missing). Keep a fresh submission untouched
+            // in that error state so Enter does not discard the draft or open an unrelated picker;
+            // slash commands, including `/model`, remain the explicit recovery path.
+            if self.configured_provider.is_none() && self.state.selected_model.is_some() {
+                self.state.composer_mut().replace_from_editor(input);
+                return Ok(());
+            }
+            self.state.record_history(&input);
             if self.agent_is_active() {
                 self.state.queue_message(input);
                 self.state.notice("next message queued");

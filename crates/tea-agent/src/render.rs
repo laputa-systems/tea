@@ -655,8 +655,10 @@ fn markdown_lines(text: &str, width: u16, style_diffs: bool) -> Vec<RenderLine> 
                         .any(|line| line.trim_start().starts_with("```"));
                 code_highlighter = Language::from_name(language_name).map(Highlighter::new);
                 in_code = true;
-                let label = if info.is_empty() { "code" } else { info };
-                output.push(RenderLine::plain(format!("┌ {label}"), {
+                // Fenced code is already visually separated from prose by the rail. The
+                // info string is still used to select syntax highlighting, but rendering it
+                // here adds noisy, implementation-facing text to every code block.
+                output.push(RenderLine::plain("┌", {
                     let mut style = Theme::default().style(Role::Muted);
                     style.bold = true;
                     style
@@ -1168,7 +1170,7 @@ mod tests {
     #[test]
     fn fenced_code_uses_the_declared_language_and_preserves_the_rail() {
         let lines = markdown_lines("```rust\nfn main() { return 1; }\n```", 40, true);
-        assert_eq!(lines[0].text, "┌ rust");
+        assert_eq!(lines[0].text, "┌");
         assert_eq!(lines[1].text, "│ fn main() { return 1; }");
         let styles = lines[1]
             .character_styles
@@ -1177,6 +1179,56 @@ mod tests {
         assert_eq!(styles[0].foreground, Some(Color::DarkGrey));
         assert_eq!(styles[2].foreground, Some(Color::Blue));
         assert_eq!(lines[2].text, "└");
+    }
+
+    #[test]
+    fn transcript_keeps_user_message_above_assistant_code_block() {
+        let mut state = AppState::new();
+        let user = tea_core::AgentMessage::User {
+            id: tea_core::state::MessageId(1),
+            content: "user message".into(),
+        };
+        state.apply_event(&tea_core::AgentEvent {
+            run_id: tea_core::RunId(1),
+            sequence: tea_core::EventSequence(1),
+            kind: tea_core::event::AgentEventKind::MessageStart { message: user },
+        });
+        let assistant_text = "```rust\nfn main() {}\n```";
+        let assistant = tea_core::AgentMessage::Assistant {
+            id: tea_core::state::MessageId(2),
+            content: assistant_text.into(),
+            tool_calls: Vec::new(),
+            stop_reason: Some(tea_core::state::StopReason::Stop),
+            error_message: None,
+        };
+        state.apply_event(&tea_core::AgentEvent {
+            run_id: tea_core::RunId(1),
+            sequence: tea_core::EventSequence(2),
+            kind: tea_core::event::AgentEventKind::MessageUpdate {
+                message: assistant.clone(),
+                text_delta: Some(assistant_text.into()),
+            },
+        });
+        state.apply_event(&tea_core::AgentEvent {
+            run_id: tea_core::RunId(1),
+            sequence: tea_core::EventSequence(3),
+            kind: tea_core::event::AgentEventKind::MessageEnd { message: assistant },
+        });
+
+        let grid = render(&state, &ProviderRegistry::new(), 40, 12);
+        assert_eq!(row_text(&grid, 0), "┃ user message");
+        assert_eq!(row_text(&grid, 2), "┌");
+        assert_eq!(row_text(&grid, 3), "│ fn main() {}");
+        assert_eq!(row_text(&grid, 4), "└");
+    }
+
+    fn row_text(grid: &Grid, row: u16) -> String {
+        (0..grid.width())
+            .filter_map(|column| grid.get(column, row))
+            .map(|cell| cell.symbol)
+            .collect::<String>()
+            .trim_end()
+            .to_owned()
     }
 
     #[test]

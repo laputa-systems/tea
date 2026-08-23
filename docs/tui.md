@@ -63,3 +63,5 @@ occupy subsequent wrapped rows; restoration and setup errors use the error color
 A saved provider/model identity remains visible even when
 the provider cannot currently be configured (for example, when its API key is
 missing), while prompting still requires a configured provider.
+In that configuration-error state, a normal text submission is left untouched;
+use `/model` to choose or repair the provider explicitly.

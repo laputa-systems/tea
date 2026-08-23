@@ -350,8 +350,6 @@ impl App {
                 })?;
                 let config = tea_core::provider::openrouter::OpenRouterConfig::try_new(key, model)
                     .map_err(|error| AppError::Setup(error.to_string()))?;
-                #[cfg(feature = "pty-harness")]
-                let config = test_openrouter_config(config)?;
                 ProviderConfiguration::OpenRouter(config)
             }
             "command-code" => {
@@ -410,17 +408,4 @@ pub(super) fn automatic_compaction_policy(context_window: NonZeroU64) -> Automat
         max_compactions_per_run: 4,
         max_overflow_retries_per_run: 1,
     }
-}
-
-#[cfg(feature = "pty-harness")]
-fn test_openrouter_config(
-    config: tea_core::provider::openrouter::OpenRouterConfig,
-) -> Result<tea_core::provider::openrouter::OpenRouterConfig, AppError> {
-    let Some(url) = std::env::var_os("TEA_AGENT_TEST_OPENROUTER_URL") else {
-        return Ok(config);
-    };
-    let url = url.to_str().ok_or_else(|| {
-        AppError::Setup("TEA_AGENT_TEST_OPENROUTER_URL must be valid UTF-8".into())
-    })?;
-    Ok(config.with_test_completion_url(url))
 }
