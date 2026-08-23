@@ -149,6 +149,7 @@ pub(crate) fn main_presentation(
     }
 
     lines.extend(activity_lines(state));
+    lines.extend(history_search_lines(state, width, 3));
     let desired_composer_rows = composer_layout(state, width).rows.len().max(1);
     let composer_capacity = if entries.is_empty() {
         usize::from(size.height).max(1)
@@ -191,6 +192,116 @@ pub(crate) fn main_presentation(
         visible: true,
     });
     fit_live(lines, cursor, size, composer_row)
+}
+
+/// Render a bounded window of the active reverse-history search directly in
+/// the mutable tail. These rows are intentionally kept above the composer so
+/// `InlineTerminal` can redraw them without adding transient search content to
+/// native terminal scrollback.
+fn history_search_lines(state: &AppState, width: u16, max_rows: usize) -> Vec<RenderLine> {
+    let Some(results) = state.history_search_results() else {
+        return Vec::new();
+    };
+    let theme = Theme::default();
+    if results.matches.is_empty() {
+        return vec![RenderLine::plain(
+            "History search · no matching session messages · Esc cancel",
+            theme.style(Role::Muted),
+        )];
+    }
+
+    let selected = results.selected.min(results.matches.len() - 1);
+    let visible = max_rows.min(results.matches.len());
+    let start = selected
+        .saturating_sub(visible / 2)
+        .min(results.matches.len().saturating_sub(visible));
+    let mut lines = vec![RenderLine::plain(
+        format!(
+            "History search · {}/{} · ↑↓ select · Enter use · Esc cancel",
+            selected + 1,
+            results.matches.len(),
+        ),
+        theme.style(Role::Muted),
+    )];
+    lines.extend(
+        results
+            .matches
+            .iter()
+            .enumerate()
+            .skip(start)
+            .take(visible)
+            .map(|(index, message)| {
+                history_search_excerpt(message, &results.query, index == selected, width, theme)
+            }),
+    );
+    lines
+}
+
+/// Collapse a submitted message into one highlighted, context-preserving row.
+/// The source message itself remains untouched in durable storage; this is a
+/// display-only excerpt for the current terminal frame.
+fn history_search_excerpt(
+    message: &str,
+    query: &str,
+    selected: bool,
+    width: u16,
+    theme: Theme,
+) -> RenderLine {
+    let message = message.replace(['\r', '\n'], " ");
+    let query = query.replace(['\r', '\n'], " ");
+    let match_byte = (!query.is_empty()).then(|| message.find(&query)).flatten();
+    let match_start = match_byte
+        .map(|index| message[..index].chars().count())
+        .unwrap_or(0);
+    let match_end = match_start + query.chars().count();
+    let characters = message.chars().collect::<Vec<_>>();
+    let content_width = usize::from(width.saturating_sub(3)).max(1);
+    let (start, end) = excerpt_range(characters.len(), match_start, content_width);
+    let leading_ellipsis = start != 0;
+    let trailing_ellipsis = end != characters.len();
+
+    let mut text = if selected {
+        String::from("› ")
+    } else {
+        String::from("  ")
+    };
+    let marker_style = if selected {
+        theme.style(Role::Accent)
+    } else {
+        theme.style(Role::Muted)
+    };
+    let body_style = theme.style(Role::Text);
+    let match_style = theme.style(Role::Accent);
+    let mut styles = vec![marker_style; 2];
+    if leading_ellipsis {
+        text.push('…');
+        styles.push(theme.style(Role::Muted));
+    }
+    for (index, character) in characters[start..end].iter().enumerate() {
+        let source_index = start + index;
+        text.push(*character);
+        styles.push(
+            (match_byte.is_some() && (match_start..match_end).contains(&source_index))
+                .then_some(match_style)
+                .unwrap_or(body_style),
+        );
+    }
+    if trailing_ellipsis {
+        text.push('…');
+        styles.push(theme.style(Role::Muted));
+    }
+    RenderLine::styled(text, body_style, styles)
+}
+
+/// Keep a query match in view while retaining enough leading context to make a
+/// history row recognizable. Character boundaries make the result UTF-8 safe;
+/// the normal terminal wrapper still handles wide display cells afterward.
+fn excerpt_range(length: usize, match_start: usize, limit: usize) -> (usize, usize) {
+    if length <= limit {
+        return (0, length);
+    }
+    let start = match_start.saturating_sub(limit / 3).min(length - limit);
+    (start, start + limit)
 }
 
 /// Project an explicit full-screen surface for the alternate screen.

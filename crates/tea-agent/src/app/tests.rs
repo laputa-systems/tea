@@ -1478,7 +1478,6 @@ fn prompt_history_returns_to_the_live_draft_after_navigation() {
     let mut state = AppState::new();
     state.record_history("first prompt");
     state.record_history("second prompt");
-    state.record_history("second prompt");
 
     state.composer_mut().replace_from_editor("unfinished draft");
     state.begin_history_navigation();
@@ -1487,6 +1486,115 @@ fn prompt_history_returns_to_the_live_draft_after_navigation() {
     assert_eq!(state.history_next().as_deref(), Some("second prompt"));
     assert_eq!(state.history_next().as_deref(), Some("unfinished draft"));
     assert_eq!(state.history_next(), None);
+}
+
+#[test]
+fn prompt_history_preserves_adjacent_durable_messages() {
+    let mut state = AppState::new();
+    state.record_history("repeat this");
+    state.record_history("repeat this");
+
+    state.begin_history_navigation();
+    assert_eq!(state.history_previous().as_deref(), Some("repeat this"));
+    assert_eq!(state.history_previous().as_deref(), Some("repeat this"));
+}
+
+#[test]
+fn restored_session_user_messages_rebuild_prompt_history() {
+    let mut state = AppState::new();
+    state.record_history("from the prior terminal process");
+    state.restore_messages(&[
+        AgentMessage::User {
+            id: MessageId(1),
+            content: "durable first prompt".into(),
+        },
+        AgentMessage::Assistant {
+            id: MessageId(2),
+            content: "durable response".into(),
+            tool_calls: Vec::new(),
+            stop_reason: None,
+            error_message: None,
+        },
+        AgentMessage::User {
+            id: MessageId(3),
+            content: "durable latest prompt".into(),
+        },
+    ]);
+
+    state.begin_history_navigation();
+    assert_eq!(state.history_previous().as_deref(), Some("durable latest prompt"));
+    assert_eq!(state.history_previous().as_deref(), Some("durable first prompt"));
+    assert_eq!(state.history_previous().as_deref(), Some("durable first prompt"));
+}
+
+#[test]
+fn reverse_history_search_selects_messages_without_discarding_the_draft() {
+    let mut state = AppState::new();
+    state.record_history("inspect the session schema");
+    state.record_history("repair the terminal renderer");
+    state.record_history("inspect the terminal layout");
+    state.composer_mut().replace_from_editor("unfinished draft");
+
+    state.begin_or_advance_history_search();
+    assert_eq!(state.composer().text(), "");
+    state
+        .composer_mut()
+        .insert_str("inspect")
+        .expect("search query is one line");
+    state.reset_history_search_selection();
+    let results = state
+        .history_search_results()
+        .expect("reverse search should be active");
+    assert_eq!(
+        results.matches,
+        vec![
+            "inspect the terminal layout".to_owned(),
+            "inspect the session schema".to_owned(),
+        ]
+    );
+
+    state.move_history_search(1);
+    assert!(state.accept_history_search());
+    assert_eq!(state.composer().text(), "inspect the session schema");
+    assert!(!state.history_search_is_active());
+
+    state.composer_mut().replace_from_editor("another draft");
+    state.begin_or_advance_history_search();
+    state.cancel_history_search();
+    assert_eq!(state.composer().text(), "another draft");
+}
+
+#[test]
+fn reverse_history_search_renders_highlighted_session_message_excerpts() {
+    let mut state = AppState::new();
+    state.record_history("review the persistence contract");
+    state.record_history("ship highlighted history search excerpts");
+    state.begin_or_advance_history_search();
+    state
+        .composer_mut()
+        .insert_str("history")
+        .expect("search query is one line");
+    state.reset_history_search_selection();
+
+    let presentation = crate::render::main_presentation(
+        &state,
+        &tea_core::provider::ProviderRegistry::new(),
+        Size {
+            width: 80,
+            height: 12,
+        },
+        0,
+    );
+    let line = presentation
+        .live
+        .iter()
+        .find(|line| line.text().contains("highlighted history search"))
+        .expect("matching history excerpt should be visible");
+    let highlighted = line
+        .text()
+        .find("history")
+        .expect("excerpt should include the matching query");
+    assert_eq!(style_at(line, highlighted).foreground, Some(Color::Cyan));
 }
 
 #[test]

@@ -76,6 +76,20 @@ Normal composer input always starts or continues the managed harness. During an
 active operation, the terminal projects durable session and live harness events
 into the transcript without owning their state.
 
+Composer history is scoped to the active durable session. The terminal rebuilds
+it from that session's accepted user-message entries when a session is resumed;
+it does not create a second history file or retain terminal commands and
+unsubmitted drafts as session messages. `Up` and `Down` navigate this history
+without discarding the current draft.
+
+`Ctrl+R` opens an inline reverse-history search in the mutable tail. Type a
+literal query to show up to three matching user-message excerpts above the
+composer, with matching text highlighted. `Up` and `Down` select older or
+newer matches, and `Enter` copies the selection into the composer without
+submitting it. `Esc` or `Ctrl+C` cancels the search and restores the draft that
+was present before it opened; another `Ctrl+R` advances to the next older
+match.
+
 While an operation is active, normal submitted composer input becomes one visible
 local next-message slot. Later submissions append to that slot, separated by a
 blank line. After the operation settles, the terminal starts the next durable

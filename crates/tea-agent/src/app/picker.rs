@@ -305,9 +305,10 @@ impl App {
         // A model/provider change is a new immutable durable profile. Do not
         // mutate an existing session's active snapshot in place; the next
         // prompt creates a fresh session unless the user explicitly resumes
-        // the old one.
+        // the old one. The composer cache cannot cross that session boundary.
         self.durable_harness = None;
         self.durable_subscription = None;
+        self.state.clear_history();
         self.state.notice("model selected");
         if let Some(home) = self.tea_home.as_ref() {
             if let Err(error) = save_last_model(home, &descriptor) {

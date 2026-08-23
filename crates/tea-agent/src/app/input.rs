@@ -24,7 +24,11 @@ impl App {
                     && matches!(self.state.surface(), UiSurface::None) =>
             {
                 self.state.composer_mut().insert_str_multiline(&text);
-                self.refresh_command_completion();
+                if self.state.history_search_is_active() {
+                    self.state.reset_history_search_selection();
+                } else {
+                    self.refresh_command_completion();
+                }
                 Ok(())
             }
             TerminalEvent::Paste(text) => self.picker_insert(&text),
@@ -67,6 +71,13 @@ impl App {
         }
         if !matches!(self.state.surface(), UiSurface::None) {
             return Ok(());
+        }
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('r') {
+            self.state.begin_or_advance_history_search();
+            return Ok(());
+        }
+        if self.state.history_search_is_active() {
+            return self.handle_history_search_key(key);
         }
         if self.state.slash_completion.is_some() {
             match key.code {
@@ -172,6 +183,63 @@ impl App {
         Ok(())
     }
 
+    /// Handle the small, inline history-search mode before normal composer
+    /// shortcuts. It keeps matching entirely local to the session-derived
+    /// history cache and only replaces the draft after an explicit Enter.
+    fn handle_history_search_key(&mut self, key: KeyEvent) -> Result<(), AppError> {
+        match key.code {
+            KeyCode::Esc => {
+                self.state.cancel_history_search();
+                self.refresh_command_completion();
+            }
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.state.cancel_history_search();
+                self.refresh_command_completion();
+            }
+            KeyCode::Up => self.state.move_history_search(-1),
+            KeyCode::Down => self.state.move_history_search(1),
+            KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                self.state.composer_mut().insert_newline();
+                self.state.reset_history_search_selection();
+            }
+            KeyCode::Enter => {
+                let has_match = self
+                    .state
+                    .history_search_results()
+                    .is_some_and(|results| !results.matches.is_empty());
+                if has_match {
+                    self.state.accept_history_search();
+                    self.refresh_command_completion();
+                } else {
+                    self.state.notice("no matching session messages");
+                }
+            }
+            KeyCode::Char(character)
+                if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
+            {
+                if let Err(error) = self.state.composer_mut().insert(character) {
+                    self.state.notice(error.to_string());
+                } else {
+                    self.state.reset_history_search_selection();
+                }
+            }
+            KeyCode::Backspace => {
+                self.state.composer_mut().backspace();
+                self.state.reset_history_search_selection();
+            }
+            KeyCode::Delete => {
+                self.state.composer_mut().delete();
+                self.state.reset_history_search_selection();
+            }
+            KeyCode::Left => self.state.composer_mut().move_left(),
+            KeyCode::Right => self.state.composer_mut().move_right(),
+            KeyCode::Home => self.state.composer_mut().home(),
+            KeyCode::End => self.state.composer_mut().end(),
+            _ => {}
+        }
+        Ok(())
+    }
+
     fn handle_control_c(&mut self) {
         let active_harness = self
             .durable_harness
@@ -201,7 +269,6 @@ impl App {
             return Ok(());
         }
         if input.starts_with('/') {
-            self.state.record_history(&input);
             self.dispatch_command(&input)
         } else {
             // A saved model can remain visible when its provider cannot be configured (for
@@ -212,7 +279,6 @@ impl App {
                 self.state.composer_mut().replace_from_editor(input);
                 return Ok(());
             }
-            self.state.record_history(&input);
             if self.agent_is_active() {
                 self.state.queue_message(input);
                 self.state.notice("next message queued");
@@ -387,5 +453,8 @@ fn help_surface_lines() -> Vec<String> {
             lines.push(format!("  {:<20} {}", spec.name, spec.help));
         }
     }
+    lines.push(String::new());
+    lines.push("Input".into());
+    lines.push("  Ctrl+R               search messages in this session".into());
     lines
 }

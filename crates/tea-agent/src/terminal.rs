@@ -546,7 +546,7 @@ mod tests {
     #[test]
     fn decodes_keys_and_utf8() {
         let mut decoder = InputDecoder::default();
-        decoder.push(b"a\x1b[A\x7f\r\x03");
+        decoder.push(b"a\x1b[A\x7f\r\x03\x12");
         decoder.push("é".as_bytes());
         assert_eq!(
             decoder.next_event(Instant::now()),
@@ -565,6 +565,14 @@ mod tests {
             decoder.next_event(Instant::now()),
             Some(TerminalEvent::Key(KeyEvent {
                 code: KeyCode::Char('c'),
+                modifiers: KeyModifiers::CONTROL,
+                kind: KeyEventKind::Press,
+            }))
+        );
+        assert_eq!(
+            decoder.next_event(Instant::now()),
+            Some(TerminalEvent::Key(KeyEvent {
+                code: KeyCode::Char('r'),
                 modifiers: KeyModifiers::CONTROL,
                 kind: KeyEventKind::Press,
             }))

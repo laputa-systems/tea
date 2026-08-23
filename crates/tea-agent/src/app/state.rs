@@ -140,12 +140,20 @@ pub struct AppState {
     /// The most recent core-emitted context estimate. `None` means the core has not supplied
     /// capacity-policy evidence for this projection; it is never inferred from rendered text.
     pub(super) context_estimate: Option<ContextEstimate>,
-    /// In-memory prompt history for the current terminal invocation.
+    /// User messages accepted by the active durable session, in submission order.
+    ///
+    /// This is a presentation cache rebuilt from the session's authoritative
+    /// user-message entries whenever the host reopens a session. It deliberately
+    /// excludes terminal commands and drafts, neither of which belong to the
+    /// durable conversation.
     pub(super) history: Vec<String>,
     /// Current history cursor; `None` means the live composer draft.
     pub(super) history_index: Option<usize>,
     /// Draft saved when history navigation first leaves the live composer.
     pub(super) history_draft: Option<String>,
+    /// Interactive reverse-history search, if the composer is filtering the
+    /// active session's durable user-message history.
+    pub(super) history_search: Option<HistorySearch>,
     /// One local next-message slot. It remains editable until the active durable
     /// operation settles, so the terminal never advertises a mutable core queue.
     pub(super) queued_message: Option<String>,
@@ -169,6 +177,26 @@ pub(super) struct SlashCompletion {
     pub(super) prefix: String,
     pub(super) selected: usize,
     pub(super) matches: Vec<String>,
+}
+
+/// Local state for a shell-style reverse-history search.
+///
+/// The query lives in `Composer` so native editing remains exactly the same as
+/// for normal input. `draft` is held aside until the user accepts a result or
+/// cancels the search.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct HistorySearch {
+    draft: String,
+    selected: usize,
+}
+
+/// Render-ready reverse-history search data. The newest matching message has
+/// index zero; callers may display a bounded window around `selected`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct HistorySearchResults {
+    pub(crate) query: String,
+    pub(crate) selected: usize,
+    pub(crate) matches: Vec<String>,
 }
 
 /// Context-policy information carried by the core event stream for footer projection.
@@ -434,9 +462,11 @@ impl AppState {
     /// not a replay of historical core events. Future events continue from the live subscription.
     pub(super) fn restore_messages(&mut self, messages: &[AgentMessage]) {
         self.clear_transcript();
+        self.clear_history();
         for message in messages {
             match message {
                 AgentMessage::User { content, .. } => {
+                    self.record_history(content);
                     self.push_entry(
                         None,
                         TranscriptEntry::User {
@@ -868,15 +898,116 @@ impl AppState {
         if prompt.trim().is_empty() {
             return;
         }
-        if self
-            .history
-            .last()
-            .is_none_or(|previous| previous != prompt)
-        {
-            self.history.push(prompt.to_owned());
-        }
+        // One item corresponds to one durable user-message entry. Adjacent
+        // duplicate prompts are meaningful evidence and must remain
+        // selectable after a session is reopened.
+        self.history.push(prompt.to_owned());
         self.history_index = None;
         self.history_draft = None;
+    }
+
+    /// Start reverse search with an empty query, retaining the current draft
+    /// until an explicit selection is accepted. A repeated Ctrl-R advances to
+    /// the next older match, mirroring conventional shell history search.
+    pub(super) fn begin_or_advance_history_search(&mut self) {
+        if self.history_search.is_some() {
+            self.move_history_search(1);
+            return;
+        }
+        self.history_draft = None;
+        self.history_index = None;
+        let draft = self.composer.take();
+        self.history_search = Some(HistorySearch { draft, selected: 0 });
+        self.slash_completion = None;
+    }
+
+    /// Whether the composer currently contains a reverse-search query.
+    pub(super) const fn history_search_is_active(&self) -> bool {
+        self.history_search.is_some()
+    }
+
+    /// Reset the selected result after editing the search query.
+    pub(super) fn reset_history_search_selection(&mut self) {
+        if let Some(search) = &mut self.history_search {
+            search.selected = 0;
+        }
+    }
+
+    /// Move through matching messages. Positive movement goes toward older
+    /// entries because search results are ordered newest first.
+    pub(super) fn move_history_search(&mut self, delta: isize) {
+        let matches = self.history_search_matches();
+        let Some(search) = &mut self.history_search else {
+            return;
+        };
+        if matches == 0 {
+            search.selected = 0;
+            return;
+        }
+        let selected = search.selected.min(matches - 1) as isize;
+        search.selected = (selected + delta).rem_euclid(matches as isize) as usize;
+    }
+
+    /// Accept the selected durable message into the normal composer.
+    /// Returns `true` only when a matching message was available.
+    pub(super) fn accept_history_search(&mut self) -> bool {
+        let Some(search) = self.history_search.take() else {
+            return false;
+        };
+        let query = self.composer.text();
+        let selected = self
+            .history
+            .iter()
+            .rev()
+            .filter(|message| message.contains(query))
+            .nth(search.selected)
+            .cloned();
+        match selected {
+            Some(message) => {
+                self.composer.replace_from_editor(message);
+                true
+            }
+            None => {
+                self.composer.replace_from_editor(search.draft);
+                false
+            }
+        }
+    }
+
+    /// Leave reverse search without changing the caller's original draft.
+    pub(super) fn cancel_history_search(&mut self) {
+        let Some(search) = self.history_search.take() else {
+            return;
+        };
+        self.composer.replace_from_editor(search.draft);
+    }
+
+    /// Give the live renderer a stable newest-first snapshot of matching
+    /// messages. The renderer alone decides how many excerpts fit its tail.
+    pub(crate) fn history_search_results(&self) -> Option<HistorySearchResults> {
+        let search = self.history_search.as_ref()?;
+        let query = self.composer.text().to_owned();
+        let matches = self
+            .history
+            .iter()
+            .rev()
+            .filter(|message| message.contains(&query))
+            .cloned()
+            .collect::<Vec<_>>();
+        Some(HistorySearchResults {
+            query,
+            selected: search.selected.min(matches.len().saturating_sub(1)),
+            matches,
+        })
+    }
+
+    fn history_search_matches(&self) -> usize {
+        let query = self.composer.text();
+        self.history
+            .iter()
+            .rev()
+            .filter(|message| message.contains(query))
+            .count()
     }
 
     pub(super) fn begin_history_navigation(&mut self) {
@@ -958,6 +1089,7 @@ impl AppState {
         self.history.clear();
         self.history_index = None;
         self.history_draft = None;
+        self.history_search = None;
     }
 
     /// Scroll a temporary surface without changing live transcript follow state.

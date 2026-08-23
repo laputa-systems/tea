@@ -7,7 +7,7 @@ use std::time::Duration;
 use tea_core::compaction::AutomaticCompactionPolicy;
 use tea_core::provider::ProviderRegistry;
 use tea_core::{AgentConfiguration, CoreError, DefaultCodingTools};
-use tea_harness::{HarnessError, HarnessEvent, TeaEvent, TeaEventSubscription};
+use tea_harness::{HarnessError, HarnessEvent, SessionEvent, TeaEvent, TeaEventSubscription};
 use tea_tui::Size;
 
 use super::cli::CliOptions;
@@ -224,6 +224,15 @@ impl App {
             loop {
                 match subscription.try_recv() {
                     Ok(TeaEvent::Agent(event)) => self.state.apply_event(&event),
+                    Ok(TeaEvent::Session(SessionEvent::OperationAccepted { .. })) => {
+                        // The session writer appended the user entry before
+                        // publishing this event. This cache is therefore
+                        // session-derived even before a reopen rebuilds it
+                        // from the authoritative log.
+                        if let Some(prompt) = self.submitted_prompt.as_deref() {
+                            self.state.record_history(prompt);
+                        }
+                    }
                     Ok(TeaEvent::Harness(HarnessEvent::CandidateRejected {
                         stage,
                         code,
