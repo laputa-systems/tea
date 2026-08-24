@@ -10,7 +10,9 @@ use mlua::{Function, Table, Value};
 use std::collections::BTreeSet;
 use tea_core::hooks::{AfterToolCall, BeforeToolCall, Replacement};
 use tea_core::state::SerializedJson;
-use tea_core::tool::{AgentToolResult, ToolExecutionMode};
+use tea_core::tool::{
+    AgentToolResult, CancellationSettlementMode, ToolExecutionMode,
+};
 use tea_protocol::JsonValue;
 
 pub(super) struct ParsedDeclaration {
@@ -194,6 +196,8 @@ fn parse_tool(declaration: &Table) -> Result<PolicyTool, PolicyError> {
             "description",
             "capability",
             "execution_mode",
+            "requires_exclusive_batch",
+            "cancellation_settlement_mode",
             "schema_json",
             "handler_source",
         ],
@@ -229,6 +233,26 @@ fn parse_tool(declaration: &Table) -> Result<PolicyTool, PolicyError> {
             });
         }
     };
+    let requires_exclusive_batch = declaration
+        .get::<Option<bool>>("requires_exclusive_batch")
+        .map_err(contract_error)?
+        .unwrap_or(false);
+    let cancellation_settlement_mode = match declaration
+        .get::<Option<String>>("cancellation_settlement_mode")
+        .map_err(contract_error)?
+        .as_deref()
+        .unwrap_or("drop_future")
+    {
+        "drop_future" => CancellationSettlementMode::DropFuture,
+        "await_future" => CancellationSettlementMode::AwaitFuture,
+        value => {
+            return Err(PolicyError::Contract {
+                message: format!(
+                    "tool {name:?} has invalid cancellation_settlement_mode {value:?}; expected drop_future or await_future"
+                ),
+            });
+        }
+    };
     let schema = JsonValue::parse(&schema_json).map_err(|error| PolicyError::Contract {
         message: format!("tool {name:?} schema_json is invalid: {error}"),
     })?;
@@ -246,6 +270,8 @@ fn parse_tool(declaration: &Table) -> Result<PolicyTool, PolicyError> {
         schema,
         capability,
         execution_mode,
+        requires_exclusive_batch,
+        cancellation_settlement_mode,
         handler_source,
     })
 }

@@ -2,9 +2,96 @@
 
 use super::{compaction_stage_name, end_reason_name, event_schema_version, event_type};
 use crate::event::{
-    CacheEvidence, Compaction, EpisodeEnd, EpisodeHeader, Tool, TraceEvent, TraceProvenance, Turn,
+    CacheEvidence, Compaction, CompactionStage, EndReason, EpisodeEnd, EpisodeHeader, Tool,
+    TraceEvent, TraceProvenance, Turn,
 };
 use std::collections::BTreeMap;
+use std::fmt;
+
+/// Error returned when a JSONL trace record is not exactly the v1 wire form.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct JsonTraceDecodeError {
+    message: String,
+}
+
+impl JsonTraceDecodeError {
+    fn new(message: impl Into<String>) -> Self { Self { message: message.into() } }
+}
+
+impl fmt::Display for JsonTraceDecodeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { f.write_str(&self.message) }
+}
+impl std::error::Error for JsonTraceDecodeError {}
+
+/// Decode one canonical JSONL record. Whitespace, unknown fields, alternate
+/// numeric forms, and extra Factory records are rejected by canonical replay.
+pub fn decode_json_line(line: &str) -> Result<TraceEvent, JsonTraceDecodeError> {
+    let value = miniserde::json::from_str::<miniserde::json::Value>(line)
+        .map_err(|_| JsonTraceDecodeError::new("invalid JSON trace record"))?;
+    let object = match value { miniserde::json::Value::Object(value) => value, _ => return Err(JsonTraceDecodeError::new("trace record is not an object")) };
+    let schema = take_u64(&object, "schema_version")?;
+    if schema != u64::from(crate::TRACE_SCHEMA_VERSION) { return Err(JsonTraceDecodeError::new("unsupported trace schema version")); }
+    let kind = take_str(&object, "type")?;
+    let event = match kind.as_str() {
+        "episode_header" => parse_header(&object)?,
+        "turn" => parse_turn(&object)?,
+        "tool" => parse_tool(&object)?,
+        "compaction" => parse_compaction(&object)?,
+        "episode_end" => parse_end(&object)?,
+        _ => return Err(JsonTraceDecodeError::new("unknown trace record type")),
+    };
+    let mut canonical = String::new();
+    write_json_event(&mut canonical, &event);
+    if canonical != line { return Err(JsonTraceDecodeError::new("non-canonical or extra trace fields")); }
+    Ok(event)
+}
+
+/// Decode a complete JSONL episode, enforcing header/terminal lifecycle order.
+pub fn decode_jsonl(input: &str) -> Result<Vec<TraceEvent>, JsonTraceDecodeError> {
+    if input.is_empty() { return Err(JsonTraceDecodeError::new("empty trace")); }
+    let mut events = Vec::new();
+    for line in input.split('\n') {
+        if line.is_empty() { continue; }
+        events.push(decode_json_line(line)?);
+    }
+    if !matches!(events.first(), Some(TraceEvent::EpisodeHeader(_))) ||
+       !matches!(events.last(), Some(TraceEvent::EpisodeEnd(_))) ||
+       events.iter().skip(1).any(|event| matches!(event, TraceEvent::EpisodeHeader(_))) ||
+       events.iter().take(events.len().saturating_sub(1)).any(TraceEvent::is_terminal) {
+        return Err(JsonTraceDecodeError::new("invalid episode lifecycle"));
+    }
+    Ok(events)
+}
+
+type Obj = std::collections::BTreeMap<String, miniserde::json::Value>;
+fn take<'a>(o: &'a Obj, n: &str) -> Result<&'a miniserde::json::Value, JsonTraceDecodeError> { o.get(n).ok_or_else(|| JsonTraceDecodeError::new(format!("missing field {n}"))) }
+fn take_str(o: &Obj, n: &str) -> Result<String, JsonTraceDecodeError> { match take(o,n)? { miniserde::json::Value::String(v) => Ok(v.clone()), _ => Err(JsonTraceDecodeError::new(format!("field {n} has wrong type"))) } }
+fn take_opt_str(o: &Obj, n: &str) -> Result<Option<String>, JsonTraceDecodeError> { match o.get(n) { None|Some(miniserde::json::Value::Null) => Ok(None), Some(miniserde::json::Value::String(v)) => Ok(Some(v.clone())), Some(_) => Err(JsonTraceDecodeError::new(format!("field {n} has wrong type"))) } }
+fn take_u64(o: &Obj, n: &str) -> Result<u64, JsonTraceDecodeError> { match take(o,n)? { miniserde::json::Value::Number(miniserde::json::Number::U64(v)) => Ok(*v), _ => Err(JsonTraceDecodeError::new(format!("field {n} has wrong type"))) } }
+fn take_opt_u64(o: &Obj, n: &str) -> Result<Option<u64>, JsonTraceDecodeError> { match o.get(n) { None|Some(miniserde::json::Value::Null) => Ok(None), Some(miniserde::json::Value::Number(miniserde::json::Number::U64(v))) => Ok(Some(*v)), Some(_) => Err(JsonTraceDecodeError::new(format!("field {n} has wrong type"))) } }
+fn take_opt_bool(o: &Obj, n: &str) -> Result<Option<bool>, JsonTraceDecodeError> { match o.get(n) { None|Some(miniserde::json::Value::Null) => Ok(None), Some(miniserde::json::Value::Bool(v)) => Ok(Some(*v)), Some(_) => Err(JsonTraceDecodeError::new(format!("field {n} has wrong type"))) } }
+fn take_map_str(o: &Obj, n: &str) -> Result<BTreeMap<String,String>, JsonTraceDecodeError> { match take(o,n)? { miniserde::json::Value::Object(m) => m.iter().map(|(k,v)| match v { miniserde::json::Value::String(s)=>Ok((k.clone(),s.clone())), _=>Err(JsonTraceDecodeError::new("map value has wrong type")) }).collect(), _=>Err(JsonTraceDecodeError::new(format!("field {n} has wrong type"))) } }
+fn take_strings(o: &Obj, n: &str) -> Result<Vec<String>, JsonTraceDecodeError> { match take(o,n)? { miniserde::json::Value::Array(a) => a.iter().map(|v| match v { miniserde::json::Value::String(s)=>Ok(s.clone()), _=>Err(JsonTraceDecodeError::new("array value has wrong type")) }).collect(), _=>Err(JsonTraceDecodeError::new(format!("field {n} has wrong type"))) } }
+
+fn parse_header(o: &Obj) -> Result<TraceEvent, JsonTraceDecodeError> {
+    let mut h=EpisodeHeader::new(take_str(o,"episode_id")?); h.metadata=take_map_str(o,"metadata")?; h.started_at_ms=take_opt_u64(o,"started_at_ms")?; h.provenance=parse_provenance(o)?; Ok(h.into())
+}
+fn parse_provenance(o: &Obj) -> Result<Option<TraceProvenance>, JsonTraceDecodeError> { match take(o,"provenance")? { miniserde::json::Value::Null=>Ok(None), miniserde::json::Value::Object(p)=>Ok(Some(TraceProvenance { session_id:take_opt_str(p,"session_id")?, lane_id:take_opt_str(p,"lane_id")?, operation_id:take_opt_str(p,"operation_id")?, epoch_id:take_opt_str(p,"epoch_id")?, core_run_id:take_opt_str(p,"core_run_id")?, harness_snapshot_id:take_opt_str(p,"harness_snapshot_id")?, harness_revision_id:take_opt_str(p,"harness_revision_id")?, model_harness_profile_id:take_opt_str(p,"model_harness_profile_id")?, experiment_id:take_opt_str(p,"experiment_id")? })), _=>Err(JsonTraceDecodeError::new("field provenance has wrong type")) } }
+fn parse_turn(o: &Obj) -> Result<TraceEvent, JsonTraceDecodeError> { let mut t=Turn::new(u32::try_from(take_u64(o,"index")?).map_err(|_|JsonTraceDecodeError::new("index out of range"))?,take_str(o,"input")?); t.output=take_opt_str(o,"output")?; t.stop_reason=take_opt_str(o,"stop_reason")?; t.cache_evidence=parse_cache(o)?; Ok(t.into()) }
+fn parse_tool(o: &Obj) -> Result<TraceEvent, JsonTraceDecodeError> { let mut t=Tool::new(u32::try_from(take_u64(o,"turn_index")?).map_err(|_|JsonTraceDecodeError::new("turn_index out of range"))?,take_str(o,"call_id")?,take_str(o,"name")?,take_str(o,"input")?); t.output=take_opt_str(o,"output")?; t.error=take_opt_str(o,"error")?; Ok(t.into()) }
+fn parse_end(o: &Obj) -> Result<TraceEvent, JsonTraceDecodeError> { let reason=match take_str(o,"reason")?.as_str() {"completed"=>EndReason::Completed,"cancelled"=>EndReason::Cancelled,"failed"=>EndReason::Failed,"aborted"=>EndReason::Aborted,v=>EndReason::Other(v.to_owned())}; Ok(EpisodeEnd { reason,error:take_opt_str(o,"error")?,finished_at_ms:take_opt_u64(o,"finished_at_ms")? }.into()) }
+fn parse_cache(o: &Obj) -> Result<Option<CacheEvidence>, JsonTraceDecodeError> {
+    let v=take(o,"cache_evidence")?; let miniserde::json::Value::Object(p)=v else { if matches!(v, miniserde::json::Value::Null){return Ok(None)} return Err(JsonTraceDecodeError::new("field cache_evidence has wrong type")) };
+    let mut c=CacheEvidence::default(); c.continuity=take_opt_str(p,"continuity")?; c.cache_domain_fingerprint=take_opt_u64(p,"cache_domain_fingerprint")?; c.changed_cache_domain_components=take_strings(p,"changed_cache_domain_components")?; c.context_bytes=take_opt_u64(p,"context_bytes")?; c.common_context_prefix_bytes=take_opt_u64(p,"common_context_prefix_bytes")?; c.common_context_prefix_ratio_millionths=take_opt_u64(p,"common_context_prefix_ratio_millionths")?.map(|v|u32::try_from(v)).transpose().map_err(|_|JsonTraceDecodeError::new("ratio out of range"))?; c.context_projection_changed=take_opt_bool(p,"context_projection_changed")?; c.context_fingerprint=take_opt_u64(p,"context_fingerprint")?; c.system_prompt_fingerprint=take_opt_u64(p,"system_prompt_fingerprint")?; c.tool_definition_fingerprint=take_opt_u64(p,"tool_definition_fingerprint")?; c.tool_order_fingerprint=take_opt_u64(p,"tool_order_fingerprint")?; c.model_fingerprint=take_opt_u64(p,"model_fingerprint")?; c.thinking_fingerprint=take_opt_u64(p,"thinking_fingerprint")?; c.deterministic_common_prefix_bytes=take_opt_u64(p,"deterministic_common_prefix_bytes")?; c.deterministic_common_prefix_tokens_estimate=take_opt_u64(p,"deterministic_common_prefix_tokens_estimate")?; c.provider_cache_read_tokens=take_opt_u64(p,"provider_cache_read_tokens")?; c.provider_cache_write_tokens=take_opt_u64(p,"provider_cache_write_tokens")?; c.serialized_request_bytes=take_opt_u64(p,"serialized_request_bytes")?; c.adapter_cache_domain_fingerprint=take_opt_u64(p,"adapter_cache_domain_fingerprint")?; c.provider_surface_digest=take_opt_str(p,"provider_surface_digest")?;
+    match take(p,"adapter_cache_domain_components")? { miniserde::json::Value::Object(m)=>{ c.adapter_cache_domain_components=m.iter().map(|(k,v)|match v {miniserde::json::Value::Number(miniserde::json::Number::U64(n))=>Ok((k.clone(),*n)), _=>Err(JsonTraceDecodeError::new("map value has wrong type"))}).collect::<Result<_,_>>()? }, _=>return Err(JsonTraceDecodeError::new("field adapter_cache_domain_components has wrong type")) }
+    Ok(Some(c))
+}
+fn parse_compaction(o: &Obj) -> Result<TraceEvent, JsonTraceDecodeError> {
+    let stage=match take_str(o,"stage")?.as_str() {"started"=>CompactionStage::Started,"source_selected"=>CompactionStage::SourceSelected,"request_prepared"=>CompactionStage::RequestPrepared,"provider_usage_observed"=>CompactionStage::ProviderUsageObserved,"replacement_proposed"=>CompactionStage::ReplacementProposed,"terminal"=>CompactionStage::Terminal,"post_compaction_request_observed"=>CompactionStage::PostCompactionRequestObserved,_=>return Err(JsonTraceDecodeError::new("unknown compaction stage"))};
+    let mut c=Compaction::new(take_str(o,"compaction_id")?,stage);
+    macro_rules! s {($f:ident)=>{c.$f=take_opt_str(o,stringify!($f))?;};} macro_rules! n {($f:ident)=>{c.$f=take_opt_u64(o,stringify!($f))?.map(|v|usize::try_from(v)).transpose().map_err(|_|JsonTraceDecodeError::new("number out of range"))?;};} macro_rules! u {($f:ident)=>{c.$f=take_opt_u64(o,stringify!($f))?.map(|v|u32::try_from(v)).transpose().map_err(|_|JsonTraceDecodeError::new("number out of range"))?;};} macro_rules! q {($f:ident)=>{c.$f=take_opt_u64(o,stringify!($f))?;};} macro_rules! b {($f:ident)=>{c.$f=take_opt_bool(o,stringify!($f))?;};}
+    s!(trigger);s!(reason);s!(phase);s!(strategy_id);u!(strategy_schema_version);s!(request_layout);q!(prompt_fingerprint);q!(source_history_revision);u!(attempt);u!(automatic_ordinal);u!(overflow_retry_ordinal);b!(retry_provider_request);n!(source_message_count);n!(source_message_bytes);n!(retained_message_count);n!(retained_suffix_bytes);n!(tool_result_bytes);n!(compactor_context_bytes);n!(compactor_tool_count);b!(tools_execution_prohibited);b!(source_is_active_context_prefix);n!(replacement_message_count);n!(replacement_bytes);q!(estimated_context_tokens_after);q!(headroom_tokens);b!(structural_validation_passed);b!(retained_suffix_exact);b!(source_generation_matches);q!(provider_input_tokens);q!(provider_output_tokens);q!(provider_cache_read_tokens);q!(provider_cache_write_tokens);n!(serialized_request_bytes);q!(cache_domain_fingerprint);s!(terminal_outcome);u!(post_compaction_turn_index); Ok(c.into())
+}
 
 pub(super) fn write_json_event(output: &mut String, event: &TraceEvent) {
     output.push('{');

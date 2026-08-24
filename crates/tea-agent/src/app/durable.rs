@@ -18,8 +18,8 @@ use tea_core::compaction::AutomaticCompactionPolicy;
 use tea_core::event::AgentEventKind;
 use tea_core::harness::{
     HarnessActor, HarnessRepository, HarnessResolver, HarnessResourceLimits,
-    HarnessRuntimePolicyDescriptors, HarnessSeedBuilder, ModelHarnessProfile, SelfExtensionMode,
-    ToolPresentationDescriptor, SELF_EXTENSION_MODE_METADATA_KEY,
+    HarnessSeedBuilder, ModelHarnessProfile, SelfExtensionMode, ToolPresentationDescriptor,
+    SELF_EXTENSION_MODE_METADATA_KEY,
 };
 use tea_core::runtime::{
     HarnessIdentity, RuntimeServices, SessionRuntime, TeaEvent, TeaEventSubscription,
@@ -169,12 +169,7 @@ pub(super) fn create_host_harness(
             profile.clone(),
             SelfExtensionMode::Off,
             HarnessResourceLimits::default(),
-            HarnessRuntimePolicyDescriptors {
-                hook_bundle_digest: Digest::from_bytes("tea-agent-openai-context-hook-v1"),
-                compaction_policy_digest: Digest::from_bytes("tea-agent-provider-compactor-v1"),
-                tool_projection_digest: Digest::from_bytes("tea-core-recoverable-projection-v1"),
-                failure_policy_digest: Digest::from_bytes("tea-core-tool-failure-policy-v1"),
-            },
+            template.runtime_policy_identities(),
         )
         .trusted_tool_presentations(tool_presentations(&configuration))
         .seed(HarnessActor::Host, created_at_ms)
@@ -612,6 +607,11 @@ fn tool_presentations(configuration: &AgentConfiguration) -> Vec<ToolPresentatio
             execution_mode: match tool.execution_mode {
                 ToolExecutionMode::Sequential => "sequential".into(),
                 ToolExecutionMode::Parallel => "parallel".into(),
+            },
+            requires_exclusive_batch: tool.requires_exclusive_batch,
+            cancellation_settlement_mode: match tool.cancellation_settlement_mode {
+                tea_core::tool::CancellationSettlementMode::DropFuture => "drop_future".into(),
+                tea_core::tool::CancellationSettlementMode::AwaitFuture => "await_future".into(),
             },
         })
         .collect()

@@ -14,6 +14,8 @@ use std::io::{self, Write};
 mod cbor;
 mod json;
 
+pub use json::{decode_json_line, decode_jsonl, JsonTraceDecodeError};
+
 /// A [`TraceSink`] that writes one JSON object followed by a newline per event.
 ///
 /// The JSON shape is the explicit v1 wire format. Every object carries
@@ -160,6 +162,47 @@ mod tests {
             ),
         );
         assert!(text.contains(r#""type":"turn"#));
+    }
+
+    #[test]
+    fn decoder_round_trips_canonical_episode_and_enforces_lifecycle() {
+        let mut sink = JsonLinesSink::new(Vec::new());
+        sink.append(EpisodeHeader::new("episode").into()).unwrap();
+        sink.append(Turn::new(0, "input").into()).unwrap();
+        sink.append(crate::EpisodeEnd::completed().into()).unwrap();
+        let text = String::from_utf8(sink.into_inner()).unwrap();
+        let events = decode_jsonl(&text).expect("canonical episode decodes");
+        assert_eq!(events.len(), 3);
+        assert!(matches!(events.first(), Some(TraceEvent::EpisodeHeader(_))));
+        assert!(matches!(events.last(), Some(TraceEvent::EpisodeEnd(_))));
+    }
+
+    #[test]
+    fn decoder_rejects_unknown_extra_and_noncanonical_records() {
+        let valid = r#"{"schema_version":1,"type":"episode_end","reason":"completed","error":null,"finished_at_ms":null}"#;
+        assert!(decode_json_line(valid).is_ok());
+        assert!(decode_json_line(&valid[..valid.len() - 1]).is_err());
+        assert!(decode_json_line(
+            r#"{"schema_version":1,"type":"factory_internal","value":1}"#
+        ).is_err());
+        assert!(decode_json_line(
+            r#" {"schema_version":1,"type":"episode_end","reason":"completed","error":null,"finished_at_ms":null}"#
+        ).is_err());
+    }
+
+    #[test]
+    fn decoder_rejects_terminal_before_header_or_records_after_end() {
+        let end = r#"{"schema_version":1,"type":"episode_end","reason":"completed","error":null,"finished_at_ms":null}"#;
+        let header = r#"{"schema_version":1,"type":"episode_header","episode_id":"e","metadata":{},"started_at_ms":null,"provenance":null}"#;
+        assert!(decode_jsonl(&format!("{end}\n{header}\n")).is_err());
+        assert!(decode_jsonl(&format!("{header}\n{end}\n{header}\n")).is_err());
+    }
+
+    #[test]
+    fn decoder_rejects_a_second_header_inside_an_episode() {
+        let header = r#"{"schema_version":1,"type":"episode_header","episode_id":"e","metadata":{},"started_at_ms":null,"provenance":null}"#;
+        let end = r#"{"schema_version":1,"type":"episode_end","reason":"completed","error":null,"finished_at_ms":null}"#;
+        assert!(decode_jsonl(&format!("{header}\n{header}\n{end}\n")).is_err());
     }
 
     #[test]

@@ -26,6 +26,19 @@ runtime services, prompt sections, tools, hooks, capability bindings, artifact p
 and model-harness profile are all immutable for that epoch. A candidate can
 change the next boundary only after validation and durable activation.
 
+Runtime policy identities are owned by `RuntimeServices`. `HarnessSeedBuilder`
+copies those identities into the immutable snapshot, and `HarnessResolver`
+checks them again before both `SessionRuntime` and `HostedEpoch` construct an
+agent. This keeps the executable hook, automatic-compaction, tool-projection,
+and tool-failure policies paired with the snapshot metadata that names them;
+the built-in defaults have stable identities as well.
+
+Tool names, descriptions, and schemas form the provider surface. Scheduling and
+cancellation controls (`execution_mode`, exclusive-batch, and cancellation
+settlement) are host-only execution policy: they have a separate immutable
+digest, are retained in snapshots and catalogs, and produce a distinct candidate
+surface diff without changing the provider-surface digest.
+
 The supervisor persists a content-redacted v1 trace artifact before it records
 the epoch's terminal outcome. Trace provenance joins the operation, epoch,
 core-run ID, revision, snapshot, and profile. See [trace](trace.md) and

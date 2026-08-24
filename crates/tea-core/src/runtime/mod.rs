@@ -28,5 +28,5 @@ pub use events::{
     SessionEvent, TeaEvent, TeaEventSubscription, ValidationStage,
 };
 pub use hosted::{HostedEpoch, HostedEpochInput};
-pub use services::RuntimeServices;
+pub use services::{RuntimePolicyIdentities, RuntimeServices};
 pub use session::{DurableOperation, HarnessIdentity, SessionRuntime};

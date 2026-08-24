@@ -1,7 +1,7 @@
 //! Public tool-handler metadata and construction validation.
 
 use std::fmt;
-use tea_core::tool::ToolExecutionMode;
+use tea_core::tool::{CancellationSettlementMode, ToolExecutionMode};
 use tea_protocol::JsonValue;
 
 /// Resource limits applied independently to each handler invocation.
@@ -44,6 +44,10 @@ pub struct ToolHandlerSpec {
     pub capability: String,
     /// Whether the core may overlap calls to this tool.
     pub execution_mode: ToolExecutionMode,
+    /// Whether this tool must be the sole call in an assistant batch.
+    pub requires_exclusive_batch: bool,
+    /// How a started invocation settles after run cancellation.
+    pub cancellation_settlement_mode: CancellationSettlementMode,
 }
 
 /// Failure while loading or validating a Luau tool handler.

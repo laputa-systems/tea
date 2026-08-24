@@ -61,6 +61,8 @@ pub enum HarnessSurface {
     ToolProjection,
     /// Host failure policy.
     FailurePolicy,
+    /// Host-only tool execution and cancellation policy.
+    ToolExecutionPolicy,
 }
 
 /// Explicit resource ceilings frozen in an immutable snapshot.
@@ -170,7 +172,7 @@ pub struct PromptSectionDescriptor {
     pub content: String,
 }
 
-/// One ordered model-facing tool presentation.
+/// One ordered model-facing tool presentation plus its host-only execution policy.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ToolPresentationDescriptor {
     /// Stable registered name.
@@ -179,8 +181,12 @@ pub struct ToolPresentationDescriptor {
     pub description: String,
     /// Canonical provider-visible JSON schema.
     pub schema: JsonValue,
-    /// Stable execution-mode spelling (`sequential` or `parallel`).
+    /// Stable host-only execution-mode spelling (`sequential` or `parallel`).
     pub execution_mode: String,
+    /// Whether the tool must be the sole call in an assistant batch.
+    pub requires_exclusive_batch: bool,
+    /// Host-only cancellation settlement spelling.
+    pub cancellation_settlement_mode: String,
 }
 
 /// Exact capability binding selected by a snapshot.
@@ -207,6 +213,8 @@ pub struct HarnessSurfaceFingerprints {
     pub system_prompt_digest: Digest,
     /// Ordered provider-visible tool-definition bytes.
     pub ordered_tool_definitions_digest: Digest,
+    /// Ordered host-only tool execution-policy bytes.
+    pub tool_execution_policy_digest: Digest,
     /// Hook bundle/source descriptor identity.
     pub hook_bundle_digest: Digest,
     /// Bound host capability identities.
@@ -963,6 +971,17 @@ fn validate_snapshot_spec(
                 message: format!("tool {} has an unknown execution mode", tool.name),
             });
         }
+        if !matches!(
+            tool.cancellation_settlement_mode.as_str(),
+            "drop_future" | "await_future"
+        ) {
+            return Err(HarnessLineageError::Invalid {
+                message: format!(
+                    "tool {} has an unknown cancellation settlement mode",
+                    tool.name
+                ),
+            });
+        }
         let _ = tool
             .schema
             .to_json_string()
@@ -1119,6 +1138,15 @@ fn collect_plugin_surfaces(
                     execution_mode: match tool.execution_mode {
                         tea_core::tool::ToolExecutionMode::Sequential => "sequential".into(),
                         tea_core::tool::ToolExecutionMode::Parallel => "parallel".into(),
+                    },
+                    requires_exclusive_batch: tool.requires_exclusive_batch,
+                    cancellation_settlement_mode: match tool.cancellation_settlement_mode {
+                        tea_core::tool::CancellationSettlementMode::DropFuture => {
+                            "drop_future".into()
+                        }
+                        tea_core::tool::CancellationSettlementMode::AwaitFuture => {
+                            "await_future".into()
+                        }
                     },
                 });
         }
@@ -1307,6 +1335,7 @@ fn fingerprints(
     let prompt = compose_system_prompt(spec);
     let system_prompt_digest = Digest::from_bytes(prompt.as_bytes());
     let ordered_tool_definitions_digest = digest_tools(&all_tool_presentations(spec))?;
+    let tool_execution_policy_digest = digest_tool_execution_policies(&all_tool_presentations(spec));
     let capability_bindings_digest = digest_capabilities(&spec.capability_bindings);
     let mut provider =
         CanonicalHashWriter::new("tea-harness-provider-surface-v1", 1, EXTENSION_ABI_VERSION);
@@ -1318,6 +1347,7 @@ fn fingerprints(
     Ok(HarnessSurfaceFingerprints {
         system_prompt_digest,
         ordered_tool_definitions_digest,
+        tool_execution_policy_digest,
         hook_bundle_digest: spec.hook_bundle_digest,
         capability_bindings_digest,
         compaction_policy_digest: spec.compaction_policy_digest,
@@ -1344,6 +1374,35 @@ pub(crate) fn compose_system_prompt(spec: &HarnessSnapshotSpec) -> String {
     sections.join("\n\n")
 }
 
+/// Combine the host hook implementation identity with the source-pinned
+/// session-plugin hook contribution for one snapshot.
+pub(crate) fn runtime_hook_bundle_digest(
+    host_identity: Digest,
+    spec: &HarnessSnapshotSpec,
+) -> Digest {
+    if spec.ordered_session_plugins.is_empty() {
+        return host_identity;
+    }
+    let mut writer = CanonicalHashWriter::new("tea-runtime-hook-bundle-v1", 1, 1);
+    writer.bytes("host_identity", host_identity.as_bytes());
+    writer.bytes(
+        "session_plugin_identity",
+        session_plugin_hook_digest(spec).as_bytes(),
+    );
+    writer.finish()
+}
+
+/// Canonical identity of the ordered session-plugin hook contribution.
+pub(crate) fn session_plugin_hook_digest(spec: &HarnessSnapshotSpec) -> Digest {
+    let mut writer = CanonicalHashWriter::new("tea-session-plugin-hooks-v1", 1, 2);
+    writer.u64("plugin_count", spec.ordered_session_plugins.len() as u64);
+    for plugin in &spec.ordered_session_plugins {
+        writer.string("plugin_id", &plugin.plugin_id);
+        writer.string("tree_id", plugin.tree_id.as_str());
+    }
+    writer.finish()
+}
+
 fn all_tool_presentations(spec: &HarnessSnapshotSpec) -> Vec<ToolPresentationDescriptor> {
     spec.tool_presentations
         .iter()
@@ -1362,7 +1421,6 @@ fn digest_tools(tools: &[ToolPresentationDescriptor]) -> Result<Digest, HarnessL
     for tool in tools {
         writer.string("name", &tool.name);
         writer.string("description", &tool.description);
-        writer.string("execution_mode", &tool.execution_mode);
         writer.string(
             "schema",
             &tool
@@ -1374,6 +1432,25 @@ fn digest_tools(tools: &[ToolPresentationDescriptor]) -> Result<Digest, HarnessL
         );
     }
     Ok(writer.finish())
+}
+
+fn digest_tool_execution_policies(tools: &[ToolPresentationDescriptor]) -> Digest {
+    let mut writer = CanonicalHashWriter::new(
+        "tea-harness-tool-execution-policies-v1",
+        1,
+        EXTENSION_ABI_VERSION,
+    );
+    writer.u64("tool_count", tools.len() as u64);
+    for tool in tools {
+        writer.string("name", &tool.name);
+        writer.string("execution_mode", &tool.execution_mode);
+        writer.boolean("requires_exclusive_batch", tool.requires_exclusive_batch);
+        writer.string(
+            "cancellation_settlement_mode",
+            &tool.cancellation_settlement_mode,
+        );
+    }
+    writer.finish()
 }
 
 fn digest_capabilities(bindings: &[CapabilityBindingRef]) -> Digest {
@@ -1429,6 +1506,10 @@ fn snapshot_id(
     writer.bytes(
         "provider_surface_digest",
         fingerprints.provider_surface_digest.as_bytes(),
+    );
+    writer.bytes(
+        "tool_execution_policy_digest",
+        fingerprints.tool_execution_policy_digest.as_bytes(),
     );
     writer.bytes("hook_bundle_digest", spec.hook_bundle_digest.as_bytes());
     writer.bytes(
@@ -1611,6 +1692,7 @@ fn surface_discriminant(surface: HarnessSurface) -> u16 {
         HarnessSurface::Compaction => 5,
         HarnessSurface::ToolProjection => 6,
         HarnessSurface::FailurePolicy => 7,
+        HarnessSurface::ToolExecutionPolicy => 8,
     }
 }
 
@@ -1630,4 +1712,38 @@ fn validate_label(value: &str, kind: &str) -> Result<(), HarnessLineageError> {
         });
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tool() -> ToolPresentationDescriptor {
+        ToolPresentationDescriptor {
+            name: "transaction".into(),
+            description: "Commit one transaction.".into(),
+            schema: JsonValue::parse(r#"{"type":"object"}"#).expect("valid schema"),
+            execution_mode: "parallel".into(),
+            requires_exclusive_batch: false,
+            cancellation_settlement_mode: "drop_future".into(),
+        }
+    }
+
+    #[test]
+    fn host_execution_policy_does_not_change_provider_tool_digest() {
+        let original = tool();
+        let mut changed = original.clone();
+        changed.execution_mode = "sequential".into();
+        changed.requires_exclusive_batch = true;
+        changed.cancellation_settlement_mode = "await_future".into();
+
+        assert_eq!(
+            digest_tools(&[original.clone()]).expect("provider digest"),
+            digest_tools(&[changed.clone()]).expect("provider digest")
+        );
+        assert_ne!(
+            digest_tool_execution_policies(&[original]),
+            digest_tool_execution_policies(&[changed])
+        );
+    }
 }

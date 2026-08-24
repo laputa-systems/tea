@@ -7,3 +7,6 @@ license = "MIT OR Apache-2.0"
 
 [lib]
 path = "src/lib.rs"
+
+[dependencies]
+miniserde = { workspace = true }

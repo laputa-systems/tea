@@ -24,3 +24,10 @@ transport, or capability grants.
 The canonical parser is tea_luau::policy::parse_declaration; the exact manifest
 validation boundary is tea_luau::bundle::BundleManifest. Any declaration
 outside this v1 shape is rejected.
+
+Each tool may also declare the host-only execution policy fields
+`requires_exclusive_batch` (default `false`) and
+`cancellation_settlement_mode` (`drop_future`, the default, or `await_future`).
+These fields control scheduling and cancellation settlement; they are not sent
+to the provider and are included in the immutable host execution-policy
+fingerprint instead.

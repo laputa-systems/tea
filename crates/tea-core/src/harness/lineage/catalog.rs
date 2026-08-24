@@ -568,18 +568,42 @@ fn encode_tool_presentation(tool: &ToolPresentationDescriptor) -> JsonValue {
             "execution_mode",
             JsonValue::String(tool.execution_mode.clone()),
         ),
+        (
+            "requires_exclusive_batch",
+            JsonValue::Bool(tool.requires_exclusive_batch),
+        ),
+        (
+            "cancellation_settlement_mode",
+            JsonValue::String(tool.cancellation_settlement_mode.clone()),
+        ),
     ])
 }
 
 fn decode_tool_presentation(
     value: &JsonValue,
 ) -> Result<ToolPresentationDescriptor, HarnessLineageError> {
-    let object = required_object(value, &["name", "description", "schema", "execution_mode"])?;
+    let object = required_object(
+        value,
+        &[
+            "name",
+            "description",
+            "schema",
+            "execution_mode",
+            "requires_exclusive_batch",
+            "cancellation_settlement_mode",
+        ],
+    )?;
     Ok(ToolPresentationDescriptor {
         name: required_string(object, "name")?.to_owned(),
         description: required_string(object, "description")?.to_owned(),
         schema: required_value(object, "schema")?.clone(),
         execution_mode: required_string(object, "execution_mode")?.to_owned(),
+        requires_exclusive_batch: required_bool(object, "requires_exclusive_batch")?,
+        cancellation_settlement_mode: required_string(
+            object,
+            "cancellation_settlement_mode",
+        )?
+        .to_owned(),
     })
 }
 
@@ -666,6 +690,10 @@ fn encode_fingerprints(value: &HarnessSurfaceFingerprints) -> JsonValue {
             JsonValue::String(value.ordered_tool_definitions_digest.to_hex()),
         ),
         (
+            "tool_execution_policy_digest",
+            JsonValue::String(value.tool_execution_policy_digest.to_hex()),
+        ),
+        (
             "hook_bundle_digest",
             JsonValue::String(value.hook_bundle_digest.to_hex()),
         ),
@@ -692,6 +720,7 @@ fn decode_fingerprints(
         &[
             "system_prompt_digest",
             "ordered_tool_definitions_digest",
+            "tool_execution_policy_digest",
             "hook_bundle_digest",
             "capability_bindings_digest",
             "compaction_policy_digest",
@@ -703,6 +732,10 @@ fn decode_fingerprints(
         ordered_tool_definitions_digest: parse_digest(required_string(
             object,
             "ordered_tool_definitions_digest",
+        )?)?,
+        tool_execution_policy_digest: parse_digest(required_string(
+            object,
+            "tool_execution_policy_digest",
         )?)?,
         hook_bundle_digest: parse_digest(required_string(object, "hook_bundle_digest")?)?,
         capability_bindings_digest: parse_digest(required_string(
@@ -1066,6 +1099,7 @@ fn encode_surface(surface: HarnessSurface) -> &'static str {
         HarnessSurface::Compaction => "compaction",
         HarnessSurface::ToolProjection => "tool_projection",
         HarnessSurface::FailurePolicy => "failure_policy",
+        HarnessSurface::ToolExecutionPolicy => "tool_execution_policy",
     }
 }
 
@@ -1078,6 +1112,7 @@ fn parse_surface(value: &str) -> Result<HarnessSurface, HarnessLineageError> {
         "compaction" => Ok(HarnessSurface::Compaction),
         "tool_projection" => Ok(HarnessSurface::ToolProjection),
         "failure_policy" => Ok(HarnessSurface::FailurePolicy),
+        "tool_execution_policy" => Ok(HarnessSurface::ToolExecutionPolicy),
         _ => Err(invalid(format!(
             "unknown catalog harness surface {value:?}"
         ))),

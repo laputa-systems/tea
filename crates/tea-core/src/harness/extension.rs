@@ -7,7 +7,9 @@ use crate::error::HookError;
 use crate::hooks::HookSet;
 use crate::scheduler::CancellationToken;
 use crate::state::ToolCallId;
-use crate::tool::{ToolRegistry, ToolUpdateSink};
+use crate::tool::{
+    CancellationSettlementMode, ToolExecutionMode, ToolRegistry, ToolUpdateSink,
+};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::future::Future;
@@ -64,7 +66,11 @@ pub struct ExtensionToolDescription {
     /// Capability that must be explicitly granted by the host.
     pub capability: String,
     /// Whether the core may overlap calls to this tool.
-    pub execution_mode: crate::tool::ToolExecutionMode,
+    pub execution_mode: ToolExecutionMode,
+    /// Whether this tool must be the sole call in an assistant batch.
+    pub requires_exclusive_batch: bool,
+    /// How a started invocation settles after run cancellation.
+    pub cancellation_settlement_mode: CancellationSettlementMode,
 }
 
 /// Provider-visible and lifecycle metadata validated from immutable source.

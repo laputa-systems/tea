@@ -79,7 +79,7 @@ impl AgentTool for RecordingTool {
     }
 }
 
-fn snapshot_spec() -> HarnessSnapshotSpec {
+fn snapshot_spec(identities: super::RuntimePolicyIdentities) -> HarnessSnapshotSpec {
     HarnessSnapshotSpec {
         base_profile_digest: Digest::from_bytes("runtime-test-host-profile"),
         base_system_prompt: "Use the durable runtime fixture.".into(),
@@ -98,14 +98,16 @@ fn snapshot_spec() -> HarnessSnapshotSpec {
             description: "records one durable tool intent".into(),
             schema: JsonValue::parse(r#"{"type":"object"}"#).expect("fixture schema"),
             execution_mode: "parallel".into(),
+            requires_exclusive_batch: false,
+            cancellation_settlement_mode: "drop_future".into(),
         }],
         plugin_tool_presentations: Vec::new(),
-        hook_bundle_digest: Digest::from_bytes("runtime-test-hooks"),
+        hook_bundle_digest: identities.hook_bundle_digest,
         capability_bindings: Vec::new(),
         resource_limits: HarnessResourceLimits::default(),
-        compaction_policy_digest: Digest::from_bytes("runtime-test-compaction"),
-        tool_projection_digest: Digest::from_bytes("runtime-test-projection"),
-        failure_policy_digest: Digest::from_bytes("runtime-test-failure-policy"),
+        compaction_policy_digest: identities.compaction_policy_digest,
+        tool_projection_digest: identities.tool_projection_digest,
+        failure_policy_digest: identities.failure_policy_digest,
     }
 }
 
@@ -115,8 +117,11 @@ fn fixture_manager(
 ) -> (Arc<HarnessResolver>, HarnessIdentity) {
     let mut repository =
         HarnessRepository::with_extension_engine(store.clone(), Arc::new(NoExtensions));
+    let mut tools = ToolRegistry::default();
+    tools.insert(Arc::new(RecordingTool));
+    let services = RuntimeServices::new(provider, tools);
     let snapshot = repository
-        .stage_snapshot(snapshot_spec())
+        .stage_snapshot(snapshot_spec(services.runtime_policy_identities()))
         .expect("no-extension snapshot stages");
     let revision = repository
         .seed_revision(snapshot.id.clone(), HarnessActor::Host, 1)
@@ -126,16 +131,57 @@ fn fixture_manager(
         snapshot.id.clone(),
         snapshot.spec.model_harness_profile.clone(),
     );
-    let mut tools = ToolRegistry::default();
-    tools.insert(Arc::new(RecordingTool));
     (
         Arc::new(HarnessResolver::new(
             repository,
-            RuntimeServices::new(provider, tools),
+            services,
             Default::default(),
         )),
         identity,
     )
+}
+
+#[test]
+fn resolver_rejects_snapshot_runtime_policy_identity_mismatch() {
+    let provider: Arc<dyn ModelProvider> = Arc::new(QueuedProvider {
+        streams: Mutex::new(VecDeque::new()),
+    });
+    let store = Arc::new(MemoryArtifactStore::default());
+    let services = RuntimeServices::new(provider, ToolRegistry::default());
+    let mut identities = services.runtime_policy_identities();
+    identities.tool_projection_digest = Digest::from_bytes("runtime-test-wrong-projection");
+    let mut repository =
+        HarnessRepository::with_extension_engine(store, Arc::new(NoExtensions));
+    let snapshot = repository
+        .stage_snapshot(snapshot_spec(identities))
+        .expect("mismatched fixture snapshot stages");
+    let revision = repository
+        .seed_revision(snapshot.id.clone(), HarnessActor::Host, 1)
+        .expect("mismatched fixture revision stages");
+    let resolver = HarnessResolver::new(repository, services, Default::default());
+    let error = resolver
+        .resolve_revision(&revision.revision_id)
+        .expect_err("runtime policy identity mismatch is rejected");
+    assert!(error.to_string().contains("tool-result projection identity"));
+}
+
+#[test]
+fn runtime_policy_default_identities_are_stable() {
+    let first = RuntimeServices::new(
+        Arc::new(QueuedProvider {
+            streams: Mutex::new(VecDeque::new()),
+        }),
+        ToolRegistry::default(),
+    )
+    .runtime_policy_identities();
+    let second = RuntimeServices::new(
+        Arc::new(QueuedProvider {
+            streams: Mutex::new(VecDeque::new()),
+        }),
+        ToolRegistry::default(),
+    )
+    .runtime_policy_identities();
+    assert_eq!(first, second);
 }
 
 fn fixture_metadata() -> tea_session::Metadata {

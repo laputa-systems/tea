@@ -1602,6 +1602,7 @@ fn decode_harness_surface(value: &JsonValue) -> Result<HarnessSurface, Evolution
         "compaction" => Ok(HarnessSurface::Compaction),
         "tool_projection" => Ok(HarnessSurface::ToolProjection),
         "failure_policy" => Ok(HarnessSurface::FailurePolicy),
+        "tool_execution_policy" => Ok(HarnessSurface::ToolExecutionPolicy),
         _ => Err(corruption("unknown harness surface")),
     }
 }
@@ -1693,6 +1694,7 @@ fn harness_surface_name(value: HarnessSurface) -> &'static str {
         HarnessSurface::Compaction => "compaction",
         HarnessSurface::ToolProjection => "tool_projection",
         HarnessSurface::FailurePolicy => "failure_policy",
+        HarnessSurface::ToolExecutionPolicy => "tool_execution_policy",
     }
 }
 

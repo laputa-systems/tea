@@ -65,6 +65,8 @@ impl ExtensionEngine for LuauExtensionEngine {
                     schema: tool.schema.clone(),
                     capability: tool.capability.clone(),
                     execution_mode: tool.execution_mode,
+                    requires_exclusive_batch: tool.requires_exclusive_batch,
+                    cancellation_settlement_mode: tool.cancellation_settlement_mode,
                 },
                 adapt_binding(&tool.capability, binding)?,
                 limits,
@@ -199,6 +201,8 @@ fn descriptor(
                 schema: tool.schema.clone(),
                 capability: tool.capability.clone(),
                 execution_mode: tool.execution_mode,
+                requires_exclusive_batch: tool.requires_exclusive_batch,
+                cancellation_settlement_mode: tool.cancellation_settlement_mode,
             })
             .collect(),
         lifecycle_hook_ids: policy.resume_hook_ids().map_err(extension_error)?,

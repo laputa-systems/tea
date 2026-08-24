@@ -8,6 +8,14 @@ Every JSON Lines and CBOR record carries schema_version 1 and a type
 discriminator. The trace crate is a sink boundary; it does not own a provider,
 filesystem location, session store, executor, or clock.
 
+The public `tea_trace::decode_json_line` decoder accepts only canonical JSONL
+records emitted by `JsonLinesSink`: it rejects unknown fields and record types,
+unsupported schema versions, alternate numeric or whitespace forms, and
+non-canonical key/order or escaping. `tea_trace::decode_jsonl` additionally
+requires exactly one header first and one episode-end record last, with no
+terminal record in between. This makes decoded trace evidence suitable for
+provider-free validation without accepting unrelated Factory records.
+
 SessionRuntime wraps its trace capture in a redactor that replaces model input
 and output, tool input and output, and terminal diagnostics before persistence.
 It retains chronology, event kinds, cache evidence, compaction lifecycle, and

@@ -42,6 +42,7 @@ mod tests {
     use tea_core::hooks::{AfterToolCall, BeforeToolCall, ContextEnvelope, HookSet, Replacement};
     use tea_core::state::{SerializedJson, ToolCallId, Usage};
     use tea_core::tool::{AgentToolResult, ToolCall};
+    use tea_core::tool::CancellationSettlementMode;
 
     const GAME_POLICY: &str = r#"
         return {
@@ -88,6 +89,11 @@ mod tests {
         assert_eq!(policy.tools().len(), 1);
         assert_eq!(policy.tools()[0].name, "execute_code");
         assert_eq!(policy.tools()[0].capability, "rs-agent");
+        assert!(!policy.tools()[0].requires_exclusive_batch);
+        assert_eq!(
+            policy.tools()[0].cancellation_settlement_mode,
+            CancellationSettlementMode::DropFuture
+        );
         assert_eq!(
             policy.before_tool_call(&call("execute_code")),
             Ok(BeforeToolCall::Allow)
@@ -97,6 +103,35 @@ mod tests {
             Ok(BeforeToolCall::Block {
                 reason: "not granted by game policy".to_owned(),
             })
+        );
+    }
+
+    #[test]
+    fn policy_tool_execution_safety_fields_are_typed_and_bounded() {
+        let policy = LuaPolicy::load(
+            r#"
+                return {
+                    prompt_sections = {},
+                    tools = {
+                        {
+                            name = "transaction",
+                            description = "Commit one transaction.",
+                            capability = "world.write",
+                            execution_mode = "parallel",
+                            requires_exclusive_batch = true,
+                            cancellation_settlement_mode = "await_future",
+                            schema_json = '{"type":"object"}',
+                        },
+                    },
+                }
+            "#,
+        )
+        .expect("execution policy fields should parse");
+        let tool = &policy.tools()[0];
+        assert!(tool.requires_exclusive_batch);
+        assert_eq!(
+            tool.cancellation_settlement_mode,
+            CancellationSettlementMode::AwaitFuture
         );
     }
 

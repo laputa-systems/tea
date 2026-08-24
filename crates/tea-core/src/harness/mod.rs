@@ -33,6 +33,5 @@ pub use resolver::{
     verify_harness_catalog_with_extension_engine,
 };
 pub use seed::{
-    HarnessRuntimePolicyDescriptors, HarnessSeedBuilder, HarnessSeedExtension,
-    HarnessSeedExtensionScope, SeededHarness,
+    HarnessSeedBuilder, HarnessSeedExtension, HarnessSeedExtensionScope, SeededHarness,
 };

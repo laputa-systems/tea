@@ -10,6 +10,7 @@ use crate::state::{AgentMessage, ModelDescriptor, SerializedJson, ThinkingLevel,
 use crate::tool::{AgentToolResult, ToolCall};
 use std::future::Future;
 use std::pin::Pin;
+use tea_session::Digest;
 
 /// A caller-driven asynchronous hook operation.
 ///
@@ -107,6 +108,15 @@ pub struct AgentLoopTurnUpdate {
 
 /// Hook trait implemented by the embedding policy layer.
 pub trait HookSet: Send + Sync {
+    /// Return the stable identity of this executable hook implementation.
+    ///
+    /// Hosts with versioned wire behavior should override this with a
+    /// checked-in identity. The type-based fallback keeps distinct concrete
+    /// implementations from silently sharing the generic default identity.
+    fn identity(&self) -> Digest {
+        Digest::from_bytes(std::any::type_name::<Self>())
+    }
+
     /// Decide whether one tool call may execute.
     fn before_tool_call(&self, call: &ToolCall) -> Result<BeforeToolCall, HookError>;
     /// Replace selected fields after execution.
@@ -198,6 +208,10 @@ pub trait HookSet: Send + Sync {
 pub struct NoHooks;
 
 impl HookSet for NoHooks {
+    fn identity(&self) -> Digest {
+        Digest::from_bytes("tea-runtime-hooks-v1")
+    }
+
     fn before_tool_call(&self, _call: &ToolCall) -> Result<BeforeToolCall, HookError> {
         Ok(BeforeToolCall::Allow)
     }

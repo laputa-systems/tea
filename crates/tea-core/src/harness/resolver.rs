@@ -6,10 +6,10 @@
 //! a lane by itself.  The supervisor remains responsible for writing a
 //! `HarnessRevisionChanged` semantic entry at an epoch boundary.
 
-use crate::harness::lineage::compose_system_prompt;
+use crate::harness::lineage::{compose_system_prompt, runtime_hook_bundle_digest};
 use crate::harness::{
     CandidateHypothesis, HarnessActor, HarnessCandidateDraft, HarnessCandidateV1, HarnessError,
-    HarnessLineageError, HarnessRepository, HarnessRevisionV1, HarnessSnapshotSpec,
+    HarnessLineageError, HarnessRepository, HarnessRevisionV1,
     HarnessSnapshotV1, HarnessSourceFile, HarnessSurface, HarnessTreeLimits, PluginBundleRef,
     PluginCapabilityCatalog, RegistryOperation, SelfExtensionMode,
 };
@@ -24,7 +24,7 @@ use tea_core::hooks::HookSet;
 use tea_core::tool::{ToolFailureCircuitBreaker, ToolRegistry, ToolResultProjectionPolicy};
 use tea_protocol::JsonValue;
 use tea_session::{
-    ArtifactId, ArtifactPolicy, ArtifactStore, CanonicalHashWriter, HarnessCandidateId,
+    ArtifactId, ArtifactPolicy, ArtifactStore, HarnessCandidateId,
     HarnessCatalogFact, HarnessRevisionId, NormalizedPath, OperationId, SessionFact, SessionWriter,
 };
 
@@ -542,7 +542,12 @@ impl HarnessResolver {
                 })
                 .collect::<Result<Vec<_>, HarnessError>>()?
         };
-        proposed_spec.hook_bundle_digest = session_plugin_hook_digest(&proposed_spec);
+        proposed_spec.hook_bundle_digest = runtime_hook_bundle_digest(
+            self.runtime_services
+                .runtime_policy_identities()
+                .hook_bundle_digest,
+            &proposed_spec,
+        );
         let proposed_snapshot = repository
             .stage_snapshot(proposed_spec)
             .map_err(lineage_error)?;
@@ -1023,6 +1028,38 @@ fn decode_harness_catalog(
 }
 
 fn resolve_snapshot(input: ResolveSnapshotInput<'_>) -> Result<ResolvedHarness, HarnessError> {
+    let runtime_policies = input.runtime_services.runtime_policy_identities();
+    let spec = &input.snapshot.spec;
+    for (label, expected, actual) in [
+        (
+            "hook bundle",
+            runtime_hook_bundle_digest(runtime_policies.hook_bundle_digest, spec),
+            spec.hook_bundle_digest,
+        ),
+        (
+            "automatic compaction",
+            runtime_policies.compaction_policy_digest,
+            spec.compaction_policy_digest,
+        ),
+        (
+            "tool-result projection",
+            runtime_policies.tool_projection_digest,
+            spec.tool_projection_digest,
+        ),
+        (
+            "tool-failure",
+            runtime_policies.failure_policy_digest,
+            spec.failure_policy_digest,
+        ),
+    ] {
+        if expected != actual {
+            return Err(HarnessError::invalid_state(format!(
+                "resolved harness {label} identity does not match RuntimeServices (expected {}, actual {})",
+                expected.to_hex(),
+                actual.to_hex(),
+            )));
+        }
+    }
     for name in input.plugin_tools.names() {
         if input.runtime_services.trusted_tools().get(name).is_some() {
             return Err(HarnessError::invalid_state(format!(
@@ -1303,6 +1340,11 @@ fn changed_surfaces(
     {
         changed.insert(HarnessSurface::ToolDefinitions);
     }
+    if parent.fingerprints.tool_execution_policy_digest
+        != proposed.fingerprints.tool_execution_policy_digest
+    {
+        changed.insert(HarnessSurface::ToolExecutionPolicy);
+    }
     if parent.fingerprints.hook_bundle_digest != proposed.fingerprints.hook_bundle_digest {
         changed.insert(HarnessSurface::Hooks);
     }
@@ -1321,21 +1363,6 @@ fn changed_surfaces(
         changed.insert(HarnessSurface::FailurePolicy);
     }
     changed
-}
-
-/// Canonical identity of the ordered session-plugin hook contribution.
-///
-/// Hosts use this when seeding a snapshot that already contains session
-/// plugins, and candidate application uses the same calculation so an exact
-/// source reapplication remains a detectable no-op.
-pub(crate) fn session_plugin_hook_digest(spec: &HarnessSnapshotSpec) -> tea_session::Digest {
-    let mut writer = CanonicalHashWriter::new("tea-session-plugin-hooks-v1", 1, 2);
-    writer.u64("plugin_count", spec.ordered_session_plugins.len() as u64);
-    for plugin in &spec.ordered_session_plugins {
-        writer.string("plugin_id", &plugin.plugin_id);
-        writer.string("tree_id", plugin.tree_id.as_str());
-    }
-    writer.finish()
 }
 
 fn source_media_type(path: &NormalizedPath) -> Result<String, HarnessError> {

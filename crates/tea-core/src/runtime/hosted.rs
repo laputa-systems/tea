@@ -181,8 +181,8 @@ mod tests {
         ExtensionLifecycle, NoExtensions,
     };
     use crate::harness::{
-        HarnessActor, HarnessResourceLimits, HarnessRuntimePolicyDescriptors, HarnessSeedBuilder,
-        ModelHarnessProfile, SelfExtensionMode,
+        HarnessActor, HarnessResourceLimits, HarnessSeedBuilder, ModelHarnessProfile,
+        PluginBundleRef, SelfExtensionMode,
     };
     use crate::scheduler::{
         CancellationToken, ModelFuture, ModelProvider, ModelRequest, ModelStream, ModelStreamEvent,
@@ -326,12 +326,7 @@ mod tests {
             profile,
             SelfExtensionMode::Off,
             HarnessResourceLimits::default(),
-            HarnessRuntimePolicyDescriptors {
-                hook_bundle_digest: Digest::from_bytes("fixture-hooks"),
-                compaction_policy_digest: Digest::from_bytes("fixture-compaction"),
-                tool_projection_digest: Digest::from_bytes("fixture-projection"),
-                failure_policy_digest: Digest::from_bytes("fixture-failure"),
-            },
+            services.runtime_policy_identities(),
         )
         .seed(HarnessActor::Host, 1)
         .expect("fixture harness seeds");
@@ -449,6 +444,51 @@ mod tests {
                 .to_string()
                 .contains("collides with a trusted host capability")
         );
+    }
+
+    #[test]
+    fn hosted_epoch_rejects_runtime_policy_identity_mismatch() {
+        let (services, mut resolved) = fixture();
+        resolved
+            .harness_snapshot
+            .as_mut()
+            .expect("fixture has an immutable snapshot")
+            .spec
+            .tool_projection_digest = Digest::from_bytes("hosted-wrong-projection");
+        let error = services
+            .prepare_hosted_epoch(
+                &resolved,
+                input(RunProvenance::default(), ToolRegistry::default()),
+            )
+            .expect_err("hosted construction rejects policy identity drift");
+        assert!(error.to_string().contains("tool-result projection identity"));
+    }
+
+    #[test]
+    fn hosted_epoch_accepts_combined_session_plugin_hook_identity() {
+        let (services, mut resolved) = fixture();
+        let snapshot = resolved
+            .harness_snapshot
+            .as_mut()
+            .expect("fixture has an immutable snapshot");
+        snapshot.spec.ordered_session_plugins.push(PluginBundleRef {
+            plugin_id: "fixture-plugin".into(),
+            tree_id: tea_session::HarnessTreeId::new("fixture-tree").expect("tree ID"),
+            requested_capabilities: std::collections::BTreeSet::new(),
+        });
+        snapshot.spec.hook_bundle_digest =
+            crate::harness::lineage::runtime_hook_bundle_digest(
+                services
+                    .runtime_policy_identities()
+                    .hook_bundle_digest,
+                &snapshot.spec,
+            );
+        services
+            .prepare_hosted_epoch(
+                &resolved,
+                input(RunProvenance::default(), ToolRegistry::default()),
+            )
+            .expect("combined session-plugin hook identity resolves");
     }
 
     #[test]

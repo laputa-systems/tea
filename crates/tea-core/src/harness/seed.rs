@@ -5,6 +5,7 @@
 //! no file, provider, model, application, session, or capability discovery.
 
 use super::extension::{ExtensionEngine, ExtensionSourceTree};
+use super::lineage::runtime_hook_bundle_digest;
 use super::{
     CapabilityBindingRef, HarnessActor, HarnessError, HarnessRepository, HarnessResourceLimits,
     HarnessRevisionV1, HarnessSnapshotSpec, HarnessSnapshotV1, HarnessTreeLimits,
@@ -13,16 +14,8 @@ use super::{
 };
 use std::collections::BTreeSet;
 use std::sync::Arc;
+use crate::runtime::RuntimePolicyIdentities;
 use tea_session::{ArtifactStore, Digest, NormalizedPath};
-
-/// Stable identities for runtime-owned policies that participate in a snapshot.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct HarnessRuntimePolicyDescriptors {
-    pub hook_bundle_digest: Digest,
-    pub compaction_policy_digest: Digest,
-    pub tool_projection_digest: Digest,
-    pub failure_policy_digest: Digest,
-}
 
 /// Registry placement for one explicitly supplied immutable extension.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -73,7 +66,7 @@ pub struct HarnessSeedBuilder {
     trusted_tool_presentations: Vec<ToolPresentationDescriptor>,
     capability_bindings: Vec<CapabilityBindingRef>,
     resource_limits: HarnessResourceLimits,
-    runtime_policies: HarnessRuntimePolicyDescriptors,
+    runtime_policies: RuntimePolicyIdentities,
     tree_limits: HarnessTreeLimits,
 }
 
@@ -101,7 +94,7 @@ impl HarnessSeedBuilder {
         profile: ModelHarnessProfile,
         self_extension_mode: SelfExtensionMode,
         resource_limits: HarnessResourceLimits,
-        runtime_policies: HarnessRuntimePolicyDescriptors,
+        runtime_policies: RuntimePolicyIdentities,
     ) -> Self {
         Self {
             artifacts,
@@ -221,25 +214,30 @@ impl HarnessSeedBuilder {
                 HarnessSeedExtensionScope::Session => session_plugins.push(bundle),
             }
         }
+        let mut snapshot_spec = HarnessSnapshotSpec {
+            base_profile_digest: self.base_profile_digest,
+            base_system_prompt: self.base_system_prompt,
+            model_harness_profile: self.profile.profile_id.clone(),
+            self_extension_addendum: self.self_extension_addendum,
+            ordered_global_plugins: global_plugins,
+            ordered_session_plugins: session_plugins,
+            prompt_sections: self.prompt_sections,
+            plugin_prompt_sections: Vec::new(),
+            tool_presentations: self.trusted_tool_presentations,
+            plugin_tool_presentations: Vec::new(),
+            hook_bundle_digest: self.runtime_policies.hook_bundle_digest,
+            capability_bindings: self.capability_bindings,
+            resource_limits: self.resource_limits,
+            compaction_policy_digest: self.runtime_policies.compaction_policy_digest,
+            tool_projection_digest: self.runtime_policies.tool_projection_digest,
+            failure_policy_digest: self.runtime_policies.failure_policy_digest,
+        };
+        snapshot_spec.hook_bundle_digest = runtime_hook_bundle_digest(
+            self.runtime_policies.hook_bundle_digest,
+            &snapshot_spec,
+        );
         let snapshot = repository
-            .stage_snapshot(HarnessSnapshotSpec {
-                base_profile_digest: self.base_profile_digest,
-                base_system_prompt: self.base_system_prompt,
-                model_harness_profile: self.profile.profile_id.clone(),
-                self_extension_addendum: self.self_extension_addendum,
-                ordered_global_plugins: global_plugins,
-                ordered_session_plugins: session_plugins,
-                prompt_sections: self.prompt_sections,
-                plugin_prompt_sections: Vec::new(),
-                tool_presentations: self.trusted_tool_presentations,
-                plugin_tool_presentations: Vec::new(),
-                hook_bundle_digest: self.runtime_policies.hook_bundle_digest,
-                capability_bindings: self.capability_bindings,
-                resource_limits: self.resource_limits,
-                compaction_policy_digest: self.runtime_policies.compaction_policy_digest,
-                tool_projection_digest: self.runtime_policies.tool_projection_digest,
-                failure_policy_digest: self.runtime_policies.failure_policy_digest,
-            })
+            .stage_snapshot(snapshot_spec)
             .map_err(|error| HarnessError::invalid_state(error.to_string()))?;
         let revision = repository
             .seed_revision(snapshot.id.clone(), actor, created_at_ms)

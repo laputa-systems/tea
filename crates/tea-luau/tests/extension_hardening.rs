@@ -314,3 +314,29 @@ fn equivalent_policy_declarations_are_deterministic() {
         second.before_tool_call(&call("other"))
     );
 }
+
+#[test]
+fn invalid_tool_cancellation_settlement_is_rejected() {
+    let error = match LuaPolicy::load(
+        r#"
+            return {
+                prompt_sections = {},
+                tools = {
+                    {
+                        name = "transaction",
+                        description = "Commit one transaction.",
+                        capability = "world.write",
+                        execution_mode = "parallel",
+                        cancellation_settlement_mode = "unknown",
+                        schema_json = '{"type":"object"}',
+                    },
+                },
+            }
+        "#,
+    ) {
+        Ok(_) => panic!("unknown cancellation settlement must fail closed"),
+        Err(error) => error,
+    };
+
+    assert!(matches!(error, PolicyError::Contract { message } if message.contains("cancellation_settlement_mode")));
+}

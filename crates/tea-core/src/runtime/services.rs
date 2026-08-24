@@ -2,6 +2,7 @@
 
 use crate::agent::{Agent, AgentConfiguration};
 use crate::harness::{HarnessError, ResolvedHarness};
+use crate::harness::lineage::runtime_hook_bundle_digest;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use tea_core::compaction::{AutomaticCompactionPolicy, Compactor};
@@ -10,7 +11,80 @@ use tea_core::hooks::{HookSet, NoHooks};
 use tea_core::scheduler::ModelProvider;
 use tea_core::state::{ModelDescriptor, ThinkingLevel};
 use tea_core::tool::{ToolFailureCircuitBreaker, ToolRegistry, ToolResultProjectionPolicy};
-use tea_session::ArtifactPolicy;
+use tea_session::{ArtifactPolicy, CanonicalHashWriter, Digest};
+
+/// Stable identities for the executable runtime policies installed in one
+/// [`RuntimeServices`] value.
+///
+/// These values are copied into an immutable harness snapshot at seed time.
+/// Resolution checks them again before constructing an agent, so a snapshot
+/// cannot silently run with a different hook or policy implementation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RuntimePolicyIdentities {
+    /// Identity of the installed hook bundle.
+    pub hook_bundle_digest: Digest,
+    /// Identity of the installed automatic-compaction policy.
+    pub compaction_policy_digest: Digest,
+    /// Identity of the installed tool-result projection policy.
+    pub tool_projection_digest: Digest,
+    /// Identity of the installed tool-failure policy.
+    pub failure_policy_digest: Digest,
+}
+
+const DEFAULT_HOOK_BUNDLE_IDENTITY: &str = "tea-runtime-hooks-v1";
+
+fn automatic_compaction_identity(policy: &AutomaticCompactionPolicy) -> Digest {
+    let mut writer = CanonicalHashWriter::new("tea-runtime-automatic-compaction", 1, 1);
+    writer.boolean("enabled", policy.enabled);
+    writer.u64("context_budget_tokens", policy.context_budget.tokens());
+    writer.string(
+        "context_budget_kind",
+        match policy.context_budget {
+            crate::compaction::ContextBudgetSource::ContextWindow(_) => "context_window",
+            crate::compaction::ContextBudgetSource::ContextBudget(_) => "context_budget",
+        },
+    );
+    writer.u64("reserved_tokens", policy.reserved_tokens);
+    writer.u64("minimum_headroom_tokens", policy.minimum_headroom_tokens);
+    writer.u64("recent_tokens", policy.recent_tokens);
+    writer.string(
+        "overflow_recovery",
+        match policy.overflow_recovery {
+            crate::compaction::OverflowRecovery::Disabled => "disabled",
+            crate::compaction::OverflowRecovery::CompactAndRetry => "compact_and_retry",
+        },
+    );
+    writer.u64("max_compactions_per_run", u64::from(policy.max_compactions_per_run));
+    writer.u64(
+        "max_overflow_retries_per_run",
+        u64::from(policy.max_overflow_retries_per_run),
+    );
+    writer.finish()
+}
+
+fn tool_projection_identity(policy: &ToolResultProjectionPolicy) -> Digest {
+    let mut writer = CanonicalHashWriter::new("tea-runtime-tool-projection", 1, 1);
+    writer.u64("max_content_bytes", policy.max_content_bytes as u64);
+    writer.u64("max_details_bytes", policy.max_details_bytes as u64);
+    writer.u64("max_total_bytes", policy.max_total_bytes as u64);
+    writer.boolean("deduplicate_repeated_errors", policy.deduplicate_repeated_errors);
+    writer.finish()
+}
+
+fn failure_policy_identity(policy: ToolFailureCircuitBreaker) -> Digest {
+    let mut writer = CanonicalHashWriter::new("tea-runtime-failure-policy", 1, 1);
+    writer.u64(
+        "max_consecutive_retryable_failures",
+        policy
+            .max_consecutive_retryable_failures
+            .map_or(0, |value| u64::from(value.get())),
+    );
+    writer.boolean(
+        "has_max_consecutive_retryable_failures",
+        policy.max_consecutive_retryable_failures.is_some(),
+    );
+    writer.finish()
+}
 
 /// Host-owned executable authority used to run a resolved harness.
 ///
@@ -28,6 +102,7 @@ pub struct RuntimeServices {
     automatic_compaction: AutomaticCompactionPolicy,
     tool_result_projection: ToolResultProjectionPolicy,
     tool_failure_circuit_breaker: ToolFailureCircuitBreaker,
+    policy_identities: RuntimePolicyIdentities,
     replay_safe_tools: BTreeSet<String>,
     artifact_policy: ArtifactPolicy,
     prompt_layout_ledger: Arc<crate::measurement::PromptLayoutLedger>,
@@ -59,6 +134,18 @@ impl RuntimeServices {
             automatic_compaction: AutomaticCompactionPolicy::default(),
             tool_result_projection: ToolResultProjectionPolicy::default(),
             tool_failure_circuit_breaker: ToolFailureCircuitBreaker::default(),
+            policy_identities: RuntimePolicyIdentities {
+                hook_bundle_digest: Digest::from_bytes(DEFAULT_HOOK_BUNDLE_IDENTITY),
+                compaction_policy_digest: automatic_compaction_identity(
+                    &AutomaticCompactionPolicy::default(),
+                ),
+                tool_projection_digest: tool_projection_identity(
+                    &ToolResultProjectionPolicy::default(),
+                ),
+                failure_policy_digest: failure_policy_identity(
+                    ToolFailureCircuitBreaker::default(),
+                ),
+            },
             replay_safe_tools: BTreeSet::new(),
             artifact_policy: ArtifactPolicy::default(),
             prompt_layout_ledger: Arc::new(crate::measurement::PromptLayoutLedger::default()),
@@ -95,7 +182,16 @@ impl RuntimeServices {
 
     /// Install host policy hooks to be wrapped by resolved extension hooks.
     pub fn hooks(mut self, hooks: Arc<dyn HookSet>) -> Self {
+        let identity = hooks.identity();
         self.base_hooks = hooks;
+        self.policy_identities.hook_bundle_digest = identity;
+        self
+    }
+
+    /// Install host hooks with an explicit immutable bundle identity.
+    pub fn hooks_with_identity(mut self, hooks: Arc<dyn HookSet>, identity: Digest) -> Self {
+        self.base_hooks = hooks;
+        self.policy_identities.hook_bundle_digest = identity;
         self
     }
 
@@ -107,18 +203,21 @@ impl RuntimeServices {
 
     /// Set the explicit automatic-compaction policy.
     pub fn automatic_compaction(mut self, policy: AutomaticCompactionPolicy) -> Self {
+        self.policy_identities.compaction_policy_digest = automatic_compaction_identity(&policy);
         self.automatic_compaction = policy;
         self
     }
 
     /// Set bounded model-facing tool-result projection policy.
     pub fn tool_result_projection(mut self, policy: ToolResultProjectionPolicy) -> Self {
+        self.policy_identities.tool_projection_digest = tool_projection_identity(&policy);
         self.tool_result_projection = policy;
         self
     }
 
     /// Set the per-run repeated tool-failure circuit breaker policy.
     pub fn tool_failure_circuit_breaker(mut self, policy: ToolFailureCircuitBreaker) -> Self {
+        self.policy_identities.failure_policy_digest = failure_policy_identity(policy);
         self.tool_failure_circuit_breaker = policy;
         self
     }
@@ -213,6 +312,53 @@ impl RuntimeServices {
         &self.artifact_policy
     }
 
+    pub(crate) fn verify_runtime_policy_identities(
+        &self,
+        resolved: &ResolvedHarness,
+    ) -> Result<(), HarnessError> {
+        let Some(snapshot) = resolved.harness_snapshot.as_ref() else {
+            return Ok(());
+        };
+        let identities = self.runtime_policy_identities();
+        let checks = [
+            (
+                "hook bundle",
+                runtime_hook_bundle_digest(identities.hook_bundle_digest, &snapshot.spec),
+                snapshot.spec.hook_bundle_digest,
+            ),
+            (
+                "automatic compaction",
+                identities.compaction_policy_digest,
+                snapshot.spec.compaction_policy_digest,
+            ),
+            (
+                "tool-result projection",
+                identities.tool_projection_digest,
+                snapshot.spec.tool_projection_digest,
+            ),
+            (
+                "tool-failure",
+                identities.failure_policy_digest,
+                snapshot.spec.failure_policy_digest,
+            ),
+        ];
+        for (label, expected, actual) in checks {
+            if expected != actual {
+                return Err(HarnessError::invalid_state(format!(
+                    "resolved harness {label} identity does not match RuntimeServices (expected {}, actual {})",
+                    expected.to_hex(),
+                    actual.to_hex(),
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Return the identities paired with this service set's executable policies.
+    pub fn runtime_policy_identities(&self) -> RuntimePolicyIdentities {
+        self.policy_identities
+    }
+
     /// Build one immutable core epoch from a resolved harness and stable host
     /// tools. The resolved harness contributes only provider-independent
     /// configuration; provider transport and trusted base tools stay here.
@@ -226,6 +372,7 @@ impl RuntimeServices {
         provenance: RunProvenance,
         additional_tools: ToolRegistry,
     ) -> Result<Agent, HarnessError> {
+        self.verify_runtime_policy_identities(resolved)?;
         let mut tools = self.trusted_tools.clone();
         for name in resolved
             .extension_tools()

@@ -342,6 +342,11 @@ fn snapshot_spec(
                 ToolExecutionMode::Sequential => "sequential".into(),
                 ToolExecutionMode::Parallel => "parallel".into(),
             },
+            requires_exclusive_batch: tool.requires_exclusive_batch,
+            cancellation_settlement_mode: match tool.cancellation_settlement_mode {
+                tea_core::tool::CancellationSettlementMode::DropFuture => "drop_future".into(),
+                tea_core::tool::CancellationSettlementMode::AwaitFuture => "await_future".into(),
+            },
         })
         .collect();
     HarnessSnapshotSpec {

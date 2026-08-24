@@ -4,7 +4,7 @@ use mlua::{Function, Lua};
 use std::fmt;
 use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex};
-use tea_core::tool::ToolExecutionMode;
+use tea_core::tool::{CancellationSettlementMode, ToolExecutionMode};
 use tea_protocol::JsonValue;
 
 /// One named v1 prompt contribution owned by a policy bundle.
@@ -60,6 +60,10 @@ pub struct PolicyTool {
     pub capability: String,
     /// Whether the core may overlap calls to this tool.
     pub execution_mode: ToolExecutionMode,
+    /// Whether this tool must be the sole call in an assistant batch.
+    pub requires_exclusive_batch: bool,
+    /// How a started invocation settles after run cancellation.
+    pub cancellation_settlement_mode: CancellationSettlementMode,
     /// Optional self-contained Luau source for this tool's coroutine handler.
     ///
     /// The source must evaluate to a function accepted by

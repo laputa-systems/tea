@@ -124,6 +124,14 @@ impl AgentTool for LuaToolHandler {
         self.spec.execution_mode
     }
 
+    fn requires_exclusive_batch(&self) -> bool {
+        self.spec.requires_exclusive_batch
+    }
+
+    fn cancellation_settlement_mode(&self) -> tea_core::tool::CancellationSettlementMode {
+        self.spec.cancellation_settlement_mode
+    }
+
     fn execute<'a>(
         &'a self,
         call: ToolCall,
@@ -671,6 +679,8 @@ mod tests {
             schema: JsonValue::object([("type", JsonValue::from("object"))]),
             capability: "world".to_owned(),
             execution_mode: ToolExecutionMode::Sequential,
+            requires_exclusive_batch: false,
+            cancellation_settlement_mode: tea_core::tool::CancellationSettlementMode::DropFuture,
         }
     }
 
@@ -736,6 +746,32 @@ mod tests {
         assert_eq!(result.content, "capability-ok");
         assert_eq!(result.tool_call_id.as_str(), "call-1");
         assert_eq!(calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn handler_exposes_host_execution_policy_to_the_core_scheduler() {
+        let capability = Arc::new(EchoCapability {
+            calls: Arc::new(AtomicUsize::new(0)),
+            response: Ok(CapabilityResponse {
+                value: JsonValue::from("unused"),
+            }),
+        });
+        let mut handler_spec = spec();
+        handler_spec.requires_exclusive_batch = true;
+        handler_spec.cancellation_settlement_mode =
+            tea_core::tool::CancellationSettlementMode::AwaitFuture;
+        let handler = LuaToolHandler::new(
+            "return function(_) return 'ok' end",
+            handler_spec,
+            bindings(capability),
+        )
+        .expect("handler should load");
+
+        assert!(handler.requires_exclusive_batch());
+        assert_eq!(
+            handler.cancellation_settlement_mode(),
+            tea_core::tool::CancellationSettlementMode::AwaitFuture
+        );
     }
 
     #[test]
