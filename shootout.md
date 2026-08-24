@@ -876,7 +876,7 @@ Do not compare:
 
 ```text
 tea-static using sessionless Agent
-tea-jit using durable SessionRuntime
+tea-jit using durable SessionSupervisor
 ```
 
 Both must use the same durable runtime path.

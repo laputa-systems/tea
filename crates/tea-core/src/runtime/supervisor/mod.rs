@@ -474,7 +474,7 @@ where
             mut session,
             resolver: manager,
             root_identity: initial_identity,
-            root_services,
+            mut root_services,
             artifacts,
             rollover_budget,
             subagents,
@@ -523,6 +523,9 @@ where
         }
         let root_lane_id = LaneId::main();
         let reduction = reduce_lane(snapshot.clone(), root_lane_id.clone())?;
+        if let Some(level) = reduction.effective_configuration.thinking_level.as_deref() {
+            root_services = root_services.thinking_level(thinking_level_from_name(level)?);
+        }
         if reduction.lane_state.active_harness_revision.as_ref()
             != Some(initial_identity.revision_id())
         {
@@ -1121,7 +1124,20 @@ where
         services: RuntimeServices,
     ) -> Result<(), HarnessError> {
         match self.lane(&lane_id) {
-            Ok(_) => Ok(()),
+            Ok(existing) => {
+                // A crash may have left a durable child lane/configuration
+                // prefix before its AgentSpawned fact. Once replay completes
+                // that graph binding, do not trust a service bundle that was
+                // registered while the lane was still graph-unclaimed.
+                let snapshot = self.snapshot()?;
+                let reduction = reduce_lane(snapshot, lane_id)?;
+                let configuration = self.configuration_for_reduction_services(
+                    &existing.runtime_services,
+                    &reduction,
+                )?;
+                validate_reserved_host_tool_names(&existing.runtime_services, &configuration)?;
+                validate_child_subagent_surface(&configuration, &existing.runtime_services)
+            }
             Err(HarnessError::InvalidState { .. }) => self.register_lane(lane_id, services),
             Err(error) => Err(error),
         }
@@ -2768,12 +2784,23 @@ where
     pub fn register_lane(
         &self,
         lane_id: LaneId,
-        services: RuntimeServices,
+        mut services: RuntimeServices,
     ) -> Result<(), HarnessError> {
         let snapshot = self.snapshot()?;
-        let reduction = reduce_lane(snapshot, lane_id.clone())?;
+        let reduction = reduce_lane(snapshot.clone(), lane_id.clone())?;
+        if let Some(level) = reduction.effective_configuration.thinking_level.as_deref() {
+            services = services.thinking_level(thinking_level_from_name(level)?);
+        }
         let configuration = self.configuration_for_reduction_services(&services, &reduction)?;
         validate_reserved_host_tool_names(&services, &configuration)?;
+        let graph = reduce_agent_graph(&snapshot)?;
+        if graph
+            .agents
+            .values()
+            .any(|node| node.spawned.lane_id == lane_id)
+        {
+            validate_child_subagent_surface(&configuration, &services)?;
+        }
         let mut lanes = self
             .lanes
             .lock()
@@ -3389,6 +3416,20 @@ where
                     }
                 }
                 RecoveryPlan::SynthesizeInterruptedToolResult { result_entry_id } => {
+                    // A started workspace mutation is not equivalent to an
+                    // interrupted read-only tool. Appending the generic error
+                    // would let a later model turn retry an effect whose first
+                    // outcome is unknown. Keep the durable prefix open until a
+                    // host explicitly reconciles it instead.
+                    if recovery_tool_start(&snapshot, &result_entry_id)?.tool_name
+                        == "apply_agent_changes"
+                    {
+                        return Err(HarnessError::RecoveryRequired {
+                            plan: RecoveryPlan::SynthesizeInterruptedToolResult {
+                                result_entry_id,
+                            },
+                        });
+                    }
                     self.append_interrupted_tool_result(&lane, &snapshot, &result_entry_id)?;
                 }
                 RecoveryPlan::ReplayToolIfStillSafe { tool } => {
@@ -4505,20 +4546,7 @@ where
         snapshot: &SessionSnapshot,
         result_entry_id: &EntryId,
     ) -> Result<(), HarnessError> {
-        let started = snapshot
-            .records()
-            .iter()
-            .find_map(|stored| match &stored.record {
-                LaneRecord::ToolStarted(started) if &started.result_entry_id == result_entry_id => {
-                    Some(started.clone())
-                }
-                _ => None,
-            })
-            .ok_or_else(|| {
-                HarnessError::invalid_state(
-                    "recovery requested an interrupted tool result with no durable intent",
-                )
-            })?;
+        let started = recovery_tool_start(snapshot, result_entry_id)?.clone();
         let tool_call_id = ToolCallId::new(started.tool_call_id.clone()).map_err(|error| {
             HarnessError::invalid_state(format!(
                 "stored tool invocation has invalid call ID: {error}"
@@ -4701,6 +4729,12 @@ fn replay_safe_host_tools(tools: &ToolRegistry) -> BTreeSet<String> {
     STABLE_ARTIFACT_TOOL_NAMES
         .into_iter()
         .chain(std::iter::once(STABLE_HARNESS_TOOL_NAME))
+        // `spawn_agent` derives every identity from the already-durable tool
+        // intent and completes an append-only, idempotent transaction.  It is
+        // the one collaboration effect that must replay after an intent-only
+        // crash; apply remains deliberately excluded because an external Git
+        // mutation without its terminal fact is ambiguous.
+        .chain(std::iter::once("spawn_agent"))
         .filter(|name| tools.get(name).is_some())
         .map(str::to_owned)
         .collect()
@@ -5700,7 +5734,7 @@ fn all_tool_definition_schemas(
     Ok(schemas)
 }
 
-fn tool_definition_digest(tool: &dyn AgentTool) -> Result<Digest, HarnessError> {
+pub(super) fn tool_definition_digest(tool: &dyn AgentTool) -> Result<Digest, HarnessError> {
     let mut writer = CanonicalHashWriter::new("tea-tool-definition-v2", 2, 1);
     writer.string("name", tool.name());
     writer.string("description", tool.description());
@@ -5977,7 +6011,7 @@ fn thinking_level_from_name(value: &str) -> Result<ThinkingLevel, HarnessError> 
         "xhigh" => Ok(ThinkingLevel::XHigh),
         "max" => Ok(ThinkingLevel::Max),
         _ => Err(HarnessError::invalid_state(
-            "durable child thinking level is not one documented value",
+            "durable thinking level is not one documented value",
         )),
     }
 }
@@ -6407,6 +6441,26 @@ fn derive_core_messages(
         }
     }
     Ok(messages)
+}
+
+fn recovery_tool_start<'a>(
+    snapshot: &'a SessionSnapshot,
+    result_entry_id: &EntryId,
+) -> Result<&'a ToolStartedRecord, HarnessError> {
+    snapshot
+        .records()
+        .iter()
+        .find_map(|stored| match &stored.record {
+            LaneRecord::ToolStarted(started) if &started.result_entry_id == result_entry_id => {
+                Some(started)
+            }
+            _ => None,
+        })
+        .ok_or_else(|| {
+            HarnessError::invalid_state(
+                "recovery requested an interrupted tool result with no durable intent",
+            )
+        })
 }
 
 fn open_epoch(snapshot: &SessionSnapshot, operation_id: &OperationId) -> Option<EpochId> {

@@ -10,14 +10,15 @@
     {"seq":1,"type":"turn_start","data":{"turn":0}},
     {"seq":2,"type":"message_start","data":{"role":"user"}},
     {"seq":3,"type":"message_end","data":{"role":"user"}},
-    {"seq":4,"type":"message_start","data":{"role":"assistant"}},
-    {"seq":5,"type":"message_update","data":{"role":"assistant","delta":"one"}},
-    {"seq":6,"type":"message_update","data":{"role":"assistant","delta":", two"}},
-    {"seq":7,"type":"message_update","data":{"role":"assistant","delta":", three"}},
-    {"seq":8,"type":"message_end","data":{"role":"assistant"}},
-    {"seq":9,"type":"turn_end","data":{"stop_reason":"stop"}},
-    {"seq":10,"type":"agent_end","data":{}},
-    {"seq":11,"type":"agent_settled","data":{"outcome":"completed"}}
+    { "seq": 4, "type": "prompt_layout_observed", "data": {} },
+    {"seq":5,"type":"message_start","data":{"role":"assistant"}},
+    {"seq":6,"type":"message_update","data":{"role":"assistant","delta":"one"}},
+    {"seq":7,"type":"message_update","data":{"role":"assistant","delta":", two"}},
+    {"seq":8,"type":"message_update","data":{"role":"assistant","delta":", three"}},
+    {"seq":9,"type":"message_end","data":{"role":"assistant"}},
+    {"seq":10,"type":"turn_end","data":{"stop_reason":"stop"}},
+    {"seq":11,"type":"agent_end","data":{}},
+    {"seq":12,"type":"agent_settled","data":{"outcome":"completed"}}
   ],
   "messages": [
     {"role":"user","content":[{"type":"text","text":"Count to three."}]},

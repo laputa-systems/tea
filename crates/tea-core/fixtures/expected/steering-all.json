@@ -20,12 +20,13 @@
     { "seq": 5, "type": "message_end", "data": { "role": "user" } },
     { "seq": 6, "type": "message_start", "data": { "role": "user" } },
     { "seq": 7, "type": "message_end", "data": { "role": "user" } },
-    { "seq": 8, "type": "message_start", "data": { "role": "assistant" } },
-    { "seq": 9, "type": "message_update", "data": { "role": "assistant", "delta": "response" } },
-    { "seq": 10, "type": "message_end", "data": { "role": "assistant" } },
-    { "seq": 11, "type": "turn_end", "data": { "stop_reason": "stop" } },
-    { "seq": 12, "type": "agent_end", "data": {} },
-    { "seq": 13, "type": "agent_settled", "data": { "outcome": "completed" } }
+    { "seq": 8, "type": "prompt_layout_observed", "data": {} },
+    { "seq": 9, "type": "message_start", "data": { "role": "assistant" } },
+    { "seq": 10, "type": "message_update", "data": { "role": "assistant", "delta": "response" } },
+    { "seq": 11, "type": "message_end", "data": { "role": "assistant" } },
+    { "seq": 12, "type": "turn_end", "data": { "stop_reason": "stop" } },
+    { "seq": 13, "type": "agent_end", "data": {} },
+    { "seq": 14, "type": "agent_settled", "data": { "outcome": "completed" } }
   ],
   "messages": [
     { "role": "user", "content": [{ "type": "text", "text": "initial prompt" }] },

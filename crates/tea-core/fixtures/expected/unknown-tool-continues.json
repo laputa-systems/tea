@@ -19,32 +19,34 @@
     { "seq": 1, "type": "turn_start", "data": { "turn": 0 } },
     { "seq": 2, "type": "message_start", "data": { "role": "user" } },
     { "seq": 3, "type": "message_end", "data": { "role": "user" } },
-    { "seq": 4, "type": "message_start", "data": { "role": "assistant" } },
-    { "seq": 5, "type": "message_end", "data": { "role": "assistant" } },
+    { "seq": 4, "type": "prompt_layout_observed", "data": {} },
+    { "seq": 5, "type": "message_start", "data": { "role": "assistant" } },
+    { "seq": 6, "type": "message_end", "data": { "role": "assistant" } },
     {
-      "seq": 6,
+      "seq": 7,
       "type": "tool_execution_start",
       "data": { "tool_call_id": "call-missing", "tool_name": "missing" }
     },
     {
-      "seq": 7,
+      "seq": 8,
       "type": "tool_execution_end",
       "data": { "tool_call_id": "call-missing", "tool_name": "missing", "is_error": true }
     },
-    { "seq": 8, "type": "message_start", "data": { "role": "tool_result" } },
-    { "seq": 9, "type": "message_end", "data": { "role": "tool_result" } },
-    { "seq": 10, "type": "turn_end", "data": { "stop_reason": "tool_call" } },
-    { "seq": 11, "type": "turn_start", "data": { "turn": 1 } },
-    { "seq": 12, "type": "message_start", "data": { "role": "assistant" } },
+    { "seq": 9, "type": "message_start", "data": { "role": "tool_result" } },
+    { "seq": 10, "type": "message_end", "data": { "role": "tool_result" } },
+    { "seq": 11, "type": "turn_end", "data": { "stop_reason": "tool_call" } },
+    { "seq": 12, "type": "turn_start", "data": { "turn": 1 } },
+    { "seq": 13, "type": "prompt_layout_observed", "data": {} },
+    { "seq": 14, "type": "message_start", "data": { "role": "assistant" } },
     {
-      "seq": 13,
+      "seq": 15,
       "type": "message_update",
       "data": { "role": "assistant", "delta": "The requested tool is unavailable." }
     },
-    { "seq": 14, "type": "message_end", "data": { "role": "assistant" } },
-    { "seq": 15, "type": "turn_end", "data": { "stop_reason": "stop" } },
-    { "seq": 16, "type": "agent_end", "data": {} },
-    { "seq": 17, "type": "agent_settled", "data": { "outcome": "completed" } }
+    { "seq": 16, "type": "message_end", "data": { "role": "assistant" } },
+    { "seq": 17, "type": "turn_end", "data": { "stop_reason": "stop" } },
+    { "seq": 18, "type": "agent_end", "data": {} },
+    { "seq": 19, "type": "agent_settled", "data": { "outcome": "completed" } }
   ],
   "messages": [
     {

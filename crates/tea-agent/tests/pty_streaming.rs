@@ -20,6 +20,10 @@ const LOCAL_PROVIDER: &str = "local";
 const LOCAL_MODEL: &str = tea_providers::local::LAGUNA_XS_2_1_MODEL;
 const FIXTURE_MODEL: &str = "pty-fixture-model";
 const LIFECYCLE_ROOT_MODEL: &str = "pty-root-subagent-lifecycle";
+const DISABLED_STARTUP_SCREEN_DIGEST: &str =
+    "92fac0f8058c91bf77b8b2491a89351846652596036aca5cf5c0df4f8ad43105";
+const DISABLED_STARTUP_OUTPUT_DIGEST: &str =
+    "2fa32b0ae888e5363a3e5d745ac2e6529e19dcceb58f92ba4516e9ba6230fec6";
 
 // These real-binary scenarios each own a terminal and a loopback server. Keep
 // their timing barriers independent instead of making one PTY's progress
@@ -535,6 +539,17 @@ fn explicitly_disabled_subagents_match_missing_config_presentation_and_output_by
     let explicitly_disabled = capture_mock_idle_startup(
         "subagents-disabled",
         Some("[features]\nsubagents = false\n"),
+    );
+
+    assert_eq!(
+        tea_session::Digest::from_bytes(missing.0.as_bytes()).to_hex(),
+        DISABLED_STARTUP_SCREEN_DIGEST,
+        "the feature-disabled startup presentation is a pinned compatibility surface"
+    );
+    assert_eq!(
+        tea_session::Digest::from_bytes(&missing.1).to_hex(),
+        DISABLED_STARTUP_OUTPUT_DIGEST,
+        "the feature-disabled startup PTY bytes are a pinned compatibility surface"
     );
 
     assert_eq!(

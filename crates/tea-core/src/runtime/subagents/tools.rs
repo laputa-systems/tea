@@ -507,10 +507,16 @@ fn parse_spawn_request(call: &ToolCall) -> Result<SpawnAgentRequest, String> {
         )?),
         None => None,
     };
-    let context_mode = match object.get("context").and_then(JsonValue::as_str) {
-        None | Some("task") => AgentContextMode::Task,
-        Some("parent") => AgentContextMode::Parent,
-        Some(_) => return Err("spawn_agent context must be task or parent".into()),
+    let context_mode = match object.get("context") {
+        None => AgentContextMode::Task,
+        Some(value) => match value
+            .as_str()
+            .ok_or_else(|| "spawn_agent context must be a string".to_owned())?
+        {
+            "task" => AgentContextMode::Task,
+            "parent" => AgentContextMode::Parent,
+            _ => return Err("spawn_agent context must be task or parent".into()),
+        },
     };
     validate_spawn_text(&task_name, &task)?;
     Ok(SpawnAgentRequest {
@@ -550,10 +556,16 @@ fn parse_wait_request(call: &ToolCall) -> Result<WaitAgentsRequest, String> {
             Ok(target.to_owned())
         })
         .collect::<Result<Vec<_>, String>>()?;
-    let return_when = match object.get("return_when").and_then(JsonValue::as_str) {
-        None | Some("all") => WaitReturnWhen::All,
-        Some("any") => WaitReturnWhen::Any,
-        Some(_) => return Err("wait_agent return_when must be any or all".into()),
+    let return_when = match object.get("return_when") {
+        None => WaitReturnWhen::All,
+        Some(value) => match value
+            .as_str()
+            .ok_or_else(|| "wait_agent return_when must be a string".to_owned())?
+        {
+            "all" => WaitReturnWhen::All,
+            "any" => WaitReturnWhen::Any,
+            _ => return Err("wait_agent return_when must be any or all".into()),
+        },
     };
     let timeout_ms = match object.get("timeout_ms") {
         None => 300_000,
@@ -632,7 +644,7 @@ fn validate_spawn_text(task_name: &str, task: &str) -> Result<(), String> {
     if !valid_task_name {
         return Err("spawn_agent task_name must match ^[a-z][a-z0-9_]{0,63}$".into());
     }
-    if task.trim().is_empty() || task.len() > 64 * 1024 {
+    if task.is_empty() || task != task.trim() || task.len() > 64 * 1024 {
         return Err("spawn_agent task must be trimmed non-empty UTF-8 within 65536 bytes".into());
     }
     Ok(())
@@ -1119,4 +1131,42 @@ fn empty_object_schema() -> JsonValue {
 
 fn unsigned(value: u64) -> JsonValue {
     JsonValue::Number(JsonNumber::Unsigned(value))
+}
+
+#[cfg(test)]
+mod parsing_tests {
+    use super::*;
+    use crate::state::ToolCallId;
+    use crate::state::SerializedJson;
+
+    fn call(name: &str, arguments: &str) -> ToolCall {
+        ToolCall {
+            id: ToolCallId::new(format!("{name}-parse-test")).expect("fixture call ID"),
+            name: name.into(),
+            arguments: SerializedJson::new(arguments),
+        }
+    }
+
+    #[test]
+    fn optional_enum_fields_reject_wrong_json_types_instead_of_using_defaults() {
+        assert!(parse_spawn_request(&call(
+            "spawn_agent",
+            r#"{"task_name":"audit","task":"inspect","model":"child","context":7}"#,
+        ))
+        .is_err());
+        assert!(parse_wait_request(&call(
+            "wait_agent",
+            r#"{"targets":["audit"],"return_when":false}"#,
+        ))
+        .is_err());
+    }
+
+    #[test]
+    fn spawn_assignment_must_already_be_trimmed() {
+        assert!(parse_spawn_request(&call(
+            "spawn_agent",
+            r#"{"task_name":"audit","task":" inspect ","model":"child"}"#,
+        ))
+        .is_err());
+    }
 }

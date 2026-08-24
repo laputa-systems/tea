@@ -432,8 +432,11 @@ ownership rather than a mailbox or detached background-work mechanism.
 `wait_agent` is sequential and cancellable; `list_agents` is parallel-safe;
 `apply_agent_changes` is sequential and exclusive-batch. Repository application
 preflights before mutation and, once mutation begins, must classify the exact
-result as `Applied`, `AlreadyApplied`, `Conflict`, `RolledBack`, or
-`Indeterminate` before observing cancellation as settled. Only a proven applied
-state produces `WorkspaceDeltaApplied`; `AlreadyApplied` is the exact-result
-idempotency fast path. The complete durability, recovery and isolation contract,
-including the crash-prefix recovery table, is in [durable subagents](subagents.md).
+result as `Applied`, `Conflict`, `RolledBack`, or `Indeterminate` before
+observing cancellation as settled. Only a proven application in the current
+attempt produces `WorkspaceDeltaApplied`; later idempotent calls are certified
+by that durable fact, never inferred from matching worktree bytes. A started
+attempt without a result is recovery-required and is not exposed to the model
+as a retryable generic interruption. The complete durability, recovery and
+isolation contract, including the crash-prefix recovery table, is in
+[durable subagents](subagents.md).

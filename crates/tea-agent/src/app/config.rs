@@ -5,7 +5,8 @@
 //! the terminal user.  Library crates must never call it.
 
 use std::collections::BTreeSet;
-use std::fs;
+use std::fs::{self, File, OpenOptions};
+use std::io::Read;
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -94,37 +95,93 @@ impl std::error::Error for ConfigError {}
 /// Load the terminal configuration rooted at the already-resolved Tea home.
 pub(super) fn load_tui_config(tea_home: &Path) -> Result<TuiConfig, ConfigError> {
     let path = tea_home.join("config.toml");
-    let metadata = match fs::symlink_metadata(&path) {
+    let initial_metadata = match fs::symlink_metadata(&path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(TuiConfig::default()),
         Err(error) => {
             return Err(ConfigError::new(
                 path,
                 None,
-                format!("could not inspect config file: {error}"),
+                format!("could not inspect config path: {error}"),
             ));
         }
     };
-    if metadata.file_type().is_symlink() {
+    if initial_metadata.file_type().is_symlink() {
         return Err(ConfigError::new(path, None, "config.toml must not be a symlink"));
     }
-    if !metadata.is_file() {
+    if !initial_metadata.is_file() {
         return Err(ConfigError::new(
             path,
             None,
             "config.toml must be a regular file",
         ));
     }
-    if metadata.len() > MAX_CONFIG_BYTES {
+    // Open without following a symlink, then validate that the path still
+    // names this exact regular file. Reading metadata and reopening by path
+    // without the handle identity check would leave a check/use window.
+    let mut file = match open_config_file(&path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(TuiConfig::default()),
+        Err(error) => {
+            return Err(ConfigError::new(
+                path,
+                None,
+                format!("could not open config file: {error}"),
+            ));
+        }
+    };
+    let opened_metadata = file.metadata().map_err(|error| {
+        ConfigError::new(
+            path.clone(),
+            None,
+            format!("could not inspect open config file: {error}"),
+        )
+    })?;
+    let path_metadata = fs::symlink_metadata(&path).map_err(|error| {
+        ConfigError::new(
+            path.clone(),
+            None,
+            format!("could not revalidate config path: {error}"),
+        )
+    })?;
+    if path_metadata.file_type().is_symlink() {
+        return Err(ConfigError::new(path, None, "config.toml must not be a symlink"));
+    }
+    if !opened_metadata.is_file() || !path_metadata.is_file() {
+        return Err(ConfigError::new(
+            path,
+            None,
+            "config.toml must be a regular file",
+        ));
+    }
+    if !metadata_names_open_file(&opened_metadata, &path_metadata) {
+        return Err(ConfigError::new(
+            path,
+            None,
+            "config.toml changed while it was being opened",
+        ));
+    }
+    if opened_metadata.len() > MAX_CONFIG_BYTES {
         return Err(ConfigError::new(
             path,
             None,
             "config.toml must not exceed 256 KiB",
         ));
     }
-    let bytes = fs::read(&path).map_err(|error| {
-        ConfigError::new(path.clone(), None, format!("could not read config file: {error}"))
-    })?;
+    let mut bytes = Vec::with_capacity(opened_metadata.len().min(MAX_CONFIG_BYTES) as usize);
+    file.by_ref()
+        .take(MAX_CONFIG_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| {
+            ConfigError::new(path.clone(), None, format!("could not read config file: {error}"))
+        })?;
+    if bytes.len() as u64 > MAX_CONFIG_BYTES {
+        return Err(ConfigError::new(
+            path,
+            None,
+            "config.toml must not exceed 256 KiB",
+        ));
+    }
     let source = std::str::from_utf8(&bytes).map_err(|error| {
         ConfigError::new(
             path.clone(),
@@ -136,6 +193,42 @@ pub(super) fn load_tui_config(tea_home: &Path) -> Result<TuiConfig, ConfigError>
         return Ok(TuiConfig::default());
     }
     parse_tui_config(&path, source)
+}
+
+#[cfg(unix)]
+fn open_config_file(path: &Path) -> std::io::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    // `O_NOFOLLOW` closes the precheck/open race and `O_NONBLOCK` ensures a
+    // raced special file cannot hang the terminal before handle validation.
+    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "freebsd", target_os = "dragonfly", target_os = "openbsd", target_os = "netbsd"))]
+    const SAFE_OPEN_FLAGS: i32 = 0x100 | 0x4;
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    const SAFE_OPEN_FLAGS: i32 = 0x20_000 | 0x800;
+    #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "freebsd", target_os = "dragonfly", target_os = "openbsd", target_os = "netbsd", target_os = "linux", target_os = "android")))]
+    const SAFE_OPEN_FLAGS: i32 = 0;
+
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(SAFE_OPEN_FLAGS)
+        .open(path)
+}
+
+#[cfg(not(unix))]
+fn open_config_file(path: &Path) -> std::io::Result<File> {
+    OpenOptions::new().read(true).open(path)
+}
+
+#[cfg(unix)]
+fn metadata_names_open_file(opened: &fs::Metadata, path: &fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    opened.dev() == path.dev() && opened.ino() == path.ino()
+}
+
+#[cfg(not(unix))]
+fn metadata_names_open_file(_opened: &fs::Metadata, _path: &fs::Metadata) -> bool {
+    true
 }
 
 impl ConfigError {
@@ -669,6 +762,27 @@ timeout_seconds = 600
         fs::write(&target, "[features]\nsubagents = true\n").expect("target writes");
         symlink(&target, home.join("config.toml")).expect("config symlink creates");
         let error = load_tui_config(&home).expect_err("symlink rejects");
+        assert!(error.to_string().contains("must not be a symlink"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_a_config_symlink_without_opening_its_fifo_target() {
+        use std::os::unix::fs::symlink;
+        use std::process::Command;
+
+        let home = tea_home("symlink-fifo");
+        let fifo = home.join("blocking-fifo");
+        assert!(
+            Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .expect("mkfifo starts")
+                .success(),
+            "fixture FIFO creates"
+        );
+        symlink(&fifo, home.join("config.toml")).expect("config symlink creates");
+        let error = load_tui_config(&home).expect_err("FIFO symlink rejects before open");
         assert!(error.to_string().contains("must not be a symlink"), "{error}");
     }
 

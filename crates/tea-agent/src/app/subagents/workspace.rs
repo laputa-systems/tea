@@ -196,9 +196,6 @@ pub(crate) enum WorkspaceApplyOutcome {
     Applied {
         evidence: Vec<WorkspaceApplyEvidence>,
     },
-    AlreadyApplied {
-        evidence: Vec<WorkspaceApplyEvidence>,
-    },
     Conflict {
         conflicts: Vec<NormalizedPath>,
         evidence: Vec<WorkspaceApplyEvidence>,
@@ -471,7 +468,11 @@ impl GitWorkspaceEngine {
         let expected = expected_states(&repository, request.delta)?;
         let before = observed_states(repository.root(), &request.delta.changed_paths)?;
         if states_match(&before, &expected) {
-            return Ok(WorkspaceApplyOutcome::AlreadyApplied {
+            // The workspace engine has no durable session authority. Matching
+            // result bytes could be a user edit or a crash after Git mutated
+            // the worktree but before `WorkspaceDeltaAppliedFact`; only core's
+            // already-committed fact may certify an idempotent success.
+            return Ok(WorkspaceApplyOutcome::Indeterminate {
                 evidence: apply_evidence(&request.delta.changed_paths, &before, &before, &expected),
             });
         }
@@ -1442,7 +1443,7 @@ mod tests {
     }
 
     #[test]
-    fn workspace_applies_clean_binary_and_idempotent_deltas_without_touching_the_parent_index() {
+    fn workspace_applies_clean_binary_deltas_without_touching_the_parent_index() {
         let repository = TestRepository::new("apply-clean");
         repository.write("tracked.txt", "original\n");
         repository.write("binary.bin", [0, 1, 2, 3]);
@@ -1471,7 +1472,7 @@ mod tests {
         assert_eq!(repository.index_bytes(), index_before);
         assert!(matches!(
             GitWorkspaceEngine.apply(repository.apply_request(&delta)),
-            Ok(WorkspaceApplyOutcome::AlreadyApplied { .. })
+            Ok(WorkspaceApplyOutcome::Indeterminate { .. })
         ));
 
         let mut tampered_patch = delta.clone();
@@ -1488,6 +1489,33 @@ mod tests {
             GitWorkspaceEngine.apply(repository.apply_request(&tampered_paths)),
             Err(WorkspaceError::InvalidRequest { .. })
         ));
+    }
+
+    #[test]
+    fn workspace_apply_does_not_certify_a_preexisting_result_without_a_durable_fact() {
+        let repository = TestRepository::new("apply-preexisting-result");
+        repository.write("tracked.txt", "parent state\n");
+        repository.commit_all("initial");
+        let lease = prepare(&repository, "agent-preexisting-result");
+        fs::write(lease.worktree_path().join("tracked.txt"), "child state\n")
+            .expect("child edit writes");
+        let delta = match GitWorkspaceEngine
+            .finalize(&lease)
+            .expect("child delta finalizes")
+        {
+            WorkspaceFinalization::Delta(delta) => delta,
+            WorkspaceFinalization::NoChanges { .. } => panic!("fixture must produce a delta"),
+        };
+
+        repository.write("tracked.txt", "child state\n");
+        let outcome = GitWorkspaceEngine
+            .apply(repository.apply_request(&delta))
+            .expect("preexisting result is classified");
+
+        assert!(
+            matches!(outcome, WorkspaceApplyOutcome::Indeterminate { .. }),
+            "matching bytes without a durable applied fact cannot prove Tea committed the delta"
+        );
     }
 
     #[test]
@@ -1621,7 +1649,7 @@ mod tests {
         );
         assert!(matches!(
             GitWorkspaceEngine.apply(repository.apply_request(&delta)),
-            Ok(WorkspaceApplyOutcome::AlreadyApplied { .. })
+            Ok(WorkspaceApplyOutcome::Indeterminate { .. })
         ));
     }
 
@@ -1653,7 +1681,7 @@ mod tests {
         );
         assert!(matches!(
             GitWorkspaceEngine.apply(repository.apply_request(&delta)),
-            Ok(WorkspaceApplyOutcome::AlreadyApplied { .. })
+            Ok(WorkspaceApplyOutcome::Indeterminate { .. })
         ));
     }
 }

@@ -26,6 +26,38 @@ use super::state::{AppState, UiStatus};
 use std::sync::Arc;
 use tea_core::state::ThinkingLevel;
 
+enum RootTaskCompletion {
+    Settled(Result<(), HarnessError>),
+    Disconnected,
+}
+
+pub(super) struct OwnedRootTask {
+    receiver: Receiver<Result<(), HarnessError>>,
+    task: smol::Task<()>,
+    completion: Option<RootTaskCompletion>,
+}
+
+impl OwnedRootTask {
+    fn new(receiver: Receiver<Result<(), HarnessError>>, task: smol::Task<()>) -> Self {
+        Self {
+            receiver,
+            task,
+            completion: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn completed_for_test(receiver: Receiver<Result<(), HarnessError>>) -> Self {
+        let task = smol::spawn(async {});
+        smol::block_on(async {
+            while !task.is_finished() {
+                smol::future::yield_now().await;
+            }
+        });
+        Self::new(receiver, task)
+    }
+}
+
 /// Assembled v1 terminal application.
 pub struct App {
     pub(super) options: CliOptions,
@@ -42,7 +74,7 @@ pub struct App {
     /// Bounded application events for the durable supervisor.
     pub(super) durable_subscription: Option<TeaEventSubscription>,
     /// Completion channel for the current durable operation.
-    pub(super) durable_task: Option<Receiver<Result<(), HarnessError>>>,
+    pub(super) durable_task: Option<OwnedRootTask>,
     pub(super) tea_home: Option<PathBuf>,
     /// Global terminal policy loaded once from the resolved Tea home. It is
     /// intentionally absent from library and `tea session` command paths.
@@ -95,8 +127,21 @@ impl App {
     /// Initialize the durable host configuration and run the terminal loop on Smol.
     pub fn run(&mut self) -> Result<(), AppError> {
         self.assemble_host()?;
-        let mut terminal = crate::terminal::TerminalGuard::enter()?;
-        smol::block_on(self.event_loop(&mut terminal))
+        let loop_result = {
+            let mut terminal = crate::terminal::TerminalGuard::enter()?;
+            smol::block_on(self.event_loop(&mut terminal))
+        };
+        // Terminal I/O failure is presentation failure, not permission to
+        // abandon the durable root future. Restore the terminal first, then
+        // request cancellation and drive the owned task through settlement.
+        let settlement = smol::block_on(self.settle_owned_root());
+        match (loop_result, settlement) {
+            (result, Ok(())) => result,
+            (Ok(()), Err(error)) => Err(error),
+            (Err(loop_error), Err(cleanup_error)) => Err(AppError::Setup(format!(
+                "{loop_error}; durable root cleanup requires recovery: {cleanup_error}"
+            ))),
+        }
     }
 
     /// Run one explicit prompt without entering terminal mode, writing only streamed assistant
@@ -275,6 +320,22 @@ impl App {
         Ok(())
     }
 
+    async fn settle_owned_root(&mut self) -> Result<(), AppError> {
+        self.quitting = true;
+        while self.durable_task.is_some() {
+            self.request_root_abort(false);
+            self.drain_events();
+            self.reap_task();
+            if self.durable_task.is_some() {
+                smol::future::yield_now().await;
+            }
+        }
+        if let Some(harness) = self.durable_harness.as_ref() {
+            super::durable::require_root_settled(harness)?;
+        }
+        Ok(())
+    }
+
     fn drain_events(&mut self) {
         loop {
             let event = match self.durable_subscription.as_ref() {
@@ -367,12 +428,32 @@ impl App {
     }
 
     pub(super) fn reap_task(&mut self) {
-        if let Some(receiver) = self.durable_task.as_ref() {
-            match receiver.try_recv() {
-                Ok(Ok(())) => {
-                    self.durable_task = None;
+        let completion = if let Some(owned) = self.durable_task.as_mut() {
+            if owned.completion.is_none() {
+                owned.completion = match owned.receiver.try_recv() {
+                    Ok(result) => Some(RootTaskCompletion::Settled(result)),
+                    Err(TryRecvError::Disconnected) => Some(RootTaskCompletion::Disconnected),
+                    Err(TryRecvError::Empty) => None,
+                };
+            }
+            owned.task.is_finished().then(|| owned.completion.take()).flatten()
+        } else {
+            None
+        };
+        if let Some(completion) = completion {
+            let _joined = self
+                .durable_task
+                .take()
+                .expect("completed root task remains owned through reaping");
+            match completion {
+                RootTaskCompletion::Settled(Ok(())) => {
                     self.submitted_prompt = None;
                     self.state.status = UiStatus::Idle;
+                    if self.quitting {
+                        self.queued_extension_commands.clear();
+                        self.refresh_subagent_footer();
+                        return;
+                    }
                     let queued_continuation = self.apply_queued_extension_commands();
                     if self.state.queued_message().is_some() {
                         self.start_queued_prompt();
@@ -383,24 +464,20 @@ impl App {
                     }
                     self.refresh_subagent_footer();
                 }
-                Ok(Err(HarnessError::Core(CoreError::Cancelled))) => {
-                    self.durable_task = None;
+                RootTaskCompletion::Settled(Err(HarnessError::Core(CoreError::Cancelled))) => {
                     self.restore_submitted_prompt(
                         "cancelled; prompt restored for explicit re-submit",
                     );
                 }
-                Ok(Err(error)) => {
-                    self.durable_task = None;
+                RootTaskCompletion::Settled(Err(error)) => {
                     self.restore_submitted_prompt(format!(
                         "{error}; prompt restored for explicit re-submit"
                     ));
                 }
-                Err(TryRecvError::Disconnected) => {
-                    self.durable_task = None;
+                RootTaskCompletion::Disconnected => {
                     self.state
                         .notice("durable operation task ended unexpectedly");
                 }
-                Err(TryRecvError::Empty) => {}
             }
         }
     }
@@ -535,22 +612,20 @@ impl App {
         input: String,
     ) {
         let (sender, receiver) = sync_channel(1);
-        smol::spawn(async move {
+        let task = smol::spawn(async move {
             let _ = sender.send(harness.run_root_prompt(input).await.map(|_| ()));
-        })
-        .detach();
-        self.durable_task = Some(receiver);
+        });
+        self.durable_task = Some(OwnedRootTask::new(receiver, task));
         self.state.status = UiStatus::Active;
     }
 
     /// Drive the one recovery plan derived from an opened durable session.
     pub(super) fn spawn_durable_recovery(&mut self, harness: Arc<super::durable::HostHarness>) {
         let (sender, receiver) = sync_channel(1);
-        smol::spawn(async move {
+        let task = smol::spawn(async move {
             let _ = sender.send(harness.resume().await.map(|_| ()));
-        })
-        .detach();
-        self.durable_task = Some(receiver);
+        });
+        self.durable_task = Some(OwnedRootTask::new(receiver, task));
         self.state.status = UiStatus::Active;
     }
 
@@ -569,16 +644,15 @@ impl App {
             return;
         }
         let (sender, receiver) = sync_channel(1);
-        smol::spawn(async move {
+        let task = smol::spawn(async move {
             let _ = sender.send(
                 harness
                     .run_extension_continuation(extension_id, input)
                     .await
                     .map(|_| ()),
             );
-        })
-        .detach();
-        self.durable_task = Some(receiver);
+        });
+        self.durable_task = Some(OwnedRootTask::new(receiver, task));
         self.state.status = UiStatus::Active;
     }
 

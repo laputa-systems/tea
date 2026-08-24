@@ -303,6 +303,7 @@ struct ToolInfo {
     operation_id: OperationId,
     epoch_id: crate::EpochId,
     tool_name: String,
+    effective_args: crate::JsonValue,
     idempotency_key: String,
     sequence: crate::Sequence,
 }
@@ -409,6 +410,7 @@ fn reduce_agent_graph_prefix<'a>(
                             operation_id: record.operation_id.clone(),
                             epoch_id: record.epoch_id.clone(),
                             tool_name: record.tool_name.clone(),
+                            effective_args: record.effective_args.clone(),
                             idempotency_key: record.idempotency_key.clone(),
                             sequence: stored.seq,
                         });
@@ -521,6 +523,17 @@ fn reduce_agent_graph_prefix<'a>(
     }
 
     for (operation_id, operation) in &operations {
+        if let Some(bound_agent) = agent_by_lane.get(&operation.lane_id)
+            && !matches!(
+                &operation.kind,
+                OperationKind::Subagent { agent_id, .. } if agent_id == bound_agent
+            )
+        {
+            return Err(Corruption::new(format!(
+                "agent-bound lane {} contains unrelated operation {operation_id}",
+                operation.lane_id
+            )));
+        }
         let OperationKind::Subagent {
             agent_id,
             parent_operation_id,
@@ -567,6 +580,20 @@ fn reduce_agent_graph_prefix<'a>(
         if derive_subagent_operation_id(agent_id, &assignment.content) != *operation_id {
             return Err(Corruption::new(format!(
                 "subagent operation {operation_id} does not match its deterministic assignment identity"
+            )));
+        }
+        let spawn_tool = tools
+            .get(&node.spawned.spawn_tool_call_id)
+            .and_then(|candidates| {
+                candidates.iter().find(|tool| {
+                    tool.operation_id == node.spawned.parent_operation_id
+                        && tool.tool_name == "spawn_agent"
+                })
+            })
+            .expect("agent spawn tool was validated");
+        if spawn_tool_assignment(spawn_tool, &node.spawned)? != assignment.content.as_str() {
+            return Err(Corruption::new(format!(
+                "subagent operation {operation_id} assignment differs from its spawn_agent intent"
             )));
         }
         validate_child_operation_identity(operation, &node.spawned)?;
@@ -650,6 +677,23 @@ fn reduce_agent_graph_prefix<'a>(
                 terminal.agent_id
             )));
         }
+        let expected_final_entry_id = entries
+            .iter()
+            .filter_map(|(entry_id, (lane_id, entry, entry_sequence))| {
+                (lane_id == &node.spawned.lane_id
+                    && *entry_sequence > operation.started_seq
+                    && *entry_sequence < *finished_sequence
+                    && matches!(entry, SessionEntry::AssistantMessage(_)))
+                .then_some((entry_sequence, entry_id))
+            })
+            .max_by_key(|(entry_sequence, _)| **entry_sequence)
+            .map(|(_, entry_id)| entry_id);
+        if terminal.final_entry_id.as_ref() != expected_final_entry_id {
+            return Err(Corruption::new(format!(
+                "agent terminal result {} does not name its operation's final assistant entry",
+                terminal.agent_id
+            )));
+        }
         if let Some(entry_id) = &terminal.final_entry_id {
             let Some((lane_id, entry, entry_sequence)) = entries.get(entry_id) else {
                 return Err(Corruption::new(format!(
@@ -715,6 +759,7 @@ fn reduce_agent_graph_prefix<'a>(
         }
     }
 
+    let mut used_apply_intents = BTreeSet::new();
     for (sequence, applied_fact) in applied {
         validate_changed_paths(&applied_fact.changed_paths)?;
         validate_bounded_nonempty("applied delta tool call ID", &applied_fact.tool_call_id, MAX_MODEL_IDENTIFIER_BYTES)?;
@@ -764,7 +809,7 @@ fn reduce_agent_graph_prefix<'a>(
                 applied_fact.delta_id
             )));
         }
-        let matches = tools
+        let matching_tools = tools
             .get(&applied_fact.tool_call_id)
             .map(Vec::as_slice)
             .unwrap_or_default()
@@ -774,12 +819,23 @@ fn reduce_agent_graph_prefix<'a>(
                     && tool.operation_id == node.spawned.parent_operation_id
                     && tool.tool_name == "apply_agent_changes"
             })
-            .count();
-        if matches != 1 {
+            .collect::<Vec<_>>();
+        if matching_tools.len() != 1 {
             return Err(Corruption::new(format!(
                 "applied workspace delta {} must correlate with exactly one parent apply_agent_changes tool intent",
                 applied_fact.delta_id
             )));
+        }
+        let apply_tool = matching_tools[0];
+        validate_apply_tool_args(apply_tool, &applied_fact.delta_id)?;
+        if !used_apply_intents.insert((
+            apply_tool.operation_id.clone(),
+            applied_fact.tool_call_id.clone(),
+            apply_tool.sequence,
+        )) {
+            return Err(Corruption::new(
+                "one apply_agent_changes intent cannot authorize more than one applied fact",
+            ));
         }
         if node.applied.replace(applied_fact).is_some() {
             return Err(Corruption::new("workspace delta was applied more than once"));
@@ -842,6 +898,14 @@ fn validate_spawn(
 ) -> Result<(), Corruption> {
     validate_task_name(&spawn.task_name)?;
     validate_bounded_nonempty("agent thinking", &spawn.thinking, MAX_THINKING_BYTES)?;
+    if !matches!(
+        spawn.thinking.as_str(),
+        "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
+    ) {
+        return Err(Corruption::new(
+            "agent thinking must name a documented thinking level",
+        ));
+    }
     validate_bounded_nonempty(
         "agent spawn tool call ID",
         &spawn.spawn_tool_call_id,
@@ -887,6 +951,7 @@ fn validate_spawn(
             spawn.agent_id
         )));
     }
+    let _ = spawn_tool_assignment(spawn_tool[0], spawn)?;
     if AgentId::derive(
         session_id,
         &spawn.parent_lane_id,
@@ -984,6 +1049,99 @@ fn validate_spawn(
         return Err(Corruption::new(format!(
             "agent {} child lane configuration does not match its spawn fact",
             spawn.agent_id
+        )));
+    }
+    Ok(())
+}
+
+fn spawn_tool_assignment<'a>(
+    tool: &'a ToolInfo,
+    spawn: &AgentSpawnedFact,
+) -> Result<&'a str, Corruption> {
+    let fields = tool.effective_args.as_object().ok_or_else(|| {
+        Corruption::new(format!(
+            "agent {} spawn_agent effective arguments are not an object",
+            spawn.agent_id
+        ))
+    })?;
+    if fields.keys().any(|key| {
+        !matches!(
+            key.as_str(),
+            "task_name" | "task" | "model" | "thinking" | "context"
+        )
+    }) {
+        return Err(Corruption::new(format!(
+            "agent {} spawn_agent effective arguments contain an unknown field",
+            spawn.agent_id
+        )));
+    }
+    let string_field = |name: &str| {
+        fields
+            .get(name)
+            .and_then(crate::JsonValue::as_str)
+            .ok_or_else(|| {
+                Corruption::new(format!(
+                    "agent {} spawn_agent effective arguments require string field {name}",
+                    spawn.agent_id
+                ))
+            })
+    };
+    if string_field("task_name")? != spawn.task_name
+        || string_field("model")? != spawn.model.model
+    {
+        return Err(Corruption::new(format!(
+            "agent {} spawn fact differs from its durable effective arguments",
+            spawn.agent_id
+        )));
+    }
+    let task = string_field("task")?;
+    if task.is_empty() || task != task.trim() || task.len() > 64 * 1024 {
+        return Err(Corruption::new(format!(
+            "agent {} spawn assignment must be trimmed nonempty UTF-8 within 65536 bytes",
+            spawn.agent_id
+        )));
+    }
+    let context_mode = match fields.get("context") {
+        None => AgentContextMode::Task,
+        Some(crate::JsonValue::String(value)) if value == "task" => AgentContextMode::Task,
+        Some(crate::JsonValue::String(value)) if value == "parent" => AgentContextMode::Parent,
+        Some(_) => {
+            return Err(Corruption::new(format!(
+                "agent {} spawn_agent context must be task or parent",
+                spawn.agent_id
+            )));
+        }
+    };
+    if context_mode != spawn.context_mode {
+        return Err(Corruption::new(format!(
+            "agent {} context differs from its durable effective arguments",
+            spawn.agent_id
+        )));
+    }
+    if let Some(thinking) = fields.get("thinking") {
+        if thinking.as_str() != Some(spawn.thinking.as_str()) {
+            return Err(Corruption::new(format!(
+                "agent {} thinking differs from its durable effective arguments",
+                spawn.agent_id
+            )));
+        }
+    }
+    Ok(task)
+}
+
+fn validate_apply_tool_args(
+    tool: &ToolInfo,
+    delta_id: &WorkspaceDeltaId,
+) -> Result<(), Corruption> {
+    let fields = tool.effective_args.as_object().ok_or_else(|| {
+        Corruption::new("apply_agent_changes effective arguments are not an object")
+    })?;
+    if fields.len() != 1
+        || fields.get("delta_id").and_then(crate::JsonValue::as_str)
+            != Some(delta_id.as_str())
+    {
+        return Err(Corruption::new(format!(
+            "apply_agent_changes intent does not authorize workspace delta {delta_id}"
         )));
     }
     Ok(())

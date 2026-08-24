@@ -4477,6 +4477,13 @@ fn jsonl_round_trips_a_complete_child_agent_graph_with_an_oversized_artifact_rep
         .expect("parent epoch commits");
     let parent_assistant = EntryId::new("agent-graph-parent-assistant")
         .expect("valid assistant entry ID");
+    let spawn_args = JsonValue::Object(std::collections::BTreeMap::from([
+        ("context".into(), JsonValue::String("task".into())),
+        ("model".into(), JsonValue::String(model.model.clone())),
+        ("task".into(), JsonValue::String("audit the durable session".into())),
+        ("task_name".into(), JsonValue::String("audit_session".into())),
+        ("thinking".into(), JsonValue::String("high".into())),
+    ]));
     session
         .append_entry(
             &parent_lane,
@@ -4486,7 +4493,7 @@ fn jsonl_round_trips_a_complete_child_agent_graph_with_an_oversized_artifact_rep
                 vec![AssistantToolCall::new(
                     "agent-graph-spawn-call",
                     "spawn_agent",
-                    JsonValue::Object(std::collections::BTreeMap::new()),
+                    spawn_args.clone(),
                 )],
             ),
         )
@@ -4500,7 +4507,7 @@ fn jsonl_round_trips_a_complete_child_agent_graph_with_an_oversized_artifact_rep
             0,
             "agent-graph-spawn-call",
             "spawn_agent",
-            JsonValue::Object(std::collections::BTreeMap::new()),
+            spawn_args,
             EntryId::new("agent-graph-spawn-result").expect("valid result entry ID"),
             ToolReplayPolicy::Never,
             Digest::from_bytes(b"spawn definition"),
@@ -4716,6 +4723,10 @@ fn jsonl_round_trips_a_complete_child_agent_graph_with_an_oversized_artifact_rep
         .expect("child terminal result commits");
     let apply_assistant = EntryId::new("agent-graph-apply-assistant")
         .expect("valid apply assistant entry ID");
+    let apply_args = JsonValue::Object(std::collections::BTreeMap::from([(
+        "delta_id".into(),
+        JsonValue::String(delta_id.to_string()),
+    )]));
     session
         .append_entry(
             &LaneId::main(),
@@ -4725,7 +4736,7 @@ fn jsonl_round_trips_a_complete_child_agent_graph_with_an_oversized_artifact_rep
                 vec![AssistantToolCall::new(
                     "agent-graph-apply-call",
                     "apply_agent_changes",
-                    JsonValue::Object(std::collections::BTreeMap::new()),
+                    apply_args.clone(),
                 )],
             ),
         )
@@ -4739,7 +4750,7 @@ fn jsonl_round_trips_a_complete_child_agent_graph_with_an_oversized_artifact_rep
             0,
             "agent-graph-apply-call",
             "apply_agent_changes",
-            JsonValue::Object(std::collections::BTreeMap::new()),
+            apply_args,
             EntryId::new("agent-graph-apply-result").expect("valid apply result entry ID"),
             ToolReplayPolicy::Never,
             Digest::from_bytes(b"apply definition"),
@@ -4913,6 +4924,16 @@ fn agent_graph_rejects_bijection_task_operation_and_terminal_violations() {
         Err(SessionError::Corruption(_))
     ));
 
+    let mut mismatched_spawn_args = spawned_agent_fixture();
+    let mut second = append_second_spawn(&mut mismatched_spawn_args, "declared_task".into());
+    second.task_name = "different_task".into();
+    assert!(matches!(
+        mismatched_spawn_args
+            .session
+            .append_fact(SessionFact::AgentSpawned(second)),
+        Err(SessionError::Corruption(_))
+    ), "a spawn fact must remain bound to its durable effective tool arguments");
+
     let mut wrong_profile = spawned_agent_fixture();
     let operation = derive_subagent_operation_id(&wrong_profile.agent, &wrong_profile.assignment);
     let child_lane = wrong_profile.child_lane.clone();
@@ -4929,6 +4950,41 @@ fn agent_graph_rejects_bijection_task_operation_and_terminal_violations() {
         matches!(wrong_profile.session.snapshot(), Ok(_)),
         "the rejected append must leave the validated prefix readable"
     );
+
+    let mut wrong_assignment = spawned_agent_fixture();
+    wrong_assignment.assignment = "audit different durable facts".into();
+    let operation = derive_subagent_operation_id(
+        &wrong_assignment.agent,
+        &wrong_assignment.assignment,
+    );
+    let child_lane = wrong_assignment.child_lane.clone();
+    let child_profile = wrong_assignment.child_profile.clone();
+    assert!(matches!(
+        append_child_operation(
+            &mut wrong_assignment,
+            child_lane,
+            operation,
+            child_profile,
+        ),
+        Err(SessionError::Corruption(_))
+    ), "the child assignment must equal the durable spawn_agent task");
+
+    let mut foreign_operation = spawned_agent_fixture();
+    let foreign_result = foreign_operation
+        .session
+        .append_record(LaneRecord::OperationStarted(OperationStartedRecord::new(
+            OperationId::new("foreign-run-on-child-lane").expect("valid operation ID"),
+            foreign_operation.child_lane.clone(),
+            Some(foreign_operation.child_revision_entry.clone()),
+            OperationKind::Run,
+            Vec::new(),
+            foreign_operation.child_revision.clone(),
+            foreign_operation.child_profile.clone(),
+        )));
+    assert!(matches!(
+        foreign_result,
+        Err(SessionError::Corruption(_))
+    ), "an agent-bound lane cannot hide an unrelated operation kind: {foreign_result:?}");
 
     let mut wrong_lane = spawned_agent_fixture();
     let wrong_lane_id = LaneId::new("wrong-child-operation-lane").expect("valid lane ID");
@@ -4966,6 +5022,49 @@ fn agent_graph_rejects_bijection_task_operation_and_terminal_violations() {
             })),
         Err(SessionError::Corruption(_))
     ));
+
+    let mut wrong_final_entry = running_agent_fixture();
+    let child_lane = wrong_final_entry.agent.lane_id();
+    let intermediate = EntryId::new("agent-intermediate-assistant")
+        .expect("valid intermediate assistant ID");
+    wrong_final_entry
+        .session
+        .append_entry(
+            &child_lane,
+            ProvisionedEntry::assistant(intermediate.clone(), "intermediate", Vec::new()),
+        )
+        .expect("intermediate assistant commits");
+    wrong_final_entry
+        .session
+        .append_entry(
+            &child_lane,
+            ProvisionedEntry::assistant(
+                EntryId::new("agent-settled-assistant").expect("valid final assistant ID"),
+                "settled report",
+                Vec::new(),
+            ),
+        )
+        .expect("settled assistant commits");
+    wrong_final_entry
+        .session
+        .append_record(LaneRecord::OperationFinished(OperationFinishedRecord {
+            operation_id: wrong_final_entry.child_operation.clone(),
+            outcome: OperationOutcome::Completed,
+        }))
+        .expect("child operation settles");
+    assert!(matches!(
+        wrong_final_entry
+            .session
+            .append_fact(SessionFact::AgentTaskFinished(AgentTaskFinishedFact {
+                agent_id: wrong_final_entry.agent,
+                operation_id: wrong_final_entry.child_operation,
+                outcome: OperationOutcome::Completed,
+                final_entry_id: Some(intermediate),
+                report: PayloadRef::Inline(JsonValue::String("intermediate".into())),
+                workspace_delta_id: None,
+            })),
+        Err(SessionError::Corruption(_))
+    ), "the retained report must name the operation's final assistant entry");
 }
 
 #[test]
@@ -5025,6 +5124,87 @@ fn agent_graph_rejects_delta_lease_and_path_invariants() {
             Err(SessionError::Corruption(_))
         ));
     }
+}
+
+#[test]
+fn agent_graph_rejects_apply_intent_for_a_different_delta() {
+    let mut fixture = running_agent_fixture();
+    fixture
+        .session
+        .append_record(LaneRecord::OperationFinished(OperationFinishedRecord {
+            operation_id: fixture.child_operation.clone(),
+            outcome: OperationOutcome::Completed,
+        }))
+        .expect("child operation finishes");
+    let delta = workspace_delta_fact(
+        &fixture.agent,
+        WorkspaceLeaseId::derive(&fixture.agent),
+        vec!["src/lib.rs".into()],
+    );
+    fixture
+        .session
+        .append_fact(SessionFact::WorkspaceDelta(delta.clone()))
+        .expect("delta commits");
+    fixture
+        .session
+        .append_fact(SessionFact::AgentTaskFinished(AgentTaskFinishedFact {
+            agent_id: fixture.agent,
+            operation_id: fixture.child_operation,
+            outcome: OperationOutcome::Completed,
+            final_entry_id: None,
+            report: PayloadRef::Inline(JsonValue::String(String::new())),
+            workspace_delta_id: Some(delta.delta_id.clone()),
+        }))
+        .expect("terminal fact commits");
+    let assistant_id = EntryId::new("mismatched-apply-assistant").expect("assistant ID");
+    let wrong_args = JsonValue::Object(std::collections::BTreeMap::from([(
+        "delta_id".into(),
+        JsonValue::String("different-delta".into()),
+    )]));
+    fixture
+        .session
+        .append_entry(
+            &LaneId::main(),
+            ProvisionedEntry::assistant(
+                assistant_id.clone(),
+                "",
+                vec![AssistantToolCall::new(
+                    "mismatched-apply-call",
+                    "apply_agent_changes",
+                    wrong_args.clone(),
+                )],
+            ),
+        )
+        .expect("apply assistant commits");
+    fixture
+        .session
+        .append_record(LaneRecord::ToolStarted(ToolStartedRecord::new(
+            RecordId::new("mismatched-apply-record").expect("record ID"),
+            OperationId::new("agent-fixture-parent-operation").expect("parent operation ID"),
+            EpochId::new("agent-fixture-parent-epoch").expect("parent epoch ID"),
+            assistant_id,
+            0,
+            "mismatched-apply-call",
+            "apply_agent_changes",
+            wrong_args,
+            EntryId::new("mismatched-apply-result").expect("result ID"),
+            ToolReplayPolicy::Never,
+            Digest::from_bytes(b"apply definition"),
+            HarnessRevisionId::new("agent-fixture-root-revision").expect("root revision ID"),
+            "mismatched-apply-key",
+        )))
+        .expect("apply intent commits");
+    assert!(matches!(
+        fixture
+            .session
+            .append_fact(SessionFact::WorkspaceDeltaApplied(WorkspaceDeltaAppliedFact {
+                delta_id: delta.delta_id,
+                target_lane_id: LaneId::main(),
+                tool_call_id: "mismatched-apply-call".into(),
+                changed_paths: delta.changed_paths,
+            })),
+        Err(SessionError::Corruption(_))
+    ));
 }
 
 struct SpawnedAgentFixture {
@@ -5104,6 +5284,7 @@ fn spawned_agent_fixture() -> SpawnedAgentFixture {
         &root_revision,
         "agent-fixture-spawn-call",
         "agent-fixture-spawn-key",
+        "audit_session",
     );
 
     let agent = AgentId::derive(
@@ -5220,7 +5401,15 @@ fn append_parent_tool_intent(
     root_revision: &HarnessRevisionId,
     tool_call_id: &str,
     idempotency_key: &str,
+    task_name: &str,
 ) {
+    let arguments = JsonValue::Object(std::collections::BTreeMap::from([
+        ("context".into(), JsonValue::String("task".into())),
+        ("model".into(), JsonValue::String("fixture-child".into())),
+        ("task".into(), JsonValue::String("audit durable facts".into())),
+        ("task_name".into(), JsonValue::String(task_name.into())),
+        ("thinking".into(), JsonValue::String("high".into())),
+    ]));
     let assistant_id = EntryId::new(format!("{tool_call_id}-assistant"))
         .expect("valid tool assistant entry ID");
     session
@@ -5232,7 +5421,7 @@ fn append_parent_tool_intent(
                 vec![AssistantToolCall::new(
                     tool_call_id,
                     "spawn_agent",
-                    JsonValue::Object(std::collections::BTreeMap::new()),
+                    arguments.clone(),
                 )],
             ),
         )
@@ -5246,7 +5435,7 @@ fn append_parent_tool_intent(
             0,
             tool_call_id,
             "spawn_agent",
-            JsonValue::Object(std::collections::BTreeMap::new()),
+            arguments,
             EntryId::new(format!("{tool_call_id}-result")).expect("valid tool result entry ID"),
             ToolReplayPolicy::Never,
             Digest::from_bytes(tool_call_id.as_bytes()),
@@ -5316,6 +5505,7 @@ fn append_second_spawn(
         &root_revision,
         "agent-fixture-second-spawn-call",
         "agent-fixture-second-spawn-key",
+        &task_name,
     );
     let session_id = fixture
         .session

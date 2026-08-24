@@ -199,6 +199,7 @@ pub(crate) struct SessionAppendIndex {
     step_attempts: BTreeMap<(OperationId, EpochId, StepKind), (StepId, u32)>,
     provider_starts: BTreeMap<ProviderRequestId, OperationId>,
     provider_settled: BTreeSet<ProviderRequestId>,
+    agent_lanes: BTreeSet<LaneId>,
     incremental_validation_ready: bool,
 }
 
@@ -222,6 +223,7 @@ impl SessionAppendIndex {
             step_attempts: BTreeMap::new(),
             provider_starts: BTreeMap::new(),
             provider_settled: BTreeSet::new(),
+            agent_lanes: BTreeSet::new(),
             incremental_validation_ready: true,
         }
     }
@@ -263,15 +265,17 @@ impl SessionAppendIndex {
                 }
                 Ok(true)
             }
-            // A child operation carries graph-only binding checks (the durable
-            // spawn, child lane, harness/profile, and assignment identity), so
-            // it must pass through the whole-prefix graph reducer before it is
-            // committed. Ordinary lifecycle records remain locally checked.
+            // Every operation on an agent-bound lane carries graph-only
+            // binding checks (the durable spawn, operation kind, harness/profile,
+            // and assignment identity), so it must pass through the whole-prefix
+            // graph reducer before it is committed. A claimed subagent operation
+            // also takes that path so an unbound or wrong lane cannot bypass it.
             SessionMutation::Record(stored)
                 if matches!(
                     &stored.record,
                     LaneRecord::OperationStarted(record)
                         if matches!(&record.kind, OperationKind::Subagent { .. })
+                            || self.agent_lanes.contains(&record.lane_id)
                 ) =>
             {
                 Ok(false)
@@ -311,7 +315,11 @@ impl SessionAppendIndex {
                     .insert(lane_id.clone(), base_leaf_id.clone());
             }
             SessionMutation::Record(stored) => self.advance_lifecycle_record(&stored.record),
-            SessionMutation::Fact(_) => {}
+            SessionMutation::Fact(stored) => {
+                if let SessionFact::AgentSpawned(spawn) = &stored.fact {
+                    self.agent_lanes.insert(spawn.lane_id.clone());
+                }
+            }
         }
     }
 

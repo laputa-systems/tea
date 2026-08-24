@@ -348,8 +348,7 @@ impl SubagentHost for TuiSubagentHost {
             .await
             .map_err(workspace_error)?;
             match outcome {
-                GitWorkspaceApplyOutcome::Applied { evidence }
-                | GitWorkspaceApplyOutcome::AlreadyApplied { evidence } => {
+                GitWorkspaceApplyOutcome::Applied { evidence } => {
                     Ok(WorkspaceApplyOutcome::Applied {
                         changed_paths: evidence
                             .into_iter()
@@ -562,8 +561,8 @@ mod tests {
                 delta: core_delta,
                 target_lane_id: tea_session::LaneId::main(),
             }))
-            .expect("idempotent reopened apply succeeds"),
-            WorkspaceApplyOutcome::Applied { .. }
+            .expect("ambiguous reopened apply is classified"),
+            WorkspaceApplyOutcome::Indeterminate { .. }
         ));
     }
 

@@ -35,8 +35,8 @@ unresolved-lease export rules. `tea-core` uses scripted providers plus fake
 source-leaf provenance, spawn replay and capacity, event-driven wait ordering,
 structured cancellation, report retention, prompt layout and recovery prefixes.
 `tea-agent` uses temporary Git repositories for snapshot isolation, binary
-deltas, private-index preflight, and `Applied`/`AlreadyApplied`/`Conflict`/
-`RolledBack`/`Indeterminate` classification, and the PTY suite for
+deltas, private-index preflight, and `Applied`/`Conflict`/`RolledBack`/
+`Indeterminate` classification, and the PTY suite for
 feature-disabled visual identity and feature-enabled root-only presentation. No
 credential or live inference is part of these checks.
 

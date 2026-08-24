@@ -862,6 +862,9 @@ pub struct ToolStartedRecord {
     /// Tool name at the validated source position.
     pub tool_name: String,
     /// Final schema-valid arguments after `before_tool` policy.
+    ///
+    /// Optional tool defaults are not necessarily expanded here. For example,
+    /// an omitted `spawn_agent.thinking` remains a durable inheritance request.
     pub effective_args: JsonValue,
     /// Provisioned tool-result entry identity.
     pub result_entry_id: EntryId,

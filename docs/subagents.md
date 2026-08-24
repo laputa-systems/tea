@@ -142,6 +142,13 @@ catalog. The session also persists first-class spawn linkage, workspace delta,
 child terminal result, and applied-delta facts. The pure `reduce_agent_graph`
 projection validates all graph, policy, harness, operation, lease, delta, and
 normalized-path relationships.
+`AgentSpawned` and `WorkspaceDeltaApplied` facts are also bound to the exact
+explicit fields in the persisted `ToolStarted.effective_args` that authorized
+them. An omitted `spawn_agent.thinking` remains an inheritance request rather
+than a default-expanded argument: `AgentSpawned.thinking` is the first durable
+resolved value and must match the child lane's `ThinkingChanged` entry. The
+child operation's assignment must equal the spawn intent's task, so a valid
+call ID cannot be reused to bless different durable semantics.
 
 ## Root tool contract
 
@@ -159,7 +166,10 @@ apply_agent_changes
 exclusive-batch. It accepts a unique `^[a-z][a-z0-9_]{0,63}$` task name, a
 trimmed assignment of at most 64 KiB, one model from the persisted enum, an
 optional thinking level, and `task` or `parent` context. The default context is
-`task`; omitted thinking inherits the parent lane's current value.
+`task`; omitted thinking inherits the parent lane's current runtime value. A
+host default need not already exist as a parent `ThinkingChanged` entry, so the
+spawn fact and child configuration durably record the resolved inherited
+value.
 
 `wait_agent` is sequential and cancellable. It resolves 1..=16 unique targets
 owned by the current root operation before waiting, uses an event-driven
@@ -225,10 +235,11 @@ content state, then applies the patch in a private-index three-way sandbox
 before using a fresh private index for the real worktree application. The user
 index, branch, and refs are preserved. `Applied` requires the observed worktree
 and private index to match the sandbox's resolved stage-0 state;
-`AlreadyApplied` requires the exact child result state. A nonmutating failed
-preflight is `Conflict`, an exact return to the recorded state is `RolledBack`,
-and every mixed or unprovable result is `Indeterminate` and is never silently
-retried.
+matching the child result before the attempt is not enough to prove how those
+bytes arrived. A nonmutating failed preflight is `Conflict`, an exact return to
+the recorded state is `RolledBack`, and every pre-existing, mixed, crashed, or
+otherwise unprovable result is `Indeterminate` and is never silently retried.
+Only a prior `WorkspaceDeltaApplied` fact provides the idempotent success path.
 
 ## Durable ordering and visibility
 
@@ -266,6 +277,8 @@ The final assistant response is the report. Reports at most 32 KiB are inline;
 larger reports are immutable artifacts. Parent previews are at most 16 KiB via
 deterministic middle truncation, patches are always artifacts, and wait results
 contain aggregate usage but never reasoning or intermediate child content.
+The terminal fact must name the last assistant entry within the exact child
+operation interval; an earlier assistant message is not a settled report.
 Operational cleanup never precedes retention of the report and any delta it
 names, so reopen, verification, collection, and export observe the same terminal
 graph after the worktree is gone.
@@ -283,9 +296,12 @@ terminal result, and cleans operational worktrees. Only then may the root
 `OperationFinished` record commit. Completed children remain durable and
 inspectable but consume no active slot.
 
-The terminal's Smol adapter retains concrete tasks behind idempotent cancel and
-join handles; it never detaches them. Ctrl+C and shutdown cascade through the
-supervisor and join all children.
+The terminal's Smol adapter retains the concrete root driver and child tasks
+behind explicit completion or idempotent cancel-and-join boundaries; it never
+detaches them. Ctrl+C, terminal I/O failure, one-shot stdout failure, and normal
+shutdown cascade through the supervisor and join all children before returning
+success. If a durable effect boundary cannot be safely settled, shutdown
+returns a typed recovery error instead of claiming that the root is closed.
 
 ## Recovery
 
@@ -305,7 +321,10 @@ Recovery is deterministic at every spawn and completion prefix:
 | Terminal fact, remaining worktree | Cleanup only |
 | Ambiguous apply | Require explicit recovery inspection |
 
-Children are restored before a resumed root can wait on them. A terminal with
+An `apply_agent_changes` `ToolStarted` without its result is an ambiguous apply:
+resume returns typed recovery-required without appending a generic tool error or
+calling the mutation port again. Children are restored before a resumed root
+can wait on them. A terminal with
 subagents disabled refuses to execute a subagent-enabled session, while
 read-only session commands remain available. Export refuses unresolved active
 workspace leases. Missing required live workspace state is a typed recovery

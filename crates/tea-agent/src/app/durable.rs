@@ -796,17 +796,49 @@ pub(super) async fn stream_host_prompt(
     subscription: TeaEventSubscription,
     prompt: String,
 ) -> Result<(), AppError> {
+    let stdout = io::stdout();
+    let mut output = stdout.lock();
+    stream_host_prompt_to(harness, subscription, prompt, &mut output).await
+}
+
+async fn stream_host_prompt_to<W: Write>(
+    harness: Arc<HostHarness>,
+    subscription: TeaEventSubscription,
+    prompt: String,
+    output: &mut W,
+) -> Result<(), AppError> {
     let mut drive = Box::pin(harness.run_root_prompt(prompt));
     loop {
-        drain_prompt_events(&subscription)?;
+        if let Err(output_error) = drain_prompt_events_to(&subscription, output) {
+            if let Err(cleanup_error) = settle_prompt_after_output_failure(&harness, &mut drive).await {
+                return Err(AppError::Setup(format!(
+                    "{output_error}; durable root cleanup requires recovery: {cleanup_error}"
+                )));
+            }
+            return Err(output_error);
+        }
         if let Some(result) = smol::future::poll_once(&mut drive).await {
-            drain_prompt_events(&subscription)?;
-            result?;
-            let mut stdout = io::stdout().lock();
-            stdout
+            let output_result = drain_prompt_events_to(&subscription, output);
+            let root_result = result.map(|_| ()).map_err(AppError::from);
+            if let Err(cleanup_error) = require_root_settled(&harness) {
+                let completed_diagnostic = match (&output_result, &root_result) {
+                    (Err(output_error), Err(root_error)) => {
+                        format!("{output_error}; root drive failed: {root_error}")
+                    }
+                    (Err(output_error), Ok(())) => output_error.to_string(),
+                    (Ok(()), Err(root_error)) => root_error.to_string(),
+                    (Ok(()), Ok(())) => "root driver returned".into(),
+                };
+                return Err(AppError::Setup(format!(
+                    "{completed_diagnostic}; durable root cleanup requires recovery: {cleanup_error}"
+                )));
+            }
+            output_result?;
+            root_result?;
+            output
                 .write_all(b"\n")
                 .map_err(|error| AppError::Setup(format!("could not write response: {error}")))?;
-            stdout
+            output
                 .flush()
                 .map_err(|error| AppError::Setup(format!("could not flush response: {error}")))?;
             return Ok(());
@@ -815,8 +847,38 @@ pub(super) async fn stream_host_prompt(
     }
 }
 
-fn drain_prompt_events(subscription: &TeaEventSubscription) -> Result<(), AppError> {
-    let mut stdout = io::stdout().lock();
+async fn settle_prompt_after_output_failure(
+    harness: &Arc<HostHarness>,
+    drive: &mut std::pin::Pin<Box<impl std::future::Future<Output = Result<tea_core::runtime::DurableOperation, tea_core::harness::HarnessError>>>>,
+) -> Result<(), tea_core::harness::HarnessError> {
+    loop {
+        let _ = harness.abort_root();
+        if smol::future::poll_once(&mut *drive).await.is_some() {
+            return require_root_settled(harness);
+        }
+        smol::future::yield_now().await;
+    }
+}
+
+pub(super) fn require_root_settled(
+    harness: &HostHarness,
+) -> Result<(), tea_core::harness::HarnessError> {
+    let reduction = reduce_lane(harness.snapshot()?, LaneId::main())?;
+    if reduction.lane_state.active_operation.is_none() {
+        return Ok(());
+    }
+    let plan = reduction.recovery_plan.ok_or_else(|| {
+        tea_core::harness::HarnessError::invalid_state(
+            "root driver returned while its durable operation remained open without recovery",
+        )
+    })?;
+    Err(tea_core::harness::HarnessError::RecoveryRequired { plan })
+}
+
+fn drain_prompt_events_to<W: Write>(
+    subscription: &TeaEventSubscription,
+    output: &mut W,
+) -> Result<(), AppError> {
     let mut wrote = false;
     while let Ok(event) = subscription.try_recv() {
         if let TeaEvent::Agent { lane_id, event } = event {
@@ -828,7 +890,7 @@ fn drain_prompt_events(subscription: &TeaEventSubscription) -> Result<(), AppErr
                 ..
             } = event.kind
             {
-                stdout.write_all(text.as_bytes()).map_err(|error| {
+                output.write_all(text.as_bytes()).map_err(|error| {
                     AppError::Setup(format!("could not write response: {error}"))
                 })?;
                 wrote = true;
@@ -836,7 +898,7 @@ fn drain_prompt_events(subscription: &TeaEventSubscription) -> Result<(), AppErr
         }
     }
     if wrote {
-        stdout
+        output
             .flush()
             .map_err(|error| AppError::Setup(format!("could not flush response: {error}")))?;
     }
@@ -1659,14 +1721,15 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::process::Command;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::Mutex;
     use std::thread;
     use std::time::{Duration, Instant};
     use tea_core::coding::TeaCodingToolsV2;
     use tea_core::hooks::NoHooks;
     use tea_core::scheduler::{
-        CancellationToken, ModelFuture, ModelRequest, ModelStream, ModelStreamEvent,
+        CancellationToken, ModelEventFuture, ModelEventStream, ModelFuture, ModelRequest,
+        ModelStream, ModelStreamEvent,
     };
     use tea_core::state::StopReason;
     use tea_core::tool::ToolRegistry;
@@ -1686,6 +1749,139 @@ mod tests {
                     ModelStreamEvent::End(StopReason::Stop),
                 ],
             }) as _)))
+        }
+    }
+
+    #[derive(Debug)]
+    struct TextThenCancellationProvider;
+
+    struct TextThenCancellationStream {
+        sent_text: bool,
+    }
+
+    impl ModelEventStream for TextThenCancellationStream {
+        fn next_event<'a>(&'a mut self, cancellation: CancellationToken) -> ModelEventFuture<'a> {
+            if !self.sent_text {
+                self.sent_text = true;
+                return Box::pin(std::future::ready(Ok(Some(
+                    ModelStreamEvent::TextDelta("partial".into()),
+                ))));
+            }
+            Box::pin(async move {
+                cancellation.cancelled().await;
+                Ok(Some(ModelStreamEvent::Aborted {
+                    message: "cancelled after output failure".into(),
+                }))
+            })
+        }
+    }
+
+    impl ModelProvider for TextThenCancellationProvider {
+        fn stream<'a>(
+            &'a self,
+            _request: ModelRequest,
+            _cancellation: CancellationToken,
+        ) -> ModelFuture<'a> {
+            Box::pin(std::future::ready(Ok(Box::new(TextThenCancellationStream {
+                sent_text: false,
+            }) as _)))
+        }
+    }
+
+    #[derive(Debug)]
+    struct PendingProvider;
+
+    struct PendingStream;
+
+    impl ModelEventStream for PendingStream {
+        fn next_event<'a>(&'a mut self, _cancellation: CancellationToken) -> ModelEventFuture<'a> {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    impl ModelProvider for PendingProvider {
+        fn stream<'a>(
+            &'a self,
+            _request: ModelRequest,
+            _cancellation: CancellationToken,
+        ) -> ModelFuture<'a> {
+            Box::pin(std::future::ready(Ok(Box::new(PendingStream) as _)))
+        }
+    }
+
+    struct FailingOutput;
+
+    impl Write for FailingOutput {
+        fn write(&mut self, _bytes: &[u8]) -> io::Result<usize> {
+            Err(io::Error::new(io::ErrorKind::BrokenPipe, "fixture output closed"))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct RootSpawnThenPendingTextProvider {
+        calls: AtomicU64,
+    }
+
+    impl ModelProvider for RootSpawnThenPendingTextProvider {
+        fn stream<'a>(
+            &'a self,
+            _request: ModelRequest,
+            _cancellation: CancellationToken,
+        ) -> ModelFuture<'a> {
+            let stream: Box<dyn ModelEventStream> = match self.calls.fetch_add(1, Ordering::SeqCst) {
+                0 => Box::new(ModelStream {
+                    events: vec![
+                        ModelStreamEvent::ToolCall(AgentToolCall {
+                            id: ToolCallId::new("root-spawn-live-child")
+                                .expect("fixture tool call ID"),
+                            name: "spawn_agent".into(),
+                            arguments: SerializedJson::new(format!(
+                                r#"{{"task_name":"child","task":"Hold the isolated assignment until cancellation.","model":"{}","context":"task"}}"#,
+                                tea_providers::local::LAGUNA_XS_2_1_MODEL,
+                            )),
+                        }),
+                        ModelStreamEvent::End(StopReason::ToolUse),
+                    ],
+                }),
+                1 => Box::new(TextThenCancellationStream { sent_text: false }),
+                _ => Box::new(ModelStream {
+                    events: vec![ModelStreamEvent::Error {
+                        message: "root fixture received an unexpected extra request".into(),
+                    }],
+                }),
+            };
+            Box::pin(std::future::ready(Ok(stream)))
+        }
+    }
+
+    struct WaitForChildThenFailOutput {
+        child_started: Arc<AtomicBool>,
+    }
+
+    impl Write for WaitForChildThenFailOutput {
+        fn write(&mut self, _bytes: &[u8]) -> io::Result<usize> {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !self.child_started.load(Ordering::Acquire) {
+                if Instant::now() >= deadline {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "fixture child did not start before output",
+                    ));
+                }
+                thread::sleep(Duration::from_millis(5));
+            }
+            Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "fixture output closed with a live child",
+            ))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
         }
     }
 
@@ -2385,6 +2581,225 @@ data: [DONE]
             .records()
             .iter()
             .any(|record| matches!(record.record, tea_session::LaneRecord::OperationStarted(_))));
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn one_shot_output_failure_aborts_and_settles_the_owned_root_drive() {
+        let home = temporary_home();
+        let workspace = home.join("workspace");
+        fs::create_dir(&workspace).expect("workspace creates");
+        let harness = create_host_harness(HostHarnessConfig {
+            tea_home: &home,
+            workspace: &workspace,
+            configuration: AgentConfiguration::new(
+                "trusted system prompt",
+                ToolRegistry::default(),
+                Arc::new(NoHooks),
+            ),
+            model: ModelDescriptor {
+                provider: "fixture".into(),
+                model: "fixture-model".into(),
+                revision: Some("fixture-revision".into()),
+            },
+            provider: Arc::new(TextThenCancellationProvider),
+            thinking_level: Some(ThinkingLevel::Off),
+            compactor: None,
+            automatic_compaction: AutomaticCompactionPolicy::disabled(),
+            subagents: None,
+        })
+        .expect("host harness creates");
+        let subscription = harness.subscribe_events().expect("event subscription creates");
+        let mut output = FailingOutput;
+        let error = smol::block_on(stream_host_prompt_to(
+            Arc::clone(&harness),
+            subscription,
+            "exercise output failure".into(),
+            &mut output,
+        ))
+        .expect_err("closed output is reported");
+        assert!(error.to_string().contains("fixture output closed"), "{error}");
+        let reduction = tea_session::reduce_lane(
+            harness.snapshot().expect("snapshot reads"),
+            LaneId::main(),
+        )
+        .expect("root lane reduces");
+        assert!(
+            reduction.lane_state.active_operation.is_none(),
+            "the one-shot driver must settle before returning its output error"
+        );
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn one_shot_output_failure_cancels_a_live_child_and_removes_its_worktree() {
+        let home = temporary_home();
+        let repository = home.join("repository");
+        fs::create_dir(&repository).expect("fixture repository creates");
+        git(&repository, &["init"]);
+        git(&repository, &["config", "user.name", "Tea Fixture"]);
+        git(&repository, &["config", "user.email", "fixture@example.invalid"]);
+        fs::write(repository.join("tracked.txt"), "original\n").expect("fixture file writes");
+        git(&repository, &["add", "tracked.txt"]);
+        git(&repository, &["commit", "-m", "initial"]);
+        let workspace = fs::canonicalize(repository).expect("fixture repository canonicalizes");
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("child fixture listener binds");
+        let address = listener
+            .local_addr()
+            .expect("child fixture listener address resolves");
+        let child_started = Arc::new(AtomicBool::new(false));
+        let server_started = Arc::clone(&child_started);
+        let server = thread::spawn(move || {
+            listener
+                .set_nonblocking(true)
+                .expect("fixture listener becomes nonblocking");
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let (mut socket, _) = loop {
+                match listener.accept() {
+                    Ok(connection) => break connection,
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                        assert!(
+                            Instant::now() < deadline,
+                            "child provider request did not arrive before the fixture deadline"
+                        );
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("child provider accept fails: {error}"),
+                }
+            };
+            socket
+                .set_nonblocking(false)
+                .expect("accepted child provider stream becomes blocking");
+            let _request = read_http_request(&mut socket);
+            server_started.store(true, Ordering::Release);
+            thread::sleep(Duration::from_millis(500));
+        });
+
+        let root_model = ModelDescriptor {
+            provider: "local".into(),
+            model: "root-output-failure-fixture".into(),
+            revision: None,
+        };
+        let configuration = host_configuration(
+            TeaCodingToolsV2::new(&workspace).expect("root coding tools configure"),
+            &workspace.to_string_lossy(),
+        )
+        .expect("root host configuration builds");
+        let subagents = HostSubagentConfig {
+            factory: Arc::new(ProviderFactory::new(
+                tea_providers::ProviderRegistry::new(),
+                Some(format!("http://{address}/v1")),
+                None,
+                workspace.to_string_lossy().into_owned(),
+            )),
+            config: SubagentTuiConfig {
+                provider: Some("local".into()),
+                models: Some(vec![tea_providers::local::LAGUNA_XS_2_1_MODEL.into()]),
+                ..SubagentTuiConfig::default()
+            },
+        };
+        let harness = create_host_harness(HostHarnessConfig {
+            tea_home: &home,
+            workspace: &workspace,
+            configuration,
+            model: root_model,
+            provider: Arc::new(RootSpawnThenPendingTextProvider::default()),
+            thinking_level: Some(ThinkingLevel::Off),
+            compactor: None,
+            automatic_compaction: AutomaticCompactionPolicy::disabled(),
+            subagents: Some(subagents),
+        })
+        .expect("enabled fixture host creates");
+        let session_id = harness
+            .snapshot()
+            .expect("fixture snapshot reads")
+            .header()
+            .session_id
+            .to_string();
+        let subscription = harness.subscribe_events().expect("event subscription creates");
+        let mut output = WaitForChildThenFailOutput {
+            child_started: Arc::clone(&child_started),
+        };
+
+        let error = smol::block_on(stream_host_prompt_to(
+            Arc::clone(&harness),
+            subscription,
+            "spawn a child before output closes".into(),
+            &mut output,
+        ))
+        .expect_err("closed output is reported");
+        assert!(
+            error.to_string().contains("fixture output closed with a live child"),
+            "{error}"
+        );
+        server.join().expect("held child provider fixture settles");
+
+        let snapshot = harness.snapshot().expect("settled fixture snapshot reads");
+        let root = reduce_lane(snapshot.clone(), LaneId::main()).expect("root lane reduces");
+        assert!(
+            root.lane_state.active_operation.is_none(),
+            "the one-shot driver closes the root before returning"
+        );
+        let graph = reduce_agent_graph(&snapshot).expect("child graph reduces");
+        let child = graph.agents.values().next().expect("one child was spawned");
+        assert!(
+            child.terminal.is_some(),
+            "output failure retains a durable child terminal fact"
+        );
+        let worktree = session_directory_for(&home, &session_id)
+            .join("subagents")
+            .join(tea_session::WorkspaceLeaseId::derive(&child.spawned.agent_id).as_str())
+            .join("worktree");
+        assert!(
+            !worktree.exists(),
+            "output failure cleanup removes the authority-bearing child worktree"
+        );
+
+        drop(harness);
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn root_settlement_check_reports_an_open_durable_recovery_obligation() {
+        let home = temporary_home();
+        let workspace = home.join("workspace");
+        fs::create_dir(&workspace).expect("workspace creates");
+        let harness = create_host_harness(HostHarnessConfig {
+            tea_home: &home,
+            workspace: &workspace,
+            configuration: AgentConfiguration::new(
+                "trusted system prompt",
+                ToolRegistry::default(),
+                Arc::new(NoHooks),
+            ),
+            model: ModelDescriptor {
+                provider: "fixture".into(),
+                model: "fixture-model".into(),
+                revision: Some("fixture-revision".into()),
+            },
+            provider: Arc::new(PendingProvider),
+            thinking_level: Some(ThinkingLevel::Off),
+            compactor: None,
+            automatic_compaction: AutomaticCompactionPolicy::disabled(),
+            subagents: None,
+        })
+        .expect("host harness creates");
+        let mut drive = Box::pin(harness.run_root_prompt("leave a recoverable root open"));
+        assert!(
+            smol::block_on(smol::future::poll_once(&mut drive)).is_none(),
+            "the fixture drive reaches its pending provider boundary"
+        );
+
+        let error = require_root_settled(&harness)
+            .expect_err("an active durable operation cannot be reported as settled");
+        assert!(
+            matches!(error, tea_core::harness::HarnessError::RecoveryRequired { .. }),
+            "the host preserves the reducer-derived recovery obligation"
+        );
+
+        drop(drive);
+        drop(harness);
         let _ = fs::remove_dir_all(home);
     }
 

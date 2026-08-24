@@ -188,7 +188,7 @@ fn new_reaps_a_completed_task_but_never_drops_a_pending_task_receiver() {
     let options = CliOptions::parse(["tea"].map(OsString::from)).expect("test options parse");
     let mut app = App::new(options);
     let (sender, receiver) = std::sync::mpsc::sync_channel(1);
-    app.durable_task = Some(receiver);
+    app.durable_task = Some(super::runtime::OwnedRootTask::completed_for_test(receiver));
 
     // The special `/new` path reaches `new_session`, but an empty receiver
     // still owns a worker that can publish terminal durable effects.

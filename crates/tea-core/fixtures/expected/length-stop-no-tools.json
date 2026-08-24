@@ -10,12 +10,13 @@
     {"seq":1,"type":"turn_start","data":{"turn":0}},
     {"seq":2,"type":"message_start","data":{"role":"user"}},
     {"seq":3,"type":"message_end","data":{"role":"user"}},
-    {"seq":4,"type":"message_start","data":{"role":"assistant"}},
-    {"seq":5,"type":"message_update","data":{"role":"assistant","delta":"partial answer"}},
-    {"seq":6,"type":"message_end","data":{"role":"assistant"}},
-    {"seq":7,"type":"turn_end","data":{"stop_reason":"length"}},
-    {"seq":8,"type":"agent_end","data":{}},
-    {"seq":9,"type":"agent_settled","data":{"outcome":"completed"}}
+    { "seq": 4, "type": "prompt_layout_observed", "data": {} },
+    {"seq":5,"type":"message_start","data":{"role":"assistant"}},
+    {"seq":6,"type":"message_update","data":{"role":"assistant","delta":"partial answer"}},
+    {"seq":7,"type":"message_end","data":{"role":"assistant"}},
+    {"seq":8,"type":"turn_end","data":{"stop_reason":"length"}},
+    {"seq":9,"type":"agent_end","data":{}},
+    {"seq":10,"type":"agent_settled","data":{"outcome":"completed"}}
   ],
   "messages": [
     {"role":"user","content":[{"type":"text","text":"Write a long answer."}]},
