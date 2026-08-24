@@ -143,6 +143,40 @@ reproducible in fixtures. The current schema constant is
 `SESSION_FORMAT_VERSION = 1`; every record is bounded to 1 MiB and a header
 that disagrees is rejected before record decoding or repair.
 
+## Durable agent graph
+
+The v1 schema is updated in place with first-class subagent facts; there is no
+decoder for a pre-subagent intermediate shape and no v2 migration. Absence of a
+`SubagentPolicy` fact means the optional capability is absent. A session that
+contains one persists the ordered full model descriptors and display metadata,
+known context windows, concurrency and total-spawn limits, timeout, and exact
+root collaboration-tool surface digest before any child spawn.
+
+`AgentSpawned` binds a deterministic `AgentId` to its root lane and operation,
+unique task name, child lane, model/thinking/context mode, exact optional parent
+source leaf, workspace lease, immutable harness identity, and durable spawn tool
+intent. The accepted child uses `OperationKind::Subagent`; ordinary operation,
+epoch, provider, tool, usage, and completion records remain authoritative for
+its execution rather than being duplicated as agent-state facts.
+
+`WorkspaceDelta` retains the child and lease, synthetic base and result Git
+commits, strictly sorted repository-relative paths, and an immutable binary
+patch `PayloadRef`. `AgentTaskFinished` follows the child's terminal operation
+record and retains its final entry, inline-or-artifact report, and optional
+delta. `WorkspaceDeltaApplied` is appended only after an exact parent
+application is proven committed.
+
+`reduce_agent_graph` is a pure projection over the append-only prefix. It
+accepts documented crash prefixes such as a spawn without an operation or a
+finished operation awaiting workspace finalization. It rejects duplicate
+agent/lane and task-name bindings, unknown parents or harness identities,
+models outside the persisted policy, mismatched child operations or leases,
+terminal facts preceding completion, unknown or mismatched deltas, invalid
+application references, and paths with NUL, absolute/parent components,
+duplicates, or nondeterministic ordering. Running, finalizing, completed,
+delta-ready, interrupted, and applied views are derived rather than persisted
+as redundant transition records.
+
 ## Evidence and artifacts
 
 Payloads that exceed an explicit policy may be stored in objects/ and
@@ -153,6 +187,10 @@ identity and length.
 SessionFact::TraceArtifact retains a redacted trace's artifact ID, byte length,
 media type, operation, epoch, core run, and resolved harness identity. That
 makes a trace recoverable evidence rather than best-effort telemetry.
+
+Subagent report and patch artifacts are equally first-class direct session
+roots. Verification checks their declared identity and length; garbage
+collection and export cannot omit them while their graph facts remain.
 
 Use `verify_session` for the durable prefix and `session_artifact_roots` for
 the exact direct session-owned immutable roots. The terminal operator commands

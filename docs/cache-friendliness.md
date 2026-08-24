@@ -9,8 +9,9 @@ Prompt cache behavior has two different evidence levels:
    only evidence treated as an actual provider cache hit or write. A proxy prefix must never be
    presented as a hit.
 
-Each live `SessionRuntime` shares one volatile `PromptLayoutLedger` across the fresh core agents
-created for successive operations. The ledger compares the exact `ModelRequest` after context
+Each live `SessionSupervisor` owns one volatile `PromptLayoutLedger` per lane and reuses that
+lane-local ledger across fresh core agents created for successive operations. Sibling lanes never
+become one another's predecessor. The ledger compares the exact `ModelRequest` after context
 projection and hooks, immediately before the provider effect. Its predecessor is process-local
 and is never persisted; the `PromptLayoutObserved` lifecycle event contains only fingerprints,
 lengths, joined prefix evidence, changed components, and continuity classification. The first
@@ -19,6 +20,19 @@ request is explicitly unavailable (`FirstRequest` with no prefix), while an appe
 provider/model/tool-domain transition is separately classified as `DomainChanged`.
 Reopening a runtime creates a fresh volatile ledger, so the first request after reopen is again
 unavailable rather than being joined to a prior process lifetime.
+
+An enabled root cache domain includes its five ordered collaboration tools
+(`spawn_agent`, `wait_agent`, `list_agents`, `interrupt_agent`, and
+`apply_agent_changes`) and the persisted ordered child-model enum; changing
+that catalog is an intentional domain change. A child request keeps this prefix
+order: stable Tea v2 child system prompt, ordered coding tools, child instruction
+suffix, optional exact parent semantic context, stable logical workspace
+descriptor, and the explicit assignment last. Agent/task IDs, task state,
+timestamps and physical worktree paths are excluded. Consequently two children
+with the same model, harness, context mode and parent source leaf have
+byte-identical request prefixes through the item before different assignments,
+without pretending sibling ledgers are adjacent or calling that evidence a
+provider cache hit.
 
 The Luau policy plane cannot write, clear, or replace this ledger. Candidate hooks run first, and
 the kernel measures their final provider-facing result at the same request boundary used for

@@ -10,7 +10,10 @@ use super::error::AppError;
 /// The terminal intentionally never constructs an unmanaged [`tea_core::Agent`]. Its only
 /// execution authority is the session-owned durable harness, which captures this configuration
 /// in a committed revision before starting an epoch.
-pub(super) fn host_configuration(tools: TeaCodingToolsV2) -> Result<AgentConfiguration, AppError> {
+pub(super) fn host_configuration(
+    tools: TeaCodingToolsV2,
+    logical_workspace_label: &str,
+) -> Result<AgentConfiguration, AppError> {
     let profile = TeaDefaultCodingProfileV2::pinned_default()
         .map_err(|error| AppError::Setup(error.to_string()))?;
     let registry = tools.registry();
@@ -18,10 +21,92 @@ pub(super) fn host_configuration(tools: TeaCodingToolsV2) -> Result<AgentConfigu
         .validate_registry(&registry)
         .map_err(|error| AppError::Setup(error.to_string()))?;
     Ok(AgentConfiguration::new(
-        profile.system_prompt_for_workspace(tools.workspace().as_path()),
+        profile.system_prompt_for_workspace(std::path::Path::new(logical_workspace_label)),
         registry,
         Arc::new(OpenAiContextHook),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn host_configuration_keeps_the_logical_workspace_outside_tool_authority() {
+        let physical = std::env::temp_dir().join(format!(
+            "tea-agent-host-logical-workspace-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&physical).expect("physical workspace creates");
+        let configuration = host_configuration(
+            TeaCodingToolsV2::new(&physical).expect("physical tools configure"),
+            "/stable/logical/workspace",
+        )
+        .expect("host configuration assembles");
+
+        assert!(configuration
+            .system_prompt
+            .contains("Current working directory: /stable/logical/workspace"));
+        assert!(
+            !configuration
+                .system_prompt
+                .contains(&*physical.to_string_lossy()),
+            "the prompt must not disclose the authority-bearing physical path"
+        );
+        let _ = std::fs::remove_dir_all(physical);
+    }
+
+    #[test]
+    fn physical_child_worktree_spelling_does_not_change_logical_prompt_fingerprint() {
+        let root = std::env::temp_dir().join(format!(
+            "tea-agent-host-logical-fingerprint-{}",
+            std::process::id()
+        ));
+        let first_physical = root.join("child-a");
+        let second_physical = root.join("child-b");
+        std::fs::create_dir_all(&first_physical).expect("first physical worktree creates");
+        std::fs::create_dir_all(&second_physical).expect("second physical worktree creates");
+        let first = host_configuration(
+            TeaCodingToolsV2::new(&first_physical).expect("first child tools configure"),
+            "/stable/logical/workspace",
+        )
+        .expect("first child configuration assembles");
+        let second = host_configuration(
+            TeaCodingToolsV2::new(&second_physical).expect("second child tools configure"),
+            "/stable/logical/workspace",
+        )
+        .expect("second child configuration assembles");
+        let first_request = tea_core::scheduler::ModelRequest {
+            system_prompt: first.system_prompt,
+            context: "stable child assignment".into(),
+            ..tea_core::scheduler::ModelRequest::default()
+        };
+        let second_request = tea_core::scheduler::ModelRequest {
+            system_prompt: second.system_prompt,
+            context: "stable child assignment".into(),
+            ..tea_core::scheduler::ModelRequest::default()
+        };
+        let measurement = tea_core::measurement::measure_prompt_cacheability(
+            Some(&first_request),
+            &second_request,
+        );
+
+        assert_eq!(
+            measurement.cache_domain_fingerprint,
+            tea_core::measurement::measure_prompt_cacheability(None, &first_request)
+                .cache_domain_fingerprint
+        );
+        assert!(!measurement.cache_domain_changed);
+        assert!(
+            !second_request
+                .system_prompt
+                .contains(&*first_physical.to_string_lossy())
+                && !second_request
+                    .system_prompt
+                    .contains(&*second_physical.to_string_lossy())
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

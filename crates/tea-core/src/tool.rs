@@ -486,8 +486,9 @@ impl ToolUpdateSink {
 pub struct ToolContext {
     /// Cancellation state owned by the run.
     pub cancellation: CancellationToken,
-    /// Arbitrary serialized host metadata for this execution.
-    pub metadata: Option<SerializedJson>,
+    /// Typed durable attribution for this exact tool execution. Sessionless
+    /// embeddings receive the explicit default rather than hidden metadata.
+    pub provenance: crate::effect::RunProvenance,
 }
 
 /// How the scheduler settles a started tool after run cancellation.

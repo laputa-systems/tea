@@ -9,10 +9,11 @@
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
+use std::num::{NonZeroU32, NonZeroU64};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tea_core::agent::AgentConfiguration;
 use tea_core::compaction::AutomaticCompactionPolicy;
 use tea_core::event::AgentEventKind;
@@ -28,7 +29,9 @@ use tea_core::harness::extension::{
     ExtensionToolLimits,
 };
 use tea_core::runtime::{
-    HarnessIdentity, RuntimeServices, SessionRuntime, TeaEvent, TeaEventSubscription,
+    HarnessIdentity, RuntimeServices, SessionSupervisor, SessionSupervisorInput,
+    SessionSupervisorReopenInput, SubagentPolicy, SubagentServices, TeaEvent,
+    TeaEventSubscription,
 };
 use tea_core::scheduler::ModelProvider;
 use tea_core::state::{
@@ -39,18 +42,22 @@ use tea_core::tool::ToolExecutionMode;
 use tea_luau::LuauExtensionEngine;
 use tea_protocol::JsonValue;
 use tea_session::{
-    reduce_lane, CanonicalHashWriter, Digest, DurabilityMode, EntryId, HarnessRevisionChangedEntry,
-    JsonlSession, LaneId, ModelChangedEntry, PayloadRef, ProvisionedEntry, SessionEntry,
-    SessionHeader, SessionId, SessionSnapshot, SessionWriter, ThinkingChangedEntry,
+    reduce_agent_graph, reduce_lane, CanonicalHashWriter, Digest, DurabilityMode, EntryId,
+    HarnessRevisionChangedEntry, JsonlSession, LaneId, ModelChangedEntry, PayloadRef,
+    ProvisionedEntry, SessionEntry, SessionFact, SessionHeader, SessionId, SessionSnapshot,
+    SessionWriter, SubagentModelRecord, SubagentPolicyFact, ThinkingChangedEntry,
     SESSION_FORMAT_VERSION,
 };
 
 use super::compaction::ProviderCompactor;
+use super::config::{SubagentTuiConfig, TuiConfig};
 use super::error::AppError;
+use super::provider_factory::ProviderFactory;
+use super::subagents::{SmolTaskRuntime, TuiSubagentHost};
 use super::support::{parse_thinking_level as parse_thinking_level_name, thinking_level_name};
 
 /// Concrete durable supervisor used by the terminal application.
-pub(super) type HostHarness = SessionRuntime<JsonlSession>;
+pub(super) type HostHarness = SessionSupervisor<JsonlSession>;
 
 /// Describe bundled host commands before a lazy session exists. This uses the
 /// same immutable source tree and extension engine later pinned in the
@@ -76,6 +83,8 @@ pub(super) struct DurableSessionSummary {
 static NEXT_SESSION_NONCE: AtomicU64 = AtomicU64::new(1);
 const HOST_SESSION_METADATA_VERSION: u64 = 1;
 const MAX_HOST_SESSION_METADATA_BYTES: u64 = 65_536;
+/// Existing host policy: permit exactly one automatic immutable activation per operation.
+const HOST_HARNESS_ROLLOVER_BUDGET: u32 = 1;
 
 pub(super) struct HostHarnessConfig<'a> {
     pub(super) tea_home: &'a Path,
@@ -86,6 +95,10 @@ pub(super) struct HostHarnessConfig<'a> {
     pub(super) thinking_level: Option<ThinkingLevel>,
     pub(super) compactor: Option<Arc<ProviderCompactor>>,
     pub(super) automatic_compaction: AutomaticCompactionPolicy,
+    /// Terminal-only optional child authority. `None` leaves root prompt,
+    /// tools, catalog and executable services byte-identical to the legacy
+    /// feature-disabled path.
+    pub(super) subagents: Option<HostSubagentConfig>,
 }
 
 pub(super) struct HostHarnessReopen<'a> {
@@ -97,6 +110,16 @@ pub(super) struct HostHarnessReopen<'a> {
     pub(super) provider: Arc<dyn ModelProvider>,
     pub(super) compactor: Option<Arc<ProviderCompactor>>,
     pub(super) automatic_compaction: AutomaticCompactionPolicy,
+    pub(super) subagents: Option<HostSubagentConfig>,
+}
+
+/// Global terminal authorization retained only while an enabled TUI session
+/// is being assembled. The effective `SubagentPolicy` is derived and then
+/// persisted before its root collaboration schema becomes active.
+#[derive(Clone)]
+pub(super) struct HostSubagentConfig {
+    pub(super) factory: Arc<ProviderFactory>,
+    pub(super) config: SubagentTuiConfig,
 }
 
 /// Create one fresh session-local managed harness under the host-selected Tea
@@ -114,6 +137,7 @@ pub(super) fn create_host_harness(
         thinking_level,
         compactor,
         automatic_compaction,
+        subagents,
     } = config;
     let sessions_root = tea_home.join("sessions");
     ensure_private_directory(tea_home)?;
@@ -122,6 +146,10 @@ pub(super) fn create_host_harness(
     let workspace_root = sessions_root.join(&workspace_key);
     ensure_private_directory(&workspace_root)?;
     let thinking_level = thinking_level.unwrap_or(ThinkingLevel::Off);
+    let subagent_policy = subagents
+        .as_ref()
+        .map(|subagents| subagents.factory.resolve_subagent_policy(&model, &subagents.config))
+        .transpose()?;
 
     let profile = model_profile(&model)?;
     let template = epoch_template(
@@ -132,6 +160,19 @@ pub(super) fn create_host_harness(
         compactor,
         automatic_compaction,
     );
+    let child_configuration = if subagent_policy.is_some() {
+        let tools = tea_core::coding::TeaCodingToolsV2::with_operations(
+            workspace,
+            Arc::new(super::nonblocking_operations::NonblockingCodingOperations),
+        )
+        .map_err(|error| AppError::Setup(format!("invalid child workspace template: {error}")))?;
+        Some(super::host::host_configuration(
+            tools,
+            &workspace.to_string_lossy(),
+        )?)
+    } else {
+        None
+    };
     let created_at_ms = now_ms()?;
 
     // Session identity is only an opaque directory/name key. A collision is
@@ -165,7 +206,7 @@ pub(super) fn create_host_harness(
             JsonValue::String(thinking_level_name(thinking_level).into()),
         );
         let header = SessionHeader::new(
-            session_id,
+            session_id.clone(),
             workspace.to_string_lossy().into_owned(),
             metadata,
         );
@@ -192,11 +233,15 @@ pub(super) fn create_host_harness(
         capability_catalog
             .insert(goal_binding)
             .map_err(|error| AppError::Setup(error.to_string()))?;
+        let (root_prompt, root_presentations) = root_harness_surface(
+            &configuration,
+            subagent_policy.as_ref(),
+        )?;
         let seeded = HarnessSeedBuilder::new(
             Arc::clone(&artifacts),
             Arc::new(LuauExtensionEngine),
             host_profile_digest(&configuration),
-            configuration.system_prompt.clone(),
+            root_prompt,
             profile.clone(),
             SelfExtensionMode::Off,
             resource_limits.clone(),
@@ -206,13 +251,27 @@ pub(super) fn create_host_harness(
             scope: HarnessSeedExtensionScope::Global,
             source: tea_luau::builtins::goal(extension_limits(&resource_limits)),
         }])
-        .capability_bindings(vec![goal_binding_ref])
-        .trusted_tool_presentations(tool_presentations(&configuration))
+        .capability_bindings(vec![goal_binding_ref.clone()])
+        .trusted_tool_presentations(root_presentations)
         .seed(HarnessActor::Host, created_at_ms)
         .map_err(|error| AppError::Setup(error.to_string()))?;
-        let repository = seeded.repository;
+        let mut repository = seeded.repository;
         let snapshot = seeded.snapshot;
         let revision = seeded.revision;
+        let child_harnesses = match (&subagents, &subagent_policy, &child_configuration) {
+            (Some(_subagents), Some(policy), Some(configuration)) => seed_child_harnesses(
+                &mut repository,
+                Arc::clone(&artifacts),
+                Arc::clone(&provider),
+                configuration,
+                policy,
+                &resource_limits,
+                &goal_binding_ref,
+                created_at_ms,
+            )?,
+            (None, None, None) => Vec::new(),
+            _ => return Err(AppError::Setup("subagent host setup is internally inconsistent".into())),
+        };
         let model_entry_id = EntryId::new(format!("initial-model-{}", nonce))
             .map_err(|error| AppError::Setup(error.to_string()))?;
         session.append_entry(
@@ -237,6 +296,9 @@ pub(super) fn create_host_harness(
                 }),
             },
         )?;
+        if let Some(policy) = &subagent_policy {
+            session.append_fact(SessionFact::SubagentPolicy(subagent_policy_fact(policy)?))?;
+        }
         let revision_entry_id = EntryId::new(format!("initial-revision-{}", nonce))
             .map_err(|error| AppError::Setup(error.to_string()))?;
         session.append_entry(
@@ -251,15 +313,43 @@ pub(super) fn create_host_harness(
             },
         )?;
         let manager = Arc::new(
-            HarnessResolver::new(repository, template, Default::default())
+            HarnessResolver::new(repository, Default::default())
                 .capability_catalog(capability_catalog)
                 .reserved_extension_command_names(super::commands::names())
                 .self_extension_mode(SelfExtensionMode::Off),
         );
         let identity = HarnessIdentity::new(revision.revision_id, snapshot.id, profile.profile_id);
-        let harness = Arc::new(SessionRuntime::new_with_artifact_store(
-            session, manager, identity, artifacts,
-        )?);
+        let subagent_services = match (&subagents, &subagent_policy) {
+            (Some(subagents), Some(policy)) => {
+                let host: Arc<dyn tea_core::runtime::SubagentHost> = Arc::new(TuiSubagentHost::new(
+                    workspace.to_path_buf(),
+                    session.directory().to_path_buf(),
+                    session_id.clone(),
+                    workspace.to_string_lossy().into_owned(),
+                    Arc::clone(&subagents.factory),
+                    Arc::clone(&artifacts),
+                    child_harnesses,
+                ));
+                let tasks: Arc<dyn tea_core::runtime::TaskRuntime> =
+                    Arc::new(SmolTaskRuntime::new());
+                Some(SubagentServices {
+                    policy: policy.clone(),
+                    host,
+                    tasks,
+                })
+            }
+            (None, None) => None,
+            _ => return Err(AppError::Setup("subagent services are internally inconsistent".into())),
+        };
+        let harness = SessionSupervisor::create(SessionSupervisorInput {
+            session,
+            resolver: manager,
+            root_identity: identity,
+            root_services: template,
+            artifacts,
+            rollover_budget: HOST_HARNESS_ROLLOVER_BUDGET,
+            subagents: subagent_services,
+        })?;
         let state_store: Arc<dyn tea_core::harness::extension::ExtensionStateStore> =
             Arc::clone(&harness) as Arc<dyn tea_core::harness::extension::ExtensionStateStore>;
         state_handle
@@ -347,13 +437,17 @@ pub(super) fn list_host_sessions(
     Ok(sessions)
 }
 
-/// Read the model required by one named session from the validated durable
-/// header. Session-picker metadata is intentionally not consulted here: it is
-/// a disposable discovery cache and must not determine resume behavior.
-pub(super) fn read_host_session_model(
+/// Validate whether the current terminal configuration may execute a durable
+/// session before selecting its provider or replacing an already-open writer.
+///
+/// This inspection is deliberately read-only: a persisted child policy is an
+/// authorization boundary, so rejecting it must not load credentials, create
+/// an adapter factory, or discard the application's current idle harness.
+pub(super) fn authorize_host_session_reopen(
     tea_home: &Path,
     workspace: &Path,
     session_id: &str,
+    config: &TuiConfig,
 ) -> Result<ModelDescriptor, AppError> {
     let session_id = SessionId::new(session_id.to_owned())
         .map_err(|error| AppError::Setup(error.to_string()))?;
@@ -375,6 +469,13 @@ pub(super) fn read_host_session_model(
             workspace.display()
         )));
     }
+    let graph = reduce_agent_graph(&inspection.snapshot)
+        .map_err(|error| AppError::Setup(error.to_string()))?;
+    let current_policy = config
+        .features
+        .subagents
+        .then_some(&config.subagents);
+    reopen_subagent_policy(graph.policy.as_ref(), current_policy)?;
     header.model.ok_or_else(|| {
         AppError::Setup("durable session header is missing its immutable model identity".into())
     })
@@ -408,6 +509,7 @@ pub(super) fn reopen_host_harness(
         provider,
         compactor,
         automatic_compaction,
+        subagents,
     } = input;
     let session_id = SessionId::new(session_id.to_owned())
         .map_err(|error| AppError::Setup(error.to_string()))?;
@@ -447,6 +549,8 @@ pub(super) fn reopen_host_harness(
     }
     let artifacts: Arc<dyn tea_session::ArtifactStore> =
         Arc::new(session.artifact_store().map_err(AppError::from)?);
+    let agent_graph = reduce_agent_graph(&snapshot)
+        .map_err(|error| AppError::Setup(error.to_string()))?;
     let reduction = reduce_lane(snapshot.clone(), LaneId::main())
         .map_err(|error| AppError::Setup(error.to_string()))?;
     let thinking_level = reduction
@@ -463,7 +567,7 @@ pub(super) fn reopen_host_harness(
         .transpose()?
         .unwrap_or(header.thinking_level);
     let template = epoch_template(
-        provider,
+        Arc::clone(&provider),
         configuration,
         model,
         thinking_level,
@@ -471,24 +575,83 @@ pub(super) fn reopen_host_harness(
         automatic_compaction,
     );
     let (state_handle, goal_binding) = goal_state_binding()?;
+    let goal_binding_ref = CapabilityBindingRef {
+        plugin_id: goal_binding.plugin_id().to_owned(),
+        capability: goal_binding.capability().to_owned(),
+        capability_version: goal_binding.capability_version().to_owned(),
+        binding_digest: goal_binding.binding_digest(),
+    };
     let mut capability_catalog = PluginCapabilityCatalog::new();
     capability_catalog
         .insert(goal_binding)
         .map_err(|error| AppError::Setup(error.to_string()))?;
+    let persisted_subagent_policy = reopen_subagent_policy(
+        agent_graph.policy.as_ref(),
+        subagents.as_ref().map(|subagents| &subagents.config),
+    )?;
+    let subagent_services = match (persisted_subagent_policy, subagents.as_ref()) {
+        // A later global enablement must not rewrite the immutable surface of
+        // a session that was created without optional child services.
+        (None, _) => None,
+        (Some(policy), Some(subagents)) => {
+            let tools = tea_core::coding::TeaCodingToolsV2::with_operations(
+                workspace,
+                Arc::new(super::nonblocking_operations::NonblockingCodingOperations),
+            )
+            .map_err(|error| AppError::Setup(format!("invalid child workspace template: {error}")))?;
+            // Keep model-facing context anchored to the durable, original
+            // workspace spelling. Only child tool execution gets a physical
+            // lease worktree later in `TuiSubagentHost::prepared`.
+            let child_configuration = super::host::host_configuration(tools, &header.workspace)?;
+            let resource_limits = HarnessResourceLimits::default();
+            let child_harnesses = derive_child_harnesses(
+                Arc::clone(&artifacts),
+                Arc::clone(&provider),
+                &child_configuration,
+                &policy,
+                &resource_limits,
+                &goal_binding_ref,
+                snapshot.header().created_at_ms,
+            )?;
+            let host: Arc<dyn tea_core::runtime::SubagentHost> = Arc::new(TuiSubagentHost::new(
+                workspace.to_path_buf(),
+                session.directory().to_path_buf(),
+                session_id.clone(),
+                header.workspace.clone(),
+                Arc::clone(&subagents.factory),
+                Arc::clone(&artifacts),
+                child_harnesses,
+            ));
+            let tasks: Arc<dyn tea_core::runtime::TaskRuntime> = Arc::new(SmolTaskRuntime::new());
+            Some(SubagentServices {
+                policy,
+                host,
+                tasks,
+            })
+        }
+        (Some(_), None) => unreachable!("validated enabled session needs a host config"),
+    };
     let manager = Arc::new(
         HarnessResolver::new(
             HarnessRepository::with_extension_engine(
                 Arc::clone(&artifacts),
                 Arc::new(LuauExtensionEngine),
             ),
-            template,
             Default::default(),
         )
         .capability_catalog(capability_catalog)
         .reserved_extension_command_names(super::commands::names())
         .self_extension_mode(header.self_extension_mode),
     );
-    let harness = Arc::new(SessionRuntime::reopen_with_artifact_store(session, manager, artifacts)?);
+    let harness = SessionSupervisor::reopen(SessionSupervisorReopenInput {
+        session,
+        resolver: manager,
+        root_services: template,
+        lane_services: BTreeMap::new(),
+        artifacts,
+        rollover_budget: HOST_HARNESS_ROLLOVER_BUDGET,
+        subagents: subagent_services,
+    })?;
     let state_store: Arc<dyn tea_core::harness::extension::ExtensionStateStore> =
         Arc::clone(&harness) as Arc<dyn tea_core::harness::extension::ExtensionStateStore>;
     state_handle
@@ -633,7 +796,7 @@ pub(super) async fn stream_host_prompt(
     subscription: TeaEventSubscription,
     prompt: String,
 ) -> Result<(), AppError> {
-    let mut drive = Box::pin(harness.run_prompt(prompt));
+    let mut drive = Box::pin(harness.run_root_prompt(prompt));
     loop {
         drain_prompt_events(&subscription)?;
         if let Some(result) = smol::future::poll_once(&mut drive).await {
@@ -656,7 +819,10 @@ fn drain_prompt_events(subscription: &TeaEventSubscription) -> Result<(), AppErr
     let mut stdout = io::stdout().lock();
     let mut wrote = false;
     while let Ok(event) = subscription.try_recv() {
-        if let TeaEvent::Agent(event) = event {
+        if let TeaEvent::Agent { lane_id, event } = event {
+            if lane_id != LaneId::main() {
+                continue;
+            }
             if let AgentEventKind::MessageUpdate {
                 text_delta: Some(text),
                 ..
@@ -729,6 +895,282 @@ fn tool_presentations(configuration: &AgentConfiguration) -> Vec<ToolPresentatio
             },
         })
         .collect()
+}
+
+/// Construct the exact immutable root collaboration surface without changing
+/// the feature-disabled host bytes. Live root collaboration tools are added
+/// by the core supervisor only after this matching policy fact is durable.
+fn root_harness_surface(
+    configuration: &AgentConfiguration,
+    policy: Option<&SubagentPolicy>,
+) -> Result<(String, Vec<ToolPresentationDescriptor>), AppError> {
+    let mut prompt = configuration.system_prompt.clone();
+    let mut definitions = configuration.tools.definitions();
+    tea_core::runtime::append_root_subagent_surface(&mut prompt, &mut definitions, policy)
+        .map_err(|error| AppError::Setup(error.to_string()))?;
+    let mut presentations = tool_presentations(configuration);
+    if let Some(policy) = policy {
+        presentations.extend(
+            tea_core::runtime::root_subagent_tool_presentations(policy)
+                .map_err(|error| AppError::Setup(error.to_string()))?,
+        );
+    }
+    debug_assert_eq!(definitions.len(), presentations.len());
+    Ok((prompt, presentations))
+}
+
+/// Encode the core-neutral policy in the session's v1 durable spelling.
+fn subagent_policy_fact(policy: &SubagentPolicy) -> Result<SubagentPolicyFact, AppError> {
+    policy
+        .validate()
+        .map_err(|error| AppError::Setup(format!("invalid subagent policy: {error}")))?;
+    Ok(SubagentPolicyFact {
+        schema_version: 1,
+        models: policy
+            .models
+            .iter()
+            .map(|model| SubagentModelRecord {
+                provider: model.descriptor.provider.clone(),
+                model: model.descriptor.model.clone(),
+                revision: model.descriptor.revision.clone(),
+                display_name: model.display_name.clone(),
+                context_window: model.context_window.map(NonZeroU64::get),
+            })
+            .collect(),
+        max_concurrent: policy.max_concurrent.get(),
+        max_total_per_operation: policy.max_total_per_operation.get(),
+        timeout_ms: policy.timeout.as_millis().min(u128::from(u64::MAX)) as u64,
+        tool_surface_digest: tea_core::runtime::root_subagent_tool_surface_digest(policy)
+            .map_err(|error| AppError::Setup(error.to_string()))?,
+    })
+}
+
+/// Decode the durable fact before installing any process-local host state.
+/// It deliberately does not re-resolve the current provider registry: the
+/// session catalog, rather than changed global configuration, authorizes a
+/// reopened session's previously committed child model domain.
+fn subagent_policy_from_fact(fact: &SubagentPolicyFact) -> Result<SubagentPolicy, AppError> {
+    fact.validate()
+        .map_err(|error| AppError::Setup(format!("invalid durable subagent policy: {error}")))?;
+    let models = fact
+        .models
+        .iter()
+        .map(|model| {
+            Ok(tea_core::runtime::SubagentModel {
+                descriptor: ModelDescriptor {
+                    provider: model.provider.clone(),
+                    model: model.model.clone(),
+                    revision: model.revision.clone(),
+                },
+                display_name: model.display_name.clone(),
+                context_window: match model.context_window {
+                    Some(value) => Some(NonZeroU64::new(value).ok_or_else(|| {
+                        AppError::Setup("durable subagent context window must be nonzero".into())
+                    })?),
+                    None => None,
+                },
+            })
+        })
+        .collect::<Result<Vec<_>, AppError>>()?;
+    let max_concurrent = NonZeroU32::new(fact.max_concurrent).ok_or_else(|| {
+        AppError::Setup("durable subagent concurrent limit must be nonzero".into())
+    })?;
+    let max_total_per_operation = NonZeroU32::new(fact.max_total_per_operation).ok_or_else(|| {
+        AppError::Setup("durable subagent total limit must be nonzero".into())
+    })?;
+    let policy = SubagentPolicy {
+        models,
+        max_concurrent,
+        max_total_per_operation,
+        timeout: Duration::from_millis(fact.timeout_ms),
+    };
+    policy
+        .validate()
+        .map_err(|error| AppError::Setup(format!("invalid durable subagent policy: {error}")))?;
+    Ok(policy)
+}
+
+/// Current terminal configuration may restrict access to a reopened catalog,
+/// but it must never silently expand or replace the session's committed one.
+fn authorize_reopened_subagent_policy(
+    config: &SubagentTuiConfig,
+    policy: &SubagentPolicy,
+) -> Result<(), AppError> {
+    let provider = &policy
+        .models
+        .first()
+        .ok_or_else(|| AppError::Setup("durable subagent policy has no models".into()))?
+        .descriptor
+        .provider;
+    if let Some(configured) = &config.provider {
+        if configured != provider {
+            return Err(AppError::Setup(format!(
+                "durable subagent session requires provider {provider:?}; current TUI policy selects {configured:?}"
+            )));
+        }
+    }
+    if let Some(allowed_models) = &config.models {
+        for model in &policy.models {
+            if !allowed_models.iter().any(|allowed| allowed == &model.descriptor.model) {
+                return Err(AppError::Setup(format!(
+                    "durable subagent session requires model {:?}, absent from current TUI policy",
+                    model.descriptor.model
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Select the immutable child policy for reopen. A current enabled config is
+/// an authorization ceiling only; a current disabled config cannot retrofit
+/// an old disabled session or execute an enabled durable one.
+fn reopen_subagent_policy(
+    fact: Option<&SubagentPolicyFact>,
+    config: Option<&SubagentTuiConfig>,
+) -> Result<Option<SubagentPolicy>, AppError> {
+    let Some(fact) = fact else {
+        return Ok(None);
+    };
+    let config = config.ok_or_else(|| {
+        AppError::Setup("durable subagent session requires features.subagents = true".into())
+    })?;
+    let policy = subagent_policy_from_fact(fact)?;
+    authorize_reopened_subagent_policy(config, &policy)?;
+    Ok(Some(policy))
+}
+
+/// One child snapshot/revision pair before it is inserted into the root
+/// resolver catalog. Building it independently gives reopen a deterministic
+/// catalog derivation for every permitted model, including models never
+/// previously spawned in this process.
+fn child_harness_seeds(
+    artifacts: Arc<dyn tea_session::ArtifactStore>,
+    provider: Arc<dyn ModelProvider>,
+    configuration: &AgentConfiguration,
+    policy: &SubagentPolicy,
+    resource_limits: &HarnessResourceLimits,
+    goal_binding_ref: &CapabilityBindingRef,
+    created_at_ms: u64,
+) -> Result<Vec<(ModelDescriptor, tea_core::harness::SeededHarness)>, AppError> {
+    policy
+        .models
+        .iter()
+        .map(|model| {
+            let mut prompt = configuration.system_prompt.clone();
+            tea_core::runtime::append_child_subagent_instruction_suffix(&mut prompt);
+            let automatic_compaction = model
+                .context_window
+                .map(super::picker::automatic_compaction_policy)
+                .unwrap_or_else(AutomaticCompactionPolicy::disabled);
+            // A child thinking level is a live lane choice resolved by core
+            // at prepare/reopen time, not an immutable snapshot identity.
+            let child_template = RuntimeServices::from_agent_configuration(
+                Arc::clone(&provider),
+                configuration.clone(),
+            )
+            .model(model.descriptor.clone())
+            .automatic_compaction(automatic_compaction);
+            let profile = model_profile(&model.descriptor)?;
+            let seeded = HarnessSeedBuilder::new(
+                Arc::clone(&artifacts),
+                Arc::new(LuauExtensionEngine),
+                host_profile_digest(configuration),
+                prompt,
+                profile,
+                SelfExtensionMode::Off,
+                resource_limits.clone(),
+                child_template.runtime_policy_identities(),
+            )
+            .extensions(vec![HarnessSeedExtension {
+                scope: HarnessSeedExtensionScope::Global,
+                source: tea_luau::builtins::goal(extension_limits(resource_limits)),
+            }])
+            .capability_bindings(vec![goal_binding_ref.clone()])
+            .trusted_tool_presentations(tool_presentations(configuration))
+            .seed(HarnessActor::Host, created_at_ms)
+            .map_err(|error| AppError::Setup(error.to_string()))?;
+            Ok((model.descriptor.clone(), seeded))
+        })
+        .collect()
+}
+
+/// Stage every permitted child profile in the same immutable resolver catalog
+/// as the root. The resulting identities are the host lookup table used for
+/// an exact descriptor at child preparation time.
+fn seed_child_harnesses(
+    repository: &mut HarnessRepository,
+    artifacts: Arc<dyn tea_session::ArtifactStore>,
+    provider: Arc<dyn ModelProvider>,
+    configuration: &AgentConfiguration,
+    policy: &SubagentPolicy,
+    resource_limits: &HarnessResourceLimits,
+    goal_binding_ref: &CapabilityBindingRef,
+    created_at_ms: u64,
+) -> Result<Vec<(ModelDescriptor, HarnessIdentity)>, AppError> {
+    child_harness_seeds(
+        artifacts,
+        provider,
+        configuration,
+        policy,
+        resource_limits,
+        goal_binding_ref,
+        created_at_ms,
+    )?
+    .into_iter()
+    .map(|(descriptor, seeded)| {
+        let snapshot = repository
+            .stage_snapshot(seeded.snapshot.spec)
+            .map_err(|error| AppError::Setup(error.to_string()))?;
+        let revision = repository
+            .seed_revision(snapshot.id.clone(), HarnessActor::Host, created_at_ms)
+            .map_err(|error| AppError::Setup(error.to_string()))?;
+        if snapshot.id != seeded.snapshot.id || revision.revision_id != seeded.revision.revision_id {
+            return Err(AppError::Setup(
+                "child harness catalog staging did not preserve its deterministic identity".into(),
+            ));
+        }
+        Ok((
+            descriptor,
+            HarnessIdentity::new(revision.revision_id, snapshot.id, seeded.profile.profile_id),
+        ))
+    })
+    .collect()
+}
+
+/// Recompute the immutable child catalog identities during session reopen.
+/// `AgentSpawned` facts are intentionally not consulted: the policy's closed
+/// ordered model catalog is enough to recover models never used before exit.
+fn derive_child_harnesses(
+    artifacts: Arc<dyn tea_session::ArtifactStore>,
+    provider: Arc<dyn ModelProvider>,
+    configuration: &AgentConfiguration,
+    policy: &SubagentPolicy,
+    resource_limits: &HarnessResourceLimits,
+    goal_binding_ref: &CapabilityBindingRef,
+    created_at_ms: u64,
+) -> Result<Vec<(ModelDescriptor, HarnessIdentity)>, AppError> {
+    child_harness_seeds(
+        artifacts,
+        provider,
+        configuration,
+        policy,
+        resource_limits,
+        goal_binding_ref,
+        created_at_ms,
+    )?
+    .into_iter()
+    .map(|(descriptor, seeded)| {
+        Ok((
+            descriptor,
+            HarnessIdentity::new(
+                seeded.revision.revision_id,
+                seeded.snapshot.id,
+                seeded.profile.profile_id,
+            ),
+        ))
+    })
+    .collect()
 }
 
 fn host_profile_digest(configuration: &AgentConfiguration) -> Digest {
@@ -1214,7 +1656,13 @@ fn ensure_private_directory(path: &Path) -> Result<(), AppError> {
 mod tests {
     use super::super::host::host_configuration;
     use super::*;
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::process::Command;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Mutex;
+    use std::thread;
+    use std::time::{Duration, Instant};
     use tea_core::coding::TeaCodingToolsV2;
     use tea_core::hooks::NoHooks;
     use tea_core::scheduler::{
@@ -1266,6 +1714,133 @@ mod tests {
         }
     }
 
+    #[derive(Debug, Default)]
+    struct RootSubagentScriptProvider {
+        calls: AtomicU64,
+        requests: Mutex<Vec<ModelRequest>>,
+    }
+
+    impl ModelProvider for RootSubagentScriptProvider {
+        fn stream<'a>(
+            &'a self,
+            request: ModelRequest,
+            _cancellation: CancellationToken,
+        ) -> ModelFuture<'a> {
+            self.requests
+                .lock()
+                .expect("root fixture request lock")
+                .push(request);
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            let events = match call {
+                0 => vec![
+                    ModelStreamEvent::ToolCall(AgentToolCall {
+                        id: ToolCallId::new("root-spawn-child").expect("fixture tool call ID"),
+                        name: "spawn_agent".into(),
+                        arguments: SerializedJson::new(format!(
+                            r#"{{"task_name":"child","task":"Replace the tracked fixture text, then report completion.","model":"{}","context":"task"}}"#,
+                            tea_providers::local::LAGUNA_XS_2_1_MODEL,
+                        )),
+                    }),
+                    ModelStreamEvent::End(StopReason::ToolUse),
+                ],
+                1 => vec![
+                    ModelStreamEvent::ToolCall(AgentToolCall {
+                        id: ToolCallId::new("root-wait-child").expect("fixture tool call ID"),
+                        name: "wait_agent".into(),
+                        arguments: SerializedJson::new(
+                            r#"{"targets":["child"],"return_when":"all","timeout_ms":5000}"#,
+                        ),
+                    }),
+                    ModelStreamEvent::End(StopReason::ToolUse),
+                ],
+                2 => vec![
+                    ModelStreamEvent::TextDelta("root received child report".into()),
+                    ModelStreamEvent::End(StopReason::Stop),
+                ],
+                _ => vec![ModelStreamEvent::Error {
+                    message: "root fixture received an unexpected extra request".into(),
+                }],
+            };
+            Box::pin(std::future::ready(Ok(Box::new(ModelStream { events }) as _)))
+        }
+    }
+
+    fn git(directory: &Path, arguments: &[&str]) {
+        let output = Command::new("git")
+            .args(arguments)
+            .current_dir(directory)
+            .output()
+            .expect("Git fixture command starts");
+        assert!(
+            output.status.success(),
+            "Git fixture command failed in {}: {}",
+            directory.display(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn read_http_request(socket: &mut TcpStream) -> String {
+        let mut bytes = Vec::new();
+        let mut chunk = [0_u8; 4096];
+        let mut header_end = None;
+        let mut expected = None;
+        loop {
+            let read = socket.read(&mut chunk).expect("fixture request reads");
+            assert_ne!(read, 0, "provider request must not close before its body");
+            bytes.extend_from_slice(&chunk[..read]);
+            if header_end.is_none() {
+                header_end = bytes
+                    .windows(4)
+                    .position(|window| window == b"\r\n\r\n")
+                    .map(|offset| offset + 4);
+                if let Some(end) = header_end {
+                    let headers = std::str::from_utf8(&bytes[..end])
+                        .expect("fixture HTTP headers are UTF-8");
+                    let content_length = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then_some(value.trim())
+                        })
+                        .expect("provider request has content length")
+                        .parse::<usize>()
+                        .expect("provider content length is numeric");
+                    expected = Some(end + content_length);
+                }
+            }
+            if expected.is_some_and(|length| bytes.len() >= length) {
+                return String::from_utf8(bytes).expect("fixture request is UTF-8");
+            }
+        }
+    }
+
+    fn write_sse_response(socket: &mut TcpStream, body: &str) {
+        socket
+            .write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .as_bytes(),
+            )
+            .expect("fixture response headers write");
+        socket
+            .write_all(body.as_bytes())
+            .expect("fixture response body writes");
+    }
+
+    fn session_directory_for(home: &Path, session_id: &str) -> PathBuf {
+        let sessions = home.join("sessions");
+        let workspace = fs::read_dir(&sessions)
+            .expect("session workspace root lists")
+            .next()
+            .expect("session workspace root exists")
+            .expect("session workspace root is readable")
+            .path();
+        workspace.join(format!("{session_id}.tea"))
+    }
+
     fn temporary_home() -> PathBuf {
         static NEXT: AtomicU64 = AtomicU64::new(1);
         let path = std::env::temp_dir().join(format!(
@@ -1275,6 +1850,494 @@ mod tests {
         ));
         fs::create_dir(&path).expect("temporary home creates");
         path
+    }
+
+    fn durable_test_policy() -> SubagentPolicy {
+        SubagentPolicy {
+            models: vec![tea_core::runtime::SubagentModel {
+                descriptor: ModelDescriptor {
+                    provider: "fixture".into(),
+                    model: "fixture-model".into(),
+                    revision: Some("fixture-revision".into()),
+                },
+                display_name: "Fixture model".into(),
+                context_window: NonZeroU64::new(16_384),
+            }],
+            max_concurrent: NonZeroU32::new(2).expect("nonzero fixture limit"),
+            max_total_per_operation: NonZeroU32::new(4).expect("nonzero fixture limit"),
+            timeout: Duration::from_secs(90),
+        }
+    }
+
+    fn durable_test_subagent_config(config: SubagentTuiConfig) -> HostSubagentConfig {
+        HostSubagentConfig {
+            factory: Arc::new(ProviderFactory::new(
+                tea_providers::ProviderRegistry::new(),
+                None,
+                None,
+                "fixture logical workspace".into(),
+            )),
+            config,
+        }
+    }
+
+    #[test]
+    fn reopen_subagent_policy_allows_a_current_model_superset() {
+        let policy = durable_test_policy();
+        let fact = subagent_policy_fact(&policy).expect("durable fact encodes");
+        let config = SubagentTuiConfig {
+            provider: Some("fixture".into()),
+            models: Some(vec!["fixture-model".into(), "newer-model".into()]),
+            ..SubagentTuiConfig::default()
+        };
+
+        let reopened = reopen_subagent_policy(Some(&fact), Some(&config))
+        .expect("a current policy superset remains an authorization ceiling")
+        .expect("durable policy remains enabled");
+
+        assert_eq!(reopened, policy);
+    }
+
+    #[test]
+    fn reopen_subagent_policy_rejects_current_provider_or_model_restrictions() {
+        let fact = subagent_policy_fact(&durable_test_policy()).expect("durable fact encodes");
+        let wrong_provider = SubagentTuiConfig {
+            provider: Some("other".into()),
+            ..SubagentTuiConfig::default()
+        };
+        assert!(reopen_subagent_policy(
+            Some(&fact),
+            Some(&wrong_provider),
+        )
+        .is_err());
+
+        let missing_model = SubagentTuiConfig {
+            provider: Some("fixture".into()),
+            models: Some(vec!["other-model".into()]),
+            ..SubagentTuiConfig::default()
+        };
+        assert!(reopen_subagent_policy(
+            Some(&fact),
+            Some(&missing_model),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn reopen_subagent_policy_does_not_retrofit_a_disabled_session() {
+        let enabled_later = SubagentTuiConfig::default();
+
+        assert!(
+            reopen_subagent_policy(None, Some(&enabled_later))
+                .expect("disabled session does not need child services")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn enabled_host_persists_policy_before_root_revision_and_reopens_without_provider_io() {
+        let home = temporary_home();
+        let workspace = home.join("workspace");
+        fs::create_dir(&workspace).expect("workspace creates");
+        let model = ModelDescriptor {
+            provider: super::super::mock::PROVIDER_ID.into(),
+            model: super::super::mock::DEFAULT_MODEL_ID.into(),
+            revision: None,
+        };
+        let subagents = durable_test_subagent_config(SubagentTuiConfig::default());
+        let provider: Arc<dyn ModelProvider> = Arc::new(StopProvider);
+        let harness = create_host_harness(HostHarnessConfig {
+            tea_home: &home,
+            workspace: &workspace,
+            configuration: super::super::mock::configuration(),
+            model: model.clone(),
+            provider: Arc::clone(&provider),
+            thinking_level: Some(ThinkingLevel::High),
+            compactor: None,
+            automatic_compaction: AutomaticCompactionPolicy::disabled(),
+            subagents: Some(subagents.clone()),
+        })
+        .expect("enabled host seeds the fixed root and child catalogs");
+        let snapshot = harness.snapshot().expect("enabled session snapshots");
+        let policy_sequence = snapshot
+            .mutations()
+            .find_map(|mutation| match mutation.mutation {
+                tea_session::SessionMutationRef::Fact(fact)
+                    if matches!(fact.fact, SessionFact::SubagentPolicy(_)) =>
+                {
+                    Some(mutation.seq)
+                }
+                _ => None,
+            })
+            .expect("policy fact persists");
+        let revision_sequence = snapshot
+            .mutations()
+            .find_map(|mutation| match mutation.mutation {
+                tea_session::SessionMutationRef::Entry(entry)
+                    if matches!(entry.body, SessionEntry::HarnessRevisionChanged(_)) =>
+                {
+                    Some(mutation.seq)
+                }
+                _ => None,
+            })
+            .expect("initial root revision persists");
+        assert!(policy_sequence < revision_sequence);
+        assert_eq!(
+            reduce_agent_graph(&snapshot)
+                .expect("enabled graph reduces")
+                .policy
+                .expect("enabled graph retains policy")
+                .models
+                .len(),
+            1
+        );
+        let session_id = snapshot.header().session_id.to_string();
+        drop(harness);
+
+        let reopened = reopen_host_harness(HostHarnessReopen {
+            tea_home: &home,
+            workspace: &workspace,
+            session_id: &session_id,
+            configuration: super::super::mock::configuration(),
+            model,
+            provider,
+            compactor: None,
+            automatic_compaction: AutomaticCompactionPolicy::disabled(),
+            subagents: Some(subagents),
+        })
+        .expect("enabled catalog reopens without constructing a child adapter");
+        assert_eq!(
+            reopened.snapshot().expect("reopened session snapshots").last_sequence(),
+            snapshot.last_sequence()
+        );
+        drop(reopened);
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn scripted_subagent_lifecycle_keeps_the_physical_lease_out_of_provider_requests_and_reopens_results() {
+        let home = temporary_home();
+        let workspace = home.join("repository");
+        fs::create_dir(&workspace).expect("fixture repository creates");
+        git(&workspace, &["init"]);
+        git(&workspace, &["config", "user.name", "Tea Fixture"]);
+        git(&workspace, &["config", "user.email", "fixture@example.invalid"]);
+        fs::write(workspace.join("tracked.txt"), "original\n").expect("fixture file writes");
+        git(&workspace, &["add", "tracked.txt"]);
+        git(&workspace, &["commit", "-m", "initial"]);
+        let workspace = fs::canonicalize(workspace).expect("fixture repository canonicalizes");
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("child fixture listener binds");
+        let address = listener
+            .local_addr()
+            .expect("child fixture listener address resolves");
+        let provider_requests = Arc::new(Mutex::new(Vec::new()));
+        let recorded_requests = Arc::clone(&provider_requests);
+        let server = thread::spawn(move || {
+            listener
+                .set_nonblocking(true)
+                .expect("fixture listener becomes nonblocking");
+            let edit_arguments = r#"{"files":[{"path":"tracked.txt","edits":[{"oldText":"original\n","newText":"child result\n"}]}]}"#;
+            let serialized_arguments = tea_protocol::JsonValue::String(edit_arguments.into())
+                .to_json_string()
+                .expect("tool arguments encode");
+            let edit = [
+                r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"child-edit","function":{"name":"edit","arguments":"#,
+                &serialized_arguments,
+                r#"}}]},"finish_reason":"tool_calls"}]}
+
+data: [DONE]
+
+"#,
+            ]
+            .concat();
+            let report = r#"data: {"choices":[{"delta":{"content":"child finished isolated edit"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":4}}
+
+data: [DONE]
+
+"#;
+            for body in [&edit, report] {
+                let deadline = Instant::now() + Duration::from_secs(5);
+                let (mut socket, _) = loop {
+                    match listener.accept() {
+                        Ok(connection) => break connection,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            assert!(
+                                Instant::now() < deadline,
+                                "child provider request did not arrive before the fixture deadline"
+                            );
+                            thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(error) => panic!("child provider accept fails: {error}"),
+                    }
+                };
+                // On platforms where an accepted stream inherits the listener's
+                // nonblocking flag, parallel test load can leave the request body
+                // momentarily unreadable after `accept`. The listener remains
+                // nonblocking for its fail-fast deadline; each established HTTP
+                // stream uses ordinary blocking request semantics.
+                socket
+                    .set_nonblocking(false)
+                    .expect("accepted child provider stream becomes blocking");
+                recorded_requests
+                    .lock()
+                    .expect("fixture request lock")
+                    .push(read_http_request(&mut socket));
+                write_sse_response(&mut socket, body);
+            }
+        });
+
+        let root_model = ModelDescriptor {
+            provider: "local".into(),
+            model: "root-scripted-fixture".into(),
+            revision: None,
+        };
+        let configuration = host_configuration(
+            TeaCodingToolsV2::new(&workspace).expect("root coding tools configure"),
+            &workspace.to_string_lossy(),
+        )
+        .expect("root host configuration builds");
+        let subagents = HostSubagentConfig {
+            factory: Arc::new(ProviderFactory::new(
+                tea_providers::ProviderRegistry::new(),
+                Some(format!("http://{address}/v1")),
+                None,
+                workspace.to_string_lossy().into_owned(),
+            )),
+            config: SubagentTuiConfig {
+                provider: Some("local".into()),
+                models: Some(vec![tea_providers::local::LAGUNA_XS_2_1_MODEL.into()]),
+                ..SubagentTuiConfig::default()
+            },
+        };
+        let root_provider = Arc::new(RootSubagentScriptProvider::default());
+        let harness = create_host_harness(HostHarnessConfig {
+            tea_home: &home,
+            workspace: &workspace,
+            configuration: configuration.clone(),
+            model: root_model.clone(),
+            provider: Arc::clone(&root_provider) as Arc<dyn ModelProvider>,
+            thinking_level: Some(ThinkingLevel::Off),
+            compactor: None,
+            automatic_compaction: AutomaticCompactionPolicy::disabled(),
+            subagents: Some(subagents.clone()),
+        })
+        .expect("enabled fixture host creates");
+        let session_id = harness
+            .snapshot()
+            .expect("fixture snapshot reads")
+            .header()
+            .session_id
+            .to_string();
+
+        let run = smol::block_on(harness.run_root_prompt("delegate the fixture edit"));
+        run.expect("root spawn and wait complete through the supervisor");
+        server.join().expect("child provider fixture settles");
+        assert_eq!(
+            fs::read(workspace.join("tracked.txt")).expect("parent fixture reads"),
+            b"original\n",
+            "the child edit must remain isolated until a later explicit apply"
+        );
+
+        let snapshot = harness.snapshot().expect("settled fixture snapshot reads");
+        let graph = reduce_agent_graph(&snapshot).expect("child graph reduces");
+        let child = graph
+            .agents
+            .values()
+            .next()
+            .expect("one child was spawned through the real root tool");
+        assert!(
+            matches!(child.state, tea_session::AgentState::DeltaReady { .. }),
+            "child terminal report and isolated workspace delta must both be durable"
+        );
+        assert!(
+            child
+                .terminal
+                .as_ref()
+                .is_some_and(|terminal| terminal.workspace_delta_id.is_some()),
+            "wait_agent must observe the durable result rather than volatile task completion"
+        );
+        let expected_physical_lease = session_directory_for(&home, &session_id)
+            .join("subagents")
+            .join(tea_session::WorkspaceLeaseId::derive(&child.spawned.agent_id).as_str())
+            .join("worktree");
+        let delta_id = child
+            .terminal
+            .as_ref()
+            .and_then(|terminal| terminal.workspace_delta_id.as_ref())
+            .expect("terminal child result names its durable delta")
+            .to_string();
+        let root_requests = root_provider
+            .requests
+            .lock()
+            .expect("root fixture request lock");
+        assert_eq!(root_requests.len(), 3, "root makes spawn, wait, and post-wait turns");
+        let post_wait = &root_requests[2].context;
+        assert!(
+            post_wait.contains("child finished isolated edit"),
+            "the root's next provider request receives the durable child report"
+        );
+        assert!(
+            post_wait.contains(&delta_id) && post_wait.contains("tracked.txt"),
+            "the root's next provider request receives the delta identity and changed path"
+        );
+        assert!(
+            !post_wait.contains("diff --git")
+                && !post_wait.contains(expected_physical_lease.to_string_lossy().as_ref()),
+            "wait_agent exposes bounded result metadata, never patch bytes or the lease path"
+        );
+        drop(root_requests);
+        let requests = provider_requests.lock().expect("fixture request lock");
+        assert_eq!(requests.len(), 2, "the child made an edit turn and a report turn");
+        for request in requests.iter() {
+            assert!(
+                request.contains(workspace.to_string_lossy().as_ref()),
+                "the child request retains the stable original workspace label"
+            );
+            assert!(
+                !request.contains(expected_physical_lease.to_string_lossy().as_ref()),
+                "the prepared child provider request must never disclose its authority-bearing lease path"
+            );
+        }
+        drop(requests);
+
+        drop(harness);
+        let reopened = reopen_host_harness(HostHarnessReopen {
+            tea_home: &home,
+            workspace: &workspace,
+            session_id: &session_id,
+            configuration,
+            model: root_model,
+            provider: root_provider as Arc<dyn ModelProvider>,
+            compactor: None,
+            automatic_compaction: AutomaticCompactionPolicy::disabled(),
+            subagents: Some(subagents),
+        })
+        .expect("terminal child result reopens without replaying provider work");
+        let reopened_graph = reduce_agent_graph(
+            &reopened.snapshot().expect("reopened fixture snapshot reads"),
+        )
+        .expect("reopened child graph reduces");
+        assert!(
+            matches!(
+                reopened_graph
+                    .agents
+                    .values()
+                    .next()
+                    .expect("reopened child remains present")
+                    .state,
+                tea_session::AgentState::DeltaReady { .. }
+            ),
+            "reopen must retain the child report and unapplied isolated delta"
+        );
+        drop(reopened);
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn child_catalog_derivation_recovers_unspawned_model_identities() {
+        let home = temporary_home();
+        let workspace = home.join("workspace");
+        fs::create_dir(&workspace).expect("workspace creates");
+        let configuration = host_configuration(
+            TeaCodingToolsV2::new(&workspace).expect("coding tools configure"),
+            &workspace.to_string_lossy(),
+        )
+        .expect("child configuration builds");
+        let policy = SubagentPolicy {
+            models: vec![
+                tea_core::runtime::SubagentModel {
+                    descriptor: ModelDescriptor {
+                        provider: "fixture".into(),
+                        model: "first-model".into(),
+                        revision: Some("r1".into()),
+                    },
+                    display_name: "First fixture".into(),
+                    context_window: NonZeroU64::new(8_192),
+                },
+                tea_core::runtime::SubagentModel {
+                    descriptor: ModelDescriptor {
+                        provider: "fixture".into(),
+                        model: "never-spawned-model".into(),
+                        revision: Some("r2".into()),
+                    },
+                    display_name: "Never spawned fixture".into(),
+                    context_window: NonZeroU64::new(16_384),
+                },
+            ],
+            max_concurrent: NonZeroU32::new(2).expect("nonzero fixture limit"),
+            max_total_per_operation: NonZeroU32::new(4).expect("nonzero fixture limit"),
+            timeout: Duration::from_secs(90),
+        };
+        let artifacts: Arc<dyn tea_session::ArtifactStore> =
+            Arc::new(tea_session::MemoryArtifactStore::default());
+        let provider: Arc<dyn ModelProvider> = Arc::new(StopProvider);
+        let (_, binding) = goal_state_binding().expect("goal binding builds");
+        let binding_ref = CapabilityBindingRef {
+            plugin_id: binding.plugin_id().to_owned(),
+            capability: binding.capability().to_owned(),
+            capability_version: binding.capability_version().to_owned(),
+            binding_digest: binding.binding_digest(),
+        };
+        let mut seeds = child_harness_seeds(
+            Arc::clone(&artifacts),
+            Arc::clone(&provider),
+            &configuration,
+            &policy,
+            &HarnessResourceLimits::default(),
+            &binding_ref,
+            1,
+        )
+        .expect("initial child catalog seeds");
+        for (_, seeded) in &seeds {
+            let prompt = &seeded.snapshot.spec.base_system_prompt;
+            assert!(prompt.ends_with(tea_core::runtime::CHILD_SUBAGENT_INSTRUCTION_SUFFIX));
+            assert_eq!(
+                prompt
+                    .matches(tea_core::runtime::CHILD_SUBAGENT_INSTRUCTION_SUFFIX)
+                    .count(),
+                1
+            );
+            assert!(seeded.snapshot.spec.tool_presentations.iter().all(|tool| {
+                !matches!(
+                    tool.name.as_str(),
+                    "spawn_agent"
+                        | "wait_agent"
+                        | "list_agents"
+                        | "interrupt_agent"
+                        | "apply_agent_changes"
+                )
+            }));
+        }
+        let (_, first) = seeds.remove(0);
+        let mut repository = first.repository;
+        let staged = seed_child_harnesses(
+            &mut repository,
+            Arc::clone(&artifacts),
+            Arc::clone(&provider),
+            &configuration,
+            &policy,
+            &HarnessResourceLimits::default(),
+            &binding_ref,
+            1,
+        )
+        .expect("every authorized child is staged in the resolver catalog");
+        let reopened = derive_child_harnesses(
+            artifacts,
+            provider,
+            &configuration,
+            &policy,
+            &HarnessResourceLimits::default(),
+            &binding_ref,
+            99,
+        )
+        .expect("reopen derives the complete catalog without spawn facts");
+
+        assert_eq!(staged, reopened);
+        assert!(reopened
+            .iter()
+            .any(|(model, _)| model.model == "never-spawned-model"));
+        let _ = fs::remove_dir_all(home);
     }
 
     #[test]
@@ -1301,6 +2364,7 @@ mod tests {
             thinking_level: Some(ThinkingLevel::Off),
             compactor: None,
             automatic_compaction: AutomaticCompactionPolicy::disabled(),
+            subagents: None,
         })
         .expect("host harness creates");
         let before = harness.snapshot().expect("initial session snapshot");
@@ -1313,7 +2377,8 @@ mod tests {
             .iter()
             .any(|fact| matches!(fact.fact, tea_session::SessionFact::HarnessCatalog(_))));
         let operation =
-            smol::block_on(harness.run_prompt("persisted prompt")).expect("durable prompt settles");
+            smol::block_on(harness.run_root_prompt("persisted prompt"))
+                .expect("durable prompt settles");
         assert!(operation.is_completed());
         let after = harness.snapshot().expect("completed session snapshot");
         assert!(after
@@ -1329,7 +2394,10 @@ mod tests {
         let workspace = home.join("workspace");
         fs::create_dir(&workspace).expect("workspace creates");
         let configuration =
-            host_configuration(TeaCodingToolsV2::new(&workspace).expect("Tea v2 tools configure"))
+            host_configuration(
+                TeaCodingToolsV2::new(&workspace).expect("Tea v2 tools configure"),
+                &workspace.to_string_lossy(),
+            )
                 .expect("durable host configuration assembles");
         let harness = create_host_harness(HostHarnessConfig {
             tea_home: &home,
@@ -1344,10 +2412,11 @@ mod tests {
             thinking_level: Some(ThinkingLevel::Off),
             compactor: None,
             automatic_compaction: AutomaticCompactionPolicy::disabled(),
+            subagents: None,
         })
         .expect("durable host harness creates");
 
-        smol::block_on(harness.run_prompt("hello"))
+        smol::block_on(harness.run_root_prompt("hello"))
             .expect("durable host request should use compatible context");
 
         let _ = fs::remove_dir_all(home);
@@ -1378,9 +2447,10 @@ mod tests {
             thinking_level: Some(ThinkingLevel::High),
             compactor: None,
             automatic_compaction: AutomaticCompactionPolicy::disabled(),
+            subagents: None,
         })
         .expect("host harness creates");
-        smol::block_on(harness.run_prompt("retain this durable prompt"))
+        smol::block_on(harness.run_root_prompt("retain this durable prompt"))
             .expect("durable prompt settles");
         let before = harness.snapshot().expect("completed durable snapshot");
         let session_id = before.header().session_id.to_string();
@@ -1400,6 +2470,7 @@ mod tests {
             provider,
             compactor: None,
             automatic_compaction: AutomaticCompactionPolicy::disabled(),
+            subagents: None,
         })
         .expect("host reopen reconstructs the durable manager");
         let after = reopened.snapshot().expect("reopened durable snapshot");
@@ -1442,6 +2513,7 @@ mod tests {
             thinking_level: Some(ThinkingLevel::Off),
             compactor: None,
             automatic_compaction: AutomaticCompactionPolicy::disabled(),
+            subagents: None,
         })
         .expect("host harness creates");
         let session_id = harness
@@ -1558,6 +2630,7 @@ mod tests {
             thinking_level: Some(ThinkingLevel::Off),
             compactor: None,
             automatic_compaction: AutomaticCompactionPolicy::disabled(),
+            subagents: None,
         })
         .expect("host harness creates");
         let snapshot = harness.snapshot().expect("session snapshot");
@@ -1603,6 +2676,7 @@ mod tests {
             thinking_level: Some(ThinkingLevel::Off),
             compactor: None,
             automatic_compaction: AutomaticCompactionPolicy::disabled(),
+            subagents: None,
         })
         .expect("host harness creates");
         let expected = harness.snapshot().expect("session snapshot");
@@ -1661,6 +2735,7 @@ mod tests {
             thinking_level: Some(ThinkingLevel::Off),
             compactor: None,
             automatic_compaction: AutomaticCompactionPolicy::disabled(),
+            subagents: None,
         })
         .expect("host harness creates");
         let session_id = harness
@@ -1714,6 +2789,7 @@ mod tests {
             thinking_level: Some(ThinkingLevel::Off),
             compactor: None,
             automatic_compaction: AutomaticCompactionPolicy::disabled(),
+            subagents: None,
         })
         .expect("host harness creates");
         let session_id = harness

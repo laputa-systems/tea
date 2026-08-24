@@ -681,6 +681,24 @@ mod tests {
     }
 
     #[test]
+    fn a_compaction_rebase_permit_is_owned_by_one_lane_ledger() {
+        let compacted_child = PromptLayoutLedger::default();
+        let sibling = PromptLayoutLedger::default();
+
+        compacted_child.expect_next_transition(ExpectedPromptLayoutTransition::Rebased);
+        assert_eq!(
+            compacted_child.take_expected_transition(),
+            Some(PromptContinuity::Rebased),
+            "the lane whose compaction committed gets exactly one rebase permit"
+        );
+        assert_eq!(
+            sibling.take_expected_transition(),
+            None,
+            "a child compaction must not permit a sibling lane's rebase"
+        );
+    }
+
+    #[test]
     fn ledger_classifies_projection_annotation_discontinuity_as_rebase() {
         let ledger = PromptLayoutLedger::default();
         let _ = ledger.observe(&request("[stable] annotation=a"));

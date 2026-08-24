@@ -1,7 +1,7 @@
 use crate::reduction::{reduce_lane_ref, reduce_lane_ref_with_append};
 use crate::{
     Corruption, EntryHeader, EntryId, EpochId, LaneId, LaneMutation, LaneRecord, OperationId,
-    ProviderRequestId, ProvisionedEntry, SESSION_FORMAT_VERSION, Sequence, SessionEntry,
+    OperationKind, ProviderRequestId, ProvisionedEntry, SESSION_FORMAT_VERSION, Sequence, SessionEntry,
     SessionFact, SessionHeader, SessionMutation, SessionSnapshot, StepId, StepKind, StoredEntry,
     StoredFact, StoredLaneMutation, StoredMutation, StoredRecord,
 };
@@ -262,6 +262,19 @@ impl SessionAppendIndex {
                     )));
                 }
                 Ok(true)
+            }
+            // A child operation carries graph-only binding checks (the durable
+            // spawn, child lane, harness/profile, and assignment identity), so
+            // it must pass through the whole-prefix graph reducer before it is
+            // committed. Ordinary lifecycle records remain locally checked.
+            SessionMutation::Record(stored)
+                if matches!(
+                    &stored.record,
+                    LaneRecord::OperationStarted(record)
+                        if matches!(&record.kind, OperationKind::Subagent { .. })
+                ) =>
+            {
+                Ok(false)
             }
             SessionMutation::Record(stored) => self.validate_lifecycle_record(&stored.record),
             SessionMutation::Entry(_) | SessionMutation::Lane(_) | SessionMutation::Fact(_) => {
@@ -710,6 +723,7 @@ pub(crate) fn validate_snapshot(snapshot: &SessionSnapshot) -> Result<(), Corrup
     for lane in snapshot_lanes(snapshot) {
         let _ = reduce_lane_ref(snapshot, lane)?;
     }
+    let _ = crate::reduce_agent_graph(snapshot)?;
     Ok(())
 }
 
@@ -731,6 +745,7 @@ pub(crate) fn validate_snapshot_append(
     for lane in lanes {
         let _ = reduce_lane_ref_with_append(snapshot, appended, lane)?;
     }
+    let _ = crate::agents::reduce_agent_graph_ref_with_append(snapshot, appended)?;
     Ok(())
 }
 

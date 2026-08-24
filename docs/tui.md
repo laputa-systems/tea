@@ -1,6 +1,6 @@
 # Terminal host
 
-The tea terminal is a presentation layer over one managed SessionRuntime. It
+The tea terminal is a presentation layer over one managed `SessionSupervisor`. It
 does not own a transcript format, an extension registry, or a second agent
 loop.
 
@@ -11,7 +11,7 @@ longer keeps a rendered transcript viewport. The presentation projection has a
 small explicit frontier:
 
 ```text
-SessionRuntime/session
+SessionSupervisor/session
         ↓
 semantic AppState transcript
         ↓
@@ -43,6 +43,14 @@ The terminal accepts explicit workspace, provider, model, thinking, compaction,
 and Tea-home options. It creates a fresh durable session only when it needs one
 and writes the initial model, thinking, harness catalog, snapshot, and revision
 before a prompt can start.
+
+After resolving Tea home, interactive and one-shot startup load
+`<tea-home>/config.toml` exactly once. A missing or empty file uses defaults;
+`--tea-home` redirects this configuration together with session storage. The
+strict terminal-only parser rejects symlinks, files over 256 KiB, unknown or
+duplicate keys, wrong types, invalid model arrays and limits, and reports the
+path plus parser source location when available. `tea session ...` commands do
+not load this file, and reusable crates never inspect it.
 
 The terminal installs an application-owned `CodingOperations` adapter through
 `TeaCodingToolsV2::with_operations`. Filesystem and search calls run on
@@ -86,6 +94,37 @@ global preference.
 Normal composer input always starts or continues the managed harness. During an
 active operation, the terminal projects durable session and live harness events
 into the transcript without owning their state.
+
+## Optional subagents
+
+Subagents are disabled unless `config.toml` contains:
+
+```toml
+[features]
+subagents = true
+```
+
+`[subagents]` may select one provider family, preserve an explicit ordered
+model allowlist, and set concurrency, total-spawn and timeout limits as defined
+in [durable subagents](subagents.md). Without an explicit list, the terminal
+uses the checked-in registry catalog for the effective provider and may append
+the valid same-provider custom root model. Provider adapters are lazy and
+credential lookup occurs only when that exact child model is used.
+
+New enabled sessions persist the complete effective policy and immutable root
+and child harness catalog. Reopen uses that persisted model domain; current
+global configuration is an authorization ceiling, never a source of silent
+expansion: a configured provider must match, and a configured model list must
+include every persisted model ID. An enabled session cannot execute while the
+global feature is off, though all read-only `tea session ...` operations remain
+available.
+
+Only main-lane agent events enter the root transcript. Child streaming and
+intermediate output remain private until the root calls `wait_agent`. The live
+footer adds `agents active/limit` only for enabled sessions and aggregates usage
+and cost across lanes without committing status chatter to scrollback. Ctrl+C,
+one-shot exit and terminal shutdown cascade through the supervisor and join all
+active child tasks.
 
 ## Bundled goal extension
 

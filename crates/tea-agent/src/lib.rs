@@ -1,6 +1,6 @@
 //! The small terminal host for [`tea_core`].
 //!
-//! SessionRuntime owns terminal conversation and execution state; these
+//! SessionSupervisor owns terminal conversation and execution state; these
 //! modules own the terminal projection and input surface. The binary is
 //! intentionally small: it consumes lossless typed events, commits settled
 //! rows to native scrollback, redraws only a bounded live tail through ANSI

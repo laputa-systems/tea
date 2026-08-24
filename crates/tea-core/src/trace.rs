@@ -360,6 +360,7 @@ fn trace_provenance(provenance: RunProvenance) -> TraceProvenance {
     TraceProvenance {
         session_id: provenance.session_id,
         lane_id: provenance.lane_id,
+        agent_id: provenance.agent_id,
         operation_id: provenance.operation_id,
         epoch_id: provenance.epoch_id,
         core_run_id: provenance.core_run_id,
@@ -1075,9 +1076,11 @@ mod tests {
             "episode-provenance",
             RunProvenance {
                 session_id: Some("session-1".into()),
-                lane_id: Some("main".into()),
+                lane_id: Some("agent-child-1".into()),
+                agent_id: Some("agent-child-1".into()),
                 operation_id: Some("operation-1".into()),
                 epoch_id: Some("epoch-1".into()),
+                source_leaf_id: Some("entry-source-1".into()),
                 core_run_id: Some("core-run-1".into()),
                 harness_snapshot_id: Some("snapshot-1".into()),
                 harness_revision_id: Some("revision-1".into()),
@@ -1131,6 +1134,8 @@ mod tests {
                 .provenance
                 .as_ref()
                 .expect("durable host provenance is retained in the header");
+            assert_eq!(provenance.lane_id.as_deref(), Some("agent-child-1"));
+            assert_eq!(provenance.agent_id.as_deref(), Some("agent-child-1"));
             assert_eq!(provenance.core_run_id.as_deref(), Some("core-run-1"));
             assert_eq!(provenance.experiment_id.as_deref(), Some("experiment-1"));
 

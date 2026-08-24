@@ -15,6 +15,7 @@ use crate::harness::{
     HarnessSurface, RegistryOperation, SelfExtensionMode,
 };
 use crate::runtime::{DiagnosticCode, HarnessEvent, HarnessIdentity, TeaEvent, ValidationStage};
+use crate::runtime::RuntimeServices;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use tea_core::error::ToolError;
@@ -38,9 +39,11 @@ pub(crate) fn stable_harness_tools<S>(
     session: Arc<Mutex<S>>,
     artifacts: Arc<dyn tea_session::ArtifactStore>,
     manager: Arc<HarnessResolver>,
+    lane_id: LaneId,
     identity: HarnessIdentity,
     operation_id: OperationId,
     rollover_budget: u32,
+    runtime_services: RuntimeServices,
     events: Arc<EventHub>,
 ) -> ToolRegistry
 where
@@ -51,9 +54,11 @@ where
         session,
         artifacts,
         manager,
+        lane_id,
         identity,
         operation_id,
         rollover_budget,
+        runtime_services,
         events,
     }));
     tools
@@ -63,9 +68,11 @@ struct TeaHarnessTool<S> {
     session: Arc<Mutex<S>>,
     artifacts: Arc<dyn tea_session::ArtifactStore>,
     manager: Arc<HarnessResolver>,
+    lane_id: LaneId,
     identity: HarnessIdentity,
     operation_id: OperationId,
     rollover_budget: u32,
+    runtime_services: RuntimeServices,
     events: Arc<EventHub>,
 }
 
@@ -157,8 +164,8 @@ where
     fn status(&self, object: &BTreeMap<String, JsonValue>) -> Result<ControlResponse, String> {
         require_exact_fields(object, &["operation"])?;
         let snapshot = self.session_snapshot()?;
-        let reduction =
-            reduce_lane(snapshot.clone(), LaneId::main()).map_err(|error| error.to_string())?;
+        let reduction = reduce_lane(snapshot.clone(), self.lane_id.clone())
+            .map_err(|error| error.to_string())?;
         let active_revision = reduction
             .lane_state
             .active_harness_revision
@@ -403,7 +410,10 @@ where
             operation_id: Some(self.operation_id.clone()),
             tool_invocation_id: call.id.to_string(),
         };
-        let candidate = self.manager.apply(request).map_err(harness_error)?;
+        let candidate = self
+            .manager
+            .apply(request, &self.runtime_services)
+            .map_err(harness_error)?;
         self.schedule_candidate(call, candidate, "apply")
     }
 
@@ -530,7 +540,7 @@ where
             });
         }
 
-        let revision_entry_id = EntryId::new(super::session::durable_identifier(
+        let revision_entry_id = EntryId::new(super::supervisor::durable_identifier(
             "entry-harness-revision",
             [self.operation_id.as_str(), call.id.as_str()],
         ))
@@ -547,8 +557,8 @@ where
             .lock()
             .map_err(|_| "durable session mutex is poisoned".to_owned())?;
         let snapshot = session.snapshot().map_err(|error| error.to_string())?;
-        let reduction =
-            reduce_lane(snapshot.clone(), LaneId::main()).map_err(|error| error.to_string())?;
+        let reduction = reduce_lane(snapshot.clone(), self.lane_id.clone())
+            .map_err(|error| error.to_string())?;
         if reduction.lane_state.active_operation.as_ref() != Some(&self.operation_id) {
             return Err("harness mutation belongs to an operation that is no longer active".into());
         }
@@ -641,7 +651,7 @@ where
     fn publish_candidate_staged(&self, candidate: &HarnessCandidateV1) {
         self.events
             .publish(TeaEvent::Harness(HarnessEvent::CandidateStaged {
-                lane_id: LaneId::main(),
+                lane_id: self.lane_id.clone(),
                 candidate_id: candidate.candidate_id.clone(),
                 parent_revision_id: candidate.draft.parent_revision_id.clone(),
                 snapshot_id: candidate.draft.proposed_snapshot_id.clone(),
@@ -661,7 +671,7 @@ where
         };
         self.events
             .publish(TeaEvent::Harness(HarnessEvent::CandidateRejected {
-                lane_id: LaneId::main(),
+                lane_id: self.lane_id.clone(),
                 candidate_id,
                 active_revision_id: self.identity.revision_id().clone(),
                 stage,

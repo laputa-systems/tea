@@ -2,6 +2,7 @@
 
 use crate::ids::*;
 use crate::model::*;
+use crate::agents::*;
 use crate::store::{
     SessionAppendIndex, SessionClock, SessionError, SessionReader, SessionWriter,
     SystemSessionClock, validate_snapshot, validate_snapshot_append,
@@ -277,6 +278,17 @@ pub struct JsonlSession {
     clock: Arc<dyn SessionClock>,
 }
 
+impl Drop for JsonlSession {
+    fn drop(&mut self) {
+        // `flock` belongs to the open-file description and a descriptor can
+        // briefly outlive this owner across `fork` before `exec` applies
+        // close-on-exec. Unlock explicitly so dropping the session is the
+        // authority boundary even when such an inherited descriptor has not
+        // closed yet. Close remains the operating-system fallback on error.
+        let _ = flock(&self.file, FlockOperation::Unlock);
+    }
+}
+
 impl JsonlSession {
     /// Create a new session directory and its initial v1 header atomically.
     pub fn create(
@@ -534,9 +546,9 @@ impl JsonlSession {
 
     /// Open the immutable object store colocated with this v1 session.
     ///
-    /// Callers that construct a durable harness over this writer should pass
-    /// this store to `SessionRuntime::new_with_artifact_store`, so every
-    /// `tea-artifact://` locator remains valid after the JSONL writer reopens.
+    /// Callers that construct a durable supervisor over this writer should
+    /// retain this store, so every `tea-artifact://` locator remains valid
+    /// after the JSONL writer reopens.
     pub fn artifact_store(&self) -> Result<crate::FileArtifactStore, crate::ArtifactError> {
         crate::FileArtifactStore::open(self.directory.join("objects"))
     }
@@ -576,6 +588,7 @@ impl JsonlSession {
             .sync_data()
             .map_err(|error| io(&self.session_path, error))?;
         let snapshot = self.snapshot.clone();
+        reject_export_with_unresolved_workspace_leases(&snapshot)?;
         let additional_roots = additional_roots
             .into_iter()
             .collect::<std::collections::BTreeSet<_>>();
@@ -671,11 +684,16 @@ impl JsonlSession {
             let _ = fs::remove_dir_all(&temporary);
         }
         result
-    }
+}
 
-    /// Return an atomic snapshot of the current durable prefix.
+/// Return an atomic snapshot of the current durable prefix.
     pub fn snapshot(&self) -> Result<SessionSnapshot, SessionError> {
         Ok(self.snapshot.clone())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn duplicate_writer_descriptor_for_test(&self) -> File {
+        self.file.try_clone().expect("test duplicates writer descriptor")
     }
 
     /// Return whether `HEAD` is the exact disposable cache derived from this
@@ -734,6 +752,32 @@ impl JsonlSession {
         }
         Ok(())
     }
+}
+
+/// Portable exports deliberately exclude operational worktrees. A child in
+/// one of these graph states still relies on its lease for deterministic
+/// recovery, so exporting only the JSONL/artifact prefix would manufacture a
+/// session that cannot safely resume. Terminal worktree cleanup is host state
+/// rather than a durable fact, so completed graph states remain exportable.
+fn reject_export_with_unresolved_workspace_leases(
+    snapshot: &crate::SessionSnapshot,
+) -> Result<(), SessionError> {
+    let graph = reduce_agent_graph(snapshot)?;
+    let unresolved = graph.agents.values().find(|node| {
+        matches!(
+            node.state,
+            AgentState::Spawned | AgentState::Running | AgentState::Finalizing { .. }
+        )
+    });
+    if let Some(node) = unresolved {
+        return Err(SessionError::InvalidInput {
+            message: format!(
+                "cannot export a session with unresolved workspace lease {} for agent {}",
+                node.spawned.workspace_lease_id, node.spawned.agent_id
+            ),
+        });
+    }
+    Ok(())
 }
 
 /// Inspect only the complete header line before any v1 recovery work. This is
@@ -2506,6 +2550,100 @@ fn decode_lane_mutation(value: &JsonValue) -> Result<LaneMutation, String> {
 
 fn encode_fact(fact: &SessionFact) -> JsonValue {
     match fact {
+        SessionFact::SubagentPolicy(fact) => JsonValue::object([
+            ("type", JsonValue::String("subagent_policy".into())),
+            ("schema_version", JsonValue::from(u64::from(fact.schema_version))),
+            (
+                "models",
+                JsonValue::Array(fact.models.iter().map(encode_subagent_model).collect()),
+            ),
+            ("max_concurrent", JsonValue::from(u64::from(fact.max_concurrent))),
+            (
+                "max_total_per_operation",
+                JsonValue::from(u64::from(fact.max_total_per_operation)),
+            ),
+            ("timeout_ms", JsonValue::from(fact.timeout_ms)),
+            ("tool_surface_digest", digest_value(fact.tool_surface_digest)),
+        ]),
+        SessionFact::AgentSpawned(fact) => JsonValue::object([
+            ("type", JsonValue::String("agent_spawned".into())),
+            ("agent_id", string_value(&fact.agent_id)),
+            ("parent_lane_id", string_value(&fact.parent_lane_id)),
+            ("parent_operation_id", string_value(&fact.parent_operation_id)),
+            ("lane_id", string_value(&fact.lane_id)),
+            ("task_name", JsonValue::String(fact.task_name.clone())),
+            ("model", encode_subagent_model(&fact.model)),
+            ("thinking", JsonValue::String(fact.thinking.clone())),
+            (
+                "context_mode",
+                JsonValue::String(agent_context_mode_name(fact.context_mode).into()),
+            ),
+            ("base_leaf_id", optional_id(fact.base_leaf_id.as_ref())),
+            ("workspace_lease_id", string_value(&fact.workspace_lease_id)),
+            (
+                "harness_revision_id",
+                string_value(&fact.harness_revision_id),
+            ),
+            (
+                "harness_snapshot_id",
+                string_value(&fact.harness_snapshot_id),
+            ),
+            (
+                "model_harness_profile_id",
+                string_value(&fact.model_harness_profile_id),
+            ),
+            (
+                "spawn_tool_call_id",
+                JsonValue::String(fact.spawn_tool_call_id.clone()),
+            ),
+        ]),
+        SessionFact::WorkspaceDelta(fact) => JsonValue::object([
+            ("type", JsonValue::String("workspace_delta".into())),
+            ("delta_id", string_value(&fact.delta_id)),
+            ("agent_id", string_value(&fact.agent_id)),
+            ("workspace_lease_id", string_value(&fact.workspace_lease_id)),
+            ("base_commit", JsonValue::String(fact.base_commit.clone())),
+            ("result_commit", JsonValue::String(fact.result_commit.clone())),
+            (
+                "changed_paths",
+                JsonValue::Array(
+                    fact.changed_paths
+                        .iter()
+                        .cloned()
+                        .map(JsonValue::String)
+                        .collect(),
+                ),
+            ),
+            ("patch", encode_payload_ref(&fact.patch)),
+        ]),
+        SessionFact::AgentTaskFinished(fact) => JsonValue::object([
+            ("type", JsonValue::String("agent_task_finished".into())),
+            ("agent_id", string_value(&fact.agent_id)),
+            ("operation_id", string_value(&fact.operation_id)),
+            ("outcome", encode_operation_outcome(&fact.outcome)),
+            ("final_entry_id", optional_id(fact.final_entry_id.as_ref())),
+            ("report", encode_payload_ref(&fact.report)),
+            (
+                "workspace_delta_id",
+                optional_id(fact.workspace_delta_id.as_ref()),
+            ),
+        ]),
+        SessionFact::WorkspaceDeltaApplied(fact) => JsonValue::object([
+            ("type", JsonValue::String("workspace_delta_applied".into())),
+            ("delta_id", string_value(&fact.delta_id)),
+            ("target_lane_id", string_value(&fact.target_lane_id)),
+            ("tool_call_id", JsonValue::String(fact.tool_call_id.clone())),
+            (
+                "changed_paths",
+                JsonValue::Array(
+                    fact.changed_paths
+                        .iter()
+                        .cloned()
+                        .map(JsonValue::String)
+                        .collect(),
+                ),
+            ),
+        ]),
         SessionFact::HarnessCatalog(fact) => JsonValue::object([
             ("type", JsonValue::String("harness_catalog".into())),
             (
@@ -2603,6 +2741,88 @@ fn encode_fact(fact: &SessionFact) -> JsonValue {
 fn decode_fact(value: &JsonValue) -> Result<SessionFact, String> {
     let fields = object(value)?;
     match required_string(fields, "type")?.as_str() {
+        "subagent_policy" => Ok(SessionFact::SubagentPolicy(SubagentPolicyFact {
+            schema_version: u16::try_from(required_u64(fields, "schema_version")?)
+                .map_err(|_| "subagent policy schema version exceeds u16".to_string())?,
+            models: required_array(fields, "models")?
+                .iter()
+                .map(decode_subagent_model)
+                .collect::<Result<Vec<_>, _>>()?,
+            max_concurrent: u32::try_from(required_u64(fields, "max_concurrent")?)
+                .map_err(|_| "subagent max_concurrent exceeds u32".to_string())?,
+            max_total_per_operation: u32::try_from(required_u64(
+                fields,
+                "max_total_per_operation",
+            )?)
+            .map_err(|_| "subagent max_total_per_operation exceeds u32".to_string())?,
+            timeout_ms: required_u64(fields, "timeout_ms")?,
+            tool_surface_digest: parse_digest(required_string(fields, "tool_surface_digest")?)?,
+        })),
+        "agent_spawned" => Ok(SessionFact::AgentSpawned(AgentSpawnedFact {
+            agent_id: parse_id!(AgentId, required_string(fields, "agent_id")?),
+            parent_lane_id: parse_id!(LaneId, required_string(fields, "parent_lane_id")?),
+            parent_operation_id: parse_id!(
+                OperationId,
+                required_string(fields, "parent_operation_id")?
+            ),
+            lane_id: parse_id!(LaneId, required_string(fields, "lane_id")?),
+            task_name: required_string(fields, "task_name")?,
+            model: decode_subagent_model(required_value(fields, "model")?)?,
+            thinking: required_string(fields, "thinking")?,
+            context_mode: parse_agent_context_mode(&required_string(fields, "context_mode")?)?,
+            base_leaf_id: optional_id_of::<EntryId>(fields, "base_leaf_id")?,
+            workspace_lease_id: parse_id!(
+                WorkspaceLeaseId,
+                required_string(fields, "workspace_lease_id")?
+            ),
+            harness_revision_id: parse_id!(
+                HarnessRevisionId,
+                required_string(fields, "harness_revision_id")?
+            ),
+            harness_snapshot_id: parse_id!(
+                HarnessSnapshotId,
+                required_string(fields, "harness_snapshot_id")?
+            ),
+            model_harness_profile_id: parse_id!(
+                ModelHarnessProfileId,
+                required_string(fields, "model_harness_profile_id")?
+            ),
+            spawn_tool_call_id: required_string(fields, "spawn_tool_call_id")?,
+        })),
+        "workspace_delta" => Ok(SessionFact::WorkspaceDelta(WorkspaceDeltaFact {
+            delta_id: parse_id!(WorkspaceDeltaId, required_string(fields, "delta_id")?),
+            agent_id: parse_id!(AgentId, required_string(fields, "agent_id")?),
+            workspace_lease_id: parse_id!(
+                WorkspaceLeaseId,
+                required_string(fields, "workspace_lease_id")?
+            ),
+            base_commit: required_string(fields, "base_commit")?,
+            result_commit: required_string(fields, "result_commit")?,
+            changed_paths: string_array(required_array(fields, "changed_paths")?)?,
+            patch: decode_payload_ref(required_value(fields, "patch")?)?,
+        })),
+        "agent_task_finished" => Ok(SessionFact::AgentTaskFinished(AgentTaskFinishedFact {
+            agent_id: parse_id!(AgentId, required_string(fields, "agent_id")?),
+            operation_id: parse_id!(OperationId, required_string(fields, "operation_id")?),
+            outcome: decode_operation_outcome(required_value(fields, "outcome")?)?,
+            final_entry_id: optional_id_of::<EntryId>(fields, "final_entry_id")?,
+            report: decode_payload_ref(required_value(fields, "report")?)?,
+            workspace_delta_id: optional_id_of::<WorkspaceDeltaId>(
+                fields,
+                "workspace_delta_id",
+            )?,
+        })),
+        "workspace_delta_applied" => Ok(SessionFact::WorkspaceDeltaApplied(
+            WorkspaceDeltaAppliedFact {
+                delta_id: parse_id!(WorkspaceDeltaId, required_string(fields, "delta_id")?),
+                target_lane_id: parse_id!(
+                    LaneId,
+                    required_string(fields, "target_lane_id")?
+                ),
+                tool_call_id: required_string(fields, "tool_call_id")?,
+                changed_paths: string_array(required_array(fields, "changed_paths")?)?,
+            },
+        )),
         "harness_catalog" => Ok(SessionFact::HarnessCatalog(HarnessCatalogFact {
             schema_version: u16::try_from(required_u64(fields, "schema_version")?)
                 .map_err(|_| "harness catalog schema version exceeds u16".to_string())?,
@@ -2668,6 +2888,42 @@ fn decode_fact(value: &JsonValue) -> Result<SessionFact, String> {
             payload: required_value(fields, "payload")?.clone(),
         }),
         other => Err(format!("unknown session fact type {other:?}")),
+    }
+}
+
+fn encode_subagent_model(model: &SubagentModelRecord) -> JsonValue {
+    JsonValue::object([
+        ("provider", JsonValue::String(model.provider.clone())),
+        ("model", JsonValue::String(model.model.clone())),
+        ("revision", optional_string(model.revision.as_deref())),
+        ("display_name", JsonValue::String(model.display_name.clone())),
+        ("context_window", optional_u64(model.context_window)),
+    ])
+}
+
+fn decode_subagent_model(value: &JsonValue) -> Result<SubagentModelRecord, String> {
+    let object = object(value)?;
+    Ok(SubagentModelRecord {
+        provider: required_string(object, "provider")?,
+        model: required_string(object, "model")?,
+        revision: optional_string_of(object, "revision")?,
+        display_name: required_string(object, "display_name")?,
+        context_window: optional_u64_of(object, "context_window")?,
+    })
+}
+
+fn agent_context_mode_name(value: AgentContextMode) -> &'static str {
+    match value {
+        AgentContextMode::Task => "task",
+        AgentContextMode::Parent => "parent",
+    }
+}
+
+fn parse_agent_context_mode(value: &str) -> Result<AgentContextMode, String> {
+    match value {
+        "task" => Ok(AgentContextMode::Task),
+        "parent" => Ok(AgentContextMode::Parent),
+        _ => Err(format!("unknown agent context mode {value:?}")),
     }
 }
 
@@ -2776,6 +3032,14 @@ fn decode_hook_data(value: &JsonValue) -> Result<BTreeMap<StableHookId, JsonValu
 fn encode_operation_kind(kind: &OperationKind) -> JsonValue {
     match kind {
         OperationKind::Run => JsonValue::object([("kind", JsonValue::String("run".into()))]),
+        OperationKind::Subagent {
+            agent_id,
+            parent_operation_id,
+        } => JsonValue::object([
+            ("kind", JsonValue::String("subagent".into())),
+            ("agent_id", string_value(agent_id)),
+            ("parent_operation_id", string_value(parent_operation_id)),
+        ]),
         OperationKind::Other(name) => JsonValue::object([
             ("kind", JsonValue::String("other".into())),
             ("name", JsonValue::String(name.clone())),
@@ -2787,6 +3051,13 @@ fn decode_operation_kind(value: &JsonValue) -> Result<OperationKind, String> {
     let object = object(value)?;
     match required_string(object, "kind")?.as_str() {
         "run" => Ok(OperationKind::Run),
+        "subagent" => Ok(OperationKind::Subagent {
+            agent_id: parse_id!(AgentId, required_string(object, "agent_id")?),
+            parent_operation_id: parse_id!(
+                OperationId,
+                required_string(object, "parent_operation_id")?
+            ),
+        }),
         "other" => Ok(OperationKind::Other(required_string(object, "name")?)),
         other => Err(format!("unknown operation kind {other:?}")),
     }
@@ -2952,6 +3223,9 @@ impl_parse_opaque_id!(
     StableHookId,
     ArtifactPolicyId,
     CoreRunId,
+    AgentId,
+    WorkspaceLeaseId,
+    WorkspaceDeltaId,
 );
 
 fn object(value: &JsonValue) -> Result<&BTreeMap<String, JsonValue>, String> {

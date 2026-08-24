@@ -7,7 +7,7 @@
 
 use std::collections::BTreeSet;
 use std::fmt;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use tea_core::compaction::{
     AutomaticCompactionRequest, CompactionContext, CompactionError, CompactionFuture,
     CompactionRequestLayout, CompactionResult, CompactionStrategy, Compactor, ProviderContext,
@@ -67,67 +67,39 @@ pub(super) fn is_compaction_request(request: &ModelRequest) -> bool {
         || request.context.contains(UPDATE_SUMMARIZATION_INSTRUCTIONS)
 }
 
-/// A compactor whose provider/model pair follows the TUI's idle model selection.
+/// One immutable provider/model compactor for a durable runtime-service bundle.
 pub(super) struct ProviderCompactor {
-    provider: RwLock<Option<Arc<dyn ModelProvider>>>,
-    model: RwLock<Option<ModelDescriptor>>,
+    provider: Arc<dyn ModelProvider>,
+    model: ModelDescriptor,
 }
 
 impl fmt::Debug for ProviderCompactor {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("ProviderCompactor")
-            .field(
-                "model",
-                &self.model.read().ok().and_then(|model| model.clone()),
-            )
+            .field("model", &self.model)
             .finish_non_exhaustive()
     }
 }
 
-impl Default for ProviderCompactor {
-    fn default() -> Self {
-        Self {
-            provider: RwLock::new(None),
-            model: RwLock::new(None),
-        }
-    }
-}
-
 impl ProviderCompactor {
-    /// Set the explicit provider/model used for future compaction requests.
-    pub(super) fn configure(&self, model: ModelDescriptor, provider: Arc<dyn ModelProvider>) {
-        *self
-            .provider
-            .write()
-            .expect("TUI compactor provider lock poisoned") = Some(provider);
-        *self
-            .model
-            .write()
-            .expect("TUI compactor model lock poisoned") = Some(model);
+    /// Bind one compactor to the exact provider/model descriptor selected by the host.
+    pub(super) fn new(model: ModelDescriptor, provider: Arc<dyn ModelProvider>) -> Self {
+        Self { provider, model }
     }
 
     fn configured(
         &self,
         context: &CompactionContext,
     ) -> Result<(Arc<dyn ModelProvider>, ModelDescriptor), CompactionError> {
-        let provider = self
-            .provider
-            .read()
-            .expect("TUI compactor provider lock poisoned")
-            .clone()
-            .ok_or_else(|| CompactionError::failed("no selected provider for compaction"))?;
-        let model = context
-            .model
-            .clone()
-            .or_else(|| {
-                self.model
-                    .read()
-                    .expect("TUI compactor model lock poisoned")
-                    .clone()
-            })
-            .ok_or_else(|| CompactionError::failed("no selected model for compaction"))?;
-        Ok((provider, model))
+        if let Some(model) = &context.model {
+            if model != &self.model {
+                return Err(CompactionError::failed(
+                    "compaction context model does not match the immutable configured provider",
+                ));
+            }
+        }
+        Ok((Arc::clone(&self.provider), self.model.clone()))
     }
 }
 

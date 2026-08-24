@@ -60,10 +60,11 @@ fn cbor_optional_provenance(output: &mut Vec<u8>, provenance: Option<&TraceProve
         output.push(0xf6);
         return;
     };
-    cbor_map(output, 9);
+    cbor_map(output, 10);
     for (name, value) in [
         ("session_id", provenance.session_id.as_deref()),
         ("lane_id", provenance.lane_id.as_deref()),
+        ("agent_id", provenance.agent_id.as_deref()),
         ("operation_id", provenance.operation_id.as_deref()),
         ("epoch_id", provenance.epoch_id.as_deref()),
         ("core_run_id", provenance.core_run_id.as_deref()),

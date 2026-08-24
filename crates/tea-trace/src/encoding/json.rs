@@ -42,7 +42,9 @@ pub fn decode_json_line(line: &str) -> Result<TraceEvent, JsonTraceDecodeError> 
     };
     let mut canonical = String::new();
     write_json_event(&mut canonical, &event);
-    if canonical != line { return Err(JsonTraceDecodeError::new("non-canonical or extra trace fields")); }
+    if canonical != line && legacy_header_without_agent_id(&event).as_deref() != Some(line) {
+        return Err(JsonTraceDecodeError::new("non-canonical or extra trace fields"));
+    }
     Ok(event)
 }
 
@@ -76,7 +78,7 @@ fn take_strings(o: &Obj, n: &str) -> Result<Vec<String>, JsonTraceDecodeError> {
 fn parse_header(o: &Obj) -> Result<TraceEvent, JsonTraceDecodeError> {
     let mut h=EpisodeHeader::new(take_str(o,"episode_id")?); h.metadata=take_map_str(o,"metadata")?; h.started_at_ms=take_opt_u64(o,"started_at_ms")?; h.provenance=parse_provenance(o)?; Ok(h.into())
 }
-fn parse_provenance(o: &Obj) -> Result<Option<TraceProvenance>, JsonTraceDecodeError> { match take(o,"provenance")? { miniserde::json::Value::Null=>Ok(None), miniserde::json::Value::Object(p)=>Ok(Some(TraceProvenance { session_id:take_opt_str(p,"session_id")?, lane_id:take_opt_str(p,"lane_id")?, operation_id:take_opt_str(p,"operation_id")?, epoch_id:take_opt_str(p,"epoch_id")?, core_run_id:take_opt_str(p,"core_run_id")?, harness_snapshot_id:take_opt_str(p,"harness_snapshot_id")?, harness_revision_id:take_opt_str(p,"harness_revision_id")?, model_harness_profile_id:take_opt_str(p,"model_harness_profile_id")?, experiment_id:take_opt_str(p,"experiment_id")? })), _=>Err(JsonTraceDecodeError::new("field provenance has wrong type")) } }
+fn parse_provenance(o: &Obj) -> Result<Option<TraceProvenance>, JsonTraceDecodeError> { match take(o,"provenance")? { miniserde::json::Value::Null=>Ok(None), miniserde::json::Value::Object(p)=>Ok(Some(TraceProvenance { session_id:take_opt_str(p,"session_id")?, lane_id:take_opt_str(p,"lane_id")?, agent_id:take_opt_str(p,"agent_id")?, operation_id:take_opt_str(p,"operation_id")?, epoch_id:take_opt_str(p,"epoch_id")?, core_run_id:take_opt_str(p,"core_run_id")?, harness_snapshot_id:take_opt_str(p,"harness_snapshot_id")?, harness_revision_id:take_opt_str(p,"harness_revision_id")?, model_harness_profile_id:take_opt_str(p,"model_harness_profile_id")?, experiment_id:take_opt_str(p,"experiment_id")? })), _=>Err(JsonTraceDecodeError::new("field provenance has wrong type")) } }
 fn parse_turn(o: &Obj) -> Result<TraceEvent, JsonTraceDecodeError> { let mut t=Turn::new(u32::try_from(take_u64(o,"index")?).map_err(|_|JsonTraceDecodeError::new("index out of range"))?,take_str(o,"input")?); t.output=take_opt_str(o,"output")?; t.stop_reason=take_opt_str(o,"stop_reason")?; t.cache_evidence=parse_cache(o)?; Ok(t.into()) }
 fn parse_tool(o: &Obj) -> Result<TraceEvent, JsonTraceDecodeError> { let mut t=Tool::new(u32::try_from(take_u64(o,"turn_index")?).map_err(|_|JsonTraceDecodeError::new("turn_index out of range"))?,take_str(o,"call_id")?,take_str(o,"name")?,take_str(o,"input")?); t.output=take_opt_str(o,"output")?; t.error=take_opt_str(o,"error")?; Ok(t.into()) }
 fn parse_end(o: &Obj) -> Result<TraceEvent, JsonTraceDecodeError> { let reason=match take_str(o,"reason")?.as_str() {"completed"=>EndReason::Completed,"cancelled"=>EndReason::Cancelled,"failed"=>EndReason::Failed,"aborted"=>EndReason::Aborted,v=>EndReason::Other(v.to_owned())}; Ok(EpisodeEnd { reason,error:take_opt_str(o,"error")?,finished_at_ms:take_opt_u64(o,"finished_at_ms")? }.into()) }
@@ -94,6 +96,14 @@ fn parse_compaction(o: &Obj) -> Result<TraceEvent, JsonTraceDecodeError> {
 }
 
 pub(super) fn write_json_event(output: &mut String, event: &TraceEvent) {
+    write_json_event_with_agent_id(output, event, true);
+}
+
+fn write_json_event_with_agent_id(
+    output: &mut String,
+    event: &TraceEvent,
+    include_agent_id: bool,
+) {
     output.push('{');
     json_field_name(output, "schema_version");
     output.push_str(&event_schema_version(event).to_string());
@@ -101,7 +111,9 @@ pub(super) fn write_json_event(output: &mut String, event: &TraceEvent) {
     json_field_name(output, "type");
     json_string(output, event_type(event));
     match event {
-        TraceEvent::EpisodeHeader(header) => write_json_header(output, header),
+        TraceEvent::EpisodeHeader(header) => {
+            write_json_header(output, header, include_agent_id)
+        }
         TraceEvent::Turn(turn) => write_json_turn(output, turn),
         TraceEvent::Tool(tool) => write_json_tool(output, tool),
         TraceEvent::Compaction(compaction) => write_json_compaction(output, compaction),
@@ -110,7 +122,7 @@ pub(super) fn write_json_event(output: &mut String, event: &TraceEvent) {
     output.push('}');
 }
 
-fn write_json_header(output: &mut String, header: &EpisodeHeader) {
+fn write_json_header(output: &mut String, header: &EpisodeHeader, include_agent_id: bool) {
     output.push(',');
     json_field_string(output, "episode_id", &header.episode_id);
     output.push(',');
@@ -120,7 +132,7 @@ fn write_json_header(output: &mut String, header: &EpisodeHeader) {
     json_field_optional_number(output, "started_at_ms", header.started_at_ms);
     output.push(',');
     json_field_name(output, "provenance");
-    json_optional_provenance(output, header.provenance.as_ref());
+    json_optional_provenance(output, header.provenance.as_ref(), include_agent_id);
 }
 
 fn write_json_turn(output: &mut String, turn: &Turn) {
@@ -138,15 +150,24 @@ fn write_json_turn(output: &mut String, turn: &Turn) {
     json_optional_cache_evidence(output, turn.cache_evidence.as_ref());
 }
 
-fn json_optional_provenance(output: &mut String, provenance: Option<&TraceProvenance>) {
+fn json_optional_provenance(
+    output: &mut String,
+    provenance: Option<&TraceProvenance>,
+    include_agent_id: bool,
+) {
     let Some(provenance) = provenance else {
         output.push_str("null");
         return;
     };
     output.push('{');
-    let fields = [
+    let mut fields = vec![
         ("session_id", provenance.session_id.as_deref()),
         ("lane_id", provenance.lane_id.as_deref()),
+    ];
+    if include_agent_id {
+        fields.push(("agent_id", provenance.agent_id.as_deref()));
+    }
+    fields.extend([
         ("operation_id", provenance.operation_id.as_deref()),
         ("epoch_id", provenance.epoch_id.as_deref()),
         ("core_run_id", provenance.core_run_id.as_deref()),
@@ -163,7 +184,7 @@ fn json_optional_provenance(output: &mut String, provenance: Option<&TraceProven
             provenance.model_harness_profile_id.as_deref(),
         ),
         ("experiment_id", provenance.experiment_id.as_deref()),
-    ];
+    ]);
     for (index, (name, value)) in fields.into_iter().enumerate() {
         if index != 0 {
             output.push(',');
@@ -171,6 +192,22 @@ fn json_optional_provenance(output: &mut String, provenance: Option<&TraceProven
         json_field_optional_string(output, name, value);
     }
     output.push('}');
+}
+
+fn legacy_header_without_agent_id(event: &TraceEvent) -> Option<String> {
+    let TraceEvent::EpisodeHeader(header) = event else {
+        return None;
+    };
+    if header
+        .provenance
+        .as_ref()
+        .is_none_or(|provenance| provenance.agent_id.is_some())
+    {
+        return None;
+    }
+    let mut legacy = String::new();
+    write_json_event_with_agent_id(&mut legacy, event, false);
+    Some(legacy)
 }
 
 fn json_optional_cache_evidence(output: &mut String, evidence: Option<&CacheEvidence>) {

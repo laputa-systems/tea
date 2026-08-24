@@ -22,7 +22,12 @@ const SUBSCRIBER_BUFFER: usize = 256;
 #[derive(Clone, Debug, PartialEq)]
 pub enum TeaEvent {
     /// A core-owned run event for a local application consumer.
-    Agent(AgentEvent),
+    Agent {
+        /// Durable lane that owns the observed core event.
+        lane_id: LaneId,
+        /// Original core event without any cross-lane projection.
+        event: AgentEvent,
+    },
     /// A committed durable session fact.
     Session(SessionEvent),
     /// A committed or validated immutable harness transition.
@@ -35,7 +40,7 @@ impl TeaEvent {
     fn session_sequence(&self) -> Option<Sequence> {
         match self {
             Self::Session(event) => Some(event.sequence()),
-            Self::Agent(_) | Self::Harness(_) | Self::Artifact(_) => None,
+            Self::Agent { .. } | Self::Harness(_) | Self::Artifact(_) => None,
         }
     }
 }

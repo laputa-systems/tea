@@ -525,7 +525,7 @@ impl RunHandle {
             call,
             ToolContext {
                 cancellation: self.cancellation.clone(),
-                metadata: None,
+                provenance: self.configuration.provenance.clone(),
             },
             update_sink,
         )

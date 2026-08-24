@@ -407,3 +407,33 @@ that distinction and pin error-message placement.
 No fixture may embed runner-specific callbacks or arbitrary Rust code. The
 scenario language is declarative so the Rust runner executes the same schedule
 defined by the contract.
+
+## Durable subagent ordering
+
+Subagents are ordinary model-invoked tools backed by a multi-lane
+`SessionSupervisor`. A spawn tool result becomes available after the workspace,
+lane configuration, graph linkage, child operation and assignment are durable,
+and after the host task runtime owns the child drive. The result does not wait
+for the child to finish.
+
+The child becomes parent-visible as terminal only after its operation outcome,
+report, optional immutable patch artifact and workspace-delta fact, and terminal
+agent fact have committed. Completion events never inject child messages into
+the root transcript. `wait_agent` is the only report-transfer boundary and
+orders results by the requested targets, not physical completion order.
+
+All children belong to the root user operation that spawned them. Root
+settlement closes spawning, cancels and joins remaining children, finalizes
+salvageable work, commits their terminal facts, and cleans their operational
+worktrees before the root `OperationFinished` record. This is structured
+ownership rather than a mailbox or detached background-work mechanism.
+
+`spawn_agent` and `interrupt_agent` use sequential tool scheduling;
+`wait_agent` is sequential and cancellable; `list_agents` is parallel-safe;
+`apply_agent_changes` is sequential and exclusive-batch. Repository application
+preflights before mutation and, once mutation begins, must classify the exact
+result as `Applied`, `AlreadyApplied`, `Conflict`, `RolledBack`, or
+`Indeterminate` before observing cancellation as settled. Only a proven applied
+state produces `WorkspaceDeltaApplied`; `AlreadyApplied` is the exact-result
+idempotency fast path. The complete durability, recovery and isolation contract,
+including the crash-prefix recovery table, is in [durable subagents](subagents.md).

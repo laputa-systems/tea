@@ -170,6 +170,10 @@ pub struct AppState {
     pub(super) extension_commands: Vec<ExtensionHostCommandDescription>,
     /// Field-wise provider accounting observed directly from the lossless event stream.
     pub(super) reported_usage: Usage,
+    /// Optional child-lane activity derived from the durable supervisor. The
+    /// field is absent, rather than zeroed, for feature-disabled sessions so
+    /// their footer bytes remain unchanged.
+    pub(super) subagent_activity: Option<(u32, u32)>,
     /// Reasoning effort used by future prompts.
     pub(super) thinking_level: ThinkingLevel,
 }
@@ -789,7 +793,31 @@ impl AppState {
                 stats.push(format!("CH{}%", percentage));
             }
         }
+        if let Some((active, maximum)) = self.subagent_activity {
+            stats.push(format!("agents {active}/{maximum}"));
+        }
         [hint, stats.join(" · ")]
+    }
+
+    /// Install the current durable child activity view. `None` is the
+    /// feature-disabled presentation state and intentionally emits no footer
+    /// placeholder.
+    pub(super) fn set_subagent_activity(&mut self, activity: Option<(u32, u32)>) {
+        self.subagent_activity = activity;
+    }
+
+    /// Retain only child-safe aggregate accounting from a non-root lane. A
+    /// child transcript, tool activity, notices, and reasoning stay private
+    /// until the root explicitly requests a report through a core tool.
+    pub(super) fn apply_background_usage_event(&mut self, event: &AgentEvent) {
+        if let AgentEventKind::ModelTurnUsage { accounting } = &event.kind {
+            self.reported_usage.accumulate(accounting.usage.clone());
+        }
+    }
+
+    /// Replace footer accounting from an authoritative durable lane reduction.
+    pub(super) fn set_reported_usage(&mut self, usage: Usage) {
+        self.reported_usage = usage;
     }
 
     pub(crate) fn set_thinking_level(&mut self, level: ThinkingLevel) {

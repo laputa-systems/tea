@@ -217,7 +217,6 @@ pub(crate) struct ResolvedIdleHook {
 /// session branch through the durable activation protocol.
 pub struct HarnessResolver {
     repository: Mutex<HarnessRepository>,
-    runtime_services: RuntimeServices,
     capability_ceiling: BTreeSet<String>,
     capability_catalog: PluginCapabilityCatalog,
     extension_engine: Arc<dyn ExtensionEngine>,
@@ -243,13 +242,11 @@ impl HarnessResolver {
     /// and the trusted base executable capabilities.
     pub fn new(
         repository: HarnessRepository,
-        runtime_services: RuntimeServices,
         capability_ceiling: BTreeSet<String>,
     ) -> Self {
         let extension_engine = repository.extension_engine();
         Self {
             repository: Mutex::new(repository),
-            runtime_services,
             capability_ceiling,
             capability_catalog: PluginCapabilityCatalog::default(),
             extension_engine,
@@ -291,18 +288,13 @@ impl HarnessResolver {
         self.self_extension_mode
     }
 
-    /// Clone the host-owned services used when this resolver constructs an
-    /// agent from a provider-independent resolved harness.
-    pub(crate) fn runtime_services(&self) -> RuntimeServices {
-        self.runtime_services.clone()
-    }
-
     /// Resolve one already staged revision into an immutable core-epoch
     /// configuration.  Source validation occurred while staging its snapshot;
     /// this method still fail-closes if lineage metadata is absent.
     pub fn resolve_revision(
         &self,
         revision_id: &HarnessRevisionId,
+        runtime_services: &RuntimeServices,
     ) -> Result<ResolvedHarness, HarnessError> {
         let (revision, snapshot, extensions) = {
             let repository = self.lock_repository()?;
@@ -371,7 +363,7 @@ impl HarnessResolver {
             ));
         }
         let memory_collector = Arc::new(ExtensionMemoryCollector::default());
-        let mut hooks = self.runtime_services.base_hook_set();
+        let mut hooks = runtime_services.base_hook_set();
         let mut plugin_tools = ToolRegistry::default();
         let mut resolved_extensions = Vec::new();
         for (index, loaded) in extensions.iter().enumerate().rev() {
@@ -492,7 +484,7 @@ impl HarnessResolver {
             }
         }
         resolve_snapshot(ResolveSnapshotInput {
-            runtime_services: &self.runtime_services,
+            runtime_services,
             revision: &revision,
             snapshot: &snapshot,
             self_extension_mode: self.self_extension_mode,
@@ -524,7 +516,11 @@ impl HarnessResolver {
     /// it produces immutable source/tree/snapshot objects first and returns a
     /// candidate whose validation result describes whether activation is
     /// permitted.
-    pub fn apply(&self, request: HarnessApplyRequest) -> Result<HarnessCandidateV1, HarnessError> {
+    pub fn apply(
+        &self,
+        request: HarnessApplyRequest,
+        runtime_services: &RuntimeServices,
+    ) -> Result<HarnessCandidateV1, HarnessError> {
         if request.tool_invocation_id.trim().is_empty() {
             return Err(HarnessError::invalid_state(
                 "harness apply requires a stable tool invocation identity",
@@ -614,7 +610,7 @@ impl HarnessResolver {
                 .collect::<Result<Vec<_>, HarnessError>>()?
         };
         proposed_spec.hook_bundle_digest = runtime_hook_bundle_digest(
-            self.runtime_services
+            runtime_services
                 .runtime_policy_identities()
                 .hook_bundle_digest,
             &proposed_spec,
@@ -1317,11 +1313,11 @@ mod tests {
         }])
         .seed(HarnessActor::Host, 1)
         .expect("fixture harness seeds");
-        let manager = HarnessResolver::new(seeded.repository, services, BTreeSet::new())
+        let manager = HarnessResolver::new(seeded.repository, BTreeSet::new())
             .reserved_extension_command_names(["/native"]);
 
         let error = manager
-            .resolve_revision(&seeded.revision.revision_id)
+            .resolve_revision(&seeded.revision.revision_id, &services)
             .expect_err("native command collision must fail resolution");
         assert!(error.to_string().contains("collides with a native host command"));
     }

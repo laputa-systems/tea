@@ -140,7 +140,7 @@ fn call(name: &str, arguments: &str) -> ToolCall {
 fn context() -> ToolContext {
     ToolContext {
         cancellation: CancellationToken::new(),
-        metadata: None,
+        provenance: crate::effect::RunProvenance::default(),
     }
 }
 
@@ -625,7 +625,7 @@ fn bash_cancellation_kills_the_foreground_shell_and_settles_promptly() {
                 ),
                 ToolContext {
                     cancellation: worker_cancellation,
-                    metadata: None,
+                    provenance: crate::effect::RunProvenance::default(),
                 },
                 ToolUpdateSink::disabled(),
             )))

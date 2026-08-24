@@ -172,6 +172,47 @@ only for explicit compatibility with the pinned Pi v1 profile. See the
 [default-profile guide](default-coding-profile.md) before granting a real
 filesystem or process capability.
 
+## Enable durable subagents explicitly
+
+Library integrations opt in by supplying both workspace and task-runtime host
+ports when constructing the durable supervisor. All supervisor inputs are
+explicit, including the automatic-harness rollover budget:
+
+```rust,ignore
+let enabled_supervisor = SessionSupervisor::create(SessionSupervisorInput {
+    session,
+    resolver,
+    root_identity,
+    root_services,
+    artifacts,
+    rollover_budget: 0,
+    subagents: Some(SubagentServices {
+        policy,
+        host: Arc::new(my_host),
+        tasks: Arc::new(my_task_runtime),
+    }),
+})?;
+```
+
+The ordinary disabled form supplies the same durable inputs but creates no
+coordinator, child provider factory, or collaboration tools:
+
+```rust,ignore
+let disabled_supervisor = SessionSupervisor::create(SessionSupervisorInput {
+    session: disabled_session,
+    resolver: disabled_resolver,
+    root_identity: disabled_root_identity,
+    root_services: disabled_root_services,
+    artifacts: disabled_artifacts,
+    rollover_budget: 0,
+    subagents: None,
+})?;
+```
+
+`~/.tea/config.toml` belongs only to the repository-owned terminal application;
+it is not an SDK configuration source. See [durable subagents](subagents.md)
+for host-port, persistence, isolation, cancellation and recovery obligations.
+
 ## Connect a real model and world
 
 Implement `ModelProvider::stream` outside the core. Return a stream source as
@@ -198,4 +239,4 @@ immutable harness with `HarnessSeedBuilder` and `HarnessResolver`, then pass the
 `HostedEpoch` exposes the caller-driven `Agent`, normalized `RunProvenance`, and
 standard harness surface fingerprints without creating a Tea session or adding
 implicit tools. This is the integration boundary for external durable authorities;
-it is not a lightweight replacement for `SessionRuntime` recovery.
+it is not a lightweight replacement for `SessionSupervisor` recovery.

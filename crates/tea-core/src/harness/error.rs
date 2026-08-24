@@ -22,6 +22,25 @@ pub enum HarnessError {
     InvalidState { message: String },
     /// A durable prefix needs an explicit recovery decision before new work.
     RecoveryRequired { plan: tea_session::RecoveryPlan },
+    /// A durable child lease could not be recovered through the explicit host
+    /// authority required for the named recovery stage.
+    SubagentRecovery {
+        /// Durable child whose live workspace authority is required.
+        agent_id: tea_session::AgentId,
+        /// Exact host-bound stage that could not continue.
+        stage: SubagentRecoveryStage,
+    },
+}
+
+/// Typed stage for child workspace recovery failures.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SubagentRecoveryStage {
+    /// Reopening the durable workspace lease failed.
+    ReopenWorkspace,
+    /// Finalizing a completed child workspace failed.
+    FinalizeWorkspace,
+    /// Cleaning up a terminal child workspace failed.
+    CleanupWorkspace,
 }
 
 impl HarnessError {
@@ -50,6 +69,9 @@ impl fmt::Display for HarnessError {
                     formatter,
                     "durable prefix requires recovery before new work: {plan:?}"
                 )
+            }
+            Self::SubagentRecovery { agent_id, stage } => {
+                write!(formatter, "subagent {agent_id} cannot recover {stage:?}")
             }
         }
     }

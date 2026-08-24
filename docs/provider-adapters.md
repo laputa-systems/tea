@@ -107,6 +107,20 @@ environment variables, a home-directory auth file, the current working
 directory, or the system clock. Applications may obtain credentials and host
 facts using their own secret/capability boundary, then pass those values in.
 
+The terminal's optional subagent composition uses a lazy provider factory keyed
+by the exact `ModelDescriptor`. It resolves a closed checked-in catalog before
+persisting the session policy, constructs an adapter only when that descriptor
+is actually selected, and keeps one immutable compactor per descriptor/provider
+pair. The child tool call cannot supply a provider, endpoint, credential or
+model outside that catalog, and unused catalog entries do not trigger credential
+lookup.
+
+Workspace-bearing adapters receive the stable logical repository label, not an
+isolated child's physical session worktree. In particular Command Code
+`workingDir` and project metadata must remain stable across two equivalent child
+leases; private index paths, worktree paths and lease suffixes never cross the
+provider boundary.
+
 Command Code also requires a `CommandCodeHostContext`, which makes the
 gateway's `workingDir`, `date`, and `environment` fields an explicit host
 decision:

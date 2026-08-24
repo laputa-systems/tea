@@ -31,4 +31,4 @@ pub mod trace;
 mod tests;
 
 pub use agent::Agent;
-pub use runtime::SessionRuntime;
+pub use runtime::{SessionSupervisor, SessionSupervisorInput, SessionSupervisorReopenInput};

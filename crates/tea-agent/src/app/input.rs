@@ -241,17 +241,8 @@ impl App {
     }
 
     fn handle_control_c(&mut self) {
-        let active_harness = self
-            .durable_harness
-            .as_ref()
-            .filter(|harness| harness.is_active())
-            .cloned();
-        if let Some(harness) = active_harness {
-            match harness.abort() {
-                Ok(true) => self.state.notice("cancelling"),
-                Ok(false) => self.state.notice("waiting for durable epoch startup"),
-                Err(error) => self.state.notice(error.to_string()),
-            }
+        if self.durable_task.is_some() || self.agent_is_active() {
+            self.request_root_abort(true);
             self.state.slash_completion = None;
             return;
         }
@@ -410,18 +401,11 @@ impl App {
             }
             "/quit" => {
                 self.quitting = true;
-                let active_harness = self
-                    .durable_harness
-                    .as_ref()
-                    .filter(|harness| harness.is_active())
-                    .cloned();
-                if let Some(harness) = active_harness {
-                    match harness.abort() {
-                        Ok(true) => self.state.notice("cancelling before exit"),
-                        Ok(false) => self.state.notice("waiting for durable epoch startup"),
-                        Err(error) => self.state.notice(error.to_string()),
-                    }
-                }
+                // A detached root receiver may exist before its first epoch
+                // installs a core agent. `abort_root` owns a sticky request
+                // for that gap; the event loop retries it until this receiver
+                // settles, then exits only after durable child cleanup joins.
+                self.request_root_abort(true);
             }
             command if self.state.extension_command(command).is_some() => {
                 self.dispatch_extension_command(command, arguments)?;
@@ -429,6 +413,39 @@ impl App {
             command => self.state.notice(format!("unknown command {command}")),
         }
         Ok(())
+    }
+
+    /// Ask the durable supervisor to cancel the root operation without using
+    /// `is_active` as a gate: the durable receiver exists one scheduling turn
+    /// before a newly accepted epoch installs its core agent.
+    pub(super) fn request_root_abort(&mut self, report: bool) -> bool {
+        let Some(harness) = self.durable_harness.as_ref() else {
+            return false;
+        };
+        match harness.abort_root() {
+            Ok(true) => {
+                if report {
+                    self.state.notice(if self.quitting {
+                        "cancelling before exit"
+                    } else {
+                        "cancelling"
+                    });
+                }
+                true
+            }
+            Ok(false) => {
+                if report && self.durable_task.is_some() {
+                    self.state.notice("waiting for durable epoch startup");
+                }
+                false
+            }
+            Err(error) => {
+                if report {
+                    self.state.notice(error.to_string());
+                }
+                false
+            }
+        }
     }
 
     fn dispatch_extension_command(&mut self, command: &str, arguments: String) -> Result<(), AppError> {

@@ -139,7 +139,10 @@ fn end_reason_name(reason: &EndReason) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{CacheEvidence, Compaction, CompactionStage, EpisodeHeader, TraceEvent, Turn};
+    use crate::{
+        CacheEvidence, Compaction, CompactionStage, EpisodeHeader, TraceEvent, TraceProvenance,
+        Turn,
+    };
     use std::collections::BTreeMap;
 
     #[test]
@@ -219,6 +222,55 @@ mod tests {
             bytes
                 .windows("episode_header".len())
                 .any(|window| window == b"episode_header")
+        );
+    }
+
+    #[test]
+    fn agent_attribution_round_trips_json_and_cbor_while_legacy_json_stays_readable() {
+        let provenance = TraceProvenance {
+            lane_id: Some("lane-child".into()),
+            agent_id: Some("agent-child".into()),
+            ..TraceProvenance::default()
+        };
+        let header = TraceEvent::from(
+            EpisodeHeader::new("episode-agent").with_provenance(provenance.clone()),
+        );
+
+        let mut json = JsonLinesSink::new(Vec::new());
+        json.append(header.clone())
+            .expect("in-memory JSON write succeeds");
+        let encoded = String::from_utf8(json.into_inner()).expect("JSON is UTF-8");
+        assert!(encoded.contains(r#""lane_id":"lane-child""#));
+        assert!(encoded.contains(r#""agent_id":"agent-child""#));
+        let TraceEvent::EpisodeHeader(decoded) =
+            decode_json_line(encoded.trim_end()).expect("canonical attribution decodes")
+        else {
+            panic!("header round trip must remain a header");
+        };
+        assert_eq!(decoded.provenance, Some(provenance));
+
+        let legacy = r#"{"schema_version":1,"type":"episode_header","episode_id":"legacy","metadata":{},"started_at_ms":null,"provenance":{"session_id":null,"lane_id":"lane-child","operation_id":null,"epoch_id":null,"core_run_id":null,"harness_snapshot_id":null,"harness_revision_id":null,"model_harness_profile_id":null,"experiment_id":null}}"#;
+        let TraceEvent::EpisodeHeader(legacy_header) =
+            decode_json_line(legacy).expect("pre-agent v1 attribution remains readable")
+        else {
+            panic!("legacy header remains a header");
+        };
+        assert_eq!(
+            legacy_header
+                .provenance
+                .as_ref()
+                .and_then(|value| value.agent_id.as_deref()),
+            None
+        );
+
+        let mut cbor = CborSink::new(Vec::new());
+        cbor.append(header).expect("in-memory CBOR write succeeds");
+        let bytes = cbor.into_inner();
+        assert!(
+            bytes
+                .windows("agent_id".len())
+                .any(|window| window == b"agent_id"),
+            "CBOR provenance carries the same optional agent attribution"
         );
     }
 

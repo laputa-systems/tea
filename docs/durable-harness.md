@@ -9,14 +9,14 @@ The relevant layers are intentionally narrow:
 
 ~~~text
 tea-agent terminal
-  -> tea_core::runtime::SessionRuntime
+  -> tea_core::runtime::SessionSupervisor
       -> tea-session semantic log and immutable objects
       -> tea_core::harness::HarnessResolver catalog, snapshots, candidates, revisions
       -> tea-core provider/tool execution
       -> redacted trace artifact
 ~~~
 
-Before an effect crosses into the core, `SessionRuntime` records the durable
+Before an effect crosses into the core, `SessionSupervisor` records the durable
 operation and epoch. Provider requests and tool calls use the effect gate, so
 intent and settled outcome are represented in session state. Reconnect state is
 derived from one atomic session snapshot plus post-commit live events.
@@ -26,9 +26,15 @@ runtime services, prompt sections, tools, hooks, capability bindings, artifact p
 and model-harness profile are all immutable for that epoch. A candidate can
 change the next boundary only after validation and durable activation.
 
+`HarnessResolver` owns only provider-independent immutable repository and
+extension resolution state. `SessionSupervisor` supplies the selected lane's
+`RuntimeServices` when resolving and constructing an epoch, so root and child
+lanes may use different providers, compactors, workspace tool registries and
+prompt-layout ledgers without hiding a mutable session-global service template.
+
 Runtime policy identities are owned by `RuntimeServices`. `HarnessSeedBuilder`
 copies those identities into the immutable snapshot, and `HarnessResolver`
-checks them again before both `SessionRuntime` and `HostedEpoch` construct an
+checks them again before both `SessionSupervisor` and `HostedEpoch` construct an
 agent. This keeps the executable hook, automatic-compaction, tool-projection,
 and tool-failure policies paired with the snapshot metadata that names them;
 the built-in defaults have stable identities as well.
@@ -50,7 +56,7 @@ extension never receives the raw session writer or another extension's state.
 After an operation has settled and the lane is idle, the terminal applies any
 queued extension controls, then asks resolved idle callbacks whether one
 internal continuation is warranted. A continuation is accepted through the
-ordinary `SessionRuntime` operation path and is stored as host-only model
+ordinary root-lane `SessionSupervisor` operation path and is stored as host-only model
 context, not as a user message. Cancellation and failed operations do not
 produce automatic retries; one settled operation may request at most one
 continuation.

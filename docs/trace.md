@@ -16,10 +16,13 @@ requires exactly one header first and one episode-end record last, with no
 terminal record in between. This makes decoded trace evidence suitable for
 provider-free validation without accepting unrelated Factory records.
 
-SessionRuntime wraps its trace capture in a redactor that replaces model input
+`SessionSupervisor` wraps each lane's trace capture in a redactor that replaces model input
 and output, tool input and output, and terminal diagnostics before persistence.
 It retains chronology, event kinds, cache evidence, compaction lifecycle, and
-durable provenance without retaining prompt or tool content.
+durable provenance without retaining prompt or tool content. Trace provenance
+includes the lane and optional child-agent identity, so a child trace remains
+attributable without becoming a root-transcript message; physical child-worktree
+and private-index paths are not durable trace identity.
 
 Turn cache evidence retains content-free request diagnostics: logical continuity,
 changed domain-component names, converted-context sizes and prefix ratio, logical

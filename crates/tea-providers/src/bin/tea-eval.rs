@@ -21,8 +21,8 @@ use tea_core::harness::{
 };
 use tea_core::hooks::HookSet;
 use tea_core::runtime::{
-    HarnessEvent, HarnessIdentity, RuntimePolicyIdentities, RuntimeServices, SessionRuntime,
-    TeaEvent,
+    HarnessEvent, HarnessIdentity, RuntimePolicyIdentities, RuntimeServices, SessionSupervisor,
+    SessionSupervisorInput, TeaEvent,
 };
 use tea_core::state::{ModelDescriptor, ThinkingLevel};
 use tea_core::tool::ToolExecutionMode;
@@ -382,7 +382,7 @@ fn snapshot_spec(
 
 fn event_name(event: &TeaEvent) -> &'static str {
     match event {
-        TeaEvent::Agent(event) => match &event.kind {
+        TeaEvent::Agent { event, .. } => match &event.kind {
             AgentEventKind::AgentStart => "agent_start",
             AgentEventKind::TurnStart { .. } => "turn_start",
             AgentEventKind::MessageStart { .. } => "message_start",
@@ -934,21 +934,23 @@ fn main() -> Result<(), String> {
         )
         .map_err(|error| error.to_string())?;
     let manager = Arc::new(
-        HarnessResolver::new(repository, services, Default::default())
+        HarnessResolver::new(repository, Default::default())
             .self_extension_mode(args.harness_mode.extension_mode()),
     );
-    let harness = SessionRuntime::new_with_artifact_store(
+    let harness = SessionSupervisor::create(SessionSupervisorInput {
         session,
-        Arc::clone(&manager),
-        HarnessIdentity::new(
+        resolver: Arc::clone(&manager),
+        root_identity: HarnessIdentity::new(
             revision.revision_id,
             snapshot.id.clone(),
             model_profile.profile_id,
         ),
+        root_services: services,
         artifacts,
-    )
-    .map_err(|error| error.to_string())?
-    .rollover_budget(1);
+        rollover_budget: 1,
+        subagents: None,
+    })
+    .map_err(|error| error.to_string())?;
     let subscription = harness
         .subscribe_events()
         .map_err(|error| error.to_string())?;
@@ -957,7 +959,7 @@ fn main() -> Result<(), String> {
         if args.harness_mode == HarnessMode::Jit {
             harness.run_authoring_prompt(prompt).await
         } else {
-            harness.run_prompt(prompt).await
+            harness.run_root_prompt(prompt).await
         }
     });
     let agent_ms = started.elapsed().as_millis() as u64;

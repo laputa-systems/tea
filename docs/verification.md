@@ -28,5 +28,17 @@ reconstructs the committed revision, and the terminal can reopen without an
 in-memory transcript. Trace and evolution work must additionally verify their
 artifact roots and exact evidence spans.
 
+Subagent verification is entirely offline. `tea-session` tests policy and graph
+facts, cross-reference corruption, JSONL fixed points, artifact reachability and
+unresolved-lease export rules. `tea-core` uses scripted providers plus fake
+`SubagentHost` and `TaskRuntime` implementations for concurrent lanes, exact
+source-leaf provenance, spawn replay and capacity, event-driven wait ordering,
+structured cancellation, report retention, prompt layout and recovery prefixes.
+`tea-agent` uses temporary Git repositories for snapshot isolation, binary
+deltas, private-index preflight, and `Applied`/`AlreadyApplied`/`Conflict`/
+`RolledBack`/`Indeterminate` classification, and the PTY suite for
+feature-disabled visual identity and feature-enabled root-only presentation. No
+credential or live inference is part of these checks.
+
 Do not run formatters, linters, pre-commit hooks, or push as part of normal
 verification in this repository.

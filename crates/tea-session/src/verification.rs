@@ -170,6 +170,15 @@ fn expected_artifact_lengths(
     }
     for fact in snapshot.facts() {
         match &fact.fact {
+            SessionFact::SubagentPolicy(_)
+            | SessionFact::AgentSpawned(_)
+            | SessionFact::WorkspaceDeltaApplied(_) => {}
+            SessionFact::WorkspaceDelta(delta) => {
+                record_payload_length(&mut expected, &delta.patch)?;
+            }
+            SessionFact::AgentTaskFinished(result) => {
+                record_payload_length(&mut expected, &result.report)?;
+            }
             SessionFact::HarnessCatalog(catalog) => {
                 record_length(&mut expected, catalog.artifact_id, catalog.byte_len)?;
             }

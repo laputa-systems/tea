@@ -3,10 +3,13 @@ use super::state::ContextEstimate;
 use super::*;
 use std::ffi::OsString;
 use std::fs;
+use std::io::{Read, Write};
+use std::net::TcpListener;
 use std::num::NonZeroU64;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::thread;
 use tea_core::compaction::{
     AutomaticCompactionReason, AutomaticCompactionRequest, CompactionContext, Compactor,
     OverflowRecovery, ProviderContext,
@@ -47,6 +50,42 @@ fn style_at(line: &StyledLine, index: usize) -> Style {
         consumed += count;
     }
     panic!("style index {index} is outside line {:?}", line.text());
+}
+
+fn read_complete_http_request(reader: &mut impl Read) {
+    let mut bytes = Vec::new();
+    let mut chunk = [0_u8; 4096];
+    let mut header_end = None;
+    let mut expected = None;
+    loop {
+        let read = reader.read(&mut chunk).expect("fixture request reads");
+        assert_ne!(read, 0, "provider request must not close before its body");
+        bytes.extend_from_slice(&chunk[..read]);
+        if header_end.is_none() {
+            header_end = bytes
+                .windows(4)
+                .position(|window| window == b"\r\n\r\n")
+                .map(|offset| offset + 4);
+            if let Some(end) = header_end {
+                let headers = std::str::from_utf8(&bytes[..end])
+                    .expect("fixture HTTP headers are UTF-8");
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then_some(value.trim())
+                    })
+                    .expect("provider request has content length")
+                    .parse::<usize>()
+                    .expect("provider content length is numeric");
+                expected = Some(end + content_length);
+            }
+        }
+        if expected.is_some_and(|length| bytes.len() >= length) {
+            return;
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -262,6 +301,29 @@ fn machine_session_inspect_and_verify_emit_authenticated_json() {
             Some(1)
         );
     }
+    let _ = fs::remove_dir_all(home);
+}
+
+#[test]
+fn session_commands_do_not_load_the_tui_config() {
+    let home = test_tea_home("session-command-no-config");
+    fs::write(home.join("config.toml"), "[features\n")
+        .expect("malformed config writes");
+    let directory = home.join("session.tea");
+    JsonlSession::create(
+        &directory,
+        SessionHeader::new(
+            SessionId::new("session-command-no-config").expect("valid session ID"),
+            "workspace-test",
+            Metadata::new(),
+        ),
+        DurabilityMode::Strict,
+    )
+    .expect("session creates");
+
+    let output = run_session_command(SessionCommand::Inspect { directory })
+        .expect("session inspection must not read TUI config");
+    assert!(output.contains("\"operation\":\"inspect\""), "{output}");
     let _ = fs::remove_dir_all(home);
 }
 
@@ -662,6 +724,41 @@ fn cli_parses_explicit_tea_home() {
 }
 
 #[test]
+fn explicit_tea_home_redirects_the_tui_config_and_loads_it_once() {
+    let tea_home = test_tea_home("config-home");
+    fs::write(
+        tea_home.join("config.toml"),
+        "[features]\nsubagents = true\n",
+    )
+    .expect("TUI config writes");
+    let options = CliOptions::parse(
+        [
+            "tea",
+            "--tea-home",
+            tea_home.to_str().expect("UTF-8 test path"),
+        ]
+        .map(OsString::from),
+    )
+    .expect("startup options parse");
+    let mut app = App::new(options);
+
+    app.assemble_host().expect("host should assemble");
+    assert!(
+        app.tui_config
+            .as_ref()
+            .expect("TUI config is retained")
+            .features
+            .subagents
+    );
+
+    fs::write(tea_home.join("config.toml"), "invalid = [\n")
+        .expect("replacement config writes");
+    app.assemble_host()
+        .expect("assembled application does not reload global config");
+    let _ = fs::remove_dir_all(tea_home);
+}
+
+#[test]
 fn startup_does_not_open_model_picker_without_an_explicit_selection() {
     let tea_home = test_tea_home("startup");
     let options = CliOptions::parse(
@@ -679,6 +776,10 @@ fn startup_does_not_open_model_picker_without_an_explicit_selection() {
 
     assert_eq!(app.state().surface(), UiSurface::None);
     assert!(app.state().selected_model.is_none());
+    assert!(
+        app.provider_factory.is_none(),
+        "feature-disabled idle startup must not initialize provider authority"
+    );
     let _ = fs::remove_dir_all(tea_home);
 }
 
@@ -772,6 +873,145 @@ fn session_resumption_restores_its_model_without_global_preferences() {
         })
     );
     assert!(resumed.durable_harness.is_some());
+    let _ = fs::remove_dir_all(tea_home);
+}
+
+#[test]
+fn session_resumption_preserves_a_revision_pinned_root_descriptor() {
+    let tea_home = test_tea_home("session-model-revision");
+    let workspace = tea_home.join("workspace");
+    fs::create_dir(&workspace).expect("workspace should be created");
+    let workspace = fs::canonicalize(workspace).expect("workspace should canonicalize");
+    let first_options = CliOptions::parse(
+        [
+            "tea",
+            "--tea-home",
+            tea_home.to_str().expect("UTF-8 test path"),
+            "--cwd",
+            workspace.to_str().expect("UTF-8 workspace path"),
+            "--provider",
+            mock::PROVIDER_ID,
+        ]
+        .map(OsString::from),
+    )
+    .expect("first startup options parse");
+    let descriptor = ModelDescriptor {
+        provider: mock::PROVIDER_ID.into(),
+        model: mock::DEFAULT_MODEL_ID.into(),
+        revision: Some("pinned-fixture-revision".into()),
+    };
+    let mut first = App::new(first_options);
+    first.assemble_host().expect("first host should assemble");
+    first
+        .select_model_descriptor(descriptor.clone())
+        .expect("revision-pinned model should select");
+    let harness = first
+        .ensure_durable_harness()
+        .expect("revision-pinned session should create");
+    let session_id = harness
+        .snapshot()
+        .expect("created session snapshot")
+        .header()
+        .session_id
+        .to_string();
+    drop(harness);
+    drop(first);
+
+    let resumed_options = CliOptions::parse(
+        [
+            "tea",
+            "--tea-home",
+            tea_home.to_str().expect("UTF-8 test path"),
+            "--cwd",
+            workspace.to_str().expect("UTF-8 workspace path"),
+        ]
+        .map(OsString::from),
+    )
+    .expect("resumed startup options parse");
+    let mut resumed = App::new(resumed_options);
+    resumed.assemble_host().expect("resumed host should assemble");
+    resumed
+        .resume_session(&session_id)
+        .expect("revision-pinned session should resume");
+    assert_eq!(resumed.state().selected_model.as_ref(), Some(&descriptor));
+    let _ = fs::remove_dir_all(tea_home);
+}
+
+#[test]
+fn disabled_subagent_reopen_rejects_before_provider_setup_or_prior_harness_removal() {
+    let tea_home = test_tea_home("disabled-subagent-reopen");
+    fs::write(
+        tea_home.join("config.toml"),
+        "[features]\nsubagents = true\n",
+    )
+    .expect("enabled TUI config writes");
+    let workspace = tea_home.join("workspace");
+    fs::create_dir(&workspace).expect("workspace should be created");
+    let workspace = fs::canonicalize(workspace).expect("workspace should canonicalize");
+    let creator_options = CliOptions::parse(
+        [
+            "tea",
+            "--tea-home",
+            tea_home.to_str().expect("UTF-8 test path"),
+            "--cwd",
+            workspace.to_str().expect("UTF-8 workspace path"),
+            "--provider",
+            mock::PROVIDER_ID,
+        ]
+        .map(OsString::from),
+    )
+    .expect("creator startup options parse");
+    let mut creator = App::new(creator_options);
+    creator.assemble_host().expect("creator host should assemble");
+    let created = creator
+        .ensure_durable_harness()
+        .expect("enabled session should create");
+    let session_id = created
+        .snapshot()
+        .expect("created session snapshot")
+        .header()
+        .session_id
+        .to_string();
+
+    let resumed_options = CliOptions::parse(
+        [
+            "tea",
+            "--tea-home",
+            tea_home.to_str().expect("UTF-8 test path"),
+            "--cwd",
+            workspace.to_str().expect("UTF-8 workspace path"),
+        ]
+        .map(OsString::from),
+    )
+    .expect("resumed startup options parse");
+    let mut resumed = App::new(resumed_options);
+    resumed.assemble_host().expect("resumed host should assemble");
+    resumed.tui_config = Some(super::config::TuiConfig::default());
+    resumed.durable_harness = Some(Arc::clone(&created));
+
+    let error = resumed
+        .resume_session(&session_id)
+        .expect_err("disabled feature must refuse the persisted enabled session");
+    assert!(error
+        .to_string()
+        .contains("requires features.subagents = true"));
+    assert!(
+        resumed.provider_factory.is_none(),
+        "authorization failure must not construct root or child provider authority"
+    );
+    assert!(
+        Arc::ptr_eq(
+            resumed
+                .durable_harness
+                .as_ref()
+                .expect("prior harness remains attached"),
+            &created,
+        ),
+        "authorization failure must not discard the prior idle harness"
+    );
+    drop(resumed);
+    drop(created);
+    drop(creator);
     let _ = fs::remove_dir_all(tea_home);
 }
 
@@ -1057,6 +1297,50 @@ fn usage_events_update_footer_projection_without_transcript_noise() {
 }
 
 #[test]
+fn subagent_footer_is_opt_in_and_uses_the_live_activity_count() {
+    let registry = tea_providers::ProviderRegistry::new();
+    let mut state = AppState::new();
+    assert_eq!(state.footer_lines(&registry)[1], "ctx ?%/?");
+
+    state.set_subagent_activity(Some((0, 4)));
+    assert_eq!(state.footer_lines(&registry)[1], "ctx ?%/? · agents 0/4");
+    state.set_subagent_activity(Some((2, 4)));
+    assert_eq!(state.footer_lines(&registry)[1], "ctx ?%/? · agents 2/4");
+    state.set_subagent_activity(None);
+    assert_eq!(state.footer_lines(&registry)[1], "ctx ?%/?");
+}
+
+#[test]
+fn child_events_update_aggregate_usage_without_entering_root_transcript() {
+    let mut app = App::new(CliOptions::default());
+    let child_lane = LaneId::new("child-agent-event").expect("child lane is valid");
+    app.project_durable_event(tea_core::runtime::TeaEvent::Agent {
+        lane_id: child_lane,
+        event: tea_core::event::AgentEvent {
+            run_id: tea_core::state::RunId(9),
+            sequence: tea_core::event::EventSequence(1),
+            kind: tea_core::event::AgentEventKind::ModelTurnUsage {
+                accounting: tea_core::state::ModelTurnAccounting {
+                    run_id: tea_core::state::RunId(9),
+                    turn_id: tea_core::state::TurnId(1),
+                    model: None,
+                    usage: Usage {
+                        output_tokens: Some(7),
+                        ..Usage::default()
+                    },
+                },
+            },
+        },
+    });
+
+    assert!(app.state().transcript().is_empty());
+    assert!(app
+        .state()
+        .footer_lines(&app.registry)[1]
+        .contains("↓7"));
+}
+
+#[test]
 fn thinking_command_changes_the_footer_effort_setting() {
     let mut app = App::new(CliOptions::parse(["tea"].map(OsString::from)).expect("options"));
 
@@ -1122,8 +1406,7 @@ fn local_compactor_summarizes_and_preserves_the_core_retained_suffix() {
             model: tea_providers::local::LAGUNA_XS_2_1_MODEL.into(),
             revision: None,
         };
-        let compactor = ProviderCompactor::default();
-        compactor.configure(
+        let compactor = ProviderCompactor::new(
             model.clone(),
             Arc::new(SummaryProvider {
                 expected_model: model.clone(),
@@ -1185,8 +1468,7 @@ fn cache_friendly_compaction_appends_one_instruction_to_an_exact_source_prefix()
             revision: None,
         };
         let requests = Arc::new(Mutex::new(Vec::new()));
-        let compactor = ProviderCompactor::default();
-        compactor.configure(
+        let compactor = ProviderCompactor::new(
             model.clone(),
             Arc::new(RecordingSummaryProvider {
                 expected_model: model.clone(),
@@ -1275,8 +1557,7 @@ fn cache_friendly_compaction_falls_back_when_a_transform_breaks_the_prefix() {
             revision: None,
         };
         let requests = Arc::new(Mutex::new(Vec::new()));
-        let compactor = ProviderCompactor::default();
-        compactor.configure(
+        let compactor = ProviderCompactor::new(
             model.clone(),
             Arc::new(RecordingSummaryProvider {
                 expected_model: model.clone(),
@@ -1657,6 +1938,72 @@ fn mock_provider_uses_a_default_model_without_credentials() {
             .names()
             .collect::<Vec<_>>(),
         ["edit"]
+    );
+    let _ = fs::remove_dir_all(tea_home);
+}
+
+#[test]
+fn one_shot_uses_the_enabled_subagent_session_path() {
+    let tea_home = test_tea_home("one-shot-subagents");
+    fs::write(
+        tea_home.join("config.toml"),
+        "[features]\nsubagents = true\n",
+    )
+    .expect("enabled TUI config writes");
+    let listener = TcpListener::bind("127.0.0.1:0").expect("fixture listener binds");
+    let address = listener.local_addr().expect("fixture address resolves");
+    let server = thread::spawn(move || {
+        let (mut socket, _) = listener.accept().expect("one-shot request connects");
+        read_complete_http_request(&mut socket);
+        let body = br#"data: {"choices":[{"delta":{"content":"one-shot fixture"},"finish_reason":"stop"}],"usage":{"prompt_tokens":2,"completion_tokens":3}}
+
+data: [DONE]
+
+"#;
+        socket
+            .write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .as_bytes(),
+            )
+            .expect("one-shot fixture headers write");
+        socket.write_all(body).expect("one-shot fixture body writes");
+        socket.flush().expect("one-shot fixture response flushes");
+    });
+    let options = CliOptions::parse(
+        [
+            "tea",
+            "--provider",
+            "local",
+            "--model",
+            "one-shot-fixture-model",
+            "--local-base-url",
+            &format!("http://{address}/v1"),
+            "--tea-home",
+            tea_home.to_str().expect("UTF-8 test path"),
+        ]
+        .map(OsString::from),
+    )
+    .expect("one-shot options parse");
+    let mut app = App::new(options);
+
+    let run = app.run_prompt("exercise enabled one-shot".into());
+    server.join().expect("one-shot fixture exits");
+    run.expect("one-shot uses the durable enabled host path");
+    let snapshot = app
+        .durable_harness
+        .as_ref()
+        .expect("one-shot retains its durable supervisor")
+        .snapshot()
+        .expect("one-shot snapshot reads");
+    assert!(
+        tea_session::reduce_agent_graph(&snapshot)
+            .expect("one-shot graph reduces")
+            .policy
+            .is_some(),
+        "one-shot must use the same enabled subagent policy path as the interactive TUI"
     );
     let _ = fs::remove_dir_all(tea_home);
 }

@@ -915,14 +915,46 @@ data: [DONE]
         use std::sync::mpsc;
         use std::time::Duration;
 
+        fn drain_request(socket: &mut std::net::TcpStream) {
+            let mut bytes = Vec::new();
+            let mut chunk = [0_u8; 4096];
+            let expected = loop {
+                let read = socket.read(&mut chunk).expect("request should remain readable");
+                assert_ne!(read, 0, "request must not close before its body");
+                bytes.extend_from_slice(&chunk[..read]);
+                let Some(header_end) = bytes
+                    .windows(4)
+                    .position(|window| window == b"\r\n\r\n")
+                    .map(|offset| offset + 4)
+                else {
+                    continue;
+                };
+                let headers = std::str::from_utf8(&bytes[..header_end])
+                    .expect("request headers should be UTF-8");
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().expect("numeric content length"))
+                    })
+                    .expect("request should include content length");
+                break header_end + content_length;
+            };
+            while bytes.len() < expected {
+                let read = socket.read(&mut chunk).expect("request body should remain readable");
+                assert_ne!(read, 0, "request must not close before its body");
+                bytes.extend_from_slice(&chunk[..read]);
+            }
+        }
+
         let listener = TcpListener::bind("127.0.0.1:0").expect("mock HTTP server should bind");
         let address = listener.local_addr().expect("mock HTTP server address");
         let (first_delta_sent, first_delta_received) = mpsc::channel();
         let (settle_response, wait_for_settlement) = mpsc::channel();
         let server = std::thread::spawn(move || {
             let (mut socket, _) = listener.accept().expect("provider should connect");
-            let mut request = [0_u8; 4096];
-            let _ = socket.read(&mut request);
+            drain_request(&mut socket);
             let first = br#"data: {"id":"streamed","choices":[{"delta":{"content":"first "},"finish_reason":null}]}
 
 "#;

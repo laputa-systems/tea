@@ -29,7 +29,7 @@ The workspace crates are:
 | --- | --- | --- |
 | `tea-protocol` | Shared `JsonValue`, canonical JSON encoding, and JSON conversion seams | Runtime IDs/messages/events, scheduler state, provider SDKs, Luau types, filesystem APIs |
 | `tea-session` | Versioned session format, reducers, immutable artifact storage, export/reopen verification | Agent/provider execution, provider SDKs, policy VMs, UI state |
-| `tea-core` | Agent FSM, durable `runtime::SessionRuntime`, immutable `harness` lineage, coding profile/tools, evolution control, context conversion, tool scheduling, hooks/queues, cancellation and settlement | HTTP/provider implementations, cwd/home/config discovery, TUI, Luau VM/runtime, Tokio executor |
+| `tea-core` | Agent FSM, durable `runtime::SessionSupervisor`, immutable `harness` lineage, coding profile/tools, evolution control, context conversion, tool scheduling, hooks/queues, cancellation and settlement | HTTP/provider implementations, cwd/home/config discovery, TUI, Luau VM/runtime, Tokio executor |
 | `tea-trace` | Immutable event-to-linear-episode recorder, redaction and caller-selected JSONL/CBOR sinks | Agent state, session tree, replay mutations, sink-driven behavior |
 | `tea-providers` | Concrete provider wire adapters and evaluation runner | Core state, durable session writes, UI ownership |
 | `tea-luau` (optional policy) | Hermetic VM, capability manifest/modules, policy hooks/tools, script error/limit translation | Core lifecycle/state/scheduling, ambient OS authority, event-loop ownership |
@@ -95,7 +95,7 @@ policy values. `HarnessSeedBuilder` gives composition roots one explicit, provid
 way to create the initial source tree, snapshot, revision, and model-harness profile;
 it performs no discovery and creates no session.
 
-`tea_core::runtime::SessionRuntime` owns session writes, recovery, activation,
+`tea_core::runtime::SessionSupervisor` owns session writes, recovery, activation,
 effects, artifacts, and event publication. It combines a `ResolvedHarness` with
 host-owned `RuntimeServices` (provider transport, trusted base tools, model
 selection, and compactor) only to construct an epoch `Agent`.
@@ -114,6 +114,36 @@ and `tea-luau::LuauExtensionEngine` and passes both through the narrow core port
 Consequently `tea-core` has no dependency on either concrete provider code or Luau.
 
 ## Ownership and state transitions
+
+`SessionSupervisor` owns one durable session and a map of lane runtimes. The
+main lane is selected only by root-facing entry points; the lower operation
+machinery receives a lane explicitly. Each lane owns its provider services,
+thinking level, active agent and operation claim, compactor, semantic branch,
+and prompt-layout ledger. The single session writer serializes mutations from
+all concurrently driven lanes into one global sequence.
+
+```text
+                         one SessionSupervisor
+                                  |
+                  +---------------+---------------+
+                  |               |               |
+              main lane       child lane A    child lane B
+              Agent/Run        Agent/Run        Agent/Run
+                  |               |               |
+                  +---------------+---------------+
+                                  |
+                       serialized SessionWriter
+```
+
+Optional subagents are supplied through explicit provider-neutral host and task
+ports. `SubagentHost` prepares and finalizes isolated workspaces and returns
+lane-specific `RuntimeServices`; `TaskRuntime` owns every asynchronous child
+handle through cancellation and join. `tea-core` neither invokes Git nor owns
+an executor. The terminal alone may turn its resolved `config.toml` into a
+`SubagentServices` value; library callers receive no ambient configuration
+semantics and must construct that value themselves. With `subagents: None`, no
+coordinator, child provider factory, or collaboration tools exist. See
+[durable subagents](subagents.md).
 
 One owned `Agent` has exactly zero or one active `Run`. The application owns the `Agent` and drives
 its futures; the core does not create an executor, spawn detached work, or maintain a background

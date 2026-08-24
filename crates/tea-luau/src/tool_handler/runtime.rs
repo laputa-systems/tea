@@ -15,6 +15,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use tea_core::error::ToolError;
+use tea_core::effect::RunProvenance;
 #[cfg(test)]
 pub(super) use tea_core::scheduler::CancellationToken;
 use tea_core::scheduler::CancellationWait;
@@ -257,7 +258,7 @@ impl Future for LuaToolExecution<'_> {
                             .context
                             .as_ref()
                             .expect("context remains until execution settles")
-                            .metadata,
+                            .provenance,
                     ) {
                         Ok(value) => value,
                         Err(error) => return Poll::Ready(Err(error)),
@@ -425,7 +426,7 @@ fn build_runtime(
 fn call_to_lua(
     lua: &Lua,
     call: &ToolCall,
-    metadata: &Option<SerializedJson>,
+    provenance: &RunProvenance,
 ) -> Result<Value, ToolError> {
     let arguments =
         JsonValue::parse(call.arguments.as_str()).map_err(|error| ToolError::InvalidArguments {
@@ -445,15 +446,51 @@ fn call_to_lua(
             tool: call.name.clone(),
             message: error.to_string(),
         })?;
-    if let Some(metadata) = metadata {
-        table
-            .set("metadata_json", metadata.as_str())
-            .map_err(|error| ToolError::Execution {
-                tool: call.name.clone(),
-                message: error.to_string(),
-            })?;
-    }
+    let provenance = provenance_to_lua(lua, provenance).map_err(|error| ToolError::Execution {
+        tool: call.name.clone(),
+        message: error.to_string(),
+    })?;
+    table
+        .set("provenance", provenance)
+        .map_err(|error| ToolError::Execution {
+            tool: call.name.clone(),
+            message: error.to_string(),
+        })?;
     Ok(Value::Table(table))
+}
+
+fn provenance_to_lua(lua: &Lua, provenance: &RunProvenance) -> mlua::Result<Table> {
+    let table = lua.create_table()?;
+    for (name, value) in [
+        ("session_id", provenance.session_id.as_deref()),
+        ("lane_id", provenance.lane_id.as_deref()),
+        ("operation_id", provenance.operation_id.as_deref()),
+        ("epoch_id", provenance.epoch_id.as_deref()),
+        ("source_leaf_id", provenance.source_leaf_id.as_deref()),
+        ("core_run_id", provenance.core_run_id.as_deref()),
+        (
+            "harness_revision_id",
+            provenance.harness_revision_id.as_deref(),
+        ),
+        (
+            "harness_snapshot_id",
+            provenance.harness_snapshot_id.as_deref(),
+        ),
+        (
+            "model_harness_profile_id",
+            provenance.model_harness_profile_id.as_deref(),
+        ),
+        (
+            "provider_surface_digest",
+            provenance.provider_surface_digest.as_deref(),
+        ),
+        ("experiment_id", provenance.experiment_id.as_deref()),
+    ] {
+        if let Some(value) = value {
+            table.set(name, value)?;
+        }
+    }
+    Ok(table)
 }
 
 fn parse_capability_request(
@@ -738,7 +775,7 @@ mod tests {
             tool_call(),
             ToolContext {
                 cancellation: CancellationToken::new(),
-                metadata: None,
+                provenance: RunProvenance::default(),
             },
             ToolUpdateSink::disabled(),
         ))
@@ -746,6 +783,39 @@ mod tests {
         assert_eq!(result.content, "capability-ok");
         assert_eq!(result.tool_call_id.as_str(), "call-1");
         assert_eq!(calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn handler_receives_typed_run_provenance_without_arbitrary_metadata() {
+        let capability = Arc::new(EchoCapability {
+            calls: Arc::new(AtomicUsize::new(0)),
+            response: Ok(CapabilityResponse {
+                value: JsonValue::Null,
+            }),
+        });
+        let handler = LuaToolHandler::new(
+            "return function(call) return call.provenance.lane_id .. ':' .. call.provenance.source_leaf_id end",
+            spec(),
+            bindings(capability),
+        )
+        .expect("handler should load");
+        let provenance = RunProvenance {
+            lane_id: Some("agent-child".into()),
+            source_leaf_id: Some("entry-parent-source".into()),
+            ..RunProvenance::default()
+        };
+
+        let result = run_to_completion(handler.execute(
+            tool_call(),
+            ToolContext {
+                cancellation: CancellationToken::new(),
+                provenance,
+            },
+            ToolUpdateSink::disabled(),
+        ))
+        .expect("handler should receive provenance");
+
+        assert_eq!(result.content, "agent-child:entry-parent-source");
     }
 
     #[test]
@@ -810,7 +880,7 @@ mod tests {
             tool_call(),
             ToolContext {
                 cancellation: CancellationToken::new(),
-                metadata: None,
+                provenance: RunProvenance::default(),
             },
             ToolUpdateSink::disabled(),
         ))
@@ -862,7 +932,7 @@ mod tests {
             tool_call(),
             ToolContext {
                 cancellation,
-                metadata: None,
+                provenance: RunProvenance::default(),
             },
             ToolUpdateSink::disabled(),
         ))
@@ -901,7 +971,7 @@ mod tests {
             tool_call(),
             ToolContext {
                 cancellation: cancellation.clone(),
-                metadata: None,
+                provenance: RunProvenance::default(),
             },
             ToolUpdateSink::disabled(),
         );
@@ -941,7 +1011,7 @@ mod tests {
             tool_call(),
             ToolContext {
                 cancellation: CancellationToken::new(),
-                metadata: None,
+                provenance: RunProvenance::default(),
             },
             ToolUpdateSink::disabled(),
         ))

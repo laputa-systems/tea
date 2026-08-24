@@ -15,7 +15,7 @@ pub use capability::{
     CapabilityBindingError, ExtensionStateCapability, PluginCapabilityBinding,
     PluginCapabilityCatalog,
 };
-pub use error::HarnessError;
+pub use error::{HarnessError, SubagentRecoveryStage};
 pub use lineage::{
     CandidateHypothesis, CandidateValidation, CapabilityBindingRef, HarnessActor,
     HarnessCandidateDraft, HarnessCandidateV1, HarnessLineageError, HarnessRepository,

@@ -366,6 +366,7 @@ fn remove_captures(stdout: &Path, stderr: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tea_core::effect::RunProvenance;
     use tea_core::state::{SerializedJson, ToolCallId};
     use tea_core::tool::{ToolCall, ToolContext, ToolUpdateSink};
 
@@ -460,7 +461,7 @@ mod tests {
         let (sender, receiver) = smol::channel::bounded(1);
         let context = ToolContext {
             cancellation: CancellationToken::new(),
-            metadata: None,
+            provenance: RunProvenance::default(),
         };
         let call = ToolCall {
             id: ToolCallId::new("stream").expect("call ID"),

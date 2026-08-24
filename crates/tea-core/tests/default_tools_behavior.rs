@@ -60,7 +60,7 @@ fn call(name: &str, arguments: &str) -> ToolCall {
 fn context() -> ToolContext {
     ToolContext {
         cancellation: CancellationToken::new(),
-        metadata: None,
+        provenance: tea_core::effect::RunProvenance::default(),
     }
 }
 

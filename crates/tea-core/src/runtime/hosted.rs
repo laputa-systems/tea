@@ -118,6 +118,10 @@ impl RuntimeServices {
             harness,
             input.effect_gate,
             provenance.clone(),
+            Arc::new(
+                crate::measurement::PromptLayoutLedger::new(self.prompt_layout_scope())
+                    .policy(self.prompt_layout_policy_value()),
+            ),
             input.additional_tools,
             Vec::new(),
         )?;
@@ -334,11 +338,10 @@ mod tests {
         let revision_id = seeded.revision.revision_id.clone();
         let resolver = crate::harness::HarnessResolver::new(
             seeded.repository,
-            services.clone(),
             Default::default(),
         );
         let resolved = resolver
-            .resolve_revision(&revision_id)
+            .resolve_revision(&revision_id, &services)
             .expect("fixture harness resolves");
         (services, resolved)
     }
@@ -359,6 +362,7 @@ mod tests {
                 &resolved,
                 Arc::new(NoopEffectGate),
                 RunProvenance::default(),
+                Arc::new(crate::measurement::PromptLayoutLedger::default()),
                 ToolRegistry::default(),
                 Vec::new(),
             )

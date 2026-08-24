@@ -25,8 +25,21 @@ and policy fingerprints.
 lineage, resolves a revision into a provider-independent `ResolvedHarness`, and persists the
 catalog needed for reopen.
 
-**Durable harness** — `tea_core::runtime::SessionRuntime`. The only host execution
+**Durable harness** — `tea_core::runtime::SessionSupervisor`. The only host execution
 surface for durable prompts, recovery, artifact verification, and collection.
+
+**Agent lane** — One independently executable semantic branch inside a
+`SessionSupervisor`, with lane-local model services, active operation, prompt-layout
+ledger, transcript, and compaction history. The main lane is the root; an enabled
+subagent is a child lane in the same session.
+
+**Subagent policy** — The immutable ordered child-model domain, display metadata,
+limits, timeout, and collaboration-tool surface persisted for a subagent-enabled
+session. Current terminal configuration is only an authorization ceiling on reopen.
+
+**Workspace delta** — A durable child-produced repository change set identified by
+its base and result trees, normalized changed paths, and immutable binary patch
+artifact. It cannot affect the parent workspace before explicit application.
 
 **Hosted epoch** — `tea_core::runtime::HostedEpoch`. One resolved immutable Tea
 agent epoch executed under a caller-owned durable authority. It shares standard

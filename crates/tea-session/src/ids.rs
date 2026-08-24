@@ -449,9 +449,89 @@ opaque_id!(
     /// Identifies a Tea core run for durable provenance.
     CoreRunId
 );
+opaque_id!(
+    /// Identifies one durable child agent inside a session.
+    AgentId
+);
+opaque_id!(
+    /// Identifies one host-owned isolated child workspace lease.
+    WorkspaceLeaseId
+);
+opaque_id!(
+    /// Identifies one immutable child workspace delta.
+    WorkspaceDeltaId
+);
+
+impl AgentId {
+    /// Derive the one replay-stable agent identity for a durable spawn intent.
+    ///
+    /// The idempotency key is the durable key from the parent tool-start
+    /// record, not a provider call ID, clock value, or process-local counter.
+    pub fn derive(
+        session_id: &SessionId,
+        parent_lane_id: &LaneId,
+        parent_operation_id: &OperationId,
+        spawn_idempotency_key: &str,
+    ) -> Self {
+        let mut hash = CanonicalHashWriter::new("tea-agent-id-v1", 1, 1);
+        hash.string("session_id", session_id.as_str());
+        hash.string("parent_lane_id", parent_lane_id.as_str());
+        hash.string("parent_operation_id", parent_operation_id.as_str());
+        hash.string("spawn_idempotency_key", spawn_idempotency_key);
+        Self::new(format!("agent-{}", hash.finish().to_hex()))
+            .expect("domain-separated agent IDs are valid opaque IDs")
+    }
+
+    /// Derive the child lane name from the agent's stable digest spelling.
+    ///
+    /// Agent and lane identities intentionally have the same textual spelling
+    /// in v1 while remaining distinct Rust types and hash domains elsewhere.
+    pub fn lane_id(&self) -> LaneId {
+        LaneId::new(self.as_str()).expect("agent IDs are valid lane IDs")
+    }
+}
+
+impl WorkspaceLeaseId {
+    /// Derive the replay-stable workspace lease for one agent.
+    pub fn derive(agent_id: &AgentId) -> Self {
+        let mut hash = CanonicalHashWriter::new("tea-workspace-lease-v1", 1, 1);
+        hash.string("agent_id", agent_id.as_str());
+        Self::new(format!("lease-{}", hash.finish().to_hex()))
+            .expect("domain-separated workspace lease IDs are valid opaque IDs")
+    }
+}
+
+impl WorkspaceDeltaId {
+    /// Derive the stable identity of one before/after workspace result.
+    pub fn derive(
+        workspace_lease_id: &WorkspaceLeaseId,
+        base_commit: &str,
+        result_commit: &str,
+    ) -> Self {
+        let mut hash = CanonicalHashWriter::new("tea-workspace-delta-v1", 1, 1);
+        hash.string("workspace_lease_id", workspace_lease_id.as_str());
+        hash.string("base_commit", base_commit);
+        hash.string("result_commit", result_commit);
+        Self::new(format!("delta-{}", hash.finish().to_hex()))
+            .expect("domain-separated workspace delta IDs are valid opaque IDs")
+    }
+}
+
+/// Derive the durable operation identity owned by one child agent assignment.
+///
+/// This remains a free function because `OperationId` is also used by root
+/// and host-defined operations that intentionally have different derivation
+/// contracts.
+pub fn derive_subagent_operation_id(agent_id: &AgentId, task: &str) -> OperationId {
+    let mut hash = CanonicalHashWriter::new("tea-subagent-operation-v1", 1, 1);
+    hash.string("agent_id", agent_id.as_str());
+    hash.bytes("task_digest", Digest::from_bytes(task.as_bytes()).as_bytes());
+    OperationId::new(format!("operation-{}", hash.finish().to_hex()))
+        .expect("domain-separated subagent operation IDs are valid opaque IDs")
+}
 
 impl LaneId {
-    /// The only lane exposed by the first complete durable slice.
+    /// The durable root lane seeded by every session header.
     pub fn main() -> Self {
         Self("main".into())
     }

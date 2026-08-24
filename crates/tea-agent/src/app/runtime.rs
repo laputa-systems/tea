@@ -1,5 +1,6 @@
 use crate::render;
 use crate::terminal::{TerminalError, TerminalGuard};
+use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{sync_channel, Receiver, TryRecvError};
@@ -15,10 +16,12 @@ use tea_tui::Size;
 
 use super::cli::CliOptions;
 use super::compaction::ProviderCompactor;
+use super::config::{load_tui_config, TuiConfig};
 use super::error::AppError;
 use super::host::host_configuration;
 use super::mock;
 use super::nonblocking_operations::NonblockingCodingOperations;
+use super::provider_factory::ProviderFactory;
 use super::state::{AppState, UiStatus};
 use std::sync::Arc;
 use tea_core::state::ThinkingLevel;
@@ -41,7 +44,12 @@ pub struct App {
     /// Completion channel for the current durable operation.
     pub(super) durable_task: Option<Receiver<Result<(), HarnessError>>>,
     pub(super) tea_home: Option<PathBuf>,
+    /// Global terminal policy loaded once from the resolved Tea home. It is
+    /// intentionally absent from library and `tea session` command paths.
+    pub(super) tui_config: Option<TuiConfig>,
     pub(super) registry: ProviderRegistry,
+    /// Lazy host-owned adapter construction for root and future child lanes.
+    pub(super) provider_factory: Option<Arc<ProviderFactory>>,
     pub(super) workspace: Option<PathBuf>,
     /// The idle prompt handed to the current run, retained only to restore local input after a
     /// failed or cancelled operation. The durable session remains the transcript source of truth.
@@ -72,7 +80,9 @@ impl App {
             durable_subscription: None,
             durable_task: None,
             tea_home: None,
+            tui_config: None,
             registry: ProviderRegistry::new(),
+            provider_factory: None,
             workspace: None,
             submitted_prompt: None,
             queued_extension_commands: Vec::new(),
@@ -134,6 +144,21 @@ impl App {
         if self.configuration.is_some() {
             return Ok(());
         }
+        let home = match self.tea_home.as_ref() {
+            Some(home) => home.clone(),
+            None => {
+                let home = resolve_tea_home(self.options.tea_home())?;
+                self.tea_home = Some(home.clone());
+                home
+            }
+        };
+        if self.tui_config.is_none() {
+            self.tui_config = Some(load_tui_config(&home)?);
+        }
+        let subagent_footer = self.tui_config.as_ref().and_then(|config| {
+            config.features.subagents.then_some((0, config.subagents.max_concurrent.get()))
+        });
+        self.state.set_subagent_activity(subagent_footer);
         let workspace = match self.options.cwd() {
             Some(path) => path.to_path_buf(),
             None => std::env::current_dir().map_err(|error| {
@@ -147,13 +172,9 @@ impl App {
         let configuration = if self.options.provider() == Some(OsStr::new(mock::PROVIDER_ID)) {
             mock::configuration()
         } else {
-            host_configuration(tools)?
+            host_configuration(tools, &workspace.to_string_lossy())?
         };
-        let compactor = Arc::new(ProviderCompactor::default());
-        self.compactor = Some(compactor);
-        let home = resolve_tea_home(self.options.tea_home())?;
         self.configuration = Some(configuration);
-        self.tea_home = Some(home);
         self.state
             .set_extension_commands(super::durable::bundled_host_commands()?);
         self.state.set_thinking_level(self.options.thinking_level());
@@ -179,10 +200,67 @@ impl App {
         Ok(())
     }
 
+    /// Construct root/provider authority only when a descriptor actually needs it.
+    ///
+    /// This keeps feature-disabled idle startup free of any child-provider factory,
+    /// credential load, or adapter construction. The same factory later supplies
+    /// exact provider configuration for root and explicitly enabled child lanes.
+    pub(super) fn provider_factory(&mut self) -> Result<Arc<ProviderFactory>, AppError> {
+        if self.provider_factory.is_none() {
+            let workspace = self
+                .workspace
+                .as_ref()
+                .ok_or_else(|| AppError::Setup("workspace is not initialized".into()))?;
+            let local_base_url = self
+                .options
+                .local_base_url()
+                .map(|value| os_text(value, "--local-base-url"))
+                .transpose()?;
+            self.provider_factory = Some(Arc::new(ProviderFactory::new(
+                self.registry,
+                local_base_url,
+                self.options.local_context_window(),
+                workspace.to_string_lossy().into_owned(),
+            )));
+        }
+        self.provider_factory
+            .as_ref()
+            .map(Arc::clone)
+            .ok_or_else(|| AppError::Setup("provider factory could not initialize".into()))
+    }
+
+    /// Return terminal-local child authority only for an explicitly enabled
+    /// application mode. The factory itself remains lazy: credentials and
+    /// model adapters are not touched here.
+    pub(super) fn subagent_host_config(
+        &mut self,
+    ) -> Result<Option<super::durable::HostSubagentConfig>, AppError> {
+        let config = self
+            .tui_config
+            .as_ref()
+            .ok_or_else(|| AppError::Setup("TUI config is not initialized".into()))?
+            .clone();
+        if !config.features.subagents {
+            return Ok(None);
+        }
+        Ok(Some(super::durable::HostSubagentConfig {
+            factory: self.provider_factory()?,
+            config: config.subagents,
+        }))
+    }
+
     async fn event_loop(&mut self, terminal: &mut TerminalGuard) -> Result<(), AppError> {
         loop {
             self.drain_events();
             self.reap_task();
+            // The detached root receiver is the terminal's structured join
+            // boundary: core settles active children and their workspaces
+            // before it sends this completion. Keep retrying the sticky root
+            // abort through the narrow schedule gap before an epoch installs
+            // its core agent; never exit early and orphan that cleanup.
+            if self.quitting && self.durable_task.is_some() {
+                self.request_root_abort(false);
+            }
             if self.quitting && self.durable_task.is_none() {
                 break;
             }
@@ -198,36 +276,94 @@ impl App {
     }
 
     fn drain_events(&mut self) {
-        if let Some(subscription) = self.durable_subscription.as_ref() {
-            loop {
-                match subscription.try_recv() {
-                    Ok(TeaEvent::Agent(event)) => self.state.apply_event(&event),
-                    Ok(TeaEvent::Session(SessionEvent::OperationAccepted { .. })) => {
-                        // The session writer appended the user entry before
-                        // publishing this event. This cache is therefore
-                        // session-derived even before a reopen rebuilds it
-                        // from the authoritative log.
-                        if let Some(prompt) = self.submitted_prompt.as_deref() {
-                            self.state.record_history(prompt);
-                        }
-                    }
-                    Ok(TeaEvent::Harness(HarnessEvent::CandidateRejected {
-                        stage,
-                        code,
-                        diagnostic,
-                        ..
-                    })) => self.state.notice(format!(
-                        "harness candidate rejected at {stage:?} ({}) : {diagnostic}",
-                        code.as_str()
-                    )),
-                    Ok(TeaEvent::Harness(_) | TeaEvent::Session(_) | TeaEvent::Artifact(_)) => {}
-                    Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
-                }
+        loop {
+            let event = match self.durable_subscription.as_ref() {
+                Some(subscription) => subscription.try_recv(),
+                None => break,
+            };
+            match event {
+                Ok(event) => self.project_durable_event(event),
+                Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
             }
-            // A managed durable epoch is the authoritative transcript and
-            // accounting source for this terminal session. Do not overwrite
-            // its projection with the idle configuration agent below.
         }
+    }
+
+    /// Project one durable event into root-facing UI state. Child event text,
+    /// tools, and notices never become root transcript rows; only accounting
+    /// is safe to aggregate before an explicit `wait_agent` report.
+    pub(super) fn project_durable_event(&mut self, event: TeaEvent) {
+        match event {
+            TeaEvent::Agent { lane_id, event } if lane_id == tea_session::LaneId::main() => {
+                self.state.apply_event(&event);
+            }
+            TeaEvent::Agent { event, .. } => self.state.apply_background_usage_event(&event),
+            TeaEvent::Session(SessionEvent::OperationAccepted { lane_id, .. }) => {
+                // The session writer appended the root user entry before this
+                // event. Child acceptance must not duplicate the root draft in
+                // local history.
+                if lane_id == tea_session::LaneId::main() {
+                    if let Some(prompt) = self.submitted_prompt.as_deref() {
+                        self.state.record_history(prompt);
+                    }
+                }
+                self.refresh_subagent_footer();
+            }
+            TeaEvent::Session(_) => self.refresh_subagent_footer(),
+            TeaEvent::Harness(HarnessEvent::CandidateRejected {
+                stage,
+                code,
+                diagnostic,
+                ..
+            }) => self.state.notice(format!(
+                "harness candidate rejected at {stage:?} ({}) : {diagnostic}",
+                code.as_str()
+            )),
+            TeaEvent::Harness(_) | TeaEvent::Artifact(_) => {}
+        }
+    }
+
+    /// Refresh enabled-only child activity and all-lane accounting from the
+    /// same durable snapshot. This makes the footer reconnect-safe while
+    /// keeping child transcripts out of the native scrollback projection.
+    fn refresh_subagent_footer(&mut self) {
+        let Some(harness) = self.durable_harness.as_ref() else {
+            return;
+        };
+        let Ok(snapshot) = harness.snapshot() else {
+            return;
+        };
+        let Ok(graph) = tea_session::reduce_agent_graph(&snapshot) else {
+            return;
+        };
+        let Some(policy) = graph.policy else {
+            self.state.set_subagent_activity(None);
+            return;
+        };
+        let active = graph
+            .agents
+            .values()
+            .filter(|agent| {
+                matches!(
+                    agent.state,
+                    tea_session::AgentState::Spawned
+                        | tea_session::AgentState::Running
+                        | tea_session::AgentState::Finalizing { .. }
+                )
+            })
+            .count() as u32;
+        let mut lane_ids = BTreeSet::from([tea_session::LaneId::main()]);
+        lane_ids.extend(graph.agents.values().map(|agent| agent.spawned.lane_id.clone()));
+        let mut aggregate = tea_session::Usage::default();
+        for lane_id in lane_ids {
+            let Ok(reduction) = tea_session::reduce_lane(snapshot.clone(), lane_id) else {
+                return;
+            };
+            aggregate.saturating_add_assign(&reduction.usage_totals);
+        }
+        self.state
+            .set_reported_usage(super::durable::core_usage(&aggregate));
+        self.state
+            .set_subagent_activity(Some((active, policy.max_concurrent)));
     }
 
     pub(super) fn reap_task(&mut self) {
@@ -245,6 +381,7 @@ impl App {
                     } else {
                         self.start_idle_extension_continuation();
                     }
+                    self.refresh_subagent_footer();
                 }
                 Ok(Err(HarnessError::Core(CoreError::Cancelled))) => {
                     self.durable_task = None;
@@ -399,7 +536,7 @@ impl App {
     ) {
         let (sender, receiver) = sync_channel(1);
         smol::spawn(async move {
-            let _ = sender.send(harness.run_prompt(input).await.map(|_| ()));
+            let _ = sender.send(harness.run_root_prompt(input).await.map(|_| ()));
         })
         .detach();
         self.durable_task = Some(receiver);
@@ -494,26 +631,31 @@ impl App {
         let workspace = self
             .workspace
             .as_ref()
-            .ok_or_else(|| AppError::Setup("workspace is not initialized".into()))?;
+            .ok_or_else(|| AppError::Setup("workspace is not initialized".into()))?
+            .clone();
         let home = self
             .tea_home
             .as_ref()
-            .ok_or_else(|| AppError::Setup("Tea home is not initialized".into()))?;
+            .ok_or_else(|| AppError::Setup("Tea home is not initialized".into()))?
+            .clone();
         let automatic_compaction = self.automatic_compaction.clone();
+        let subagents = self.subagent_host_config()?;
         let harness = super::durable::create_host_harness(super::durable::HostHarnessConfig {
-            tea_home: home,
-            workspace,
+            tea_home: &home,
+            workspace: &workspace,
             configuration,
             model,
             provider,
             thinking_level: Some(self.options.thinking_level()),
             compactor: self.compactor.clone(),
             automatic_compaction,
+            subagents,
         })?;
         self.durable_subscription = Some(harness.subscribe_events()?);
         self.state
             .set_extension_commands(harness.extension_host_commands()?);
         self.durable_harness = Some(Arc::clone(&harness));
+        self.refresh_subagent_footer();
         Ok(harness)
     }
 
@@ -551,6 +693,7 @@ impl App {
             .ok_or_else(|| AppError::Setup("Tea home is not initialized".into()))?
             .clone();
         let automatic_compaction = self.automatic_compaction.clone();
+        let subagents = self.subagent_host_config()?;
 
         // Drop the prior idle writer before opening another session. This is
         // also what lets a user select the currently displayed session again
@@ -566,6 +709,7 @@ impl App {
             provider,
             compactor: self.compactor.clone(),
             automatic_compaction,
+            subagents,
         })?;
         self.state.set_thinking_level(harness.thinking_level()?);
         let snapshot = harness.snapshot()?;
@@ -579,6 +723,7 @@ impl App {
             .set_extension_commands(harness.extension_host_commands()?);
         let recovery = reduction.lane_state.active_operation.is_some();
         self.durable_harness = Some(Arc::clone(&harness));
+        self.refresh_subagent_footer();
         self.submitted_prompt = None;
         self.state.close_surface();
         if recovery {

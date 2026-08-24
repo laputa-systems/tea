@@ -192,7 +192,7 @@ impl AgentBuilder {
     /// Share a volatile prompt-layout ledger with other agents in one live
     /// host session. The ledger emits only content-free evidence. A host that
     /// shares it directly must serialize provider dispatch in that scope;
-    /// [`crate::runtime::SessionRuntime`] already enforces one active operation.
+    /// [`crate::runtime::SessionSupervisor`] enforces one active operation per lane.
     pub fn prompt_layout_ledger(
         mut self,
         ledger: Arc<crate::measurement::PromptLayoutLedger>,

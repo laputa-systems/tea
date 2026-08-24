@@ -7,12 +7,15 @@ use tea_providers::RegistryError;
 use tea_session::{ArtifactError, SessionError as DurableSessionError};
 
 use super::cli::CliError;
+use super::config::ConfigError;
 
 /// Local application failures. Provider and core failures retain their typed source.
 #[derive(Debug)]
 pub enum AppError {
     /// Command-line parsing failed.
     Cli(CliError),
+    /// Terminal-only global configuration could not be safely loaded.
+    Config(ConfigError),
     /// Terminal setup, input, output, or restoration failed.
     Terminal(TerminalError),
     /// `$EDITOR` integration failed before it could replace the composer.
@@ -35,6 +38,7 @@ impl fmt::Display for AppError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Cli(error) => error.fmt(formatter),
+            Self::Config(error) => error.fmt(formatter),
             Self::Terminal(error) => error.fmt(formatter),
             Self::Editor(error) => error.fmt(formatter),
             Self::Setup(message) => formatter.write_str(message),
@@ -51,6 +55,7 @@ impl std::error::Error for AppError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Cli(error) => Some(error),
+            Self::Config(error) => Some(error),
             Self::Terminal(error) => Some(error),
             Self::Editor(error) => Some(error),
             Self::Registry(error) => Some(error),
@@ -66,6 +71,12 @@ impl std::error::Error for AppError {
 impl From<CliError> for AppError {
     fn from(error: CliError) -> Self {
         Self::Cli(error)
+    }
+}
+
+impl From<ConfigError> for AppError {
+    fn from(error: ConfigError) -> Self {
+        Self::Config(error)
     }
 }
 

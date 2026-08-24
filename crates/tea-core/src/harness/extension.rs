@@ -201,7 +201,7 @@ pub trait ExtensionStateStore: Send + Sync {
 
 /// A late-bound host connection for a generic extension-state capability.
 ///
-/// A capability catalog is constructed before a `SessionRuntime` exists, so
+/// A capability catalog is constructed before a `SessionSupervisor` exists, so
 /// the composition root attaches the already shared runtime exactly once.
 /// This indirection carries no raw writer into Luau and is equally usable by
 /// any bundled or user-supplied extension.

@@ -41,6 +41,14 @@ composition; hosts that need bounded scheduling supply their own adapter. The st
 must explicitly choose `CommandEnvironment::inherited()` or add variables. No factory consults
 ambient cwd, home, `.pi`, sessions, credentials, or resource discovery.
 
+Prompt composition distinguishes a stable logical workspace label from the
+physical workspace authority used by executable tools. They are normally the
+same path. An isolated subagent instead binds coding tools to its detached
+physical worktree while retaining the original repository root as the logical
+label in the system prompt and provider-specific host context. Session worktree,
+lease, private-index, and temporary paths must never enter a provider request or
+its cache-domain fingerprint.
+
 ## Tea terminal v2 profile
 
 `DefaultCodingTools` and `PiDefaultCodingProfile` remain the explicit legacy-parity pair: their

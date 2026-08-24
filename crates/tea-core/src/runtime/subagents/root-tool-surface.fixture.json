@@ -1,0 +1,153 @@
+{
+  "child_instruction_suffix": "You are a Tea subagent executing one bounded assignment.\n\nWork only on the assigned task. Your workspace is an isolated snapshot. Your\nedits are not visible to the parent until the parent explicitly applies them.\n\nInspect and test your work normally. Use your final response as a concise\nreport covering what you found, what you changed, validation performed, and\nremaining risks.\n\nYou cannot spawn additional agents.",
+  "root_instruction_suffix": "You may delegate independent work to isolated subagents.\n\nUse spawn_agent with a complete assignment and a model selected from the\nhost-authorized catalog. Subagents do not share your writable working tree.\nTheir changes are returned as durable deltas and remain invisible here until\nyou explicitly call apply_agent_changes.\n\nUse wait_agent to retrieve reports. Child output is never inserted into your\ncontext automatically. Delegate only work that can proceed independently; keep\nsmall or sequential work in the current agent.",
+  "tools": [
+    {
+      "cancellation_settlement_mode": "await_future",
+      "description": "Start one isolated child assignment without waiting for its completion. The selected model must be in the host-authorized catalog.",
+      "execution_mode": "sequential",
+      "name": "spawn_agent",
+      "requires_exclusive_batch": false,
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "context": {
+            "description": "task uses only the assignment; parent forks the exact parent source context.",
+            "enum": [
+              "task",
+              "parent"
+            ],
+            "type": "string"
+          },
+          "model": {
+            "description": "Model selected for this child.",
+            "enum": [
+              "openai/gpt-5.6-luna"
+            ],
+            "type": "string"
+          },
+          "task": {
+            "description": "Complete, self-contained assignment for the child.",
+            "maxLength": 65536,
+            "minLength": 1,
+            "type": "string"
+          },
+          "task_name": {
+            "description": "Stable unique name for this child within the current root operation.",
+            "maxLength": 64,
+            "minLength": 1,
+            "type": "string"
+          },
+          "thinking": {
+            "description": "Optional child reasoning level.",
+            "enum": [
+              "off",
+              "minimal",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "task_name",
+          "task",
+          "model"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "cancellation_settlement_mode": "drop_future",
+      "description": "Wait for one or more child assignments owned by the current root operation and return only requested durable reports.",
+      "execution_mode": "sequential",
+      "name": "wait_agent",
+      "requires_exclusive_batch": false,
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "return_when": {
+            "enum": [
+              "any",
+              "all"
+            ],
+            "type": "string"
+          },
+          "targets": {
+            "description": "Agent IDs or task names returned by spawn_agent.",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 16,
+            "minItems": 1,
+            "type": "array"
+          },
+          "timeout_ms": {
+            "maximum": 600000,
+            "minimum": 100,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "targets"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "cancellation_settlement_mode": "drop_future",
+      "description": "List child assignments owned by the current root operation without returning reports, intermediate output, patches, or paths.",
+      "execution_mode": "parallel",
+      "name": "list_agents",
+      "requires_exclusive_batch": false,
+      "schema": {
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      }
+    },
+    {
+      "cancellation_settlement_mode": "await_future",
+      "description": "Interrupt one child assignment owned by the current root operation and wait for durable cancellation settlement.",
+      "execution_mode": "sequential",
+      "name": "interrupt_agent",
+      "requires_exclusive_batch": false,
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "target": {
+            "description": "Agent ID or task name owned by the current root operation.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "target"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "cancellation_settlement_mode": "await_future",
+      "description": "Preflight and apply exactly one durable child workspace delta to the root workspace without changing the user index.",
+      "execution_mode": "sequential",
+      "name": "apply_agent_changes",
+      "requires_exclusive_batch": true,
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "delta_id": {
+            "description": "Durable child workspace delta ID to apply.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "delta_id"
+        ],
+        "type": "object"
+      }
+    }
+  ]
+}

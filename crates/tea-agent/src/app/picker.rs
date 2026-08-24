@@ -3,8 +3,7 @@ use std::num::NonZeroU64;
 use std::sync::Arc;
 use tea_core::agent::AgentConfiguration;
 use tea_core::compaction::{AutomaticCompactionPolicy, ContextBudgetSource, OverflowRecovery};
-use tea_core::state::Usage;
-use tea_providers::{ConfiguredProvider, ProviderConfiguration};
+use tea_core::state::{ModelDescriptor, Usage};
 
 use super::durable::list_host_sessions;
 use super::error::AppError;
@@ -13,7 +12,6 @@ use super::mock;
 use super::nonblocking_operations::NonblockingCodingOperations;
 use super::runtime::App;
 use super::state::{Picker, UiSurface};
-use super::support::utc_date;
 
 impl App {
     pub(super) fn open_model_picker(&mut self) {
@@ -61,8 +59,15 @@ impl App {
         else {
             return Err(AppError::Setup("Tea home is not initialized".into()));
         };
-        let model = super::durable::read_host_session_model(home, workspace, id)?;
-        self.select_model(model.provider, model.model)?;
+        let config = self
+            .tui_config
+            .as_ref()
+            .ok_or_else(|| AppError::Setup("TUI config is not initialized".into()))?;
+        // This is a durable authorization check, not provider selection. It
+        // must complete before selection can lazily construct an adapter or
+        // clear the currently attached idle harness.
+        let model = super::durable::authorize_host_session_reopen(home, workspace, id, config)?;
+        self.select_model_descriptor(model)?;
         self.reopen_durable_session(id)
     }
 
@@ -257,42 +262,44 @@ impl App {
     }
 
     pub(super) fn select_model(&mut self, provider: String, model: String) -> Result<(), AppError> {
+        self.select_model_descriptor(ModelDescriptor {
+            provider,
+            model,
+            revision: None,
+        })
+    }
+
+    /// Select an exact provider/model/revision descriptor. Session resumption
+    /// passes the immutable descriptor directly so a returned provider pin is
+    /// never silently reconstructed as an unpinned model choice.
+    pub(super) fn select_model_descriptor(
+        &mut self,
+        requested: ModelDescriptor,
+    ) -> Result<(), AppError> {
         if self.agent_is_active() {
             self.state.notice("model changes require an idle agent");
             return Ok(());
         }
-        if provider != "local" && self.options.local_context_window().is_some() {
+        if requested.provider != "local" && self.options.local_context_window().is_some() {
             return Err(AppError::Setup(
                 "--local-context-window requires --provider local".into(),
             ));
         }
-        let configuration = self.configuration_for_provider(&provider)?;
-        let configured = self.configured_provider(&provider, &model)?;
+        let configuration = self.configuration_for_provider(&requested.provider)?;
+        let (configured, compactor, context_window) = {
+            let factory = self.provider_factory()?;
+            let configured = factory.configured(&requested)?;
+            let compactor = factory.compactor(&configured)?;
+            let context_window = factory.context_window(&configured.descriptor);
+            (configured, compactor, context_window)
+        };
         let descriptor = configured.descriptor.clone();
-        let configured_provider = configured.provider;
-        self.configured_provider = Some(Arc::clone(&configured_provider));
+        self.configured_provider = Some(Arc::clone(&configured.provider));
         self.configuration = Some(configuration);
-        if let Some(compactor) = &self.compactor {
-            compactor.configure(descriptor.clone(), Arc::clone(&configured_provider));
-        }
-        let context_window = if provider == mock::PROVIDER_ID {
-            NonZeroU64::new(mock::CONTEXT_WINDOW)
-        } else {
-            self.options.local_context_window().or_else(|| {
-                self.registry
-                    .provider(&provider)
-                    .and_then(|entry| entry.model(&model))
-                    .and_then(|model| model.context_window)
-                    .and_then(NonZeroU64::new)
-            })
-        };
-        let policy = if self.compactor.is_some() {
-            context_window
-                .map(automatic_compaction_policy)
-                .unwrap_or_else(AutomaticCompactionPolicy::disabled)
-        } else {
-            AutomaticCompactionPolicy::disabled()
-        };
+        self.compactor = Some(compactor);
+        let policy = context_window
+            .map(automatic_compaction_policy)
+            .unwrap_or_else(AutomaticCompactionPolicy::disabled);
         self.automatic_compaction = policy.clone();
         self.state.automatic_compaction_enabled = policy.enabled;
         self.state.selected_context_window = context_window;
@@ -324,70 +331,9 @@ impl App {
             Arc::new(NonblockingCodingOperations),
         )
         .map_err(|error| AppError::Setup(format!("invalid --cwd: {error}")))?;
-        super::host::host_configuration(tools)
+        super::host::host_configuration(tools, &workspace.to_string_lossy())
     }
 
-    fn configured_provider(
-        &self,
-        provider: &str,
-        model: &str,
-    ) -> Result<ConfiguredProvider, AppError> {
-        if provider == mock::PROVIDER_ID {
-            return Ok(mock::configured_provider(model));
-        }
-        let descriptor = self
-            .registry
-            .resolve_model(provider, model.to_owned())?
-            .into_descriptor();
-        let configuration = match provider {
-            "openrouter" => {
-                let key = std::env::var("OPENROUTER_API_KEY").map_err(|_| {
-                    AppError::Setup("OPENROUTER_API_KEY is required for OpenRouter".into())
-                })?;
-                let config = tea_providers::openrouter::OpenRouterConfig::try_new(key, model)
-                    .map_err(|error| AppError::Setup(error.to_string()))?;
-                ProviderConfiguration::OpenRouter(config)
-            }
-            "command-code" => {
-                let key = std::env::var("COMMANDCODE_API_KEY").map_err(|_| {
-                    AppError::Setup("COMMANDCODE_API_KEY is required for Command Code".into())
-                })?;
-                let workspace = self
-                    .workspace
-                    .as_ref()
-                    .ok_or_else(|| AppError::Setup("workspace is not initialized".into()))?;
-                let host = tea_providers::commandcode::CommandCodeHostContext::new(
-                    workspace.to_string_lossy(),
-                    utc_date(),
-                    std::env::consts::OS,
-                )
-                .map_err(|error| AppError::Setup(error.to_string()))?;
-                ProviderConfiguration::CommandCode(
-                    tea_providers::commandcode::CommandCodeConfig::new(key, model, host)
-                        .map_err(|error| AppError::Setup(error.to_string()))?,
-                )
-            }
-            "local" => {
-                let base_url = self
-                    .options
-                    .local_base_url()
-                    .map(|value| super::runtime::os_text(value, "--local-base-url"))
-                    .transpose()?
-                    .unwrap_or_else(|| tea_providers::local::DEFAULT_BASE_URL.to_owned());
-                let config = tea_providers::local::LocalConfig::try_new(base_url, model)
-                    .map_err(|error| AppError::Setup(error.to_string()))?;
-                ProviderConfiguration::Local(config)
-            }
-            _ => {
-                return Err(AppError::Setup(format!(
-                    "provider {provider:?} is not compiled in"
-                )))
-            }
-        };
-        self.registry
-            .build(descriptor, configuration)
-            .map_err(Into::into)
-    }
 }
 
 pub(super) fn automatic_compaction_policy(context_window: NonZeroU64) -> AutomaticCompactionPolicy {

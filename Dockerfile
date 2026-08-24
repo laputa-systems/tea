@@ -112,12 +112,14 @@ WORKDIR /src
 COPY . .
 
 # Keep the container's verification contract identical to the host's. The
-# fixture manifest checker is Python, so install its Alpine runtime only for
-# this build step and remove it (including its libgcc/libstdc++ dependencies)
-# from the resulting verification image.
-RUN apk add --no-cache python3 \
+# fixture manifest checker is Python and the workspace-isolation fixtures use
+# real Git repositories, so install both runtimes only for this build step and
+# remove them (including Python's libgcc/libstdc++ dependencies) from the
+# resulting verification image.
+RUN apk add --no-cache python3 git \
     && make test \
-    && apk del --no-network python3 python3-pyc pyc python3-pycache-pyc0 \
+    && apk del --no-network python3 python3-pyc pyc python3-pycache-pyc0 git \
     && test ! -e /usr/bin/python3 \
+    && test ! -e /usr/bin/git \
     && test ! -e /usr/lib/libstdc++.so.6 \
     && ln -sf /usr/lib/libunwind.so.1 /usr/lib/libgcc_s.so.1

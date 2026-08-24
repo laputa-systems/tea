@@ -5,7 +5,7 @@
 //! bracketed-paste lifecycle.
 
 use rustix::event::{poll, PollFd, PollFlags, Timespec};
-use rustix::io::Errno;
+use rustix::io::{retry_on_intr, Errno};
 use rustix::termios::{tcgetattr, tcgetwinsize, tcsetattr, OptionalActions, Termios};
 use std::collections::VecDeque;
 use std::fmt;
@@ -248,13 +248,23 @@ impl TerminalGuard {
             .timeout_until_escape(now)
             .map_or(timeout, |remaining| remaining.min(timeout));
         let timespec = duration_to_timespec(wait);
-        let ready = {
+        // Child-workspace cleanup reaps short-lived `git` processes.  On
+        // platforms which surface that SIGCHLD to the foreground thread, an
+        // otherwise idle terminal poll can be interrupted.  A signal does not
+        // change terminal ownership or input state, so retry the syscall
+        // rather than tear down an interactive session mid-cancellation.
+        let ready = retry_on_intr(|| {
             let mut fds = [PollFd::new(&self.input, PollFlags::IN)];
-            poll(&mut fds, Some(&timespec))?
-        };
+            poll(&mut fds, Some(&timespec))
+        })?;
         if ready != 0 {
             let mut bytes = [0_u8; 4096];
-            let count = self.input.read(&mut bytes)?;
+            let count = loop {
+                match self.input.read(&mut bytes) {
+                    Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                    result => break result?,
+                }
+            };
             self.decoder.push(&bytes[..count]);
         }
 
@@ -271,7 +281,7 @@ impl TerminalGuard {
 
     /// Return the currently available terminal dimensions.
     pub fn size(&self) -> Result<(u16, u16), TerminalError> {
-        let size = tcgetwinsize(&self.input)?;
+        let size = retry_on_intr(|| tcgetwinsize(&self.input))?;
         Ok((size.ws_col, size.ws_row))
     }
 

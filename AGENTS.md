@@ -14,6 +14,8 @@ Start with [docs/overview.md](docs/overview.md). The main routes are:
 - [Tracing](docs/trace.md) and [Luau ABI v1](docs/luau-abi-v1.md) for
   optional observability and policy layers.
 - [Terminal host](docs/tui.md) for the repository-owned `tea` TUI.
+- [Durable subagents](docs/subagents.md) for the optional asynchronous
+  multi-lane execution and isolated-workspace contract.
 - [Quality evaluation](evals/README.md) and [verification](docs/verification.md)
   for contract and quality evidence.
 - [fixture format](crates/tea-core/fixtures/fixture-format.md) and

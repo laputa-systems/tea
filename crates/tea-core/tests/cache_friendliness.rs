@@ -2,6 +2,7 @@
 
 use std::sync::{Arc, Mutex};
 use tea_core::Agent;
+use tea_core::compaction::{CompactionContext, CompactionFuture, CompactionResult, Compactor};
 use tea_core::error::HookError;
 use tea_core::hooks::{AfterToolCall, BeforeToolCall, ContextEnvelope, HookSet};
 use tea_core::measurement::measure_prompt_cacheability;
@@ -21,6 +22,19 @@ struct RecordingProvider {
 }
 
 struct RewritingHooks;
+
+struct KeepFirstMessage;
+
+impl Compactor for KeepFirstMessage {
+    fn compact<'a>(
+        &'a self,
+        mut context: CompactionContext,
+        _cancellation: CancellationToken,
+    ) -> CompactionFuture<'a> {
+        context.messages.truncate(1);
+        Box::pin(std::future::ready(Ok(CompactionResult::new(context.messages))))
+    }
+}
 
 impl HookSet for RewritingHooks {
     fn before_tool_call(&self, _call: &ToolCall) -> Result<BeforeToolCall, HookError> {
@@ -60,6 +74,28 @@ impl ModelProvider for RecordingProvider {
                 ModelStreamEvent::End(StopReason::Stop),
             ],
         }) as _)))
+    }
+}
+
+/// Mirrors task-mode child projection: its stable system/tool surface and
+/// logical workspace precede the assignment, which is the final variable
+/// context item. The fixture leaves tools empty only because their ordered
+/// definitions are constant across the two requests under comparison.
+fn task_mode_child_request_with_assignment_last(task: &str, model: &str) -> ModelRequest {
+    let mut system_prompt = "stable Tea v2 child system prompt".to_owned();
+    tea_core::runtime::append_child_subagent_instruction_suffix(&mut system_prompt);
+    ModelRequest {
+        system_prompt,
+        tools: Vec::new(),
+        model: Some(ModelDescriptor {
+            provider: "fixture".into(),
+            model: model.into(),
+            revision: None,
+        }),
+        thinking_level: ThinkingLevel::Off,
+        context: format!(
+            "stable child context\nlogical workspace: /workspace/logical\nassignment: {task}"
+        ),
     }
 }
 
@@ -123,6 +159,138 @@ fn adjacent_text_turns_keep_the_prior_context_prefix() {
             .map(|measurement| measurement.common_context_prefix_ratio_millionths)
             .collect::<Vec<_>>(),
     );
+}
+
+#[test]
+fn lane_ledgers_never_compare_sibling_child_requests_as_adjacent() {
+    let root = PromptLayoutLedger::default();
+    let first_child = PromptLayoutLedger::default();
+    let second_child = PromptLayoutLedger::default();
+    let root_request = task_mode_child_request_with_assignment_last("root task", "root-model");
+    let first_request =
+        task_mode_child_request_with_assignment_last("first child task", "child-model");
+    let second_request =
+        task_mode_child_request_with_assignment_last("second child task", "child-model");
+
+    assert_eq!(
+        root.observe(&root_request).continuity,
+        PromptContinuity::FirstRequest
+    );
+    assert_eq!(
+        first_child.observe(&first_request).continuity,
+        PromptContinuity::FirstRequest
+    );
+    assert_eq!(
+        second_child.observe(&second_request).continuity,
+        PromptContinuity::FirstRequest,
+        "a sibling starts a distinct logical conversation, not after the first child"
+    );
+
+    let mut first_follow_up = first_request.clone();
+    first_follow_up.context.push_str("\nfollow-up: continue");
+    assert_eq!(
+        first_child.observe(&first_follow_up).continuity,
+        PromptContinuity::ExactExtension
+    );
+    let mut second_follow_up = second_request.clone();
+    second_follow_up.context.push_str("\nfollow-up: continue");
+    assert_eq!(
+        second_child.observe(&second_follow_up).continuity,
+        PromptContinuity::ExactExtension
+    );
+}
+
+#[test]
+fn same_child_model_and_context_keep_a_stable_task_last_prefix() {
+    let first = task_mode_child_request_with_assignment_last(
+        "A: inspect the first concern",
+        "child-model",
+    );
+    let second = task_mode_child_request_with_assignment_last(
+        "B: inspect the second concern",
+        "child-model",
+    );
+    let stable_context = "stable child context\nlogical workspace: /workspace/logical\nassignment: ";
+    let measurement = measure_prompt_cacheability(Some(&first), &second);
+
+    assert!(first.context.ends_with("A: inspect the first concern"));
+    assert!(second.context.ends_with("B: inspect the second concern"));
+    assert_eq!(
+        measurement.common_context_prefix_bytes,
+        stable_context.len(),
+        "only the final assignment varies between otherwise identical child requests"
+    );
+    assert!(!measurement.cache_domain_changed);
+}
+
+#[test]
+fn model_change_is_a_domain_change_even_with_identical_child_context() {
+    let ledger = PromptLayoutLedger::default();
+    let first = task_mode_child_request_with_assignment_last("same assignment", "child-model-a");
+    let second = task_mode_child_request_with_assignment_last("same assignment", "child-model-b");
+    let _ = ledger.observe(&first);
+    let changed = ledger.observe(&second);
+
+    assert_eq!(changed.continuity, PromptContinuity::DomainChanged);
+    assert!(changed.cache_domain_changed);
+    assert!(
+        changed
+            .changed_cache_domain_components
+            .iter()
+            .any(|component| component == "model")
+    );
+}
+
+#[test]
+fn child_compaction_changes_only_its_own_history_and_layout_ledger() {
+    smol::block_on(async {
+        let root_ledger = Arc::new(PromptLayoutLedger::default());
+        let compacted_child_ledger = Arc::new(PromptLayoutLedger::default());
+        let sibling_ledger = Arc::new(PromptLayoutLedger::default());
+        let root = Agent::builder()
+            .model_provider(Arc::new(RecordingProvider::default()))
+            .prompt_layout_ledger(Arc::clone(&root_ledger))
+            .build();
+        let compacted_child = Agent::builder()
+            .model_provider(Arc::new(RecordingProvider::default()))
+            .compactor(Arc::new(KeepFirstMessage))
+            .prompt_layout_ledger(Arc::clone(&compacted_child_ledger))
+            .build();
+        let sibling = Agent::builder()
+            .model_provider(Arc::new(RecordingProvider::default()))
+            .prompt_layout_ledger(Arc::clone(&sibling_ledger))
+            .build();
+
+        for (agent, prompt) in [
+            (&root, "root history"),
+            (&compacted_child, "child history"),
+            (&sibling, "sibling history"),
+        ] {
+            agent
+                .start_prompt(prompt)
+                .expect("lane prompt starts")
+                .drive()
+                .await
+                .expect("lane prompt settles");
+        }
+        let root_before = root.snapshot().messages;
+        let sibling_before = sibling.snapshot().messages;
+
+        compacted_child
+            .start_compaction()
+            .expect("child compaction starts")
+            .drive()
+            .await
+            .expect("child compaction settles");
+
+        assert_eq!(compacted_child.snapshot().messages.len(), 1);
+        assert_eq!(root.snapshot().messages, root_before);
+        assert_eq!(sibling.snapshot().messages, sibling_before);
+        assert!(
+            !Arc::ptr_eq(&root_ledger, &compacted_child_ledger)
+                && !Arc::ptr_eq(&compacted_child_ledger, &sibling_ledger)
+        );
+    });
 }
 
 #[test]

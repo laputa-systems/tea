@@ -30,6 +30,8 @@ tea-session = { path = "../tea-session" }
 tea-tui = { path = "../tea-tui" }
 smol = { workspace = true }
 rustix = { version = "=1.1.4", default-features = false, features = ["event", "std", "termios"] }
+# The terminal-only global configuration parser.  Keep it out of reusable crates.
+toml_edit = "=0.25.13"
 
 [dev-dependencies]
 # Published package name; the library target remains `ptytest` for consumers.

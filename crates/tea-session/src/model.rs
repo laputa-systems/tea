@@ -1,7 +1,8 @@
 use crate::{
-    ArtifactId, ArtifactPolicyId, CoreRunId, Digest, EntryId, EpochId, HarnessCandidateId,
-    HarnessRevisionId, HarnessSnapshotId, LaneId, ModelHarnessProfileId, OperationId,
-    ProviderRequestId, RecordId, Sequence, SessionId, StableHookId, StepId,
+    AgentId, AgentSpawnedFact, AgentTaskFinishedFact, ArtifactId, ArtifactPolicyId, CoreRunId,
+    Digest, EntryId, EpochId, HarnessCandidateId, HarnessRevisionId, HarnessSnapshotId, LaneId,
+    ModelHarnessProfileId, OperationId, ProviderRequestId, RecordId, Sequence, SessionId,
+    StableHookId, StepId, SubagentPolicyFact, WorkspaceDeltaAppliedFact, WorkspaceDeltaFact,
 };
 #[cfg(test)]
 use std::cell::Cell;
@@ -43,7 +44,9 @@ pub struct SessionHeader {
     pub workspace: String,
     /// Host-defined immutable session metadata.
     pub metadata: Metadata,
-    /// First durable lane. The initial implementation exposes only `main`.
+    /// The `main` root lane seeded when this multi-lane session is created.
+    /// Additional child lanes are appended through durable topology mutations
+    /// in that same session.
     pub initial_lane: LaneId,
     /// Integrity identity of this canonical v1 header. The JSONL wire codec
     /// seals it before a header can be persisted or reduced.
@@ -623,6 +626,13 @@ pub struct StoredRecord {
 pub enum OperationKind {
     /// One user task that may span epochs.
     Run,
+    /// One child task owned by exactly one root operation.
+    Subagent {
+        /// Stable child identity that owns this lane-local operation.
+        agent_id: AgentId,
+        /// Root operation that created and must settle this child.
+        parent_operation_id: OperationId,
+    },
     /// An explicitly named host-defined operation kind.
     Other(String),
 }
@@ -980,6 +990,16 @@ pub struct StoredLaneMutation {
 /// Session-wide fact that is not semantic context or an operation fact.
 #[derive(Clone, Debug, PartialEq)]
 pub enum SessionFact {
+    /// Immutable closed child-model policy for this optional session feature.
+    SubagentPolicy(SubagentPolicyFact),
+    /// Durable parent-to-child graph linkage and child configuration.
+    AgentSpawned(AgentSpawnedFact),
+    /// Immutable isolated child workspace result and binary patch artifact.
+    WorkspaceDelta(WorkspaceDeltaFact),
+    /// Durable child terminal report after its operation completed.
+    AgentTaskFinished(AgentTaskFinishedFact),
+    /// Proven parent application of one immutable child workspace delta.
+    WorkspaceDeltaApplied(WorkspaceDeltaAppliedFact),
     /// Immutable harness-catalog manifest retained outside model context.
     ///
     /// The catalog itself is an exact content-addressed JSON object in the
@@ -1085,6 +1105,11 @@ impl SessionFact {
     /// Return immutable artifact objects pinned by this session-wide fact.
     pub fn artifact_references(&self) -> Vec<ArtifactId> {
         match self {
+            Self::SubagentPolicy(_) | Self::AgentSpawned(_) | Self::WorkspaceDeltaApplied(_) => {
+                Vec::new()
+            }
+            Self::WorkspaceDelta(fact) => fact.patch.artifact_id().into_iter().collect(),
+            Self::AgentTaskFinished(fact) => fact.report.artifact_id().into_iter().collect(),
             Self::HarnessCatalog(fact) => vec![fact.artifact_id],
             Self::ToolSchemaDeviation(fact) => {
                 fact.raw_arguments.artifact_id().into_iter().collect()

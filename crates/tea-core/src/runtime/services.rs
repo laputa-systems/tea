@@ -105,7 +105,8 @@ pub struct RuntimeServices {
     policy_identities: RuntimePolicyIdentities,
     replay_safe_tools: BTreeSet<String>,
     artifact_policy: ArtifactPolicy,
-    prompt_layout_ledger: Arc<crate::measurement::PromptLayoutLedger>,
+    prompt_layout_scope: crate::measurement::PromptCacheScope,
+    prompt_layout_policy: crate::measurement::PromptLayoutPolicy,
 }
 
 impl std::fmt::Debug for RuntimeServices {
@@ -148,7 +149,8 @@ impl RuntimeServices {
             },
             replay_safe_tools: BTreeSet::new(),
             artifact_policy: ArtifactPolicy::default(),
-            prompt_layout_ledger: Arc::new(crate::measurement::PromptLayoutLedger::default()),
+            prompt_layout_scope: crate::measurement::PromptCacheScope::default(),
+            prompt_layout_policy: crate::measurement::PromptLayoutPolicy::default(),
         }
     }
 
@@ -167,6 +169,12 @@ impl RuntimeServices {
     pub fn model(mut self, model: ModelDescriptor) -> Self {
         self.model = Some(model);
         self
+    }
+
+    /// Borrow the exact provider/model/revision descriptor selected for this
+    /// lane, when the host bound one.
+    pub(crate) fn model_descriptor(&self) -> Option<&ModelDescriptor> {
+        self.model.as_ref()
     }
 
     /// Set the default thinking level.
@@ -222,31 +230,17 @@ impl RuntimeServices {
         self
     }
 
-    /// Share prompt-layout continuity across fresh agents built by this live
-    /// runtime. The ledger is volatile and emits only content-free evidence.
-    pub fn prompt_layout_ledger(
-        mut self,
-        ledger: Arc<crate::measurement::PromptLayoutLedger>,
-    ) -> Self {
-        self.prompt_layout_ledger = ledger;
-        self
-    }
-
-    /// Select an opaque equality-only serving/cache scope for this live
-    /// runtime's layout ledger.
+    /// Select an opaque equality-only serving/cache scope for the ledgers
+    /// that lanes build from this immutable service configuration.
     pub fn prompt_cache_scope(mut self, scope: crate::measurement::PromptCacheScope) -> Self {
-        let policy = self.prompt_layout_ledger.policy_value();
-        self.prompt_layout_ledger =
-            Arc::new(crate::measurement::PromptLayoutLedger::new(scope).policy(policy));
+        self.prompt_layout_scope = scope;
         self
     }
 
     /// Select whether layout continuity is observed or rejected before
     /// provider dispatch.
     pub fn prompt_layout_policy(mut self, policy: crate::measurement::PromptLayoutPolicy) -> Self {
-        let scope = self.prompt_layout_ledger.scope();
-        self.prompt_layout_ledger =
-            Arc::new(crate::measurement::PromptLayoutLedger::new(scope).policy(policy));
+        self.prompt_layout_policy = policy;
         self
     }
 
@@ -297,11 +291,11 @@ impl RuntimeServices {
     }
 
     pub(crate) fn prompt_layout_scope(&self) -> crate::measurement::PromptCacheScope {
-        self.prompt_layout_ledger.scope()
+        self.prompt_layout_scope
     }
 
     pub(crate) fn prompt_layout_policy_value(&self) -> crate::measurement::PromptLayoutPolicy {
-        self.prompt_layout_ledger.policy_value()
+        self.prompt_layout_policy
     }
 
     pub(crate) fn replay_safe_tools(&self) -> &BTreeSet<String> {
@@ -370,6 +364,7 @@ impl RuntimeServices {
         resolved: &ResolvedHarness,
         effect_gate: Arc<dyn EffectGate>,
         provenance: RunProvenance,
+        prompt_layout_ledger: Arc<crate::measurement::PromptLayoutLedger>,
         additional_tools: ToolRegistry,
         host_messages: Vec<crate::state::SerializedJson>,
     ) -> Result<Agent, HarnessError> {
@@ -418,7 +413,7 @@ impl RuntimeServices {
             .effect_provenance(provenance)
             .thinking_level(self.thinking_level)
             .tool_failure_circuit_breaker(resolved.tool_failure_circuit_breaker());
-        builder = builder.prompt_layout_ledger(Arc::clone(&self.prompt_layout_ledger));
+        builder = builder.prompt_layout_ledger(prompt_layout_ledger);
         if let Some(model) = &self.model {
             builder = builder.model(model.clone());
         }

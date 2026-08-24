@@ -186,6 +186,9 @@ impl EpisodeHeader {
 pub struct TraceProvenance {
     pub session_id: Option<String>,
     pub lane_id: Option<String>,
+    /// Durable child-agent identity when the traced lane belongs to one. This
+    /// remains optional because the main lane has no child-agent identity.
+    pub agent_id: Option<String>,
     pub operation_id: Option<String>,
     pub epoch_id: Option<String>,
     pub core_run_id: Option<String>,

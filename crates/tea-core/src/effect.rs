@@ -63,10 +63,18 @@ pub struct RunProvenance {
     pub session_id: Option<String>,
     /// Durable lane identity, when the embedding has one.
     pub lane_id: Option<String>,
+    /// Durable child-agent identity, when this lane belongs to one. The main
+    /// lane intentionally leaves this absent rather than manufacturing a root
+    /// agent identity.
+    pub agent_id: Option<String>,
     /// Durable operation identity, when the run belongs to an operation.
     pub operation_id: Option<String>,
     /// Durable epoch identity, when the run belongs to an epoch.
     pub epoch_id: Option<String>,
+    /// Exact semantic leaf used as input to the epoch that emitted this
+    /// effect. Tool hosts use this immutable value for parent-context child
+    /// forks rather than consulting a later mutable lane leaf.
+    pub source_leaf_id: Option<String>,
     /// Durable core-run identity allocated with the epoch before this run
     /// starts. Unlike the process-local `RunId`, this value remains stable
     /// across telemetry sinks and recovery inspection.
@@ -92,8 +100,10 @@ impl RunProvenance {
     pub fn is_empty(&self) -> bool {
         self.session_id.is_none()
             && self.lane_id.is_none()
+            && self.agent_id.is_none()
             && self.operation_id.is_none()
             && self.epoch_id.is_none()
+            && self.source_leaf_id.is_none()
             && self.core_run_id.is_none()
             && self.harness_snapshot_id.is_none()
             && self.harness_revision_id.is_none()

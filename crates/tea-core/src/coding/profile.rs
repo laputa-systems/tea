@@ -21,7 +21,7 @@ const TEA_DEFAULT_PROFILE_V2: &str = include_str!(concat!(
     "/profile/tea-default-profile-v2.json"
 ));
 
-/// Prompt and ordered tool specification for one agent profile.
+/// Prompt and ordered tool specification for one coding profile.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ProfileSpec {
     /// Ordered system prompt text.

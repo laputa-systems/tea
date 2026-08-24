@@ -11,7 +11,7 @@ reconstructs an in-memory transcript as a source of truth.
    recovery plan.
 3. HarnessResolver restores its immutable catalog from a
    SessionFact::HarnessCatalog artifact.
-4. SessionRuntime::reopen_with_artifact_store resolves the committed
+4. `SessionSupervisor::reopen` resolves the committed
    harness revision, snapshot, model-harness profile, and policy mode from
    durable state.
 5. The supervisor completes or safely resumes the next durable operation
