@@ -1335,7 +1335,8 @@ fn fingerprints(
     let prompt = compose_system_prompt(spec);
     let system_prompt_digest = Digest::from_bytes(prompt.as_bytes());
     let ordered_tool_definitions_digest = digest_tools(&all_tool_presentations(spec))?;
-    let tool_execution_policy_digest = digest_tool_execution_policies(&all_tool_presentations(spec));
+    let tool_execution_policy_digest =
+        digest_tool_execution_policies(&all_tool_presentations(spec));
     let capability_bindings_digest = digest_capabilities(&spec.capability_bindings);
     let mut provider =
         CanonicalHashWriter::new("tea-harness-provider-surface-v1", 1, EXTENSION_ABI_VERSION);
@@ -1738,7 +1739,7 @@ mod tests {
         changed.cancellation_settlement_mode = "await_future".into();
 
         assert_eq!(
-            digest_tools(&[original.clone()]).expect("provider digest"),
+            digest_tools(std::slice::from_ref(&original)).expect("provider digest"),
             digest_tools(&[changed.clone()]).expect("provider digest")
         );
         assert_ne!(

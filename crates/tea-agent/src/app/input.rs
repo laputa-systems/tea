@@ -335,20 +335,15 @@ impl App {
             self.state.slash_completion = None;
             return;
         }
-        self.state.update_slash_completion(
-            self.matching_commands(prefix),
-        );
+        self.state
+            .update_slash_completion(self.matching_commands(prefix));
     }
 
     fn matching_commands(&self, prefix: &str) -> Vec<String> {
         commands::matching(prefix)
             .into_iter()
             .map(|command| command.name.to_owned())
-            .chain(
-                self.state
-                    .matching_extension_commands(prefix)
-                    .into_iter(),
-            )
+            .chain(self.state.matching_extension_commands(prefix))
             .collect()
     }
 
@@ -378,8 +373,10 @@ impl App {
         }
         match command.as_str() {
             "/help" => {
-                self.state
-                    .set_surface_lines(UiSurface::Help, help_surface_lines(&self.state.extension_commands));
+                self.state.set_surface_lines(
+                    UiSurface::Help,
+                    help_surface_lines(&self.state.extension_commands),
+                );
             }
             "/model" => {
                 if let (Some(provider), Some(model)) = (words.next(), words.next()) {
@@ -448,7 +445,11 @@ impl App {
         }
     }
 
-    fn dispatch_extension_command(&mut self, command: &str, arguments: String) -> Result<(), AppError> {
+    fn dispatch_extension_command(
+        &mut self,
+        command: &str,
+        arguments: String,
+    ) -> Result<(), AppError> {
         if self.configured_provider.is_none() && self.durable_harness.is_none() {
             self.state.notice("select a model first");
             self.open_model_picker();

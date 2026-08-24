@@ -67,8 +67,8 @@ fn read_complete_http_request(reader: &mut impl Read) {
                 .position(|window| window == b"\r\n\r\n")
                 .map(|offset| offset + 4);
             if let Some(end) = header_end {
-                let headers = std::str::from_utf8(&bytes[..end])
-                    .expect("fixture HTTP headers are UTF-8");
+                let headers =
+                    std::str::from_utf8(&bytes[..end]).expect("fixture HTTP headers are UTF-8");
                 let content_length = headers
                     .lines()
                     .find_map(|line| {
@@ -307,8 +307,7 @@ fn machine_session_inspect_and_verify_emit_authenticated_json() {
 #[test]
 fn session_commands_do_not_load_the_tui_config() {
     let home = test_tea_home("session-command-no-config");
-    fs::write(home.join("config.toml"), "[features\n")
-        .expect("malformed config writes");
+    fs::write(home.join("config.toml"), "[features\n").expect("malformed config writes");
     let directory = home.join("session.tea");
     JsonlSession::create(
         &directory,
@@ -751,8 +750,7 @@ fn explicit_tea_home_redirects_the_tui_config_and_loads_it_once() {
             .subagents
     );
 
-    fs::write(tea_home.join("config.toml"), "invalid = [\n")
-        .expect("replacement config writes");
+    fs::write(tea_home.join("config.toml"), "invalid = [\n").expect("replacement config writes");
     app.assemble_host()
         .expect("assembled application does not reload global config");
     let _ = fs::remove_dir_all(tea_home);
@@ -855,7 +853,9 @@ fn session_resumption_restores_its_model_without_global_preferences() {
     )
     .expect("resumed startup options parse");
     let mut resumed = App::new(resumed_options);
-    resumed.assemble_host().expect("resumed host should assemble");
+    resumed
+        .assemble_host()
+        .expect("resumed host should assemble");
     assert!(
         resumed.state().selected_model.is_none(),
         "a legacy global preference must not choose the startup model"
@@ -929,7 +929,9 @@ fn session_resumption_preserves_a_revision_pinned_root_descriptor() {
     )
     .expect("resumed startup options parse");
     let mut resumed = App::new(resumed_options);
-    resumed.assemble_host().expect("resumed host should assemble");
+    resumed
+        .assemble_host()
+        .expect("resumed host should assemble");
     resumed
         .resume_session(&session_id)
         .expect("revision-pinned session should resume");
@@ -962,7 +964,9 @@ fn disabled_subagent_reopen_rejects_before_provider_setup_or_prior_harness_remov
     )
     .expect("creator startup options parse");
     let mut creator = App::new(creator_options);
-    creator.assemble_host().expect("creator host should assemble");
+    creator
+        .assemble_host()
+        .expect("creator host should assemble");
     let created = creator
         .ensure_durable_harness()
         .expect("enabled session should create");
@@ -985,7 +989,9 @@ fn disabled_subagent_reopen_rejects_before_provider_setup_or_prior_harness_remov
     )
     .expect("resumed startup options parse");
     let mut resumed = App::new(resumed_options);
-    resumed.assemble_host().expect("resumed host should assemble");
+    resumed
+        .assemble_host()
+        .expect("resumed host should assemble");
     resumed.tui_config = Some(super::config::TuiConfig::default());
     resumed.durable_harness = Some(Arc::clone(&created));
 
@@ -1334,10 +1340,7 @@ fn child_events_update_aggregate_usage_without_entering_root_transcript() {
     });
 
     assert!(app.state().transcript().is_empty());
-    assert!(app
-        .state()
-        .footer_lines(&app.registry)[1]
-        .contains("↓7"));
+    assert!(app.state().footer_lines(&app.registry)[1].contains("↓7"));
 }
 
 #[test]
@@ -1969,7 +1972,9 @@ data: [DONE]
                 .as_bytes(),
             )
             .expect("one-shot fixture headers write");
-        socket.write_all(body).expect("one-shot fixture body writes");
+        socket
+            .write_all(body)
+            .expect("one-shot fixture body writes");
         socket.flush().expect("one-shot fixture response flushes");
     });
     let options = CliOptions::parse(
@@ -2037,15 +2042,17 @@ fn command_completion_includes_durable_session_commands() {
 #[test]
 fn bundled_extension_commands_feed_completion_and_help() {
     let mut app = App::new(CliOptions::default());
-    app.state
-        .set_extension_commands(super::durable::bundled_host_commands().expect("goal bundle resolves"));
+    app.state.set_extension_commands(
+        super::durable::bundled_host_commands().expect("goal bundle resolves"),
+    );
     app.state.composer_mut().insert_str("/go").expect("prefix");
     app.complete_command();
     assert_eq!(app.state.composer().text(), "/goal ");
 
     app.dispatch_command("/help")
         .expect("help dispatch succeeds");
-    assert!(app.state.surface_lines().is_some_and(|lines| {
-        lines.iter().any(|line| line.contains("/goal"))
-    }));
+    assert!(app
+        .state
+        .surface_lines()
+        .is_some_and(|lines| { lines.iter().any(|line| line.contains("/goal")) }));
 }

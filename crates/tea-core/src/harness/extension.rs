@@ -7,9 +7,7 @@ use crate::error::HookError;
 use crate::hooks::HookSet;
 use crate::scheduler::CancellationToken;
 use crate::state::ToolCallId;
-use crate::tool::{
-    CancellationSettlementMode, ToolExecutionMode, ToolRegistry, ToolUpdateSink,
-};
+use crate::tool::{CancellationSettlementMode, ToolExecutionMode, ToolRegistry, ToolUpdateSink};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::future::Future;
@@ -135,7 +133,10 @@ pub trait ExtensionHostCommand: Send + Sync {
     /// Immutable host-local command metadata.
     fn description(&self) -> &ExtensionHostCommandDescription;
     /// Evaluate the command without ambient host authority.
-    fn invoke(&self, input: &ExtensionCommandInput) -> Result<ExtensionCommandResult, ExtensionError>;
+    fn invoke(
+        &self,
+        input: &ExtensionCommandInput,
+    ) -> Result<ExtensionCommandResult, ExtensionError>;
 }
 
 /// Generic operation outcome made available to an idle extension hook.
@@ -189,7 +190,10 @@ pub trait ExtensionIdleHook: Send + Sync {
 /// cannot select another extension's namespace or obtain a session writer.
 pub trait ExtensionStateStore: Send + Sync {
     /// Read the latest inline value for every kind owned by one extension.
-    fn read_extension_state(&self, extension_id: &str) -> Result<ExtensionStateView, ExtensionError>;
+    fn read_extension_state(
+        &self,
+        extension_id: &str,
+    ) -> Result<ExtensionStateView, ExtensionError>;
     /// Append one external-only/session-retained value to that extension's
     /// namespace. Existing values are never mutated.
     fn append_extension_state(
@@ -212,7 +216,11 @@ pub struct ExtensionStateHandle {
 
 impl fmt::Debug for ExtensionStateHandle {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let attached = self.store.lock().map(|store| store.is_some()).unwrap_or(false);
+        let attached = self
+            .store
+            .lock()
+            .map(|store| store.is_some())
+            .unwrap_or(false);
         formatter
             .debug_struct("ExtensionStateHandle")
             .field("attached", &attached)

@@ -92,14 +92,18 @@ mod tests {
         );
 
         assert!(
-            !Arc::ptr_eq(&root.prompt_layout_ledger, &first_child.prompt_layout_ledger)
-                && !Arc::ptr_eq(
-                    &first_child.prompt_layout_ledger,
-                    &second_child.prompt_layout_ledger
-                )
+            !Arc::ptr_eq(
+                &root.prompt_layout_ledger,
+                &first_child.prompt_layout_ledger
+            ) && !Arc::ptr_eq(
+                &first_child.prompt_layout_ledger,
+                &second_child.prompt_layout_ledger
+            )
         );
         assert_eq!(
-            root.prompt_layout_ledger.observe(&request("root")).continuity,
+            root.prompt_layout_ledger
+                .observe(&request("root"))
+                .continuity,
             PromptContinuity::FirstRequest
         );
         assert_eq!(

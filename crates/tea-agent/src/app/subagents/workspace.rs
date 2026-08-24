@@ -6,15 +6,13 @@
 //! files until an explicit delta application succeeds.
 
 use super::git::{
-    GitError, GitRepository, environment_with_index, synthetic_commit_environment, trim_line,
+    environment_with_index, synthetic_commit_environment, trim_line, GitError, GitRepository,
 };
 use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
-use tea_session::{
-    AgentId, Digest, NormalizedPath, SessionId, WorkspaceDeltaId, WorkspaceLeaseId,
-};
+use tea_session::{AgentId, Digest, NormalizedPath, SessionId, WorkspaceDeltaId, WorkspaceLeaseId};
 
 /// Inputs that bind one physical child workspace to durable session identity.
 #[derive(Clone, Debug)]
@@ -106,9 +104,7 @@ impl GitWorkspaceDelta {
                 agent_id: agent_id.clone(),
             });
         }
-        if delta_id
-            != WorkspaceDeltaId::derive(&workspace_lease_id, &base_commit, &result_commit)
-        {
+        if delta_id != WorkspaceDeltaId::derive(&workspace_lease_id, &base_commit, &result_commit) {
             return Err(WorkspaceError::InvalidRequest {
                 message: "durable workspace delta ID does not match its lease and commits".into(),
             });
@@ -122,13 +118,10 @@ impl GitWorkspaceDelta {
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
-        if changed_paths.is_empty()
-            || changed_paths
-                .windows(2)
-                .any(|pair| pair[0] >= pair[1])
-        {
+        if changed_paths.is_empty() || changed_paths.windows(2).any(|pair| pair[0] >= pair[1]) {
             return Err(WorkspaceError::InvalidRequest {
-                message: "durable workspace delta paths must be nonempty, sorted, and unique".into(),
+                message: "durable workspace delta paths must be nonempty, sorted, and unique"
+                    .into(),
             });
         }
         Ok(Self {
@@ -232,10 +225,17 @@ impl std::fmt::Display for WorkspaceError {
                 "workspace lease does not match deterministic agent {agent_id}"
             ),
             Self::SubmoduleUnsupported { path } => {
-                write!(formatter, "submodule {path:?} is unsupported in v1 child workspaces")
+                write!(
+                    formatter,
+                    "submodule {path:?} is unsupported in v1 child workspaces"
+                )
             }
             Self::MissingOperationalWorktree { path } => {
-                write!(formatter, "child operational worktree is missing: {}", path.display())
+                write!(
+                    formatter,
+                    "child operational worktree is missing: {}",
+                    path.display()
+                )
             }
             Self::InvalidChangedPath { path, message } => {
                 write!(formatter, "changed Git path {path:?} is invalid: {message}")
@@ -449,7 +449,12 @@ impl GitWorkspaceEngine {
                 &[],
             )?;
         }
-        for name in ["base.index", "base.index.lock", "result.index", "result.index.lock"] {
+        for name in [
+            "base.index",
+            "base.index.lock",
+            "result.index",
+            "result.index.lock",
+        ] {
             remove_file_if_present(&private_directory.join(name))?;
         }
         Ok(())
@@ -486,24 +491,29 @@ impl GitWorkspaceEngine {
             });
         }
 
-        let preflight_index = preflight_index_path(
-            request.session_directory,
-            &request.delta.workspace_lease_id,
-        );
+        let preflight_index =
+            preflight_index_path(request.session_directory, &request.delta.workspace_lease_id);
         build_apply_index(&repository, &preflight_index)?;
         let preflight_environment = environment_with_index(&preflight_index);
         let checked = repository.run_with_input(
-            ["apply", "--3way", "--check", "--cached", "--whitespace=nowarn"],
+            [
+                "apply",
+                "--3way",
+                "--check",
+                "--cached",
+                "--whitespace=nowarn",
+            ],
             &preflight_environment,
             &request.delta.patch,
         )?;
         let preflight_succeeded = if checked.success {
-            repository.run_with_input(
-                ["apply", "--3way", "--cached", "--whitespace=nowarn"],
-                &preflight_environment,
-                &request.delta.patch,
-            )?
-            .success
+            repository
+                .run_with_input(
+                    ["apply", "--3way", "--cached", "--whitespace=nowarn"],
+                    &preflight_environment,
+                    &request.delta.patch,
+                )?
+                .success
         } else {
             false
         };
@@ -569,7 +579,10 @@ impl GitWorkspaceEngine {
 
 fn validate_request(request: &WorkspaceLeaseRequest) -> Result<(), WorkspaceError> {
     if request.logical_workspace_label.is_empty()
-        || request.logical_workspace_label.chars().any(char::is_control)
+        || request
+            .logical_workspace_label
+            .chars()
+            .any(char::is_control)
     {
         return Err(WorkspaceError::InvalidRequest {
             message: "logical workspace label must be a nonempty printable string".into(),
@@ -643,16 +656,25 @@ fn create_synthetic_commit(
     }
     arguments.push(OsString::from("-m"));
     arguments.push(OsString::from(message));
-    Ok(trim_line(&repository.output(arguments, &synthetic_commit_environment())?))
+    Ok(trim_line(
+        &repository.output(arguments, &synthetic_commit_environment())?,
+    ))
 }
 
-fn resolve_ref(repository: &GitRepository, reference: &str) -> Result<Option<String>, WorkspaceError> {
+fn resolve_ref(
+    repository: &GitRepository,
+    reference: &str,
+) -> Result<Option<String>, WorkspaceError> {
     Ok(repository
         .optional_output(["rev-parse", "--verify", "--quiet", reference], &[])?
         .map(|value| trim_line(&value)))
 }
 
-fn update_ref(repository: &GitRepository, reference: &str, commit: &str) -> Result<(), WorkspaceError> {
+fn update_ref(
+    repository: &GitRepository,
+    reference: &str,
+    commit: &str,
+) -> Result<(), WorkspaceError> {
     repository.output(["update-ref", reference, commit], &[])?;
     Ok(())
 }
@@ -662,7 +684,10 @@ fn reject_submodules(
     environment: &[(OsString, OsString)],
 ) -> Result<(), WorkspaceError> {
     let staged = repository.output(["ls-files", "--stage", "-z"], environment)?;
-    for entry in staged.split(|byte| *byte == 0).filter(|entry| !entry.is_empty()) {
+    for entry in staged
+        .split(|byte| *byte == 0)
+        .filter(|entry| !entry.is_empty())
+    {
         if entry.starts_with(b"160000 ") {
             let path = entry
                 .splitn(2, |byte| *byte == b'\t')
@@ -734,15 +759,20 @@ fn changed_paths(
         &[],
     )?;
     let mut paths = BTreeSet::new();
-    for raw_path in output.split(|byte| *byte == 0).filter(|path| !path.is_empty()) {
-        let path = std::str::from_utf8(raw_path).map_err(|error| WorkspaceError::InvalidChangedPath {
-            path: String::from_utf8_lossy(raw_path).into_owned(),
-            message: format!("Git path is not UTF-8: {error}"),
-        })?;
-        let normalized = NormalizedPath::new(path).map_err(|error| WorkspaceError::InvalidChangedPath {
-            path: path.into(),
-            message: error.to_string(),
-        })?;
+    for raw_path in output
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+    {
+        let path =
+            std::str::from_utf8(raw_path).map_err(|error| WorkspaceError::InvalidChangedPath {
+                path: String::from_utf8_lossy(raw_path).into_owned(),
+                message: format!("Git path is not UTF-8: {error}"),
+            })?;
+        let normalized =
+            NormalizedPath::new(path).map_err(|error| WorkspaceError::InvalidChangedPath {
+                path: path.into(),
+                message: error.to_string(),
+            })?;
         paths.insert(normalized);
     }
     Ok(paths.into_iter().collect())
@@ -784,7 +814,10 @@ fn state_at_treeish(
         ["ls-tree", "--full-tree", "-z", commit, "--", path.as_str()],
         &[],
     )?;
-    let Some(entry) = entry.split(|byte| *byte == 0).find(|entry| !entry.is_empty()) else {
+    let Some(entry) = entry
+        .split(|byte| *byte == 0)
+        .find(|entry| !entry.is_empty())
+    else {
         return Ok(WorkspacePathState::Missing);
     };
     let mut entry_parts = entry.splitn(2, |byte| *byte == b'\t');
@@ -799,15 +832,19 @@ fn state_at_treeish(
     let fields = header.split(|byte| *byte == b' ').collect::<Vec<_>>();
     if fields.len() != 3 {
         return Err(WorkspaceError::InvalidRequest {
-            message: format!("Git emitted malformed tree entry header for {}", path.as_str()),
+            message: format!(
+                "Git emitted malformed tree entry header for {}",
+                path.as_str()
+            ),
         });
     }
     let mode = std::str::from_utf8(fields[0]).map_err(|error| WorkspaceError::InvalidRequest {
         message: format!("Git emitted a non-UTF-8 tree mode: {error}"),
     })?;
-    let object_type = std::str::from_utf8(fields[1]).map_err(|error| WorkspaceError::InvalidRequest {
-        message: format!("Git emitted a non-UTF-8 tree object type: {error}"),
-    })?;
+    let object_type =
+        std::str::from_utf8(fields[1]).map_err(|error| WorkspaceError::InvalidRequest {
+            message: format!("Git emitted a non-UTF-8 tree object type: {error}"),
+        })?;
     if object_type != "blob" || !matches!(mode, "100644" | "100755" | "120000") {
         return Err(WorkspaceError::InvalidRequest {
             message: format!(
@@ -864,7 +901,10 @@ fn observed_path_state(path: &Path) -> Result<WorkspacePathState, WorkspaceError
     }
     if !metadata.file_type().is_file() {
         return Err(WorkspaceError::InvalidRequest {
-            message: format!("workspace path {} is not a regular file or symlink", path.display()),
+            message: format!(
+                "workspace path {} is not a regular file or symlink",
+                path.display()
+            ),
         });
     }
     let bytes = fs::read(path).map_err(|error| WorkspaceError::Io {
@@ -920,12 +960,14 @@ fn apply_evidence(
         .zip(before.iter().cloned())
         .zip(after.iter().cloned())
         .zip(expected_applied.iter().cloned())
-        .map(|(((path, before), after), expected_applied)| WorkspaceApplyEvidence {
-            path,
-            before,
-            after,
-            expected_applied,
-        })
+        .map(
+            |(((path, before), after), expected_applied)| WorkspaceApplyEvidence {
+                path,
+                before,
+                after,
+                expected_applied,
+            },
+        )
         .collect()
 }
 
@@ -936,15 +978,23 @@ fn apply_index_path(session_directory: &Path, workspace_lease_id: &WorkspaceLeas
         .join(format!("{}.index", workspace_lease_id.as_str()))
 }
 
-fn preflight_index_path(session_directory: &Path, workspace_lease_id: &WorkspaceLeaseId) -> PathBuf {
+fn preflight_index_path(
+    session_directory: &Path,
+    workspace_lease_id: &WorkspaceLeaseId,
+) -> PathBuf {
     session_directory
         .join("subagents")
         .join("apply")
         .join(format!("{}.preflight.index", workspace_lease_id.as_str()))
 }
 
-fn build_apply_index(repository: &GitRepository, private_index: &Path) -> Result<(), WorkspaceError> {
-    let directory = private_index.parent().expect("private index path has a parent");
+fn build_apply_index(
+    repository: &GitRepository,
+    private_index: &Path,
+) -> Result<(), WorkspaceError> {
+    let directory = private_index
+        .parent()
+        .expect("private index path has a parent");
     ensure_directory(directory)?;
     remove_file_if_present(private_index)?;
     remove_file_if_present(&private_index.with_extension("index.lock"))?;
@@ -962,9 +1012,13 @@ fn remove_private_index(private_index: &Path) -> Result<(), WorkspaceError> {
     remove_file_if_present(&private_index.with_extension("index.lock"))
 }
 
-fn authenticate_delta(repository: &GitRepository, delta: &GitWorkspaceDelta) -> Result<(), WorkspaceError> {
+fn authenticate_delta(
+    repository: &GitRepository,
+    delta: &GitWorkspaceDelta,
+) -> Result<(), WorkspaceError> {
     if resolve_ref(repository, &delta.base_ref)?.as_deref() != Some(delta.base_commit.as_str())
-        || resolve_ref(repository, &delta.result_ref)?.as_deref() != Some(delta.result_commit.as_str())
+        || resolve_ref(repository, &delta.result_ref)?.as_deref()
+            != Some(delta.result_commit.as_str())
     {
         return Err(WorkspaceError::InvalidRequest {
             message: "workspace delta commits are not retained by their durable hidden refs".into(),
@@ -985,7 +1039,9 @@ fn authenticate_delta(repository: &GitRepository, delta: &GitWorkspaceDelta) -> 
     };
     if expected.patch != delta.patch || expected.changed_paths != delta.changed_paths {
         return Err(WorkspaceError::InvalidRequest {
-            message: "workspace delta patch or changed paths disagree with its retained Git commits".into(),
+            message:
+                "workspace delta patch or changed paths disagree with its retained Git commits"
+                    .into(),
         });
     }
     Ok(())
@@ -1139,10 +1195,8 @@ mod tests {
     fn test_git_config() -> &'static Path {
         TEST_GIT_CONFIG
             .get_or_init(|| {
-                let path = std::env::temp_dir().join(format!(
-                    "tea-agent-empty-git-config-{}",
-                    std::process::id()
-                ));
+                let path = std::env::temp_dir()
+                    .join(format!("tea-agent-empty-git-config-{}", std::process::id()));
                 fs::write(&path, b"").expect("empty isolated Git config writes");
                 path
             })
@@ -1169,7 +1223,8 @@ mod tests {
     }
 
     #[test]
-    fn workspace_snapshot_captures_dirty_deletion_untracked_binary_and_rename_without_touching_parent() {
+    fn workspace_snapshot_captures_dirty_deletion_untracked_binary_and_rename_without_touching_parent(
+    ) {
         let repository = TestRepository::new("snapshot");
         repository.write("tracked.txt", "committed\n");
         repository.write("deleted.txt", "delete me\n");
@@ -1192,8 +1247,14 @@ mod tests {
 
         let lease = prepare(&repository, "agent-snapshot");
         assert_eq!(lease.logical_workspace_label(), "repository");
-        assert_ne!(lease.logical_workspace_label(), lease.worktree_path().to_string_lossy());
-        assert_eq!(fs::read(lease.worktree_path().join("tracked.txt")).unwrap(), parent_tracked);
+        assert_ne!(
+            lease.logical_workspace_label(),
+            lease.worktree_path().to_string_lossy()
+        );
+        assert_eq!(
+            fs::read(lease.worktree_path().join("tracked.txt")).unwrap(),
+            parent_tracked
+        );
         assert!(!lease.worktree_path().join("deleted.txt").exists());
         assert_eq!(
             fs::read(lease.worktree_path().join("untracked.txt")).unwrap(),
@@ -1222,8 +1283,11 @@ mod tests {
         repository.write("tracked.txt", "original\n");
         repository.commit_all("initial");
         let first = prepare(&repository, "agent-first");
-        fs::write(first.worktree_path().join("tracked.txt"), "first child only\n")
-            .expect("first child edit writes");
+        fs::write(
+            first.worktree_path().join("tracked.txt"),
+            "first child only\n",
+        )
+        .expect("first child edit writes");
         let replayed = GitWorkspaceEngine
             .prepare(repository.request("agent-first"))
             .expect("same durable lease reopens");
@@ -1238,7 +1302,10 @@ mod tests {
             b"original\n"
         );
         assert_eq!(repository.read("tracked.txt"), b"original\n");
-        run_git(&repository.root, ["show-ref", "--verify", first.base_ref.as_str()]);
+        run_git(
+            &repository.root,
+            ["show-ref", "--verify", first.base_ref.as_str()],
+        );
         assert_ne!(first.worktree_path(), second.worktree_path());
     }
 
@@ -1248,8 +1315,11 @@ mod tests {
         repository.write("tracked.txt", "original\n");
         repository.commit_all("initial");
         let lease = prepare(&repository, "agent-active");
-        fs::write(lease.worktree_path().join("tracked.txt"), "unfinalized child edit\n")
-            .expect("child edit writes");
+        fs::write(
+            lease.worktree_path().join("tracked.txt"),
+            "unfinalized child edit\n",
+        )
+        .expect("child edit writes");
         GitWorkspaceEngine
             .cleanup(&lease)
             .expect("test removes only the operational worktree");
@@ -1369,7 +1439,10 @@ mod tests {
         )
         .expect("child rename succeeds");
 
-        let first = match GitWorkspaceEngine.finalize(&lease).expect("finalization succeeds") {
+        let first = match GitWorkspaceEngine
+            .finalize(&lease)
+            .expect("finalization succeeds")
+        {
             WorkspaceFinalization::Delta(delta) => delta,
             WorkspaceFinalization::NoChanges { .. } => panic!("edits must produce a delta"),
         };
@@ -1379,23 +1452,40 @@ mod tests {
             .map(|path| path.as_str())
             .collect::<Vec<_>>();
         assert_eq!(path_names, vec!["binary.bin", "renamed.txt", "tracked.txt"]);
-        assert!(first.patch.windows(b"GIT binary patch".len()).any(|window| window == b"GIT binary patch"));
-        let replayed = GitWorkspaceEngine.finalize(&lease).expect("finalization replays");
+        assert!(first
+            .patch
+            .windows(b"GIT binary patch".len())
+            .any(|window| window == b"GIT binary patch"));
+        let replayed = GitWorkspaceEngine
+            .finalize(&lease)
+            .expect("finalization replays");
         assert_eq!(replayed, WorkspaceFinalization::Delta(first.clone()));
-        GitWorkspaceEngine.cleanup(&lease).expect("cleanup succeeds");
+        GitWorkspaceEngine
+            .cleanup(&lease)
+            .expect("cleanup succeeds");
         assert!(!lease.worktree_path().exists());
         GitWorkspaceEngine.cleanup(&lease).expect("cleanup replays");
         let reopened = GitWorkspaceEngine
             .prepare(repository.request("agent-finalize"))
             .expect("terminal lease reopens from durable refs");
         assert!(!reopened.worktree_path().exists());
-        GitWorkspaceEngine.cleanup(&reopened).expect("terminal cleanup remains a fixed point");
+        GitWorkspaceEngine
+            .cleanup(&reopened)
+            .expect("terminal cleanup remains a fixed point");
         assert_eq!(
-            GitWorkspaceEngine.finalize(&reopened).expect("result ref replays after cleanup"),
+            GitWorkspaceEngine
+                .finalize(&reopened)
+                .expect("result ref replays after cleanup"),
             WorkspaceFinalization::Delta(first.clone())
         );
-        run_git(&repository.root, ["show-ref", "--verify", lease.base_ref.as_str()]);
-        run_git(&repository.root, ["show-ref", "--verify", lease.result_ref.as_str()]);
+        run_git(
+            &repository.root,
+            ["show-ref", "--verify", lease.base_ref.as_str()],
+        );
+        run_git(
+            &repository.root,
+            ["show-ref", "--verify", lease.result_ref.as_str()],
+        );
         assert_eq!(repository.read("tracked.txt"), b"original\n");
     }
 
@@ -1426,7 +1516,9 @@ mod tests {
                 .expect("no-change finalization replays"),
             first
         );
-        GitWorkspaceEngine.cleanup(&lease).expect("no-change workspace cleans up");
+        GitWorkspaceEngine
+            .cleanup(&lease)
+            .expect("no-change workspace cleans up");
         let reopened = GitWorkspaceEngine
             .prepare(repository.request("agent-no-changes"))
             .expect("no-change result ref reopens");
@@ -1454,7 +1546,10 @@ mod tests {
             .expect("child text edit writes");
         fs::write(lease.worktree_path().join("binary.bin"), [255, 0, 254, 1])
             .expect("child binary edit writes");
-        let delta = match GitWorkspaceEngine.finalize(&lease).expect("delta finalizes") {
+        let delta = match GitWorkspaceEngine
+            .finalize(&lease)
+            .expect("delta finalizes")
+        {
             WorkspaceFinalization::Delta(delta) => delta,
             WorkspaceFinalization::NoChanges { .. } => panic!("edits must produce a delta"),
         };
@@ -1533,7 +1628,10 @@ mod tests {
             "one\ntwo child\nthree\nfour\nfive\nsix\nseven\neight\nnine\nten\n",
         )
         .expect("child edit writes");
-        let three_way_delta = match GitWorkspaceEngine.finalize(&lease).expect("delta finalizes") {
+        let three_way_delta = match GitWorkspaceEngine
+            .finalize(&lease)
+            .expect("delta finalizes")
+        {
             WorkspaceFinalization::Delta(delta) => delta,
             WorkspaceFinalization::NoChanges { .. } => panic!("child edit must produce delta"),
         };
@@ -1542,7 +1640,8 @@ mod tests {
             "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\nnine parent\nten\n",
         );
         let index_before = repository.index_bytes();
-        let three_way_outcome = GitWorkspaceEngine.apply(repository.apply_request(&three_way_delta));
+        let three_way_outcome =
+            GitWorkspaceEngine.apply(repository.apply_request(&three_way_delta));
         assert!(
             matches!(&three_way_outcome, Ok(WorkspaceApplyOutcome::Applied { .. })),
             "three-way application should merge nonoverlapping parent and child edits: {three_way_outcome:?}"
@@ -1560,9 +1659,13 @@ mod tests {
         conflict_repository.write("tracked.txt", "parent conflict\n");
         let before = conflict_repository.read("tracked.txt");
         let index_before = conflict_repository.index_bytes();
-        let conflict_outcome = GitWorkspaceEngine.apply(conflict_repository.apply_request(&conflict_delta));
+        let conflict_outcome =
+            GitWorkspaceEngine.apply(conflict_repository.apply_request(&conflict_delta));
         assert!(
-            matches!(&conflict_outcome, Ok(WorkspaceApplyOutcome::Conflict { .. })),
+            matches!(
+                &conflict_outcome,
+                Ok(WorkspaceApplyOutcome::Conflict { .. })
+            ),
             "conflicting preflight must leave the parent unchanged: {conflict_outcome:?}"
         );
         assert_eq!(conflict_repository.read("tracked.txt"), before);
@@ -1577,7 +1680,10 @@ mod tests {
             .expect("first child edit writes");
         fs::write(lease.worktree_path().join("second.txt"), "second child\n")
             .expect("second child edit writes");
-        let delta = match GitWorkspaceEngine.finalize(&lease).expect("delta finalizes") {
+        let delta = match GitWorkspaceEngine
+            .finalize(&lease)
+            .expect("delta finalizes")
+        {
             WorkspaceFinalization::Delta(delta) => delta,
             WorkspaceFinalization::NoChanges { .. } => panic!("child edits must produce delta"),
         };
@@ -1601,7 +1707,10 @@ mod tests {
         let lease = prepare(&repository, "agent-binary-conflict");
         fs::write(lease.worktree_path().join("binary.bin"), child)
             .expect("child binary edit writes");
-        let delta = match GitWorkspaceEngine.finalize(&lease).expect("binary delta finalizes") {
+        let delta = match GitWorkspaceEngine
+            .finalize(&lease)
+            .expect("binary delta finalizes")
+        {
             WorkspaceFinalization::Delta(delta) => delta,
             WorkspaceFinalization::NoChanges { .. } => panic!("binary edit must produce a delta"),
         };
@@ -1628,10 +1737,15 @@ mod tests {
         repository.commit_all("initial");
         let lease = prepare(&repository, "agent-executable");
         let script = lease.worktree_path().join("script.sh");
-        let mut permissions = fs::metadata(&script).expect("child script metadata").permissions();
+        let mut permissions = fs::metadata(&script)
+            .expect("child script metadata")
+            .permissions();
         permissions.set_mode(0o755);
         fs::set_permissions(&script, permissions).expect("child script becomes executable");
-        let delta = match GitWorkspaceEngine.finalize(&lease).expect("mode delta finalizes") {
+        let delta = match GitWorkspaceEngine
+            .finalize(&lease)
+            .expect("mode delta finalizes")
+        {
             WorkspaceFinalization::Delta(delta) => delta,
             WorkspaceFinalization::NoChanges { .. } => panic!("mode change must produce a delta"),
         };
@@ -1667,9 +1781,14 @@ mod tests {
         let link = lease.worktree_path().join("link");
         fs::remove_file(&link).expect("child symlink removes");
         symlink("target-b", &link).expect("child symlink updates");
-        let delta = match GitWorkspaceEngine.finalize(&lease).expect("symlink delta finalizes") {
+        let delta = match GitWorkspaceEngine
+            .finalize(&lease)
+            .expect("symlink delta finalizes")
+        {
             WorkspaceFinalization::Delta(delta) => delta,
-            WorkspaceFinalization::NoChanges { .. } => panic!("symlink target change must produce a delta"),
+            WorkspaceFinalization::NoChanges { .. } => {
+                panic!("symlink target change must produce a delta")
+            }
         };
         assert!(matches!(
             GitWorkspaceEngine.apply(repository.apply_request(&delta)),

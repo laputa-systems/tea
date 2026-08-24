@@ -21,7 +21,7 @@ pub mod event;
 pub mod redaction;
 pub mod sink;
 
-pub use encoding::{decode_json_line, decode_jsonl, CborSink, JsonLinesSink, JsonTraceDecodeError};
+pub use encoding::{CborSink, JsonLinesSink, JsonTraceDecodeError, decode_json_line, decode_jsonl};
 pub use event::{
     CacheEvidence, Compaction, CompactionStage, EndReason, EpisodeEnd, EpisodeHeader, ModelTurn,
     TRACE_SCHEMA_VERSION, Tool, ToolExecution, TraceEvent, TraceEventKind, TraceProvenance, Turn,

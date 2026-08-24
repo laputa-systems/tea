@@ -4265,7 +4265,12 @@ fn assert_active_workspace_lease_export_is_refused(session: &mut JsonlSession, s
     let result = session.export_to(&destination, std::iter::empty());
     let _ = std::fs::remove_dir_all(&destination);
     assert!(
-        matches!(result, Err(SessionExportError::Session(SessionError::InvalidInput { .. }))),
+        matches!(
+            result,
+            Err(SessionExportError::Session(
+                SessionError::InvalidInput { .. }
+            ))
+        ),
         "export must refuse a session with an unresolved {state} workspace lease: {result:?}"
     );
 }
@@ -4337,8 +4342,8 @@ fn usage_totals_add_decimal_costs_without_filling_unknown_fields() {
 fn subagent_ids_are_deterministic_domain_separated_and_form_the_child_lane() {
     let session_id = SessionId::new("subagent-id-session").expect("valid session ID");
     let parent_lane = LaneId::main();
-    let parent_operation = OperationId::new("subagent-id-parent-operation")
-        .expect("valid parent operation ID");
+    let parent_operation =
+        OperationId::new("subagent-id-parent-operation").expect("valid parent operation ID");
     let agent = AgentId::derive(
         &session_id,
         &parent_lane,
@@ -4389,12 +4394,14 @@ fn agent_graph_rejects_an_applied_delta_that_was_never_persisted() {
     let delta = WorkspaceDeltaId::new("delta-missing").expect("valid delta ID");
 
     assert!(matches!(
-        session.append_fact(SessionFact::WorkspaceDeltaApplied(WorkspaceDeltaAppliedFact {
-            delta_id: delta,
-            target_lane_id: LaneId::main(),
-            tool_call_id: "apply-call".into(),
-            changed_paths: vec!["src/lib.rs".into()],
-        })),
+        session.append_fact(SessionFact::WorkspaceDeltaApplied(
+            WorkspaceDeltaAppliedFact {
+                delta_id: delta,
+                target_lane_id: LaneId::main(),
+                tool_call_id: "apply-call".into(),
+                changed_paths: vec!["src/lib.rs".into()],
+            }
+        )),
         Err(SessionError::Corruption(_))
     ));
     assert_eq!(
@@ -4442,12 +4449,12 @@ fn jsonl_round_trips_a_complete_child_agent_graph_with_an_oversized_artifact_rep
         .expect("policy commits");
 
     let parent_lane = LaneId::main();
-    let parent_operation = OperationId::new("agent-graph-parent-operation")
-        .expect("valid parent operation ID");
-    let root_revision = HarnessRevisionId::new("agent-graph-root-revision")
-        .expect("valid root revision ID");
-    let root_profile = ModelHarnessProfileId::new("agent-graph-root-profile")
-        .expect("valid root profile ID");
+    let parent_operation =
+        OperationId::new("agent-graph-parent-operation").expect("valid parent operation ID");
+    let root_revision =
+        HarnessRevisionId::new("agent-graph-root-revision").expect("valid root revision ID");
+    let root_profile =
+        ModelHarnessProfileId::new("agent-graph-root-profile").expect("valid root profile ID");
     let parent_epoch = EpochId::new("agent-graph-parent-epoch").expect("valid parent epoch ID");
     session
         .append_record(LaneRecord::OperationStarted(OperationStartedRecord::new(
@@ -4470,18 +4477,23 @@ fn jsonl_round_trips_a_complete_child_agent_graph_with_an_oversized_artifact_rep
             harness_snapshot_id: HarnessSnapshotId::new("agent-graph-root-snapshot")
                 .expect("valid root snapshot ID"),
             model_harness_profile: root_profile,
-            core_run_id: CoreRunId::new("agent-graph-parent-core-run")
-                .expect("valid core run ID"),
+            core_run_id: CoreRunId::new("agent-graph-parent-core-run").expect("valid core run ID"),
             epoch_resume_data: std::collections::BTreeMap::new(),
         }))
         .expect("parent epoch commits");
-    let parent_assistant = EntryId::new("agent-graph-parent-assistant")
-        .expect("valid assistant entry ID");
+    let parent_assistant =
+        EntryId::new("agent-graph-parent-assistant").expect("valid assistant entry ID");
     let spawn_args = JsonValue::Object(std::collections::BTreeMap::from([
         ("context".into(), JsonValue::String("task".into())),
         ("model".into(), JsonValue::String(model.model.clone())),
-        ("task".into(), JsonValue::String("audit the durable session".into())),
-        ("task_name".into(), JsonValue::String("audit_session".into())),
+        (
+            "task".into(),
+            JsonValue::String("audit the durable session".into()),
+        ),
+        (
+            "task_name".into(),
+            JsonValue::String("audit_session".into()),
+        ),
         ("thinking".into(), JsonValue::String("high".into())),
     ]));
     session
@@ -4523,12 +4535,12 @@ fn jsonl_round_trips_a_complete_child_agent_graph_with_an_oversized_artifact_rep
         "agent-graph-spawn-key",
     );
     let child_lane = agent.lane_id();
-    let child_revision = HarnessRevisionId::new("agent-graph-child-revision")
-        .expect("valid child revision ID");
-    let child_snapshot = HarnessSnapshotId::new("agent-graph-child-snapshot")
-        .expect("valid child snapshot ID");
-    let child_profile = ModelHarnessProfileId::new("agent-graph-child-profile")
-        .expect("valid child profile ID");
+    let child_revision =
+        HarnessRevisionId::new("agent-graph-child-revision").expect("valid child revision ID");
+    let child_snapshot =
+        HarnessSnapshotId::new("agent-graph-child-snapshot").expect("valid child snapshot ID");
+    let child_profile =
+        ModelHarnessProfileId::new("agent-graph-child-profile").expect("valid child profile ID");
     session
         .append_lane_mutation(LaneMutation::Created {
             lane_id: child_lane.clone(),
@@ -4552,8 +4564,7 @@ fn jsonl_round_trips_a_complete_child_agent_graph_with_an_oversized_artifact_rep
         .append_entry(
             &child_lane,
             ProvisionedEntry {
-                id: EntryId::new("agent-graph-child-thinking")
-                    .expect("valid thinking entry ID"),
+                id: EntryId::new("agent-graph-child-thinking").expect("valid thinking entry ID"),
                 body: SessionEntry::ThinkingChanged(ThinkingChangedEntry {
                     level: "high".into(),
                 }),
@@ -4594,15 +4605,14 @@ fn jsonl_round_trips_a_complete_child_agent_graph_with_an_oversized_artifact_rep
         .expect("agent spawn fact commits");
     assert_active_workspace_lease_export_is_refused(&mut session, "spawned");
     let child_operation = derive_subagent_operation_id(&agent, "audit the durable session");
-    let assignment_id = EntryId::new("agent-graph-child-assignment")
-        .expect("valid assignment entry ID");
+    let assignment_id =
+        EntryId::new("agent-graph-child-assignment").expect("valid assignment entry ID");
     session
         .append_record(LaneRecord::OperationStarted(OperationStartedRecord::new(
             child_operation.clone(),
             child_lane.clone(),
             Some(
-                EntryId::new("agent-graph-child-revision-entry")
-                    .expect("valid revision entry ID"),
+                EntryId::new("agent-graph-child-revision-entry").expect("valid revision entry ID"),
             ),
             OperationKind::Subagent {
                 agent_id: agent.clone(),
@@ -4639,8 +4649,7 @@ fn jsonl_round_trips_a_complete_child_agent_graph_with_an_oversized_artifact_rep
             operation_id: child_operation.clone(),
             epoch_index: 0,
             source_leaf_id: Some(
-                EntryId::new("agent-graph-child-assignment")
-                    .expect("valid assignment entry ID"),
+                EntryId::new("agent-graph-child-assignment").expect("valid assignment entry ID"),
             ),
             harness_revision_id: child_revision.clone(),
             harness_snapshot_id: HarnessSnapshotId::new("agent-graph-child-snapshot")
@@ -4721,8 +4730,8 @@ fn jsonl_round_trips_a_complete_child_agent_graph_with_an_oversized_artifact_rep
             workspace_delta_id: Some(delta_id.clone()),
         }))
         .expect("child terminal result commits");
-    let apply_assistant = EntryId::new("agent-graph-apply-assistant")
-        .expect("valid apply assistant entry ID");
+    let apply_assistant =
+        EntryId::new("agent-graph-apply-assistant").expect("valid apply assistant entry ID");
     let apply_args = JsonValue::Object(std::collections::BTreeMap::from([(
         "delta_id".into(),
         JsonValue::String(delta_id.to_string()),
@@ -4759,12 +4768,14 @@ fn jsonl_round_trips_a_complete_child_agent_graph_with_an_oversized_artifact_rep
         )))
         .expect("parent apply intent commits");
     session
-        .append_fact(SessionFact::WorkspaceDeltaApplied(WorkspaceDeltaAppliedFact {
-            delta_id: delta_id.clone(),
-            target_lane_id: LaneId::main(),
-            tool_call_id: "agent-graph-apply-call".into(),
-            changed_paths: vec!["src/lib.rs".into()],
-        }))
+        .append_fact(SessionFact::WorkspaceDeltaApplied(
+            WorkspaceDeltaAppliedFact {
+                delta_id: delta_id.clone(),
+                target_lane_id: LaneId::main(),
+                tool_call_id: "agent-graph-apply-call".into(),
+                changed_paths: vec!["src/lib.rs".into()],
+            },
+        ))
         .expect("applied delta fact commits");
     let verified = verify_session(
         &session.snapshot().expect("snapshot verifies"),
@@ -4787,8 +4798,18 @@ fn jsonl_round_trips_a_complete_child_agent_graph_with_an_oversized_artifact_rep
     let export = session
         .export_to(&export_directory, std::iter::empty())
         .expect("export retains the child patch artifact");
-    assert!(export.verification.artifact_roots.contains(&patch.artifact_id));
-    assert!(export.verification.artifact_roots.contains(&report.artifact_id));
+    assert!(
+        export
+            .verification
+            .artifact_roots
+            .contains(&patch.artifact_id)
+    );
+    assert!(
+        export
+            .verification
+            .artifact_roots
+            .contains(&report.artifact_id)
+    );
 
     let expected_delta_id = delta_id.clone();
     let live = reduce_agent_graph(&session.snapshot().expect("live final snapshot"))
@@ -4827,7 +4848,9 @@ fn agent_graph_rejects_invalid_policy_models_and_parent_operations() {
         tool_surface_digest: Digest::from_bytes(b"policy"),
     };
     let mut duplicate_revision = invalid_policy.clone();
-    duplicate_revision.models.push(duplicate_revision.models[0].clone());
+    duplicate_revision
+        .models
+        .push(duplicate_revision.models[0].clone());
     assert!(duplicate_revision.validate().is_err());
 
     let mut duplicate_model_id = invalid_policy.clone();
@@ -4861,8 +4884,8 @@ fn agent_graph_rejects_invalid_policy_models_and_parent_operations() {
 
     let mut fixture = spawned_agent_fixture();
     let mut missing_parent = fixture.spawn.clone();
-    missing_parent.parent_operation_id = OperationId::new("missing-parent-operation")
-        .expect("valid missing operation ID");
+    missing_parent.parent_operation_id =
+        OperationId::new("missing-parent-operation").expect("valid missing operation ID");
     let fixture_session_id = fixture
         .session
         .snapshot()
@@ -4927,12 +4950,15 @@ fn agent_graph_rejects_bijection_task_operation_and_terminal_violations() {
     let mut mismatched_spawn_args = spawned_agent_fixture();
     let mut second = append_second_spawn(&mut mismatched_spawn_args, "declared_task".into());
     second.task_name = "different_task".into();
-    assert!(matches!(
-        mismatched_spawn_args
-            .session
-            .append_fact(SessionFact::AgentSpawned(second)),
-        Err(SessionError::Corruption(_))
-    ), "a spawn fact must remain bound to its durable effective tool arguments");
+    assert!(
+        matches!(
+            mismatched_spawn_args
+                .session
+                .append_fact(SessionFact::AgentSpawned(second)),
+            Err(SessionError::Corruption(_))
+        ),
+        "a spawn fact must remain bound to its durable effective tool arguments"
+    );
 
     let mut wrong_profile = spawned_agent_fixture();
     let operation = derive_subagent_operation_id(&wrong_profile.agent, &wrong_profile.assignment);
@@ -4947,27 +4973,23 @@ fn agent_graph_rejects_bijection_task_operation_and_terminal_violations() {
         Err(SessionError::Corruption(_))
     ));
     assert!(
-        matches!(wrong_profile.session.snapshot(), Ok(_)),
+        wrong_profile.session.snapshot().is_ok(),
         "the rejected append must leave the validated prefix readable"
     );
 
     let mut wrong_assignment = spawned_agent_fixture();
     wrong_assignment.assignment = "audit different durable facts".into();
-    let operation = derive_subagent_operation_id(
-        &wrong_assignment.agent,
-        &wrong_assignment.assignment,
-    );
+    let operation =
+        derive_subagent_operation_id(&wrong_assignment.agent, &wrong_assignment.assignment);
     let child_lane = wrong_assignment.child_lane.clone();
     let child_profile = wrong_assignment.child_profile.clone();
-    assert!(matches!(
-        append_child_operation(
-            &mut wrong_assignment,
-            child_lane,
-            operation,
-            child_profile,
+    assert!(
+        matches!(
+            append_child_operation(&mut wrong_assignment, child_lane, operation, child_profile,),
+            Err(SessionError::Corruption(_))
         ),
-        Err(SessionError::Corruption(_))
-    ), "the child assignment must equal the durable spawn_agent task");
+        "the child assignment must equal the durable spawn_agent task"
+    );
 
     let mut foreign_operation = spawned_agent_fixture();
     let foreign_result = foreign_operation
@@ -4981,10 +5003,10 @@ fn agent_graph_rejects_bijection_task_operation_and_terminal_violations() {
             foreign_operation.child_revision.clone(),
             foreign_operation.child_profile.clone(),
         )));
-    assert!(matches!(
-        foreign_result,
-        Err(SessionError::Corruption(_))
-    ), "an agent-bound lane cannot hide an unrelated operation kind: {foreign_result:?}");
+    assert!(
+        matches!(foreign_result, Err(SessionError::Corruption(_))),
+        "an agent-bound lane cannot hide an unrelated operation kind: {foreign_result:?}"
+    );
 
     let mut wrong_lane = spawned_agent_fixture();
     let wrong_lane_id = LaneId::new("wrong-child-operation-lane").expect("valid lane ID");
@@ -5025,8 +5047,8 @@ fn agent_graph_rejects_bijection_task_operation_and_terminal_violations() {
 
     let mut wrong_final_entry = running_agent_fixture();
     let child_lane = wrong_final_entry.agent.lane_id();
-    let intermediate = EntryId::new("agent-intermediate-assistant")
-        .expect("valid intermediate assistant ID");
+    let intermediate =
+        EntryId::new("agent-intermediate-assistant").expect("valid intermediate assistant ID");
     wrong_final_entry
         .session
         .append_entry(
@@ -5052,19 +5074,22 @@ fn agent_graph_rejects_bijection_task_operation_and_terminal_violations() {
             outcome: OperationOutcome::Completed,
         }))
         .expect("child operation settles");
-    assert!(matches!(
-        wrong_final_entry
-            .session
-            .append_fact(SessionFact::AgentTaskFinished(AgentTaskFinishedFact {
-                agent_id: wrong_final_entry.agent,
-                operation_id: wrong_final_entry.child_operation,
-                outcome: OperationOutcome::Completed,
-                final_entry_id: Some(intermediate),
-                report: PayloadRef::Inline(JsonValue::String("intermediate".into())),
-                workspace_delta_id: None,
-            })),
-        Err(SessionError::Corruption(_))
-    ), "the retained report must name the operation's final assistant entry");
+    assert!(
+        matches!(
+            wrong_final_entry
+                .session
+                .append_fact(SessionFact::AgentTaskFinished(AgentTaskFinishedFact {
+                    agent_id: wrong_final_entry.agent,
+                    operation_id: wrong_final_entry.child_operation,
+                    outcome: OperationOutcome::Completed,
+                    final_entry_id: Some(intermediate),
+                    report: PayloadRef::Inline(JsonValue::String("intermediate".into())),
+                    workspace_delta_id: None,
+                })),
+            Err(SessionError::Corruption(_))
+        ),
+        "the retained report must name the operation's final assistant entry"
+    );
 }
 
 #[test]
@@ -5077,8 +5102,8 @@ fn agent_graph_rejects_delta_lease_and_path_invariants() {
             outcome: OperationOutcome::Completed,
         }))
         .expect("child operation completes before finalization");
-    let foreign_lease = WorkspaceLeaseId::new("foreign-workspace-lease")
-        .expect("valid foreign lease ID");
+    let foreign_lease =
+        WorkspaceLeaseId::new("foreign-workspace-lease").expect("valid foreign lease ID");
     let unknown_agent = AgentId::new("unknown-delta-agent").expect("valid unknown agent ID");
     assert!(matches!(
         completed
@@ -5197,12 +5222,14 @@ fn agent_graph_rejects_apply_intent_for_a_different_delta() {
     assert!(matches!(
         fixture
             .session
-            .append_fact(SessionFact::WorkspaceDeltaApplied(WorkspaceDeltaAppliedFact {
-                delta_id: delta.delta_id,
-                target_lane_id: LaneId::main(),
-                tool_call_id: "mismatched-apply-call".into(),
-                changed_paths: delta.changed_paths,
-            })),
+            .append_fact(SessionFact::WorkspaceDeltaApplied(
+                WorkspaceDeltaAppliedFact {
+                    delta_id: delta.delta_id,
+                    target_lane_id: LaneId::main(),
+                    tool_call_id: "mismatched-apply-call".into(),
+                    changed_paths: delta.changed_paths,
+                }
+            )),
         Err(SessionError::Corruption(_))
     ));
 }
@@ -5244,12 +5271,12 @@ fn spawned_agent_fixture() -> SpawnedAgentFixture {
             tool_surface_digest: Digest::from_bytes(b"fixture tools"),
         }))
         .expect("policy commits");
-    let parent_operation = OperationId::new("agent-fixture-parent-operation")
-        .expect("valid parent operation ID");
-    let root_revision = HarnessRevisionId::new("agent-fixture-root-revision")
-        .expect("valid root revision ID");
-    let root_profile = ModelHarnessProfileId::new("agent-fixture-root-profile")
-        .expect("valid root profile ID");
+    let parent_operation =
+        OperationId::new("agent-fixture-parent-operation").expect("valid parent operation ID");
+    let root_revision =
+        HarnessRevisionId::new("agent-fixture-root-revision").expect("valid root revision ID");
+    let root_profile =
+        ModelHarnessProfileId::new("agent-fixture-root-profile").expect("valid root profile ID");
     let parent_epoch = EpochId::new("agent-fixture-parent-epoch").expect("valid parent epoch ID");
     session
         .append_record(LaneRecord::OperationStarted(OperationStartedRecord::new(
@@ -5294,12 +5321,12 @@ fn spawned_agent_fixture() -> SpawnedAgentFixture {
         "agent-fixture-spawn-key",
     );
     let child_lane = agent.lane_id();
-    let child_revision = HarnessRevisionId::new("agent-fixture-child-revision")
-        .expect("valid child revision ID");
-    let child_snapshot = HarnessSnapshotId::new("agent-fixture-child-snapshot")
-        .expect("valid child snapshot ID");
-    let child_profile = ModelHarnessProfileId::new("agent-fixture-child-profile")
-        .expect("valid child profile ID");
+    let child_revision =
+        HarnessRevisionId::new("agent-fixture-child-revision").expect("valid child revision ID");
+    let child_snapshot =
+        HarnessSnapshotId::new("agent-fixture-child-snapshot").expect("valid child snapshot ID");
+    let child_profile =
+        ModelHarnessProfileId::new("agent-fixture-child-profile").expect("valid child profile ID");
     let spawn = AgentSpawnedFact {
         agent_id: agent.clone(),
         parent_lane_id: LaneId::main(),
@@ -5375,8 +5402,9 @@ fn append_child_operation_with_source(
     profile: ModelHarnessProfileId,
     source_leaf_id: Option<EntryId>,
 ) -> Result<StoredRecord, SessionError> {
-    fixture.session.append_record(LaneRecord::OperationStarted(
-        OperationStartedRecord::new(
+    fixture
+        .session
+        .append_record(LaneRecord::OperationStarted(OperationStartedRecord::new(
             operation_id,
             lane_id,
             source_leaf_id,
@@ -5390,8 +5418,7 @@ fn append_child_operation_with_source(
             )],
             fixture.child_revision.clone(),
             profile,
-        ),
-    ))
+        )))
 }
 
 fn append_parent_tool_intent(
@@ -5406,12 +5433,15 @@ fn append_parent_tool_intent(
     let arguments = JsonValue::Object(std::collections::BTreeMap::from([
         ("context".into(), JsonValue::String("task".into())),
         ("model".into(), JsonValue::String("fixture-child".into())),
-        ("task".into(), JsonValue::String("audit durable facts".into())),
+        (
+            "task".into(),
+            JsonValue::String("audit durable facts".into()),
+        ),
         ("task_name".into(), JsonValue::String(task_name.into())),
         ("thinking".into(), JsonValue::String("high".into())),
     ]));
-    let assistant_id = EntryId::new(format!("{tool_call_id}-assistant"))
-        .expect("valid tool assistant entry ID");
+    let assistant_id =
+        EntryId::new(format!("{tool_call_id}-assistant")).expect("valid tool assistant entry ID");
     session
         .append_entry(
             &LaneId::main(),
@@ -5491,13 +5521,10 @@ fn child_revision_entry_id(agent_id: &AgentId) -> EntryId {
     EntryId::new(format!("{agent_id}-revision")).expect("valid child revision entry ID")
 }
 
-fn append_second_spawn(
-    fixture: &mut SpawnedAgentFixture,
-    task_name: String,
-) -> AgentSpawnedFact {
+fn append_second_spawn(fixture: &mut SpawnedAgentFixture, task_name: String) -> AgentSpawnedFact {
     let parent_epoch = EpochId::new("agent-fixture-parent-epoch").expect("valid parent epoch ID");
-    let root_revision = HarnessRevisionId::new("agent-fixture-root-revision")
-        .expect("valid root revision ID");
+    let root_revision =
+        HarnessRevisionId::new("agent-fixture-root-revision").expect("valid root revision ID");
     append_parent_tool_intent(
         &mut fixture.session,
         &fixture.parent_operation,
@@ -5580,11 +5607,7 @@ fn workspace_delta_fact(
     }
 }
 
-fn assert_rejected_agent_fact(
-    mut session: MemorySession,
-    fact: AgentSpawnedFact,
-    _reason: &str,
-) {
+fn assert_rejected_agent_fact(mut session: MemorySession, fact: AgentSpawnedFact, _reason: &str) {
     assert!(matches!(
         session.append_fact(SessionFact::AgentSpawned(fact)),
         Err(SessionError::Corruption(_))

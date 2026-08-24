@@ -336,10 +336,7 @@ mod tests {
         .seed(HarnessActor::Host, 1)
         .expect("fixture harness seeds");
         let revision_id = seeded.revision.revision_id.clone();
-        let resolver = crate::harness::HarnessResolver::new(
-            seeded.repository,
-            Default::default(),
-        );
+        let resolver = crate::harness::HarnessResolver::new(seeded.repository, Default::default());
         let resolved = resolver
             .resolve_revision(&revision_id, &services)
             .expect("fixture harness resolves");
@@ -467,7 +464,11 @@ mod tests {
                 input(RunProvenance::default(), ToolRegistry::default()),
             )
             .expect_err("hosted construction rejects policy identity drift");
-        assert!(error.to_string().contains("tool-result projection identity"));
+        assert!(
+            error
+                .to_string()
+                .contains("tool-result projection identity")
+        );
     }
 
     #[test]
@@ -482,13 +483,10 @@ mod tests {
             tree_id: tea_session::HarnessTreeId::new("fixture-tree").expect("tree ID"),
             requested_capabilities: std::collections::BTreeSet::new(),
         });
-        snapshot.spec.hook_bundle_digest =
-            crate::harness::lineage::runtime_hook_bundle_digest(
-                services
-                    .runtime_policy_identities()
-                    .hook_bundle_digest,
-                &snapshot.spec,
-            );
+        snapshot.spec.hook_bundle_digest = crate::harness::lineage::runtime_hook_bundle_digest(
+            services.runtime_policy_identities().hook_bundle_digest,
+            &snapshot.spec,
+        );
         services
             .prepare_hosted_epoch(
                 &resolved,

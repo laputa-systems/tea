@@ -7,8 +7,9 @@
 //! state alone.
 
 use super::{
-    ApplyAgentChangesResult, InterruptAgentResult, SpawnAgentRequest, SpawnedAgentHandle, SubagentServices,
-    SubagentStatus, TaskHandle, WaitAgentsRequest, WaitAgentsResult, WorkspaceLease,
+    ApplyAgentChangesResult, InterruptAgentResult, SpawnAgentRequest, SpawnedAgentHandle,
+    SubagentServices, SubagentStatus, TaskHandle, WaitAgentsRequest, WaitAgentsResult,
+    WorkspaceLease,
 };
 use crate::harness::HarnessError;
 use crate::runtime::supervisor::SessionSupervisor;
@@ -97,7 +98,10 @@ impl ActivityNotifier {
 
     #[cfg(test)]
     fn waiter_count(&self) -> usize {
-        self.state.lock().map(|state| state.waiters.len()).unwrap_or_default()
+        self.state
+            .lock()
+            .map(|state| state.waiters.len())
+            .unwrap_or_default()
     }
 }
 
@@ -132,7 +136,9 @@ impl Future for ActivityWait<'_> {
                 *waiter = context.waker().clone();
             }
         } else {
-            state.waiters.push((this.waiter_id, context.waker().clone()));
+            state
+                .waiters
+                .push((this.waiter_id, context.waker().clone()));
         }
         Poll::Pending
     }
@@ -163,10 +169,7 @@ where
 {
     /// Bind explicit services to one supervisor without creating a global
     /// provider, workspace, executor, or fallback implementation.
-    pub(crate) fn new(
-        supervisor: Weak<SessionSupervisor<S>>,
-        services: SubagentServices,
-    ) -> Self {
+    pub(crate) fn new(supervisor: Weak<SessionSupervisor<S>>, services: SubagentServices) -> Self {
         Self {
             supervisor,
             services,
@@ -231,7 +234,9 @@ where
         let supervisor = self.supervisor.upgrade().ok_or_else(|| {
             HarnessError::invalid_state("subagent coordinator outlived its supervisor")
         })?;
-        supervisor.interrupt_subagent(self, &context.provenance, target).await
+        supervisor
+            .interrupt_subagent(self, &context.provenance, target)
+            .await
     }
 
     /// Apply one cleanup-ready child delta through the host's explicit root
@@ -276,7 +281,9 @@ where
             .copied()
             .unwrap_or_default();
         let pending_active = state.pending_agents.len() as u32;
-        if durable_active.saturating_add(pending_active) >= self.services.policy.max_concurrent.get() {
+        if durable_active.saturating_add(pending_active)
+            >= self.services.policy.max_concurrent.get()
+        {
             return Err(HarnessError::invalid_state(
                 "subagent concurrent-operation limit is exhausted",
             ));
@@ -297,14 +304,21 @@ where
     }
 
     /// Release a failed pre-acceptance reservation.
-    pub(crate) fn release_reservation(&self, agent_id: &AgentId, parent_operation_id: &OperationId) {
+    pub(crate) fn release_reservation(
+        &self,
+        agent_id: &AgentId,
+        parent_operation_id: &OperationId,
+    ) {
         let Ok(mut state) = self.state.lock() else {
             return;
         };
         if !state.pending_agents.remove(agent_id) {
             return;
         }
-        let remove = match state.pending_total_by_root_operation.get_mut(parent_operation_id) {
+        let remove = match state
+            .pending_total_by_root_operation
+            .get_mut(parent_operation_id)
+        {
             Some(count) => {
                 *count = count.saturating_sub(1);
                 *count == 0
@@ -312,7 +326,9 @@ where
             None => false,
         };
         if remove {
-            state.pending_total_by_root_operation.remove(parent_operation_id);
+            state
+                .pending_total_by_root_operation
+                .remove(parent_operation_id);
         }
     }
 
@@ -385,11 +401,10 @@ where
     /// join in `TaskHandle::drop`; removal is therefore reserved for an
     /// external join/reap point.
     pub(crate) fn task_completed(&self, agent_id: &AgentId) {
-        if let Ok(mut state) = self.state.lock() {
-            if !state.handles.contains_key(agent_id) {
+        if let Ok(mut state) = self.state.lock()
+            && !state.handles.contains_key(agent_id) {
                 state.completed_before_install.insert(agent_id.clone());
             }
-        }
     }
 
     /// Record a task that stopped before cleanup without self-dropping the
@@ -465,7 +480,10 @@ where
     }
 
     /// Construct the host timer through the explicit task-runtime port.
-    pub(crate) fn timeout(&self, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>> {
+    pub(crate) fn timeout(
+        &self,
+        duration: Duration,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>> {
         self.services.tasks.sleep(duration)
     }
 

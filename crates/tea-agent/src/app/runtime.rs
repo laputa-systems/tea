@@ -201,7 +201,10 @@ impl App {
             self.tui_config = Some(load_tui_config(&home)?);
         }
         let subagent_footer = self.tui_config.as_ref().and_then(|config| {
-            config.features.subagents.then_some((0, config.subagents.max_concurrent.get()))
+            config
+                .features
+                .subagents
+                .then_some((0, config.subagents.max_concurrent.get()))
         });
         self.state.set_subagent_activity(subagent_footer);
         let workspace = match self.options.cwd() {
@@ -413,7 +416,12 @@ impl App {
             })
             .count() as u32;
         let mut lane_ids = BTreeSet::from([tea_session::LaneId::main()]);
-        lane_ids.extend(graph.agents.values().map(|agent| agent.spawned.lane_id.clone()));
+        lane_ids.extend(
+            graph
+                .agents
+                .values()
+                .map(|agent| agent.spawned.lane_id.clone()),
+        );
         let mut aggregate = tea_session::Usage::default();
         for lane_id in lane_ids {
             let Ok(reduction) = tea_session::reduce_lane(snapshot.clone(), lane_id) else {
@@ -436,7 +444,11 @@ impl App {
                     Err(TryRecvError::Empty) => None,
                 };
             }
-            owned.task.is_finished().then(|| owned.completion.take()).flatten()
+            owned
+                .task
+                .is_finished()
+                .then(|| owned.completion.take())
+                .flatten()
         } else {
             None
         };
@@ -515,7 +527,8 @@ impl App {
             return None;
         }
         let Some(harness) = self.durable_harness.as_ref().cloned() else {
-            self.state.notice("discarded queued extension controls without a durable harness");
+            self.state
+                .notice("discarded queued extension controls without a durable harness");
             return None;
         };
         let mut continuation = None;

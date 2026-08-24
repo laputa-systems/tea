@@ -333,7 +333,6 @@ impl App {
         .map_err(|error| AppError::Setup(format!("invalid --cwd: {error}")))?;
         super::host::host_configuration(tools, &workspace.to_string_lossy())
     }
-
 }
 
 pub(super) fn automatic_compaction_policy(context_window: NonZeroU64) -> AutomaticCompactionPolicy {

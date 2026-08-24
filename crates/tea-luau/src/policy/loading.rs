@@ -16,12 +16,12 @@ use mlua::{Lua, LuaOptions, StdLib, Table, Value, VmState};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use tea_core::hooks::{AfterToolCall, BeforeToolCall};
-use tea_core::tool::{AgentToolResult, ToolCall};
 use tea_core::harness::extension::{
     ExtensionCommandInput, ExtensionCommandResult, ExtensionIdleInput, ExtensionIdleResult,
     ExtensionOperationOutcome,
 };
+use tea_core::hooks::{AfterToolCall, BeforeToolCall};
+use tea_core::tool::{AgentToolResult, ToolCall};
 use tea_protocol::{JsonNumber, JsonValue};
 
 const POLICY_CHUNK_NAME: &str = "tea-policy.luau";
@@ -244,7 +244,10 @@ impl LuaPolicy {
             })?;
         reset_interrupt_budget(&runtime);
         let input = extension_command_input_table(&runtime.lua, input)?;
-        let output = handler.function.call::<Value>(input).map_err(runtime_error)?;
+        let output = handler
+            .function
+            .call::<Value>(input)
+            .map_err(runtime_error)?;
         parse_extension_result(output)
     }
 
@@ -540,7 +543,9 @@ fn extension_idle_input_table(lua: &Lua, input: &ExtensionIdleInput) -> Result<T
         )
         .map_err(runtime_error)?;
     if let ExtensionOperationOutcome::Failed { code } = &input.outcome {
-        table.set("failure_code", code.as_str()).map_err(runtime_error)?;
+        table
+            .set("failure_code", code.as_str())
+            .map_err(runtime_error)?;
     }
     table
         .set("elapsed_active_seconds", input.elapsed_active_seconds)
@@ -565,7 +570,10 @@ fn extension_state_table(
     let state = lua.create_table().map_err(runtime_error)?;
     for (kind, value) in values {
         state
-            .set(kind.as_str(), json_to_lua(lua, value).map_err(runtime_error)?)
+            .set(
+                kind.as_str(),
+                json_to_lua(lua, value).map_err(runtime_error)?,
+            )
             .map_err(runtime_error)?;
     }
     Ok(state)

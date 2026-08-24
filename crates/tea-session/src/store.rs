@@ -1,9 +1,9 @@
 use crate::reduction::{reduce_lane_ref, reduce_lane_ref_with_append};
 use crate::{
     Corruption, EntryHeader, EntryId, EpochId, LaneId, LaneMutation, LaneRecord, OperationId,
-    OperationKind, ProviderRequestId, ProvisionedEntry, SESSION_FORMAT_VERSION, Sequence, SessionEntry,
-    SessionFact, SessionHeader, SessionMutation, SessionSnapshot, StepId, StepKind, StoredEntry,
-    StoredFact, StoredLaneMutation, StoredMutation, StoredRecord,
+    OperationKind, ProviderRequestId, ProvisionedEntry, SESSION_FORMAT_VERSION, Sequence,
+    SessionEntry, SessionFact, SessionHeader, SessionMutation, SessionSnapshot, StepId, StepKind,
+    StoredEntry, StoredFact, StoredLaneMutation, StoredMutation, StoredRecord,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;

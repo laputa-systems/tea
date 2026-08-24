@@ -14,7 +14,7 @@ use std::io::{self, Write};
 mod cbor;
 mod json;
 
-pub use json::{decode_json_line, decode_jsonl, JsonTraceDecodeError};
+pub use json::{JsonTraceDecodeError, decode_json_line, decode_jsonl};
 
 /// A [`TraceSink`] that writes one JSON object followed by a newline per event.
 ///
@@ -185,9 +185,10 @@ mod tests {
         let valid = r#"{"schema_version":1,"type":"episode_end","reason":"completed","error":null,"finished_at_ms":null}"#;
         assert!(decode_json_line(valid).is_ok());
         assert!(decode_json_line(&valid[..valid.len() - 1]).is_err());
-        assert!(decode_json_line(
-            r#"{"schema_version":1,"type":"factory_internal","value":1}"#
-        ).is_err());
+        assert!(
+            decode_json_line(r#"{"schema_version":1,"type":"factory_internal","value":1}"#)
+                .is_err()
+        );
         assert!(decode_json_line(
             r#" {"schema_version":1,"type":"episode_end","reason":"completed","error":null,"finished_at_ms":null}"#
         ).is_err());

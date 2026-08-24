@@ -22,14 +22,22 @@ pub(super) struct GitRun {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum GitError {
-    Unavailable { message: String },
-    NotWorktree { path: PathBuf, message: String },
+    Unavailable {
+        message: String,
+    },
+    NotWorktree {
+        path: PathBuf,
+        message: String,
+    },
     Command {
         directory: PathBuf,
         arguments: Vec<String>,
         message: String,
     },
-    Io { path: PathBuf, message: String },
+    Io {
+        path: PathBuf,
+        message: String,
+    },
 }
 
 impl std::fmt::Display for GitError {
@@ -37,7 +45,11 @@ impl std::fmt::Display for GitError {
         match self {
             Self::Unavailable { message } => write!(formatter, "Git is unavailable: {message}"),
             Self::NotWorktree { path, message } => {
-                write!(formatter, "{} is not a Git worktree: {message}", path.display())
+                write!(
+                    formatter,
+                    "{} is not a Git worktree: {message}",
+                    path.display()
+                )
             }
             Self::Command {
                 directory,
@@ -58,11 +70,12 @@ impl std::error::Error for GitError {}
 
 impl GitRepository {
     pub(super) fn discover(workspace: &Path) -> Result<Self, GitError> {
-        let version = Command::new("git").arg("--version").output().map_err(|error| {
-            GitError::Unavailable {
+        let version = Command::new("git")
+            .arg("--version")
+            .output()
+            .map_err(|error| GitError::Unavailable {
                 message: error.to_string(),
-            }
-        })?;
+            })?;
         if !version.status.success() {
             return Err(GitError::Unavailable {
                 message: output_message(&version),
@@ -166,8 +179,14 @@ pub(super) fn environment_with_index(index: &Path) -> Vec<(OsString, OsString)> 
 pub(super) fn synthetic_commit_environment() -> Vec<(OsString, OsString)> {
     BTreeMap::from([
         (OsString::from("GIT_AUTHOR_NAME"), OsString::from("Tea")),
-        (OsString::from("GIT_AUTHOR_EMAIL"), OsString::from("tea@local.invalid")),
-        (OsString::from("GIT_AUTHOR_DATE"), OsString::from("2000-01-01T00:00:00Z")),
+        (
+            OsString::from("GIT_AUTHOR_EMAIL"),
+            OsString::from("tea@local.invalid"),
+        ),
+        (
+            OsString::from("GIT_AUTHOR_DATE"),
+            OsString::from("2000-01-01T00:00:00Z"),
+        ),
         (OsString::from("GIT_COMMITTER_NAME"), OsString::from("Tea")),
         (
             OsString::from("GIT_COMMITTER_EMAIL"),

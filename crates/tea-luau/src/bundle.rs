@@ -372,7 +372,10 @@ pub enum ManifestError {
 impl fmt::Display for ManifestError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::UnsupportedAbiVersion { expected: _, actual } => {
+            Self::UnsupportedAbiVersion {
+                expected: _,
+                actual,
+            } => {
                 write!(
                     formatter,
                     "unsupported bundle ABI version {actual}; supported versions are {BUNDLE_ABI_VERSION} and {BUNDLE_ABI_V2_VERSION}"

@@ -525,7 +525,10 @@ impl WorkspaceDeltaId {
 pub fn derive_subagent_operation_id(agent_id: &AgentId, task: &str) -> OperationId {
     let mut hash = CanonicalHashWriter::new("tea-subagent-operation-v1", 1, 1);
     hash.string("agent_id", agent_id.as_str());
-    hash.bytes("task_digest", Digest::from_bytes(task.as_bytes()).as_bytes());
+    hash.bytes(
+        "task_digest",
+        Digest::from_bytes(task.as_bytes()).as_bytes(),
+    );
     OperationId::new(format!("operation-{}", hash.finish().to_hex()))
         .expect("domain-separated subagent operation IDs are valid opaque IDs")
 }

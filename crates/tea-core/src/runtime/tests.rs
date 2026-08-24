@@ -1,27 +1,25 @@
+use super::subagents::{
+    ApplyAgentChangesResult, ApplyWorkspaceDeltaRequest, FinalizeSubagentRequest,
+    PrepareSubagentRequest, PreparedSubagent, ReopenSubagentRequest, SpawnAgentRequest,
+    SubagentHost, SubagentHostError, SubagentHostFuture, SubagentModel, SubagentPolicy,
+    SubagentServices, SubagentTaskError, TaskHandle, TaskRuntime, WaitAgentsRequest,
+    WaitReturnWhen, WorkspaceApplyOutcome, WorkspaceDelta, WorkspaceFinalization, WorkspaceLease,
+};
 use super::{
     HarnessIdentity, RuntimeServices, SessionSupervisor, SessionSupervisorInput,
     SessionSupervisorReopenInput, append_child_subagent_instruction_suffix,
-    append_root_subagent_surface, root_subagent_tool_definitions,
-    root_subagent_tool_presentations,
+    append_root_subagent_surface, root_subagent_tool_definitions, root_subagent_tool_presentations,
 };
-use super::subagents::{
-    ApplyAgentChangesResult, ApplyWorkspaceDeltaRequest, FinalizeSubagentRequest, PreparedSubagent,
-    PrepareSubagentRequest, ReopenSubagentRequest, SubagentHost, SubagentHostError,
-    SpawnAgentRequest, SubagentHostFuture, SubagentModel, SubagentPolicy, SubagentServices,
-    SubagentTaskError, TaskHandle, TaskRuntime, WaitAgentsRequest, WaitReturnWhen,
-    WorkspaceApplyOutcome, WorkspaceDelta, WorkspaceFinalization,
-    WorkspaceLease,
-};
+use crate::effect::RunProvenance;
 use crate::harness::extension::NoExtensions;
 use crate::harness::{
-    HarnessActor, HarnessError, HarnessRepository, HarnessResolver, HarnessResourceLimits, HarnessSnapshotSpec,
-    PromptSectionDescriptor, SELF_EXTENSION_MODE_METADATA_KEY, SelfExtensionMode,
-    ToolPresentationDescriptor,
+    HarnessActor, HarnessError, HarnessRepository, HarnessResolver, HarnessResourceLimits,
+    HarnessSnapshotSpec, PromptSectionDescriptor, SELF_EXTENSION_MODE_METADATA_KEY,
+    SelfExtensionMode, ToolPresentationDescriptor,
 };
 use crate::scheduler::{
     CancellationToken, ModelFuture, ModelProvider, ModelRequest, ModelStream, ModelStreamEvent,
 };
-use crate::effect::RunProvenance;
 use crate::state::{AgentToolCall, ModelDescriptor, SerializedJson, StopReason, ToolCallId};
 use crate::tool::{
     AgentTool, AgentToolResult, CancellationSettlementMode, ToolCall, ToolContext, ToolDefinition,
@@ -35,13 +33,14 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tea_protocol::JsonValue;
 use tea_session::{
-    AgentContextMode, AgentId, AgentState, ArtifactPolicyId, ArtifactStore, AssistantToolCall, CoreRunId, Digest, DurabilityMode, EntryId,
-    EpochFinishReason, EpochFinishedRecord, EpochId, EpochStartedRecord, HarnessRevisionChangedEntry, JsonlSession, LaneId,
-    LaneMutation, LaneRecord, MemoryArtifactStore, MemorySession, ModelHarnessProfileId,
-    ModelChangedEntry, OperationFinishedRecord, OperationId, OperationKind, OperationOutcome, PayloadRef,
-    OperationStartedRecord, ProvisionedEntry, RecordId, SessionEntry, SessionFact,
-    SessionHeader, SessionId, SessionWriter, SubagentModelRecord, SubagentPolicyFact,
-    ThinkingChangedEntry, ToolReplayPolicy, ToolResultEntry, ToolStartedRecord, Usage, WorkspaceDeltaId, WorkspaceLeaseId,
+    AgentContextMode, AgentId, AgentState, ArtifactPolicyId, ArtifactStore, AssistantToolCall,
+    CoreRunId, Digest, DurabilityMode, EntryId, EpochFinishReason, EpochFinishedRecord, EpochId,
+    EpochStartedRecord, HarnessRevisionChangedEntry, JsonlSession, LaneId, LaneMutation,
+    LaneRecord, MemoryArtifactStore, MemorySession, ModelChangedEntry, ModelHarnessProfileId,
+    OperationFinishedRecord, OperationId, OperationKind, OperationOutcome, OperationStartedRecord,
+    PayloadRef, ProvisionedEntry, RecordId, SessionEntry, SessionFact, SessionHeader, SessionId,
+    SessionWriter, SubagentModelRecord, SubagentPolicyFact, ThinkingChangedEntry, ToolReplayPolicy,
+    ToolResultEntry, ToolStartedRecord, Usage, WorkspaceDeltaId, WorkspaceLeaseId,
     reduce_agent_graph, reduce_lane,
 };
 
@@ -131,11 +130,11 @@ impl SubagentHost for FixtureSubagentHost {
         let allowed_models = self.allowed_models.clone();
         let requests = Arc::clone(&self.requests);
         Box::pin(async move {
-            let descriptor = allowed_models.get(&request.model.descriptor.model).ok_or_else(|| {
-                SubagentHostError {
+            let descriptor = allowed_models
+                .get(&request.model.descriptor.model)
+                .ok_or_else(|| SubagentHostError {
                     message: "fixture host rejected an unlisted child model".into(),
-                }
-            })?;
+                })?;
             let prepared = fixture_prepared_subagent(
                 child_identity,
                 descriptor.clone(),
@@ -179,7 +178,7 @@ impl SubagentHost for FixtureSubagentHost {
         request: FinalizeSubagentRequest,
     ) -> SubagentHostFuture<'a, WorkspaceFinalization> {
         let finalizations = Arc::clone(&self.finalizations);
-        let patch_artifact = self.delta_patch_artifact.clone();
+        let patch_artifact = self.delta_patch_artifact;
         Box::pin(async move {
             match finalizations
                 .lock()
@@ -266,7 +265,8 @@ fn fixture_prepared_subagent(
 
 struct FixtureTaskHandle {
     task_id: u64,
-    tasks: std::sync::Weak<Mutex<BTreeMap<u64, Pin<Box<dyn Future<Output = ()> + Send + 'static>>>>>,
+    tasks:
+        std::sync::Weak<Mutex<BTreeMap<u64, Pin<Box<dyn Future<Output = ()> + Send + 'static>>>>>,
 }
 
 impl TaskHandle for FixtureTaskHandle {
@@ -301,7 +301,10 @@ struct FixtureSleep {
 impl Future for FixtureSleep {
     type Output = ();
 
-    fn poll(mut self: Pin<&mut Self>, _context: &mut std::task::Context<'_>) -> std::task::Poll<()> {
+    fn poll(
+        mut self: Pin<&mut Self>,
+        _context: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<()> {
         if let Some(action) = self.action.take() {
             action();
         }
@@ -380,7 +383,6 @@ impl FixtureTaskRuntime {
                 .insert(task_id, task);
         }
     }
-
 }
 
 impl TaskRuntime for FixtureTaskRuntime {
@@ -532,8 +534,7 @@ fn resolver_rejects_snapshot_runtime_policy_identity_mismatch() {
     let services = RuntimeServices::new(provider, ToolRegistry::default());
     let mut identities = services.runtime_policy_identities();
     identities.tool_projection_digest = Digest::from_bytes("runtime-test-wrong-projection");
-    let mut repository =
-        HarnessRepository::with_extension_engine(store, Arc::new(NoExtensions));
+    let mut repository = HarnessRepository::with_extension_engine(store, Arc::new(NoExtensions));
     let snapshot = repository
         .stage_snapshot(snapshot_spec(identities))
         .expect("mismatched fixture snapshot stages");
@@ -544,7 +545,11 @@ fn resolver_rejects_snapshot_runtime_policy_identity_mismatch() {
     let error = resolver
         .resolve_revision(&revision.revision_id, &services)
         .expect_err("runtime policy identity mismatch is rejected");
-    assert!(error.to_string().contains("tool-result projection identity"));
+    assert!(
+        error
+            .to_string()
+            .contains("tool-result projection identity")
+    );
 }
 
 #[test]
@@ -681,12 +686,7 @@ fn build_subagent_runtime_with_policy(
     Arc<Mutex<Vec<PrepareSubagentRequest>>>,
     Arc<FixtureTaskRuntime>,
 ) {
-    build_subagent_runtime_with_child_surface(
-        session_id,
-        root_streams,
-        policy,
-        false,
-    )
+    build_subagent_runtime_with_child_surface(session_id, root_streams, policy, false)
 }
 
 fn build_subagent_runtime_with_child_surface(
@@ -836,7 +836,9 @@ fn build_active_spawn_replay_fixture() -> (
     build_active_spawn_replay_fixture_with_options(false, false, true, None)
 }
 
-fn build_active_spawn_replay_fixture_with_foreign_reused_task(include_foreign: bool) -> (
+fn build_active_spawn_replay_fixture_with_foreign_reused_task(
+    include_foreign: bool,
+) -> (
     Arc<SessionSupervisor<MemorySession>>,
     Arc<FixtureTaskRuntime>,
     Arc<Mutex<Vec<PrepareSubagentRequest>>>,
@@ -936,8 +938,7 @@ fn build_active_spawn_replay_fixture_with_options(
         root_source = EntryId::new("fixture-older-root-assistant").expect("older root leaf ID");
     }
     if let Some(thinking) = parent_thinking {
-        let thinking_id =
-            EntryId::new("fixture-root-replay-thinking").expect("thinking entry ID");
+        let thinking_id = EntryId::new("fixture-root-replay-thinking").expect("thinking entry ID");
         session
             .append_entry(
                 &LaneId::main(),
@@ -1115,14 +1116,35 @@ fn build_active_spawn_replay_fixture_with_options(
         }),
     })
     .expect("fixture supervisor creates");
-    (runtime, tasks, requests, reopen_count, cleanup_fail, finalizations, apply_outcomes, apply_requests, call, provenance, request)
+    (
+        runtime,
+        tasks,
+        requests,
+        reopen_count,
+        cleanup_fail,
+        finalizations,
+        apply_outcomes,
+        apply_requests,
+        call,
+        provenance,
+        request,
+    )
 }
 
 #[test]
 fn apply_agent_changes_intent_only_recovery_requires_host_reconciliation() {
     smol::block_on(async {
-        let (runtime, _tasks, _requests, _reopens, _cleanup, _finalizations, _outcomes, apply_requests, ..) =
-            build_active_spawn_replay_fixture_with_options(false, true, true, None);
+        let (
+            runtime,
+            _tasks,
+            _requests,
+            _reopens,
+            _cleanup,
+            _finalizations,
+            _outcomes,
+            apply_requests,
+            ..,
+        ) = build_active_spawn_replay_fixture_with_options(false, true, true, None);
         let before = runtime.snapshot().expect("snapshot reads").last_sequence();
         for _ in 0..2 {
             let error = runtime
@@ -1144,7 +1166,10 @@ fn apply_agent_changes_intent_only_recovery_requires_host_reconciliation() {
             "recovery-required classification must not append a generic retryable result"
         );
         assert!(
-            apply_requests.lock().expect("apply request mutex").is_empty(),
+            apply_requests
+                .lock()
+                .expect("apply request mutex")
+                .is_empty(),
             "ambiguous recovery must not call the workspace mutation port"
         );
     });
@@ -1182,7 +1207,9 @@ fn append_finished_foreign_spawn_with_reused_task_name(
         model: policy.models[0].descriptor.model.clone(),
         revision: policy.models[0].descriptor.revision.clone(),
         display_name: policy.models[0].display_name.clone(),
-        context_window: policy.models[0].context_window.map(std::num::NonZeroU64::get),
+        context_window: policy.models[0]
+            .context_window
+            .map(std::num::NonZeroU64::get),
     };
     session
         .append_record(LaneRecord::OperationStarted(OperationStartedRecord::new(
@@ -1263,7 +1290,9 @@ fn append_finished_foreign_spawn_with_reused_task_name(
             &lane_id,
             ProvisionedEntry {
                 id: EntryId::new("fixture-older-child-thinking").expect("older thinking entry ID"),
-                body: SessionEntry::ThinkingChanged(ThinkingChangedEntry { level: "off".into() }),
+                body: SessionEntry::ThinkingChanged(ThinkingChangedEntry {
+                    level: "off".into(),
+                }),
             },
         )
         .expect("older child thinking commits");
@@ -1433,7 +1462,8 @@ fn build_active_two_spawn_fixture() -> (
                         AssistantToolCall::new(
                             call.id.to_string(),
                             call.name.clone(),
-                            JsonValue::parse(call.arguments.as_str()).expect("fixture tool args parse"),
+                            JsonValue::parse(call.arguments.as_str())
+                                .expect("fixture tool args parse"),
                         )
                     })
                     .collect(),
@@ -1575,7 +1605,10 @@ fn subagent_spawn_accepts_a_task_context_child_and_hands_it_to_the_task_runtime(
     smol::block_on(async {
         let (runtime, requests, tasks) = build_subagent_runtime(
             "runtime-subagent-task-context",
-            vec![spawn_stream("spawn-task-context", AgentContextMode::Task), completion_stream()],
+            vec![
+                spawn_stream("spawn-task-context", AgentContextMode::Task),
+                completion_stream(),
+            ],
         );
         runtime
             .run_root_prompt("delegate an isolated review")
@@ -1611,7 +1644,10 @@ fn subagent_spawn_accepts_a_task_context_child_and_hands_it_to_the_task_runtime(
             AgentState::Interrupted,
             "root settlement cancels an unobserved child before finishing its own operation"
         );
-        assert_eq!(child.spawned.workspace_lease_id, WorkspaceLeaseId::derive(&child.spawned.agent_id));
+        assert_eq!(
+            child.spawned.workspace_lease_id,
+            WorkspaceLeaseId::derive(&child.spawned.agent_id)
+        );
     });
 }
 
@@ -1716,7 +1752,10 @@ fn subagent_spawn_intent_only_resume_replays_exactly_one_child_transaction() {
             "repeat recovery reports the settled boundary instead of replaying again"
         );
         assert_eq!(
-            runtime.snapshot().expect("repeated snapshot reads").last_sequence(),
+            runtime
+                .snapshot()
+                .expect("repeated snapshot reads")
+                .last_sequence(),
             recovered_sequence,
             "repeat recovery cannot duplicate the child transaction"
         );
@@ -1794,7 +1833,10 @@ fn subagent_spawn_parent_context_uses_the_epoch_source_leaf_not_the_later_worksp
     smol::block_on(async {
         let (runtime, requests, _tasks) = build_subagent_runtime(
             "runtime-subagent-parent-context",
-            vec![spawn_stream("spawn-parent-context", AgentContextMode::Parent), completion_stream()],
+            vec![
+                spawn_stream("spawn-parent-context", AgentContextMode::Parent),
+                completion_stream(),
+            ],
         );
         runtime
             .run_root_prompt("delegate with exact parent context")
@@ -1846,8 +1888,10 @@ fn subagent_spawn_rejects_invalid_names_and_disallowed_models_before_workspace_p
                 ),
             ),
         ] {
-            let (runtime, requests, tasks) =
-                build_subagent_runtime(session_id, vec![spawn_batch(vec![call]), completion_stream()]);
+            let (runtime, requests, tasks) = build_subagent_runtime(
+                session_id,
+                vec![spawn_batch(vec![call]), completion_stream()],
+            );
             runtime
                 .run_root_prompt("attempt a rejected delegation")
                 .await
@@ -1873,7 +1917,10 @@ fn subagent_spawn_rejects_a_root_collaboration_harness_prepared_for_a_child() {
     smol::block_on(async {
         let (runtime, requests, tasks) = build_subagent_runtime_with_child_surface(
             "runtime-subagent-root-child-surface",
-            vec![spawn_stream("root-as-child", AgentContextMode::Task), completion_stream()],
+            vec![
+                spawn_stream("root-as-child", AgentContextMode::Task),
+                completion_stream(),
+            ],
             fixture_subagent_policy(),
             true,
         );
@@ -1898,7 +1945,10 @@ fn subagent_spawn_inherits_or_explicitly_overrides_parent_thinking() {
     smol::block_on(async {
         let (defaulted, defaulted_requests, _) = build_subagent_runtime(
             "runtime-subagent-default-thinking",
-            vec![spawn_stream("default-thinking", AgentContextMode::Task), completion_stream()],
+            vec![
+                spawn_stream("default-thinking", AgentContextMode::Task),
+                completion_stream(),
+            ],
         );
         defaulted
             .run_root_prompt("delegate with the host default thinking")
@@ -1946,7 +1996,10 @@ fn subagent_spawn_inherits_or_explicitly_overrides_parent_thinking() {
 
         let (inherited, inherited_requests, _) = build_subagent_runtime(
             "runtime-subagent-inherited-thinking",
-            vec![spawn_stream("inherit-thinking", AgentContextMode::Task), completion_stream()],
+            vec![
+                spawn_stream("inherit-thinking", AgentContextMode::Task),
+                completion_stream(),
+            ],
         );
         inherited
             .replace_thinking_level(crate::state::ThinkingLevel::High)
@@ -2052,8 +2105,20 @@ fn subagent_spawn_rejects_duplicate_task_names_and_enforces_active_capacity() {
                 .len(),
             1
         );
-        assert_eq!(duplicate_requests.lock().expect("fixture request mutex").len(), 1);
-        assert_eq!(*duplicate_tasks.accepted.lock().expect("fixture task count mutex"), 1);
+        assert_eq!(
+            duplicate_requests
+                .lock()
+                .expect("fixture request mutex")
+                .len(),
+            1
+        );
+        assert_eq!(
+            *duplicate_tasks
+                .accepted
+                .lock()
+                .expect("fixture task count mutex"),
+            1
+        );
 
         let mut limited = fixture_subagent_policy();
         limited.max_concurrent = NonZeroU32::new(1).expect("fixture limit");
@@ -2094,8 +2159,20 @@ fn subagent_spawn_rejects_duplicate_task_names_and_enforces_active_capacity() {
                 .len(),
             1
         );
-        assert_eq!(capacity_requests.lock().expect("fixture request mutex").len(), 1);
-        assert_eq!(*capacity_tasks.accepted.lock().expect("fixture task count mutex"), 1);
+        assert_eq!(
+            capacity_requests
+                .lock()
+                .expect("fixture request mutex")
+                .len(),
+            1
+        );
+        assert_eq!(
+            *capacity_tasks
+                .accepted
+                .lock()
+                .expect("fixture task count mutex"),
+            1
+        );
     });
 }
 
@@ -2206,20 +2283,40 @@ fn subagent_spawn_uses_the_configured_alternate_provider_catalog() {
 #[test]
 fn subagent_spawn_replay_reuses_one_durable_child_and_reacquires_task_ownership() {
     smol::block_on(async {
-        let (runtime, tasks, requests, reopen_count, _cleanup_fail, _finalizations, _apply_outcomes, _apply_requests, call, provenance, request) =
-            build_active_spawn_replay_fixture();
+        let (
+            runtime,
+            tasks,
+            requests,
+            reopen_count,
+            _cleanup_fail,
+            _finalizations,
+            _apply_outcomes,
+            _apply_requests,
+            call,
+            provenance,
+            request,
+        ) = build_active_spawn_replay_fixture();
         tasks.reject_once();
         let coordinator = runtime
             .subagent_coordinator_for_test()
             .expect("fixture coordinator exists");
         let first = runtime
-            .accept_subagent_spawn(&coordinator, call.clone(), provenance.clone(), request.clone())
+            .accept_subagent_spawn(
+                &coordinator,
+                call.clone(),
+                provenance.clone(),
+                request.clone(),
+            )
             .await
             .expect_err("task-runtime refusal remains a recoverable durable prefix");
         assert!(first.to_string().contains("refused"));
         let graph = reduce_agent_graph(&runtime.snapshot().expect("snapshot reads"))
             .expect("durable prefix reduces");
-        assert_eq!(graph.agents.len(), 1, "first attempt committed one child only");
+        assert_eq!(
+            graph.agents.len(),
+            1,
+            "first attempt committed one child only"
+        );
         assert_eq!(
             graph.agents.values().next().expect("child exists").state,
             AgentState::Running
@@ -2262,8 +2359,19 @@ fn subagent_spawn_replay_reuses_one_durable_child_and_reacquires_task_ownership(
 #[test]
 fn subagent_reopen_registers_and_resumes_an_open_child_before_root_waits() {
     smol::block_on(async {
-        let (runtime, tasks, _requests, reopen_count, _cleanup_fail, _finalizations, _apply_outcomes, _apply_requests, call, provenance, request) =
-            build_active_spawn_replay_fixture();
+        let (
+            runtime,
+            tasks,
+            _requests,
+            reopen_count,
+            _cleanup_fail,
+            _finalizations,
+            _apply_outcomes,
+            _apply_requests,
+            call,
+            provenance,
+            request,
+        ) = build_active_spawn_replay_fixture();
         let coordinator = runtime
             .subagent_coordinator_for_test()
             .expect("fixture coordinator exists");
@@ -2358,8 +2466,19 @@ fn subagent_reopen_registers_and_resumes_an_open_child_before_root_waits() {
 #[test]
 fn subagent_reopen_reports_missing_live_workspace_with_a_typed_error() {
     smol::block_on(async {
-        let (runtime, tasks, _requests, _reopen_count, cleanup_fail, _finalizations, _apply_outcomes, _apply_requests, call, provenance, request) =
-            build_active_spawn_replay_fixture();
+        let (
+            runtime,
+            tasks,
+            _requests,
+            _reopen_count,
+            cleanup_fail,
+            _finalizations,
+            _apply_outcomes,
+            _apply_requests,
+            call,
+            provenance,
+            request,
+        ) = build_active_spawn_replay_fixture();
         let coordinator = runtime
             .subagent_coordinator_for_test()
             .expect("fixture coordinator exists");
@@ -2403,8 +2522,19 @@ fn subagent_reopen_reports_missing_live_workspace_with_a_typed_error() {
 #[test]
 fn subagent_terminal_recovery_cleans_idempotently_without_reopening_a_worktree() {
     smol::block_on(async {
-        let (runtime, tasks, _requests, reopen_count, _cleanup_fail, _finalizations, _apply_outcomes, _apply_requests, call, provenance, request) =
-            build_active_spawn_replay_fixture();
+        let (
+            runtime,
+            tasks,
+            _requests,
+            reopen_count,
+            _cleanup_fail,
+            _finalizations,
+            _apply_outcomes,
+            _apply_requests,
+            call,
+            provenance,
+            request,
+        ) = build_active_spawn_replay_fixture();
         let coordinator = runtime
             .subagent_coordinator_for_test()
             .expect("fixture coordinator exists");
@@ -2459,8 +2589,19 @@ fn subagent_terminal_recovery_cleans_idempotently_without_reopening_a_worktree()
 #[test]
 fn subagent_reopen_finishes_a_durable_delta_prefix_without_losing_its_report() {
     smol::block_on(async {
-        let (runtime, tasks, _requests, _reopen_count, _cleanup_fail, finalizations, _apply_outcomes, _apply_requests, call, provenance, request) =
-            build_active_spawn_replay_fixture();
+        let (
+            runtime,
+            tasks,
+            _requests,
+            _reopen_count,
+            _cleanup_fail,
+            finalizations,
+            _apply_outcomes,
+            _apply_requests,
+            call,
+            provenance,
+            request,
+        ) = build_active_spawn_replay_fixture();
         let coordinator = runtime
             .subagent_coordinator_for_test()
             .expect("fixture coordinator exists");
@@ -2469,7 +2610,10 @@ fn subagent_reopen_finishes_a_durable_delta_prefix_without_losing_its_report() {
             .await
             .expect("child operation accepts");
         runtime
-            .append_subagent_assistant_for_test(&spawned.agent_id, "recoverable delta report".into())
+            .append_subagent_assistant_for_test(
+                &spawned.agent_id,
+                "recoverable delta report".into(),
+            )
             .expect("fixture assistant report appends");
         finalizations
             .lock()
@@ -2509,9 +2653,16 @@ fn subagent_reopen_finishes_a_durable_delta_prefix_without_losing_its_report() {
             .expect("recovered delta graph reduces");
         let child = &graph.agents[&spawned.agent_id];
         assert!(child.terminal.is_some());
-        assert!(child.workspace_delta.is_some(), "existing immutable delta is retained");
+        assert!(
+            child.workspace_delta.is_some(),
+            "existing immutable delta is retained"
+        );
         assert_eq!(
-            child.terminal.as_ref().expect("terminal report exists").report,
+            child
+                .terminal
+                .as_ref()
+                .expect("terminal report exists")
+                .report,
             PayloadRef::Inline(JsonValue::String("recoverable delta report".into())),
         );
         assert!(
@@ -2527,8 +2678,19 @@ fn subagent_reopen_finishes_a_durable_delta_prefix_without_losing_its_report() {
 #[test]
 fn subagent_terminalization_retains_inline_and_artifact_reports_with_nochange_or_delta() {
     smol::block_on(async {
-        let (inline_runtime, _tasks, _requests, _reopen_count, _cleanup_fail, _finalizations, _apply_outcomes, _apply_requests, call, provenance, request) =
-            build_active_spawn_replay_fixture();
+        let (
+            inline_runtime,
+            _tasks,
+            _requests,
+            _reopen_count,
+            _cleanup_fail,
+            _finalizations,
+            _apply_outcomes,
+            _apply_requests,
+            call,
+            provenance,
+            request,
+        ) = build_active_spawn_replay_fixture();
         let inline_coordinator = inline_runtime
             .subagent_coordinator_for_test()
             .expect("fixture coordinator exists");
@@ -2553,14 +2715,32 @@ fn subagent_terminalization_retains_inline_and_artifact_reports_with_nochange_or
             .expect("inline terminal graph reduces");
         let inline = &inline_graph.agents[&inline_child.agent_id];
         assert_eq!(inline.state, AgentState::Interrupted);
-        assert!(inline.workspace_delta.is_none(), "no-change completion has no synthetic delta");
+        assert!(
+            inline.workspace_delta.is_none(),
+            "no-change completion has no synthetic delta"
+        );
         assert_eq!(
-            inline.terminal.as_ref().expect("terminal report exists").report,
+            inline
+                .terminal
+                .as_ref()
+                .expect("terminal report exists")
+                .report,
             PayloadRef::Inline(JsonValue::String("short final report".into())),
         );
 
-        let (artifact_runtime, _tasks, _requests, _reopen_count, _cleanup_fail, finalizations, _apply_outcomes, _apply_requests, call, provenance, request) =
-            build_active_spawn_replay_fixture();
+        let (
+            artifact_runtime,
+            _tasks,
+            _requests,
+            _reopen_count,
+            _cleanup_fail,
+            finalizations,
+            _apply_outcomes,
+            _apply_requests,
+            call,
+            provenance,
+            request,
+        ) = build_active_spawn_replay_fixture();
         let artifact_coordinator = artifact_runtime
             .subagent_coordinator_for_test()
             .expect("fixture coordinator exists");
@@ -2587,8 +2767,9 @@ fn subagent_terminalization_retains_inline_and_artifact_reports_with_nochange_or
             )
             .await
             .expect("interrupted child finalizes its salvageable delta");
-        let artifact_graph = reduce_agent_graph(&artifact_runtime.snapshot().expect("snapshot reads"))
-            .expect("artifact terminal graph reduces");
+        let artifact_graph =
+            reduce_agent_graph(&artifact_runtime.snapshot().expect("snapshot reads"))
+                .expect("artifact terminal graph reduces");
         let artifact = &artifact_graph.agents[&artifact_child.agent_id];
         assert!(matches!(
             artifact.state,
@@ -2597,8 +2778,15 @@ fn subagent_terminalization_retains_inline_and_artifact_reports_with_nochange_or
                 ..
             }
         ));
-        assert!(artifact.workspace_delta.is_some(), "interrupted changes remain salvageable");
-        let PayloadRef::Artifact { artifact_id, byte_len, .. } = &artifact
+        assert!(
+            artifact.workspace_delta.is_some(),
+            "interrupted changes remain salvageable"
+        );
+        let PayloadRef::Artifact {
+            artifact_id,
+            byte_len,
+            ..
+        } = &artifact
             .terminal
             .as_ref()
             .expect("terminal report exists")
@@ -2635,8 +2823,19 @@ fn subagent_terminalization_retains_inline_and_artifact_reports_with_nochange_or
 fn subagent_spawn_replay_completes_each_partial_lane_binding_prefix() {
     smol::block_on(async {
         for configured_entries in 0..=3 {
-            let (runtime, tasks, _requests, _reopen_count, _cleanup_fail, _finalizations, _apply_outcomes, _apply_requests, call, provenance, request) =
-                build_active_spawn_replay_fixture();
+            let (
+                runtime,
+                tasks,
+                _requests,
+                _reopen_count,
+                _cleanup_fail,
+                _finalizations,
+                _apply_outcomes,
+                _apply_requests,
+                call,
+                provenance,
+                request,
+            ) = build_active_spawn_replay_fixture();
             let coordinator = runtime
                 .subagent_coordinator_for_test()
                 .expect("fixture coordinator exists");
@@ -2675,8 +2874,13 @@ fn subagent_spawn_replay_completes_each_partial_lane_binding_prefix() {
                             entry.lane_id == agent_id.lane_id()
                                 && match kind {
                                     "model" => matches!(entry.body, SessionEntry::ModelChanged(_)),
-                                    "thinking" => matches!(entry.body, SessionEntry::ThinkingChanged(_)),
-                                    "harness" => matches!(entry.body, SessionEntry::HarnessRevisionChanged(_)),
+                                    "thinking" => {
+                                        matches!(entry.body, SessionEntry::ThinkingChanged(_))
+                                    }
+                                    "harness" => matches!(
+                                        entry.body,
+                                        SessionEntry::HarnessRevisionChanged(_)
+                                    ),
                                     _ => false,
                                 }
                         })
@@ -2770,9 +2974,9 @@ fn subagent_spawn_replay_revalidates_a_pre_registered_partial_child_lane() {
             .await
             .expect_err("graph binding revalidates the already registered child surface");
         assert!(
-            error
-                .to_string()
-                .contains("subagent child harness cannot expose root collaboration tool spawn_agent"),
+            error.to_string().contains(
+                "subagent child harness cannot expose root collaboration tool spawn_agent"
+            ),
             "the root collaboration capability is rejected at the post-fact child boundary"
         );
         assert!(
@@ -2793,8 +2997,19 @@ fn subagent_spawn_replay_revalidates_a_pre_registered_partial_child_lane() {
 #[test]
 fn subagent_spawn_fact_without_operation_replays_the_original_assignment() {
     smol::block_on(async {
-        let (runtime, tasks, _requests, reopen_count, _cleanup_fail, _finalizations, _apply_outcomes, _apply_requests, call, provenance, request) =
-            build_active_spawn_replay_fixture();
+        let (
+            runtime,
+            tasks,
+            _requests,
+            reopen_count,
+            _cleanup_fail,
+            _finalizations,
+            _apply_outcomes,
+            _apply_requests,
+            call,
+            provenance,
+            request,
+        ) = build_active_spawn_replay_fixture();
         let coordinator = runtime
             .subagent_coordinator_for_test()
             .expect("fixture coordinator exists");
@@ -2834,7 +3049,10 @@ fn subagent_spawn_fact_without_operation_replays_the_original_assignment() {
         let assignment = post_replay
             .entries()
             .iter()
-            .find(|entry| entry.lane_id == agent_id.lane_id() && matches!(entry.body, SessionEntry::UserMessage(_)))
+            .find(|entry| {
+                entry.lane_id == agent_id.lane_id()
+                    && matches!(entry.body, SessionEntry::UserMessage(_))
+            })
             .expect("original task assignment is appended once");
         assert_eq!(
             match &assignment.body {
@@ -2852,8 +3070,19 @@ fn subagent_spawn_fact_without_operation_replays_the_original_assignment() {
 #[test]
 fn subagent_policy_timeout_fails_the_child_and_retains_salvageable_changes() {
     smol::block_on(async {
-        let (runtime, tasks, _requests, _reopens, _cleanup_fail, finalizations, _apply_outcomes, _apply_requests, call, provenance, request) =
-            build_active_spawn_replay_fixture();
+        let (
+            runtime,
+            tasks,
+            _requests,
+            _reopens,
+            _cleanup_fail,
+            finalizations,
+            _apply_outcomes,
+            _apply_requests,
+            call,
+            provenance,
+            request,
+        ) = build_active_spawn_replay_fixture();
         let coordinator = runtime
             .subagent_coordinator_for_test()
             .expect("fixture coordinator exists");
@@ -2870,7 +3099,10 @@ fn subagent_policy_timeout_fails_the_child_and_retains_salvageable_changes() {
 
         let graph = reduce_agent_graph(&runtime.snapshot().expect("snapshot reads"))
             .expect("timed-out child graph reduces");
-        let child = graph.agents.get(&spawned.agent_id).expect("child remains durable");
+        let child = graph
+            .agents
+            .get(&spawned.agent_id)
+            .expect("child remains durable");
         assert_eq!(
             child.state,
             AgentState::DeltaReady {
@@ -2934,8 +3166,19 @@ fn subagent_policy_timeout_fails_the_child_and_retains_salvageable_changes() {
 #[test]
 fn completed_child_trace_header_carries_its_durable_agent_id() {
     smol::block_on(async {
-        let (runtime, tasks, _requests, _reopen_count, _cleanup_fail, _finalizations, _apply_outcomes, _apply_requests, call, provenance, request) =
-            build_active_spawn_replay_fixture();
+        let (
+            runtime,
+            tasks,
+            _requests,
+            _reopen_count,
+            _cleanup_fail,
+            _finalizations,
+            _apply_outcomes,
+            _apply_requests,
+            call,
+            provenance,
+            request,
+        ) = build_active_spawn_replay_fixture();
         tasks.hold_wait_timeouts();
         let coordinator = runtime
             .subagent_coordinator_for_test()
@@ -2979,8 +3222,19 @@ fn completed_child_trace_header_carries_its_durable_agent_id() {
 
 #[test]
 fn subagent_coordinator_rejects_a_total_budget_exhausted_by_durable_history() {
-    let (runtime, _tasks, _requests, _reopens, _cleanup_fail, _finalizations, _apply_outcomes, _apply_requests, _call, _provenance, _request) =
-        build_active_spawn_replay_fixture();
+    let (
+        runtime,
+        _tasks,
+        _requests,
+        _reopens,
+        _cleanup_fail,
+        _finalizations,
+        _apply_outcomes,
+        _apply_requests,
+        _call,
+        _provenance,
+        _request,
+    ) = build_active_spawn_replay_fixture();
     let coordinator = runtime
         .subagent_coordinator_for_test()
         .expect("fixture coordinator exists");
@@ -2998,8 +3252,19 @@ fn subagent_coordinator_rejects_a_total_budget_exhausted_by_durable_history() {
 #[test]
 fn subagent_wait_observes_only_cleanup_ready_results_and_interrupt_is_idempotent() {
     smol::block_on(async {
-        let (runtime, tasks, _requests, _reopens, cleanup_fail, _finalizations, _apply_outcomes, _apply_requests, call, provenance, request) =
-            build_active_spawn_replay_fixture();
+        let (
+            runtime,
+            tasks,
+            _requests,
+            _reopens,
+            cleanup_fail,
+            _finalizations,
+            _apply_outcomes,
+            _apply_requests,
+            call,
+            provenance,
+            request,
+        ) = build_active_spawn_replay_fixture();
         let coordinator = runtime
             .subagent_coordinator_for_test()
             .expect("fixture coordinator exists");
@@ -3063,7 +3328,11 @@ fn subagent_wait_observes_only_cleanup_ready_results_and_interrupt_is_idempotent
         assert_eq!(first.previous, AgentState::Interrupted);
         assert_eq!(first.resulting, AgentState::Interrupted);
         assert!(coordinator.is_exposable(&spawned.agent_id));
-        assert_eq!(tasks.owned_task_count(), 0, "cancelled child task is not detached");
+        assert_eq!(
+            tasks.owned_task_count(),
+            0,
+            "cancelled child task is not detached"
+        );
 
         let ready_wait = coordinator
             .wait(
@@ -3101,8 +3370,19 @@ fn subagent_wait_observes_only_cleanup_ready_results_and_interrupt_is_idempotent
 #[test]
 fn subagent_wait_timeout_and_cancellation_drop_notifier_wakers() {
     smol::block_on(async {
-        let (runtime, tasks, _requests, _reopens, _cleanup_fail, _finalizations, _apply_outcomes, _apply_requests, call, provenance, request) =
-            build_active_spawn_replay_fixture();
+        let (
+            runtime,
+            tasks,
+            _requests,
+            _reopens,
+            _cleanup_fail,
+            _finalizations,
+            _apply_outcomes,
+            _apply_requests,
+            call,
+            provenance,
+            request,
+        ) = build_active_spawn_replay_fixture();
         let coordinator = runtime
             .subagent_coordinator_for_test()
             .expect("fixture coordinator exists");
@@ -3198,7 +3478,10 @@ fn subagent_wait_keeps_requested_order_while_list_sorts_by_task_name() {
                     provenance: provenance.clone(),
                 },
                 WaitAgentsRequest {
-                    targets: vec![handles[0].agent_id.to_string(), handles[1].agent_id.to_string()],
+                    targets: vec![
+                        handles[0].agent_id.to_string(),
+                        handles[1].agent_id.to_string(),
+                    ],
                     return_when: WaitReturnWhen::Any,
                     timeout: Duration::from_millis(100),
                 },
@@ -3227,7 +3510,10 @@ fn subagent_wait_keeps_requested_order_while_list_sorts_by_task_name() {
             })
             .expect("list observes current root children");
         assert_eq!(
-            listed.iter().map(|status| status.task_name.as_str()).collect::<Vec<_>>(),
+            listed
+                .iter()
+                .map(|status| status.task_name.as_str())
+                .collect::<Vec<_>>(),
             ["a_task", "z_task"],
             "list_agents has its own deterministic task-name ordering"
         );
@@ -3238,7 +3524,10 @@ fn subagent_wait_keeps_requested_order_while_list_sorts_by_task_name() {
                     provenance,
                 },
                 WaitAgentsRequest {
-                    targets: vec![handles[0].agent_id.to_string(), handles[1].agent_id.to_string()],
+                    targets: vec![
+                        handles[0].agent_id.to_string(),
+                        handles[1].agent_id.to_string(),
+                    ],
                     return_when: WaitReturnWhen::All,
                     timeout: Duration::from_millis(100),
                 },
@@ -3326,15 +3615,23 @@ fn apply_agent_changes_commits_a_proven_delta_and_replays_without_reapplying() {
                 changed_paths: vec!["src/fixture.rs".into()],
             }
         );
-        assert_eq!(apply_requests.lock().expect("fixture apply request mutex").len(), 1);
+        assert_eq!(
+            apply_requests
+                .lock()
+                .expect("fixture apply request mutex")
+                .len(),
+            1
+        );
         let graph = reduce_agent_graph(&runtime.snapshot().expect("snapshot reads"))
             .expect("applied graph reduces");
-        assert!(graph
-            .agents
-            .get(&spawned.agent_id)
-            .expect("spawned node exists")
-            .applied
-            .is_some());
+        assert!(
+            graph
+                .agents
+                .get(&spawned.agent_id)
+                .expect("spawned node exists")
+                .applied
+                .is_some()
+        );
 
         let replay = coordinator
             .apply(
@@ -3349,7 +3646,10 @@ fn apply_agent_changes_commits_a_proven_delta_and_replays_without_reapplying() {
             .expect("durably committed application replays as observation");
         assert_eq!(replay, first);
         assert_eq!(
-            apply_requests.lock().expect("fixture apply request mutex").len(),
+            apply_requests
+                .lock()
+                .expect("fixture apply request mutex")
+                .len(),
             1,
             "an existing WorkspaceDeltaAppliedFact never re-enters host mutation"
         );
@@ -3440,7 +3740,10 @@ fn apply_agent_changes_validates_host_outcomes_and_ignores_post_begin_cancellati
             )
             .await
             .expect("cancellation after application begins cannot erase classification");
-        assert!(matches!(result, ApplyAgentChangesResult::Indeterminate { .. }));
+        assert!(matches!(
+            result,
+            ApplyAgentChangesResult::Indeterminate { .. }
+        ));
     });
 }
 
@@ -3575,22 +3878,40 @@ fn wait_targets_are_owner_scoped_and_timeout_rereads_the_boundary_snapshot() {
             .expect("timeout rereads the terminal activity boundary snapshot");
         assert!(boundary.timed_out);
         assert_eq!(boundary.completed[0].status.agent_id, spawned.agent_id);
-
     });
 }
 
 #[test]
 fn root_abort_remains_sticky_while_ambiguous_apply_requires_reconciliation() {
     smol::block_on(async {
-        let (runtime, _tasks, _requests, _reopens, _cleanup_fail, _finalizations, _apply_outcomes, _apply_requests, _call, _provenance, _request) =
-            build_active_spawn_replay_fixture_with_options(false, true, true, None);
+        let (
+            runtime,
+            _tasks,
+            _requests,
+            _reopens,
+            _cleanup_fail,
+            _finalizations,
+            _apply_outcomes,
+            _apply_requests,
+            _call,
+            _provenance,
+            _request,
+        ) = build_active_spawn_replay_fixture_with_options(false, true, true, None);
         assert!(
-            runtime.abort_root().expect("root abort checks durable operation"),
+            runtime
+                .abort_root()
+                .expect("root abort checks durable operation"),
             "a durable accepted root operation accepts cancellation before its agent exists"
         );
-        assert!(runtime.root_abort_requested_for_test().expect("root lane reads"));
         assert!(
-            runtime.abort_root().expect("repeated root abort is idempotent"),
+            runtime
+                .root_abort_requested_for_test()
+                .expect("root lane reads")
+        );
+        assert!(
+            runtime
+                .abort_root()
+                .expect("repeated root abort is idempotent"),
             "the same still-open operation retains its sticky cancellation request"
         );
         let resumed = runtime.resume().await;
@@ -3600,17 +3921,16 @@ fn root_abort_remains_sticky_while_ambiguous_apply_requires_reconciliation() {
                 plan: tea_session::RecoveryPlan::SynthesizeInterruptedToolResult { .. },
             })
         ));
-        let reduction = reduce_lane(
-            runtime.snapshot().expect("snapshot reads"),
-            LaneId::main(),
-        )
-        .expect("root reduction succeeds");
+        let reduction = reduce_lane(runtime.snapshot().expect("snapshot reads"), LaneId::main())
+            .expect("root reduction succeeds");
         assert!(
             reduction.lane_state.active_operation.is_some(),
             "ambiguous apply recovery must retain the open root operation: {reduction:?}"
         );
         assert!(
-            runtime.root_abort_requested_for_test().expect("root lane reads"),
+            runtime
+                .root_abort_requested_for_test()
+                .expect("root lane reads"),
             "reconciliation cannot erase the pending durable root cancellation"
         );
     });
@@ -3618,32 +3938,56 @@ fn root_abort_remains_sticky_while_ambiguous_apply_requires_reconciliation() {
 
 #[test]
 fn root_abort_is_sticky_after_claim_before_operation_acceptance() {
-    let (runtime, _requests, _tasks) = build_subagent_runtime(
-        "runtime-root-preaccept-abort",
-        vec![completion_stream()],
-    );
+    let (runtime, _requests, _tasks) =
+        build_subagent_runtime("runtime-root-preaccept-abort", vec![completion_stream()]);
     runtime
         .claim_root_before_acceptance_for_test()
         .expect("test owns the pre-accept claim");
     assert!(
-        runtime.abort_root().expect("claimed root drive is cancellable"),
+        runtime
+            .abort_root()
+            .expect("claimed root drive is cancellable"),
         "Ctrl+C between claim and OperationStarted becomes an install-time abort"
     );
-    assert!(runtime.root_abort_requested_for_test().expect("root lane reads"));
+    assert!(
+        runtime
+            .root_abort_requested_for_test()
+            .expect("root lane reads")
+    );
 }
 
 #[test]
 fn rejected_concurrent_root_prompt_cannot_clear_the_active_abort_request() {
     smol::block_on(async {
-        let (runtime, _tasks, _requests, _reopens, _cleanup_fail, _finalizations, _apply_outcomes, _apply_requests, _call, _provenance, _request) =
-            build_active_spawn_replay_fixture();
-        assert!(runtime.abort_root().expect("accepted root operation is cancellable"));
+        let (
+            runtime,
+            _tasks,
+            _requests,
+            _reopens,
+            _cleanup_fail,
+            _finalizations,
+            _apply_outcomes,
+            _apply_requests,
+            _call,
+            _provenance,
+            _request,
+        ) = build_active_spawn_replay_fixture();
         assert!(
-            runtime.run_root_prompt("a concurrent prompt").await.is_err(),
+            runtime
+                .abort_root()
+                .expect("accepted root operation is cancellable")
+        );
+        assert!(
+            runtime
+                .run_root_prompt("a concurrent prompt")
+                .await
+                .is_err(),
             "the already-open root operation owns the sole lane claim"
         );
         assert!(
-            runtime.root_abort_requested_for_test().expect("root lane reads"),
+            runtime
+                .root_abort_requested_for_test()
+                .expect("root lane reads"),
             "a rejected contender cannot erase the active operation's sticky abort"
         );
     });
@@ -3946,20 +4290,28 @@ fn scripted_lanes_drive_concurrently_with_independent_ledgers_and_one_writer() {
             supervisor.run_lane_prompt(beta.clone(), "beta assignment"),
         )
         .await;
-        assert!(alpha_result.expect("alpha operation settles").is_completed());
+        assert!(
+            alpha_result
+                .expect("alpha operation settles")
+                .is_completed()
+        );
         assert!(beta_result.expect("beta operation settles").is_completed());
 
         let snapshot = supervisor.snapshot().expect("serialized snapshot reads");
-        assert!(reduce_lane(snapshot.clone(), alpha)
-            .expect("alpha reduces")
-            .lane_state
-            .active_operation
-            .is_none());
-        assert!(reduce_lane(snapshot.clone(), beta)
-            .expect("beta reduces")
-            .lane_state
-            .active_operation
-            .is_none());
+        assert!(
+            reduce_lane(snapshot.clone(), alpha)
+                .expect("alpha reduces")
+                .lane_state
+                .active_operation
+                .is_none()
+        );
+        assert!(
+            reduce_lane(snapshot.clone(), beta)
+                .expect("beta reduces")
+                .lane_state
+                .active_operation
+                .is_none()
+        );
         assert_eq!(
             snapshot.last_sequence().0,
             snapshot.mutations().count() as u64,

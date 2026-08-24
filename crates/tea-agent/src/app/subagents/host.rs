@@ -100,7 +100,7 @@ impl TuiSubagentHost {
                 .into_iter()
                 .map(|(descriptor, identity)| (ChildHarnessKey::from(&descriptor), identity))
                 .collect(),
-            engine: GitWorkspaceEngine::default(),
+            engine: GitWorkspaceEngine,
             leases: Mutex::new(BTreeMap::new()),
             deltas: Mutex::new(BTreeMap::new()),
         }
@@ -113,16 +113,18 @@ impl TuiSubagentHost {
         reattach: bool,
     ) -> Result<GitWorkspaceLease, SubagentHostError> {
         if workspace_lease_id != WorkspaceLeaseId::derive(&agent_id) {
-            return Err(host_error("subagent workspace lease does not match its child identity"));
+            return Err(host_error(
+                "subagent workspace lease does not match its child identity",
+            ));
         }
         let request = WorkspaceLeaseRequest {
-                repository: self.workspace.clone(),
-                session_directory: self.session_directory.clone(),
-                session_id: self.session_id.clone(),
-                agent_id,
-                workspace_lease_id,
-                logical_workspace_label: self.logical_workspace_label.clone(),
-            };
+            repository: self.workspace.clone(),
+            session_directory: self.session_directory.clone(),
+            session_id: self.session_id.clone(),
+            agent_id,
+            workspace_lease_id,
+            logical_workspace_label: self.logical_workspace_label.clone(),
+        };
         let engine = self.engine;
         // Git may block on repository locks and must never run on the Smol
         // executor polling path. The request remains fully owned by this host
@@ -166,8 +168,8 @@ impl TuiSubagentHost {
         .map_err(|error| host_error(format!("invalid isolated child workspace: {error}")))?;
         // Tool authority is the lease worktree; model-facing host context is
         // the stable original workspace label retained by the lease.
-        let configuration = host_configuration(tools, lease.logical_workspace_label())
-            .map_err(app_error)?;
+        let configuration =
+            host_configuration(tools, lease.logical_workspace_label()).map_err(app_error)?;
         // The persisted model catalog carries the context capacity that
         // seeded this child's immutable runtime policy. Do not re-read a
         // changed current registry on reopen and accidentally mismatch that
@@ -205,9 +207,13 @@ impl TuiSubagentHost {
             .map_err(|_| host_error("subagent workspace lease map is poisoned"))?
             .get(&workspace.id)
             .cloned()
-            .ok_or_else(|| host_error("subagent workspace lease is not attached in this process"))?;
+            .ok_or_else(|| {
+                host_error("subagent workspace lease is not attached in this process")
+            })?;
         if lease.logical_workspace_label() != workspace.logical_workspace {
-            return Err(host_error("subagent workspace lease logical label does not match"));
+            return Err(host_error(
+                "subagent workspace lease logical label does not match",
+            ));
         }
         Ok(lease)
     }
@@ -220,7 +226,9 @@ impl SubagentHost for TuiSubagentHost {
     ) -> SubagentHostFuture<'a, PreparedSubagent> {
         Box::pin(async move {
             if request.session_id != self.session_id {
-                return Err(host_error("subagent prepare request belongs to another session"));
+                return Err(host_error(
+                    "subagent prepare request belongs to another session",
+                ));
             }
             let agent_id = request.agent_id;
             let workspace_lease_id = WorkspaceLeaseId::derive(&agent_id);
@@ -237,7 +245,9 @@ impl SubagentHost for TuiSubagentHost {
     ) -> SubagentHostFuture<'a, PreparedSubagent> {
         Box::pin(async move {
             if request.session_id != self.session_id {
-                return Err(host_error("subagent reopen request belongs to another session"));
+                return Err(host_error(
+                    "subagent reopen request belongs to another session",
+                ));
             }
             let lease = self
                 .prepare_workspace(request.agent_id, request.workspace_lease_id, true)
@@ -265,7 +275,9 @@ impl SubagentHost for TuiSubagentHost {
                         artifacts.put(&patch_bytes, "application/vnd.tea.git-patch")
                     })
                     .await
-                    .map_err(|error| host_error(format!("could not retain child patch: {error}")))?;
+                    .map_err(|error| {
+                        host_error(format!("could not retain child patch: {error}"))
+                    })?;
                     let id = WorkspaceDeltaId::derive(
                         &delta.workspace_lease_id,
                         &delta.base_commit,
@@ -303,9 +315,13 @@ impl SubagentHost for TuiSubagentHost {
             let artifacts = Arc::clone(&self.artifacts);
             let patch = smol::unblock(move || artifacts.get(artifact_id))
                 .await
-                .map_err(|error| host_error(format!("could not load child patch artifact: {error}")))?;
+                .map_err(|error| {
+                    host_error(format!("could not load child patch artifact: {error}"))
+                })?;
             if ArtifactId::from_bytes(&patch) != request.delta.patch_artifact {
-                return Err(host_error("child patch artifact does not match its durable identity"));
+                return Err(host_error(
+                    "child patch artifact does not match its durable identity",
+                ));
             }
             // Do not trust the volatile cache after reopen. Reconstruct the
             // exact Git handle from the durable delta plus content-addressed
@@ -329,7 +345,9 @@ impl SubagentHost for TuiSubagentHost {
                     .map_err(|_| host_error("subagent workspace delta map is poisoned"))?;
                 if let Some(cached) = cache.get(&request.delta.id) {
                     if cached != &delta {
-                        return Err(host_error("cached child workspace delta disagrees with durable request"));
+                        return Err(host_error(
+                            "cached child workspace delta disagrees with durable request",
+                        ));
                     }
                 } else {
                     cache.insert(request.delta.id.clone(), delta.clone());
@@ -381,7 +399,9 @@ impl SubagentHost for TuiSubagentHost {
     fn cleanup<'a>(&'a self, lease: CoreWorkspaceLease) -> SubagentHostFuture<'a, ()> {
         Box::pin(async move {
             if lease.logical_workspace != self.logical_workspace_label {
-                return Err(host_error("subagent workspace lease logical label does not match"));
+                return Err(host_error(
+                    "subagent workspace lease logical label does not match",
+                ));
             }
             let engine = self.engine;
             let workspace = self.workspace.clone();
@@ -393,8 +413,8 @@ impl SubagentHost for TuiSubagentHost {
             smol::unblock(move || {
                 engine.cleanup_durable_lease(&workspace, &session_directory, &workspace_lease_id)
             })
-                .await
-                .map_err(workspace_error)?;
+            .await
+            .map_err(workspace_error)?;
             self.leases
                 .lock()
                 .map_err(|_| host_error("subagent workspace lease map is poisoned"))?
@@ -522,7 +542,8 @@ mod tests {
         else {
             panic!("child edit must produce a delta");
         };
-        let artifacts: Arc<dyn ArtifactStore> = Arc::new(tea_session::MemoryArtifactStore::default());
+        let artifacts: Arc<dyn ArtifactStore> =
+            Arc::new(tea_session::MemoryArtifactStore::default());
         let patch = artifacts
             .put(&delta.patch, "application/vnd.tea.git-patch")
             .expect("patch artifact stores");
@@ -582,7 +603,8 @@ mod tests {
                 logical_workspace_label: "logical repository".into(),
             })
             .expect("child workspace prepares");
-        let artifacts: Arc<dyn ArtifactStore> = Arc::new(tea_session::MemoryArtifactStore::default());
+        let artifacts: Arc<dyn ArtifactStore> =
+            Arc::new(tea_session::MemoryArtifactStore::default());
         let host = reopened_host(&repository, session_id, artifacts);
 
         smol::block_on(host.cleanup(CoreWorkspaceLease {

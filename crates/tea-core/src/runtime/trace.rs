@@ -90,12 +90,11 @@ mod tests {
 
         let redactor = DurableTraceRedactor;
         let header = redactor.redact(TraceEvent::from(
-            EpisodeHeader::new("episode")
-                .with_provenance(TraceProvenance {
-                    lane_id: Some("lane-child".into()),
-                    agent_id: Some("agent-child".into()),
-                    ..TraceProvenance::default()
-                }),
+            EpisodeHeader::new("episode").with_provenance(TraceProvenance {
+                lane_id: Some("lane-child".into()),
+                agent_id: Some("agent-child".into()),
+                ..TraceProvenance::default()
+            }),
         ));
         let turn = redactor.redact(TraceEvent::from(Turn::new(0, TASK).with_output(REPORT)));
         let tool = redactor.redact(TraceEvent::from(

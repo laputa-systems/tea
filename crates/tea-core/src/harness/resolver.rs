@@ -9,9 +9,9 @@
 use crate::harness::lineage::{compose_system_prompt, runtime_hook_bundle_digest};
 use crate::harness::{
     CandidateHypothesis, HarnessActor, HarnessCandidateDraft, HarnessCandidateV1, HarnessError,
-    HarnessLineageError, HarnessRepository, HarnessRevisionV1,
-    HarnessSnapshotV1, HarnessSourceFile, HarnessSurface, HarnessTreeLimits, PluginBundleRef,
-    PluginCapabilityCatalog, RegistryOperation, SelfExtensionMode,
+    HarnessLineageError, HarnessRepository, HarnessRevisionV1, HarnessSnapshotV1,
+    HarnessSourceFile, HarnessSurface, HarnessTreeLimits, PluginBundleRef, PluginCapabilityCatalog,
+    RegistryOperation, SelfExtensionMode,
 };
 use crate::runtime::context::ContextPolicyRegistry;
 use crate::runtime::lifecycle::PluginLifecycleRegistry;
@@ -24,8 +24,8 @@ use tea_core::hooks::HookSet;
 use tea_core::tool::{ToolFailureCircuitBreaker, ToolRegistry, ToolResultProjectionPolicy};
 use tea_protocol::JsonValue;
 use tea_session::{
-    ArtifactId, ArtifactPolicy, ArtifactStore, HarnessCandidateId,
-    HarnessCatalogFact, HarnessRevisionId, NormalizedPath, OperationId, SessionFact, SessionWriter,
+    ArtifactId, ArtifactPolicy, ArtifactStore, HarnessCandidateId, HarnessCatalogFact,
+    HarnessRevisionId, NormalizedPath, OperationId, SessionFact, SessionWriter,
 };
 
 /// Fixed artifact media type for immutable harness repository catalogs.
@@ -240,10 +240,7 @@ impl std::fmt::Debug for HarnessResolver {
 impl HarnessResolver {
     /// Create a session-local catalog from immutable source/snapshot lineage
     /// and the trusted base executable capabilities.
-    pub fn new(
-        repository: HarnessRepository,
-        capability_ceiling: BTreeSet<String>,
-    ) -> Self {
+    pub fn new(repository: HarnessRepository, capability_ceiling: BTreeSet<String>) -> Self {
         let extension_engine = repository.extension_engine();
         Self {
             repository: Mutex::new(repository),
@@ -1190,7 +1187,9 @@ mod tests {
     use crate::harness::{
         HarnessSeedBuilder, HarnessSeedExtension, HarnessSeedExtensionScope, ModelHarnessProfile,
     };
-    use crate::scheduler::{CancellationToken, ModelFuture, ModelProvider, ModelRequest, ModelStream};
+    use crate::scheduler::{
+        CancellationToken, ModelFuture, ModelProvider, ModelRequest, ModelStream,
+    };
     use crate::tool::ToolRegistry;
 
     #[derive(Debug)]
@@ -1202,7 +1201,9 @@ mod tests {
             _request: ModelRequest,
             _cancellation: CancellationToken,
         ) -> ModelFuture<'a> {
-            Box::pin(std::future::ready(Ok(Box::new(ModelStream::default()) as _)))
+            Box::pin(std::future::ready(
+                Ok(Box::new(ModelStream::default()) as _),
+            ))
         }
     }
 
@@ -1319,7 +1320,11 @@ mod tests {
         let error = manager
             .resolve_revision(&seeded.revision.revision_id, &services)
             .expect_err("native command collision must fail resolution");
-        assert!(error.to_string().contains("collides with a native host command"));
+        assert!(
+            error
+                .to_string()
+                .contains("collides with a native host command")
+        );
     }
 }
 

@@ -301,7 +301,8 @@ impl ExtensionCapability for ExtensionStateCapability {
             if cancellation.is_cancelled() {
                 return Err(ExtensionCapabilityError::Cancelled);
             }
-            let result = match request.method.as_str() {
+            
+            match request.method.as_str() {
                 "get" => state
                     .read(&extension_id)
                     .map_err(|error| ExtensionCapabilityError::Execution {
@@ -346,8 +347,7 @@ impl ExtensionCapability for ExtensionStateCapability {
                     capability: request.capability,
                     method: method.to_owned(),
                 }),
-            };
-            result
+            }
         })
     }
 }
@@ -432,6 +432,10 @@ fn validate_handler_limits(limits: ExtensionToolLimits) -> Result<(), Capability
     Ok(())
 }
 
+fn binding_error(error: tea_core::harness::extension::ExtensionError) -> HarnessError {
+    HarnessError::invalid_state(format!("could not bind extension capability: {error}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -494,18 +498,20 @@ mod tests {
         handle
             .attach(Arc::clone(&store) as Arc<dyn ExtensionStateStore>)
             .expect("state store attaches once");
-        let review = ExtensionStateCapability::new("review", handle.clone())
-            .expect("portable extension ID");
+        let review =
+            ExtensionStateCapability::new("review", handle.clone()).expect("portable extension ID");
         let other = ExtensionStateCapability::new("other", handle).expect("portable extension ID");
 
-        let appended = smol::block_on(review.invoke(
-            request(
-                "append",
-                JsonValue::parse(r#"{"kind":"review.state.v1","content":{"phase":"open"}}"#)
-                    .expect("fixture state JSON"),
+        let appended = smol::block_on(
+            review.invoke(
+                request(
+                    "append",
+                    JsonValue::parse(r#"{"kind":"review.state.v1","content":{"phase":"open"}}"#)
+                        .expect("fixture state JSON"),
+                ),
+                CancellationToken::new(),
             ),
-            CancellationToken::new(),
-        ))
+        )
         .expect("review can append its state");
         assert_eq!(appended.value, JsonValue::Bool(true));
 
@@ -523,8 +529,4 @@ mod tests {
         .expect("other namespace remains readable");
         assert_eq!(other_state.value, JsonValue::Object(BTreeMap::new()));
     }
-}
-
-fn binding_error(error: tea_core::harness::extension::ExtensionError) -> HarnessError {
-    HarnessError::invalid_state(format!("could not bind extension capability: {error}"))
 }

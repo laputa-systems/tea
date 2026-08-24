@@ -14,8 +14,8 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll};
-use tea_core::error::ToolError;
 use tea_core::effect::RunProvenance;
+use tea_core::error::ToolError;
 #[cfg(test)]
 pub(super) use tea_core::scheduler::CancellationToken;
 use tea_core::scheduler::CancellationWait;
@@ -423,11 +423,7 @@ fn build_runtime(
     })
 }
 
-fn call_to_lua(
-    lua: &Lua,
-    call: &ToolCall,
-    provenance: &RunProvenance,
-) -> Result<Value, ToolError> {
+fn call_to_lua(lua: &Lua, call: &ToolCall, provenance: &RunProvenance) -> Result<Value, ToolError> {
     let arguments =
         JsonValue::parse(call.arguments.as_str()).map_err(|error| ToolError::InvalidArguments {
             tool: call.name.clone(),

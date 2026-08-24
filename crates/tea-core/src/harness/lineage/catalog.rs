@@ -599,11 +599,8 @@ fn decode_tool_presentation(
         schema: required_value(object, "schema")?.clone(),
         execution_mode: required_string(object, "execution_mode")?.to_owned(),
         requires_exclusive_batch: required_bool(object, "requires_exclusive_batch")?,
-        cancellation_settlement_mode: required_string(
-            object,
-            "cancellation_settlement_mode",
-        )?
-        .to_owned(),
+        cancellation_settlement_mode: required_string(object, "cancellation_settlement_mode")?
+            .to_owned(),
     })
 }
 

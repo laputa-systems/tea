@@ -338,5 +338,7 @@ fn invalid_tool_cancellation_settlement_is_rejected() {
         Err(error) => error,
     };
 
-    assert!(matches!(error, PolicyError::Contract { message } if message.contains("cancellation_settlement_mode")));
+    assert!(
+        matches!(error, PolicyError::Contract { message } if message.contains("cancellation_settlement_mode"))
+    );
 }

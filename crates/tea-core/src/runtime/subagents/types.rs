@@ -1,8 +1,8 @@
 //! Provider-neutral values exchanged at the subagent host boundary.
 
 use super::{SubagentHost, TaskRuntime};
-use crate::runtime::RuntimeServices;
 use crate::runtime::HarnessIdentity;
+use crate::runtime::RuntimeServices;
 use crate::state::{ModelDescriptor, ThinkingLevel};
 use std::num::{NonZeroU32, NonZeroU64};
 use std::sync::Arc;

@@ -12,9 +12,9 @@ use super::{
     ModelHarnessProfile, PluginBundleRef, PromptSectionDescriptor, SelfExtensionMode,
     ToolPresentationDescriptor,
 };
+use crate::runtime::RuntimePolicyIdentities;
 use std::collections::BTreeSet;
 use std::sync::Arc;
-use crate::runtime::RuntimePolicyIdentities;
 use tea_session::{ArtifactStore, Digest, NormalizedPath};
 
 /// Registry placement for one explicitly supplied immutable extension.
@@ -232,10 +232,8 @@ impl HarnessSeedBuilder {
             tool_projection_digest: self.runtime_policies.tool_projection_digest,
             failure_policy_digest: self.runtime_policies.failure_policy_digest,
         };
-        snapshot_spec.hook_bundle_digest = runtime_hook_bundle_digest(
-            self.runtime_policies.hook_bundle_digest,
-            &snapshot_spec,
-        );
+        snapshot_spec.hook_bundle_digest =
+            runtime_hook_bundle_digest(self.runtime_policies.hook_bundle_digest, &snapshot_spec);
         let snapshot = repository
             .stage_snapshot(snapshot_spec)
             .map_err(|error| HarnessError::invalid_state(error.to_string()))?;

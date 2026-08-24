@@ -4,8 +4,8 @@
 //! artifacts. It deliberately has no provider, tool, executor, or Luau VM
 //! dependency. `tea_core::runtime` drives those effects above this boundary.
 
-mod artifact;
 mod agents;
+mod artifact;
 mod gc;
 mod ids;
 mod jsonl;
@@ -14,14 +14,14 @@ mod reduction;
 mod store;
 mod verification;
 
-pub use artifact::{
-    ArtifactDescriptor, ArtifactError, ArtifactInventoryItem, ArtifactMatch, ArtifactPage,
-    ArtifactPolicy, ArtifactStore, FileArtifactStore, MemoryArtifactStore,
-};
 pub use agents::{
     AgentContextMode, AgentGraphNode, AgentGraphReduction, AgentSpawnedFact, AgentState,
     AgentTaskFinishedFact, SubagentModelRecord, SubagentPolicyFact, WorkspaceDeltaAppliedFact,
     WorkspaceDeltaFact, reduce_agent_graph,
+};
+pub use artifact::{
+    ArtifactDescriptor, ArtifactError, ArtifactInventoryItem, ArtifactMatch, ArtifactPage,
+    ArtifactPolicy, ArtifactStore, FileArtifactStore, MemoryArtifactStore,
 };
 pub use gc::{
     ArtifactGcPlan, ArtifactGcReport, ArtifactQuota, ArtifactQuotaStatus, apply_artifact_gc,

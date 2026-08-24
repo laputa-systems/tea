@@ -14,8 +14,8 @@ use crate::harness::{
     HarnessCandidateV1, HarnessError, HarnessFilePatch, HarnessResolver, HarnessRevisionReason,
     HarnessSurface, RegistryOperation, SelfExtensionMode,
 };
-use crate::runtime::{DiagnosticCode, HarnessEvent, HarnessIdentity, TeaEvent, ValidationStage};
 use crate::runtime::RuntimeServices;
+use crate::runtime::{DiagnosticCode, HarnessEvent, HarnessIdentity, TeaEvent, ValidationStage};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use tea_core::error::ToolError;

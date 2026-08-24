@@ -7,9 +7,9 @@
 //! bytes before any `spawn_agent` call can occur.
 
 use super::{
-    ApplyAgentChangesResult, InterruptAgentResult, SpawnAgentRequest, SubagentCoordinator, SubagentPolicy,
-    SubagentPolicyError, SubagentStatus, WaitAgentsRequest, WaitAgentsResult, WaitReturnWhen,
-    WaitedSubagent,
+    ApplyAgentChangesResult, InterruptAgentResult, SpawnAgentRequest, SubagentCoordinator,
+    SubagentPolicy, SubagentPolicyError, SubagentStatus, WaitAgentsRequest, WaitAgentsResult,
+    WaitReturnWhen, WaitedSubagent,
 };
 use crate::harness::ToolPresentationDescriptor;
 use crate::tool::{
@@ -19,8 +19,8 @@ use crate::tool::{
 use std::sync::Arc;
 use std::time::Duration;
 use tea_protocol::{JsonNumber, JsonValue};
-use tea_session::{CanonicalHashWriter, Digest, WorkspaceDeltaId};
 use tea_session::{AgentContextMode, AgentState, SessionWriter};
+use tea_session::{CanonicalHashWriter, Digest, WorkspaceDeltaId};
 
 /// Stable root-only instruction appended when child services are enabled.
 pub const ROOT_SUBAGENT_INSTRUCTION_SUFFIX: &str = concat!(
@@ -45,9 +45,7 @@ pub const CHILD_SUBAGENT_INSTRUCTION_SUFFIX: &str = concat!(
     "You cannot spawn additional agents."
 );
 
-const THINKING_LEVELS: [&str; 7] = [
-    "off", "minimal", "low", "medium", "high", "xhigh", "max",
-];
+const THINKING_LEVELS: [&str; 7] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 
 /// Names reserved exclusively for the immutable root collaboration surface.
 /// Child harnesses reject both a presentation and an executable capability
@@ -251,11 +249,21 @@ impl<S> AgentTool for WaitAgentTool<S>
 where
     S: SessionWriter + Send + 'static,
 {
-    fn name(&self) -> &str { &self.definition.name }
-    fn description(&self) -> &str { &self.definition.description }
-    fn schema(&self) -> &JsonValue { &self.definition.schema }
-    fn execution_mode(&self) -> ToolExecutionMode { self.definition.execution_mode }
-    fn requires_exclusive_batch(&self) -> bool { self.definition.requires_exclusive_batch }
+    fn name(&self) -> &str {
+        &self.definition.name
+    }
+    fn description(&self) -> &str {
+        &self.definition.description
+    }
+    fn schema(&self) -> &JsonValue {
+        &self.definition.schema
+    }
+    fn execution_mode(&self) -> ToolExecutionMode {
+        self.definition.execution_mode
+    }
+    fn requires_exclusive_batch(&self) -> bool {
+        self.definition.requires_exclusive_batch
+    }
     fn cancellation_settlement_mode(&self) -> CancellationSettlementMode {
         self.definition.cancellation_settlement_mode
     }
@@ -288,11 +296,21 @@ impl<S> AgentTool for ListAgentsTool<S>
 where
     S: SessionWriter + Send + 'static,
 {
-    fn name(&self) -> &str { &self.definition.name }
-    fn description(&self) -> &str { &self.definition.description }
-    fn schema(&self) -> &JsonValue { &self.definition.schema }
-    fn execution_mode(&self) -> ToolExecutionMode { self.definition.execution_mode }
-    fn requires_exclusive_batch(&self) -> bool { self.definition.requires_exclusive_batch }
+    fn name(&self) -> &str {
+        &self.definition.name
+    }
+    fn description(&self) -> &str {
+        &self.definition.description
+    }
+    fn schema(&self) -> &JsonValue {
+        &self.definition.schema
+    }
+    fn execution_mode(&self) -> ToolExecutionMode {
+        self.definition.execution_mode
+    }
+    fn requires_exclusive_batch(&self) -> bool {
+        self.definition.requires_exclusive_batch
+    }
     fn cancellation_settlement_mode(&self) -> CancellationSettlementMode {
         self.definition.cancellation_settlement_mode
     }
@@ -330,11 +348,21 @@ impl<S> AgentTool for InterruptAgentTool<S>
 where
     S: SessionWriter + Send + 'static,
 {
-    fn name(&self) -> &str { &self.definition.name }
-    fn description(&self) -> &str { &self.definition.description }
-    fn schema(&self) -> &JsonValue { &self.definition.schema }
-    fn execution_mode(&self) -> ToolExecutionMode { self.definition.execution_mode }
-    fn requires_exclusive_batch(&self) -> bool { self.definition.requires_exclusive_batch }
+    fn name(&self) -> &str {
+        &self.definition.name
+    }
+    fn description(&self) -> &str {
+        &self.definition.description
+    }
+    fn schema(&self) -> &JsonValue {
+        &self.definition.schema
+    }
+    fn execution_mode(&self) -> ToolExecutionMode {
+        self.definition.execution_mode
+    }
+    fn requires_exclusive_batch(&self) -> bool {
+        self.definition.requires_exclusive_batch
+    }
     fn cancellation_settlement_mode(&self) -> CancellationSettlementMode {
         self.definition.cancellation_settlement_mode
     }
@@ -407,9 +435,15 @@ where
                     tool_call_id: call.id,
                     content: JsonValue::object([
                         ("agent_id", JsonValue::String(handle.agent_id.to_string())),
-                        ("task_id", JsonValue::String(handle.operation_id.to_string())),
+                        (
+                            "task_id",
+                            JsonValue::String(handle.operation_id.to_string()),
+                        ),
                         ("task_name", JsonValue::String(handle.task_name)),
-                        ("state", JsonValue::String(agent_state_name(&handle.state).into())),
+                        (
+                            "state",
+                            JsonValue::String(agent_state_name(&handle.state).into()),
+                        ),
                     ])
                     .to_json_string()
                     .expect("fixed spawn result is JSON encodable"),
@@ -470,7 +504,11 @@ where
                 Ok(delta_id) => delta_id,
                 Err(message) => return Ok(recoverable_error(call, message)),
             };
-            match self.coordinator.apply(call.clone(), context, delta_id).await {
+            match self
+                .coordinator
+                .apply(call.clone(), context, delta_id)
+                .await
+            {
                 Ok(result) => Ok(json_result(call, apply_result_value(result))),
                 Err(error) => Ok(recoverable_error(call, error.to_string())),
             }
@@ -485,7 +523,10 @@ fn parse_spawn_request(call: &ToolCall) -> Result<SpawnAgentRequest, String> {
         .as_object()
         .ok_or_else(|| "spawn_agent arguments must be a JSON object".to_owned())?;
     if object.keys().any(|key| {
-        !matches!(key.as_str(), "task_name" | "task" | "model" | "thinking" | "context")
+        !matches!(
+            key.as_str(),
+            "task_name" | "task" | "model" | "thinking" | "context"
+        )
     }) {
         return Err("spawn_agent arguments contain an unknown field".into());
     }
@@ -500,11 +541,11 @@ fn parse_spawn_request(call: &ToolCall) -> Result<SpawnAgentRequest, String> {
     let task = required_string("task")?;
     let model = required_string("model")?;
     let thinking = match object.get("thinking") {
-        Some(value) => Some(parse_thinking_level(
-            value
-                .as_str()
-                .ok_or_else(|| "spawn_agent thinking must be a string".to_owned())?,
-        )?),
+        Some(value) => {
+            Some(parse_thinking_level(value.as_str().ok_or_else(|| {
+                "spawn_agent thinking must be a string".to_owned()
+            })?)?)
+        }
         None => None,
     };
     let context_mode = match object.get("context") {
@@ -534,7 +575,10 @@ fn parse_wait_request(call: &ToolCall) -> Result<WaitAgentsRequest, String> {
     let object = value
         .as_object()
         .ok_or_else(|| "wait_agent arguments must be a JSON object".to_owned())?;
-    if object.keys().any(|key| !matches!(key.as_str(), "targets" | "return_when" | "timeout_ms")) {
+    if object
+        .keys()
+        .any(|key| !matches!(key.as_str(), "targets" | "return_when" | "timeout_ms"))
+    {
         return Err("wait_agent arguments contain an unknown field".into());
     }
     let targets = object
@@ -699,7 +743,13 @@ fn wait_result_value(result: WaitAgentsResult) -> JsonValue {
         ),
         (
             "pending",
-            JsonValue::Array(result.pending.iter().map(wait_pending_status_value).collect()),
+            JsonValue::Array(
+                result
+                    .pending
+                    .iter()
+                    .map(wait_pending_status_value)
+                    .collect(),
+            ),
         ),
         ("timed_out", JsonValue::Bool(result.timed_out)),
     ])
@@ -727,9 +777,17 @@ fn apply_result_value(result: ApplyAgentChangesResult) -> JsonValue {
             ("state", JsonValue::String("conflict".into())),
             (
                 "conflicting_paths",
-                JsonValue::Array(conflicting_paths.into_iter().map(JsonValue::String).collect()),
+                JsonValue::Array(
+                    conflicting_paths
+                        .into_iter()
+                        .map(JsonValue::String)
+                        .collect(),
+                ),
             ),
-            ("patch_artifact", JsonValue::String(patch_artifact.to_string())),
+            (
+                "patch_artifact",
+                JsonValue::String(patch_artifact.to_string()),
+            ),
         ]),
         ApplyAgentChangesResult::RolledBack {
             delta_id,
@@ -803,18 +861,26 @@ fn list_status_value(status: &SubagentStatus) -> JsonValue {
 fn status_fields(status: &SubagentStatus) -> Vec<(&'static str, JsonValue)> {
     vec![
         ("agent_id", JsonValue::String(status.agent_id.to_string())),
-        ("task_id", JsonValue::String(status.operation_id.to_string())),
+        (
+            "task_id",
+            JsonValue::String(status.operation_id.to_string()),
+        ),
         ("task_name", JsonValue::String(status.task_name.clone())),
         ("model", JsonValue::String(model_label(status))),
         ("thinking", JsonValue::String(status.thinking.clone())),
-        ("state", JsonValue::String(agent_state_name(&status.state).into())),
+        (
+            "state",
+            JsonValue::String(agent_state_name(&status.state).into()),
+        ),
         (
             "context",
-            JsonValue::String(match status.context_mode {
-                AgentContextMode::Task => "task",
-                AgentContextMode::Parent => "parent",
-            }
-            .into()),
+            JsonValue::String(
+                match status.context_mode {
+                    AgentContextMode::Task => "task",
+                    AgentContextMode::Parent => "parent",
+                }
+                .into(),
+            ),
         ),
         ("usage", usage_value(&status.usage)),
     ]
@@ -830,26 +896,30 @@ fn model_label(status: &SubagentStatus) -> String {
 }
 
 fn wait_changes_value(status: &SubagentStatus) -> JsonValue {
-    status.workspace_change.as_ref().map(|change| {
-        JsonValue::object([
-            ("delta_id", JsonValue::String(change.delta_id.to_string())),
-            (
-                "changed_paths",
-                JsonValue::Array(
-                    change
-                        .changed_paths
-                        .iter()
-                        .cloned()
-                        .map(JsonValue::String)
-                        .collect(),
+    status
+        .workspace_change
+        .as_ref()
+        .map(|change| {
+            JsonValue::object([
+                ("delta_id", JsonValue::String(change.delta_id.to_string())),
+                (
+                    "changed_paths",
+                    JsonValue::Array(
+                        change
+                            .changed_paths
+                            .iter()
+                            .cloned()
+                            .map(JsonValue::String)
+                            .collect(),
+                    ),
                 ),
-            ),
-            (
-                "patch_artifact",
-                JsonValue::String(change.patch_artifact.to_string()),
-            ),
-        ])
-    }).unwrap_or(JsonValue::Null)
+                (
+                    "patch_artifact",
+                    JsonValue::String(change.patch_artifact.to_string()),
+                ),
+            ])
+        })
+        .unwrap_or(JsonValue::Null)
 }
 
 fn usage_value(usage: &tea_session::Usage) -> JsonValue {
@@ -864,11 +934,17 @@ fn usage_value(usage: &tea_session::Usage) -> JsonValue {
         ),
         (
             "cache_read_tokens",
-            usage.cache_read_tokens.map(unsigned).unwrap_or(JsonValue::Null),
+            usage
+                .cache_read_tokens
+                .map(unsigned)
+                .unwrap_or(JsonValue::Null),
         ),
         (
             "cache_write_tokens",
-            usage.cache_write_tokens.map(unsigned).unwrap_or(JsonValue::Null),
+            usage
+                .cache_write_tokens
+                .map(unsigned)
+                .unwrap_or(JsonValue::Null),
         ),
     ])
 }
@@ -1136,8 +1212,8 @@ fn unsigned(value: u64) -> JsonValue {
 #[cfg(test)]
 mod parsing_tests {
     use super::*;
-    use crate::state::ToolCallId;
     use crate::state::SerializedJson;
+    use crate::state::ToolCallId;
 
     fn call(name: &str, arguments: &str) -> ToolCall {
         ToolCall {
@@ -1149,24 +1225,30 @@ mod parsing_tests {
 
     #[test]
     fn optional_enum_fields_reject_wrong_json_types_instead_of_using_defaults() {
-        assert!(parse_spawn_request(&call(
-            "spawn_agent",
-            r#"{"task_name":"audit","task":"inspect","model":"child","context":7}"#,
-        ))
-        .is_err());
-        assert!(parse_wait_request(&call(
-            "wait_agent",
-            r#"{"targets":["audit"],"return_when":false}"#,
-        ))
-        .is_err());
+        assert!(
+            parse_spawn_request(&call(
+                "spawn_agent",
+                r#"{"task_name":"audit","task":"inspect","model":"child","context":7}"#,
+            ))
+            .is_err()
+        );
+        assert!(
+            parse_wait_request(&call(
+                "wait_agent",
+                r#"{"targets":["audit"],"return_when":false}"#,
+            ))
+            .is_err()
+        );
     }
 
     #[test]
     fn spawn_assignment_must_already_be_trimmed() {
-        assert!(parse_spawn_request(&call(
-            "spawn_agent",
-            r#"{"task_name":"audit","task":" inspect ","model":"child"}"#,
-        ))
-        .is_err());
+        assert!(
+            parse_spawn_request(&call(
+                "spawn_agent",
+                r#"{"task_name":"audit","task":" inspect ","model":"child"}"#,
+            ))
+            .is_err()
+        );
     }
 }

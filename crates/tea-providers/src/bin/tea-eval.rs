@@ -836,12 +836,10 @@ fn main() -> Result<(), String> {
     // policy identities are copied from the same executable configuration.
     // `AgentConfiguration` is cloned only for this composition step; the
     // original is retained to describe the snapshot surface.
-    let services = RuntimeServices::from_agent_configuration(
-        provider.clone(),
-        configuration.clone(),
-    )
-    .model(model.clone())
-    .thinking_level(args.thinking);
+    let services =
+        RuntimeServices::from_agent_configuration(provider.clone(), configuration.clone())
+            .model(model.clone())
+            .thinking_level(args.thinking);
     let runtime_identities = services.runtime_policy_identities();
     let session_root = args
         .evidence_dir
@@ -1105,8 +1103,8 @@ mod tests {
     use tea_core::tool::ToolRegistry;
 
     use super::{
-        model_profile, sha256, snapshot_spec, AgentConfiguration, HarnessMode, ModelDescriptor,
-        OpenAiContextHook, OpenRouterConfig, OpenRouterProvider, REQUIRED_MODEL, RuntimeServices,
+        AgentConfiguration, HarnessMode, ModelDescriptor, OpenAiContextHook, OpenRouterConfig,
+        OpenRouterProvider, REQUIRED_MODEL, RuntimeServices, model_profile, sha256, snapshot_spec,
     };
     #[test]
     fn requested_laguna_s_model_is_not_the_xs_model() {
@@ -1139,10 +1137,9 @@ mod tests {
             "test-key",
             REQUIRED_MODEL,
         )));
-        let services =
-            RuntimeServices::from_agent_configuration(provider, configuration.clone())
-                .model(model)
-                .thinking_level(super::ThinkingLevel::High);
+        let services = RuntimeServices::from_agent_configuration(provider, configuration.clone())
+            .model(model)
+            .thinking_level(super::ThinkingLevel::High);
         let identities = services.runtime_policy_identities();
         let snapshot = snapshot_spec(&configuration, &profile, HarnessMode::Jit, identities);
 
@@ -1155,6 +1152,9 @@ mod tests {
             snapshot.tool_projection_digest,
             identities.tool_projection_digest
         );
-        assert_eq!(snapshot.failure_policy_digest, identities.failure_policy_digest);
+        assert_eq!(
+            snapshot.failure_policy_digest,
+            identities.failure_policy_digest
+        );
     }
 }

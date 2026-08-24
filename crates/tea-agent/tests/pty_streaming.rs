@@ -7,8 +7,8 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -200,8 +200,7 @@ impl SubagentLifecycleFixture {
     fn start() -> Self {
         const CHILD_STREAM: &str = "CHILD_STREAM_MUST_NOT_REACH_ROOT_SCROLLBACK";
 
-        let listener =
-            TcpListener::bind("127.0.0.1:0").expect("subagent fixture should bind");
+        let listener = TcpListener::bind("127.0.0.1:0").expect("subagent fixture should bind");
         listener
             .set_nonblocking(true)
             .expect("subagent fixture should become nonblocking");
@@ -220,12 +219,13 @@ impl SubagentLifecycleFixture {
             let child_first = format!(
                 "data: {{\"choices\":[{{\"delta\":{{\"content\":\"{CHILD_STREAM}\"}},\"finish_reason\":null}}]}}\n\n"
             );
-            let child_final = r#"data: {"choices":[{"delta":{"content":""},"finish_reason":"stop"}]}
+            let child_final =
+                r#"data: {"choices":[{"delta":{"content":""},"finish_reason":"stop"}]}
 
 data: [DONE]
 
 "#
-            .to_owned();
+                .to_owned();
             let deadline = Instant::now() + Duration::from_secs(5);
             let mut root_requests = 0_u8;
             let mut child_writer = None;
@@ -356,8 +356,12 @@ fn read_complete_http_request(socket: &mut TcpStream) -> String {
         .lines()
         .find_map(|line| {
             let (name, value) = line.split_once(':')?;
-            name.eq_ignore_ascii_case("content-length")
-                .then(|| value.trim().parse::<usize>().expect("provider content length is numeric"))
+            name.eq_ignore_ascii_case("content-length").then(|| {
+                value
+                    .trim()
+                    .parse::<usize>()
+                    .expect("provider content length is numeric")
+            })
         })
         .expect("provider request includes content length");
     while bytes.len() < header_end + content_length {
@@ -444,7 +448,10 @@ fn create_git_workspace(tea_home: &Path) -> PathBuf {
     fs::create_dir(&workspace).expect("fixture workspace creates");
     git(&workspace, &["init"]);
     git(&workspace, &["config", "user.name", "Tea PTY Fixture"]);
-    git(&workspace, &["config", "user.email", "pty-fixture@example.invalid"]);
+    git(
+        &workspace,
+        &["config", "user.email", "pty-fixture@example.invalid"],
+    );
     fs::write(workspace.join("tracked.txt"), "original\n").expect("fixture file writes");
     git(&workspace, &["add", "tracked.txt"]);
     git(&workspace, &["commit", "-m", "initial"]);
@@ -569,9 +576,7 @@ fn enabled_subagents_hide_child_streaming_and_cleanup_before_ctrl_c_exit() {
     let workspace = create_git_workspace(&tea_home);
     fs::write(
         tea_home.join("config.toml"),
-        format!(
-            "[features]\nsubagents = true\n\n[subagents]\nmodels = [\"{LOCAL_MODEL}\"]\n"
-        ),
+        format!("[features]\nsubagents = true\n\n[subagents]\nmodels = [\"{LOCAL_MODEL}\"]\n"),
     )
     .expect("enabled TUI config writes");
     let fixture = SubagentLifecycleFixture::start();

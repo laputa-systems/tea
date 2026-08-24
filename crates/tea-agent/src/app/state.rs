@@ -5,8 +5,8 @@ use tea_core::event::{
     AgentEvent, AgentEventKind, AutomaticCompactionOutcome, CompactionOutcome,
     ProviderRequestSkipReason,
 };
-use tea_core::state::{AgentMessage, ModelDescriptor, ThinkingLevel, ToolCallId, Usage};
 use tea_core::harness::extension::ExtensionHostCommandDescription;
+use tea_core::state::{AgentMessage, ModelDescriptor, ThinkingLevel, ToolCallId, Usage};
 use tea_providers::ProviderRegistry;
 
 use super::commands;
@@ -235,10 +235,7 @@ impl AppState {
             .find(|command| command.name == name)
     }
 
-    pub(super) fn matching_extension_commands(
-        &self,
-        prefix: &str,
-    ) -> Vec<String> {
+    pub(super) fn matching_extension_commands(&self, prefix: &str) -> Vec<String> {
         self.extension_commands
             .iter()
             .filter(move |command| command.name.starts_with(prefix))
@@ -704,7 +701,11 @@ impl AppState {
                 commands::all()
                     .iter()
                     .map(|command| command.name)
-                    .chain(self.extension_commands.iter().map(|command| command.name.as_str()))
+                    .chain(
+                        self.extension_commands
+                            .iter()
+                            .map(|command| command.name.as_str())
+                    )
                     .collect::<Vec<_>>()
                     .join(" · ")
             )

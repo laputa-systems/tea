@@ -119,11 +119,31 @@ fn root_tool_surface_is_ordered_and_has_the_required_execution_contract() {
     assert_eq!(
         execution_contracts(&definitions),
         [
-            (ToolExecutionMode::Sequential, false, CancellationSettlementMode::AwaitFuture),
-            (ToolExecutionMode::Sequential, false, CancellationSettlementMode::DropFuture),
-            (ToolExecutionMode::Parallel, false, CancellationSettlementMode::DropFuture),
-            (ToolExecutionMode::Sequential, false, CancellationSettlementMode::AwaitFuture),
-            (ToolExecutionMode::Sequential, true, CancellationSettlementMode::AwaitFuture),
+            (
+                ToolExecutionMode::Sequential,
+                false,
+                CancellationSettlementMode::AwaitFuture
+            ),
+            (
+                ToolExecutionMode::Sequential,
+                false,
+                CancellationSettlementMode::DropFuture
+            ),
+            (
+                ToolExecutionMode::Parallel,
+                false,
+                CancellationSettlementMode::DropFuture
+            ),
+            (
+                ToolExecutionMode::Sequential,
+                false,
+                CancellationSettlementMode::AwaitFuture
+            ),
+            (
+                ToolExecutionMode::Sequential,
+                true,
+                CancellationSettlementMode::AwaitFuture
+            ),
         ]
     );
     let model_enum = definitions[0]
@@ -162,19 +182,15 @@ fn root_tool_surface_is_ordered_and_has_the_required_execution_contract() {
     changed_catalog.models[1].descriptor.model = "model-c".into();
     assert_ne!(
         root_subagent_tool_surface_digest(&policy).expect("original digest builds"),
-        root_subagent_tool_surface_digest(&changed_catalog)
-            .expect("changed catalog digest builds"),
+        root_subagent_tool_surface_digest(&changed_catalog).expect("changed catalog digest builds"),
         "the model allowlist deliberately changes the root prompt/tool domain",
     );
     let mut enabled_prompt = "existing root prompt".to_owned();
     let mut enabled_tools = vec![fixture_tool("read")];
-    let digest = append_root_subagent_surface(
-        &mut enabled_prompt,
-        &mut enabled_tools,
-        Some(&policy),
-    )
-    .expect("enabled root surface builds")
-    .expect("enabled root surface returns its persisted digest");
+    let digest =
+        append_root_subagent_surface(&mut enabled_prompt, &mut enabled_tools, Some(&policy))
+            .expect("enabled root surface builds")
+            .expect("enabled root surface returns its persisted digest");
     assert_eq!(
         digest,
         root_subagent_tool_surface_digest(&policy).expect("surface digest is stable")

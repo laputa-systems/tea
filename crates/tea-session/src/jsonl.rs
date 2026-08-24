@@ -1,8 +1,8 @@
 //! Strict append-only JSONL v1 session storage.
 
+use crate::agents::*;
 use crate::ids::*;
 use crate::model::*;
-use crate::agents::*;
 use crate::store::{
     SessionAppendIndex, SessionClock, SessionError, SessionReader, SessionWriter,
     SystemSessionClock, validate_snapshot, validate_snapshot_append,
@@ -684,16 +684,18 @@ impl JsonlSession {
             let _ = fs::remove_dir_all(&temporary);
         }
         result
-}
+    }
 
-/// Return an atomic snapshot of the current durable prefix.
+    /// Return an atomic snapshot of the current durable prefix.
     pub fn snapshot(&self) -> Result<SessionSnapshot, SessionError> {
         Ok(self.snapshot.clone())
     }
 
     #[cfg(test)]
     pub(crate) fn duplicate_writer_descriptor_for_test(&self) -> File {
-        self.file.try_clone().expect("test duplicates writer descriptor")
+        self.file
+            .try_clone()
+            .expect("test duplicates writer descriptor")
     }
 
     /// Return whether `HEAD` is the exact disposable cache derived from this
@@ -2552,24 +2554,36 @@ fn encode_fact(fact: &SessionFact) -> JsonValue {
     match fact {
         SessionFact::SubagentPolicy(fact) => JsonValue::object([
             ("type", JsonValue::String("subagent_policy".into())),
-            ("schema_version", JsonValue::from(u64::from(fact.schema_version))),
+            (
+                "schema_version",
+                JsonValue::from(u64::from(fact.schema_version)),
+            ),
             (
                 "models",
                 JsonValue::Array(fact.models.iter().map(encode_subagent_model).collect()),
             ),
-            ("max_concurrent", JsonValue::from(u64::from(fact.max_concurrent))),
+            (
+                "max_concurrent",
+                JsonValue::from(u64::from(fact.max_concurrent)),
+            ),
             (
                 "max_total_per_operation",
                 JsonValue::from(u64::from(fact.max_total_per_operation)),
             ),
             ("timeout_ms", JsonValue::from(fact.timeout_ms)),
-            ("tool_surface_digest", digest_value(fact.tool_surface_digest)),
+            (
+                "tool_surface_digest",
+                digest_value(fact.tool_surface_digest),
+            ),
         ]),
         SessionFact::AgentSpawned(fact) => JsonValue::object([
             ("type", JsonValue::String("agent_spawned".into())),
             ("agent_id", string_value(&fact.agent_id)),
             ("parent_lane_id", string_value(&fact.parent_lane_id)),
-            ("parent_operation_id", string_value(&fact.parent_operation_id)),
+            (
+                "parent_operation_id",
+                string_value(&fact.parent_operation_id),
+            ),
             ("lane_id", string_value(&fact.lane_id)),
             ("task_name", JsonValue::String(fact.task_name.clone())),
             ("model", encode_subagent_model(&fact.model)),
@@ -2603,7 +2617,10 @@ fn encode_fact(fact: &SessionFact) -> JsonValue {
             ("agent_id", string_value(&fact.agent_id)),
             ("workspace_lease_id", string_value(&fact.workspace_lease_id)),
             ("base_commit", JsonValue::String(fact.base_commit.clone())),
-            ("result_commit", JsonValue::String(fact.result_commit.clone())),
+            (
+                "result_commit",
+                JsonValue::String(fact.result_commit.clone()),
+            ),
             (
                 "changed_paths",
                 JsonValue::Array(
@@ -2807,18 +2824,12 @@ fn decode_fact(value: &JsonValue) -> Result<SessionFact, String> {
             outcome: decode_operation_outcome(required_value(fields, "outcome")?)?,
             final_entry_id: optional_id_of::<EntryId>(fields, "final_entry_id")?,
             report: decode_payload_ref(required_value(fields, "report")?)?,
-            workspace_delta_id: optional_id_of::<WorkspaceDeltaId>(
-                fields,
-                "workspace_delta_id",
-            )?,
+            workspace_delta_id: optional_id_of::<WorkspaceDeltaId>(fields, "workspace_delta_id")?,
         })),
         "workspace_delta_applied" => Ok(SessionFact::WorkspaceDeltaApplied(
             WorkspaceDeltaAppliedFact {
                 delta_id: parse_id!(WorkspaceDeltaId, required_string(fields, "delta_id")?),
-                target_lane_id: parse_id!(
-                    LaneId,
-                    required_string(fields, "target_lane_id")?
-                ),
+                target_lane_id: parse_id!(LaneId, required_string(fields, "target_lane_id")?),
                 tool_call_id: required_string(fields, "tool_call_id")?,
                 changed_paths: string_array(required_array(fields, "changed_paths")?)?,
             },
@@ -2896,7 +2907,10 @@ fn encode_subagent_model(model: &SubagentModelRecord) -> JsonValue {
         ("provider", JsonValue::String(model.provider.clone())),
         ("model", JsonValue::String(model.model.clone())),
         ("revision", optional_string(model.revision.as_deref())),
-        ("display_name", JsonValue::String(model.display_name.clone())),
+        (
+            "display_name",
+            JsonValue::String(model.display_name.clone()),
+        ),
         ("context_window", optional_u64(model.context_window)),
     ])
 }

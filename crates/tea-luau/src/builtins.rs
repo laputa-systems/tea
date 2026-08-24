@@ -33,8 +33,8 @@ pub fn goal(limits: ExtensionLimits) -> ExtensionSourceTree {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{LuaPolicy, LuauExtensionEngine, PolicyError};
     use crate::bundle::{Bundle, BundleManifest, BUNDLE_ABI_V2_VERSION};
+    use crate::{LuaPolicy, LuauExtensionEngine, PolicyError};
     use tea_core::harness::extension::{
         ExtensionCommandInput, ExtensionEngine, ExtensionIdleInput, ExtensionOperationOutcome,
         ExtensionStateView,
@@ -46,12 +46,8 @@ mod tests {
             max_memory_bytes: 1024 * 1024,
             max_interrupt_checks: 10_000,
         });
-        let manifest = BundleManifest::new(
-            BUNDLE_ABI_V2_VERSION,
-            "init.luau",
-            ["extension.state"],
-        )
-        .expect("manifest is valid");
+        let manifest = BundleManifest::new(BUNDLE_ABI_V2_VERSION, "init.luau", ["extension.state"])
+            .expect("manifest is valid");
         LuaPolicy::load_bundle(
             Bundle::from_sources(
                 manifest,
@@ -72,8 +68,8 @@ mod tests {
             std::iter::empty::<&str>(),
         )
         .expect("v2 manifest is valid");
-        let bundle = Bundle::from_sources(manifest, [("init.luau", source)])
-            .expect("v2 bundle is closed");
+        let bundle =
+            Bundle::from_sources(manifest, [("init.luau", source)]).expect("v2 bundle is closed");
         LuaPolicy::load_bundle(bundle)
     }
 
@@ -85,8 +81,14 @@ mod tests {
             max_interrupt_checks: 10_000,
         });
         assert_eq!(tree.extension_id, "goal");
-        assert_eq!(tree.files.keys().collect::<Vec<_>>(), ["init.luau", "manifest.json", "prompts.luau"]);
-        assert_eq!(tree.expected_capabilities, Some(BTreeSet::from(["extension.state".into()])));
+        assert_eq!(
+            tree.files.keys().collect::<Vec<_>>(),
+            ["init.luau", "manifest.json", "prompts.luau"]
+        );
+        assert_eq!(
+            tree.expected_capabilities,
+            Some(BTreeSet::from(["extension.state".into()]))
+        );
         let descriptor = LuauExtensionEngine
             .describe(&tree)
             .expect("bundled goal source resolves");
@@ -220,7 +222,9 @@ mod tests {
             Ok(_) => panic!("v1 must not silently accept host commands"),
             Err(error) => error,
         };
-        assert!(matches!(error, PolicyError::Contract { message } if message.contains("unknown field")));
+        assert!(
+            matches!(error, PolicyError::Contract { message } if message.contains("unknown field"))
+        );
     }
 
     #[test]
@@ -237,7 +241,9 @@ mod tests {
             Ok(_) => panic!("duplicate commands must fail"),
             Err(error) => error,
         };
-        assert!(matches!(duplicate, PolicyError::Contract { message } if message.contains("duplicate extension command")));
+        assert!(
+            matches!(duplicate, PolicyError::Contract { message } if message.contains("duplicate extension command"))
+        );
 
         let policy = load_v2_policy(
             r#"return {

@@ -113,10 +113,11 @@ impl ExtensionEngine for LuauExtensionEngine {
                 }) as Arc<dyn ExtensionHostCommand>
             })
             .collect();
-        let idle_hook = policy
-            .has_idle_hook()
-            .map_err(extension_error)?
-            .then(|| Arc::new(LuauIdlePolicy { policy: Arc::clone(&policy) }) as Arc<dyn ExtensionIdleHook>);
+        let idle_hook = policy.has_idle_hook().map_err(extension_error)?.then(|| {
+            Arc::new(LuauIdlePolicy {
+                policy: Arc::clone(&policy),
+            }) as Arc<dyn ExtensionIdleHook>
+        });
         Ok(ResolvedExtension {
             hooks,
             tools,

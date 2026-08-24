@@ -38,14 +38,19 @@ impl From<&ModelDescriptor> for ProviderDescriptorKey {
 
 /// Host-owned credential boundary. Adapters never receive ambient authority.
 trait CredentialSource: Send + Sync {
-    fn load(&self, variable: &'static str, provider_name: &'static str) -> Result<String, AppError>;
+    fn load(&self, variable: &'static str, provider_name: &'static str)
+        -> Result<String, AppError>;
 }
 
 #[derive(Debug, Default)]
 struct EnvironmentCredentials;
 
 impl CredentialSource for EnvironmentCredentials {
-    fn load(&self, variable: &'static str, provider_name: &'static str) -> Result<String, AppError> {
+    fn load(
+        &self,
+        variable: &'static str,
+        provider_name: &'static str,
+    ) -> Result<String, AppError> {
         std::env::var(variable)
             .map_err(|_| AppError::Setup(format!("{variable} is required for {provider_name}")))
     }
@@ -75,7 +80,10 @@ impl std::fmt::Debug for ProviderFactory {
             .field("local_base_url", &self.local_base_url)
             .field("local_context_window", &self.local_context_window)
             .field("logical_workspace", &self.logical_workspace)
-            .field("cached_adapter_count", &self.cache.lock().map(|cache| cache.len()))
+            .field(
+                "cached_adapter_count",
+                &self.cache.lock().map(|cache| cache.len()),
+            )
             .finish_non_exhaustive()
     }
 }
@@ -126,7 +134,9 @@ impl ProviderFactory {
             return self.resolve_mock_subagent_policy(config);
         }
         let provider = self.registry.provider(provider_id).ok_or_else(|| {
-            AppError::Setup(format!("subagent provider {provider_id:?} is not compiled in"))
+            AppError::Setup(format!(
+                "subagent provider {provider_id:?} is not compiled in"
+            ))
         })?;
         let models = match config.models.as_ref() {
             Some(identifiers) => {
@@ -317,7 +327,9 @@ impl ProviderFactory {
                 )
             }
             "command-code" => {
-                let key = self.credentials.load("COMMANDCODE_API_KEY", "Command Code")?;
+                let key = self
+                    .credentials
+                    .load("COMMANDCODE_API_KEY", "Command Code")?;
                 let host = tea_providers::commandcode::CommandCodeHostContext::new(
                     &self.logical_workspace,
                     utc_date(),
@@ -325,8 +337,12 @@ impl ProviderFactory {
                 )
                 .map_err(|error| AppError::Setup(error.to_string()))?;
                 ProviderConfiguration::CommandCode(
-                    tea_providers::commandcode::CommandCodeConfig::new(key, &descriptor.model, host)
-                        .map_err(|error| AppError::Setup(error.to_string()))?,
+                    tea_providers::commandcode::CommandCodeConfig::new(
+                        key,
+                        &descriptor.model,
+                        host,
+                    )
+                    .map_err(|error| AppError::Setup(error.to_string()))?,
                 )
             }
             "local" => {
@@ -346,12 +362,17 @@ impl ProviderFactory {
                 )));
             }
         };
-        self.registry.build(descriptor.clone(), configuration).map_err(Into::into)
+        self.registry
+            .build(descriptor.clone(), configuration)
+            .map_err(Into::into)
     }
 
     #[cfg(test)]
     fn cached_adapter_count(&self) -> usize {
-        self.cache.lock().expect("provider adapter cache lock").len()
+        self.cache
+            .lock()
+            .expect("provider adapter cache lock")
+            .len()
     }
 
     #[cfg(test)]
@@ -360,7 +381,9 @@ impl ProviderFactory {
         descriptor: &ModelDescriptor,
     ) -> Result<ProviderConfiguration, AppError> {
         if descriptor.provider != "local" {
-            return Err(AppError::Setup("test helper requires a local descriptor".into()));
+            return Err(AppError::Setup(
+                "test helper requires a local descriptor".into(),
+            ));
         }
         let base_url = self
             .local_base_url
@@ -427,13 +450,19 @@ mod tests {
         };
 
         let policy = factory
-            .resolve_subagent_policy(&root("local", tea_providers::local::LAGUNA_XS_2_1_MODEL), &config)
+            .resolve_subagent_policy(
+                &root("local", tea_providers::local::LAGUNA_XS_2_1_MODEL),
+                &config,
+            )
             .expect("configured provider catalog resolves");
         assert_eq!(
             policy
                 .models
                 .iter()
-                .map(|model| (model.descriptor.provider.as_str(), model.descriptor.model.as_str()))
+                .map(|model| (
+                    model.descriptor.provider.as_str(),
+                    model.descriptor.model.as_str()
+                ))
                 .collect::<Vec<_>>(),
             vec![
                 ("openrouter", "openai/gpt-5.6-luna"),
@@ -466,9 +495,16 @@ mod tests {
                 .iter()
                 .map(|model| model.descriptor.model.as_str())
                 .collect::<Vec<_>>(),
-            entry.models.iter().map(|model| model.id).collect::<Vec<_>>(),
+            entry
+                .models
+                .iter()
+                .map(|model| model.id)
+                .collect::<Vec<_>>(),
         );
-        assert_eq!(policy.models.last().expect("custom root model").descriptor, root);
+        assert_eq!(
+            policy.models.last().expect("custom root model").descriptor,
+            root
+        );
     }
 
     #[test]
@@ -545,14 +581,20 @@ mod tests {
         assert_eq!(factory.cached_adapter_count(), 0);
 
         let local = root("local", tea_providers::local::LAGUNA_XS_2_1_MODEL);
-        let first_local = factory.configured(&local).expect("local adapter builds without credentials");
+        let first_local = factory
+            .configured(&local)
+            .expect("local adapter builds without credentials");
         let second_local = factory.configured(&local).expect("local adapter is cached");
         assert!(Arc::ptr_eq(&first_local, &second_local));
         assert_eq!(credentials.loads.load(Ordering::SeqCst), 0);
 
         let openrouter = root("openrouter", "openai/gpt-5.6-luna");
-        let first_openrouter = factory.configured(&openrouter).expect("configured adapter builds");
-        let second_openrouter = factory.configured(&openrouter).expect("configured adapter is cached");
+        let first_openrouter = factory
+            .configured(&openrouter)
+            .expect("configured adapter builds");
+        let second_openrouter = factory
+            .configured(&openrouter)
+            .expect("configured adapter is cached");
         assert!(Arc::ptr_eq(&first_openrouter, &second_openrouter));
         assert_eq!(credentials.loads.load(Ordering::SeqCst), 1);
         assert_eq!(factory.cached_adapter_count(), 2);
@@ -564,7 +606,10 @@ mod tests {
             loads: AtomicUsize::new(0),
         }));
         let descriptor = root("local", "caller/local-model");
-        assert_eq!(factory.context_window(&descriptor).map(NonZeroU64::get), Some(48_000));
+        assert_eq!(
+            factory.context_window(&descriptor).map(NonZeroU64::get),
+            Some(48_000)
+        );
         let ProviderConfiguration::Local(configuration) = factory
             .local_configuration_for(&descriptor)
             .expect("local configuration builds")
@@ -587,7 +632,9 @@ mod tests {
             .configured(&root("local", "caller/local-model"))
             .expect("custom local adapter builds");
         let first_compactor = factory.compactor(&first).expect("first compactor builds");
-        let first_compactor_again = factory.compactor(&first).expect("first compactor is cached");
+        let first_compactor_again = factory
+            .compactor(&first)
+            .expect("first compactor is cached");
         let second_compactor = factory.compactor(&second).expect("second compactor builds");
         assert!(
             !Arc::ptr_eq(&first, &second),

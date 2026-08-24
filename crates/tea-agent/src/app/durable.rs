@@ -17,6 +17,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tea_core::agent::AgentConfiguration;
 use tea_core::compaction::AutomaticCompactionPolicy;
 use tea_core::event::AgentEventKind;
+use tea_core::harness::extension::{
+    ExtensionEngine, ExtensionHostCommandDescription, ExtensionLimits, ExtensionStateHandle,
+    ExtensionToolLimits,
+};
 use tea_core::harness::{
     CapabilityBindingRef, ExtensionStateCapability, HarnessActor, HarnessRepository,
     HarnessResolver, HarnessResourceLimits, HarnessSeedBuilder, HarnessSeedExtension,
@@ -24,14 +28,9 @@ use tea_core::harness::{
     PluginCapabilityCatalog, SelfExtensionMode, ToolPresentationDescriptor,
     SELF_EXTENSION_MODE_METADATA_KEY,
 };
-use tea_core::harness::extension::{
-    ExtensionEngine, ExtensionHostCommandDescription, ExtensionLimits, ExtensionStateHandle,
-    ExtensionToolLimits,
-};
 use tea_core::runtime::{
     HarnessIdentity, RuntimeServices, SessionSupervisor, SessionSupervisorInput,
-    SessionSupervisorReopenInput, SubagentPolicy, SubagentServices, TeaEvent,
-    TeaEventSubscription,
+    SessionSupervisorReopenInput, SubagentPolicy, SubagentServices, TeaEvent, TeaEventSubscription,
 };
 use tea_core::scheduler::ModelProvider;
 use tea_core::state::{
@@ -62,8 +61,7 @@ pub(super) type HostHarness = SessionSupervisor<JsonlSession>;
 /// Describe bundled host commands before a lazy session exists. This uses the
 /// same immutable source tree and extension engine later pinned in the
 /// durable harness; it does not create a shadow command implementation.
-pub(super) fn bundled_host_commands(
-) -> Result<Vec<ExtensionHostCommandDescription>, AppError> {
+pub(super) fn bundled_host_commands() -> Result<Vec<ExtensionHostCommandDescription>, AppError> {
     LuauExtensionEngine
         .describe(&tea_luau::builtins::goal(extension_limits(
             &HarnessResourceLimits::default(),
@@ -148,7 +146,11 @@ pub(super) fn create_host_harness(
     let thinking_level = thinking_level.unwrap_or(ThinkingLevel::Off);
     let subagent_policy = subagents
         .as_ref()
-        .map(|subagents| subagents.factory.resolve_subagent_policy(&model, &subagents.config))
+        .map(|subagents| {
+            subagents
+                .factory
+                .resolve_subagent_policy(&model, &subagents.config)
+        })
         .transpose()?;
 
     let profile = model_profile(&model)?;
@@ -233,10 +235,8 @@ pub(super) fn create_host_harness(
         capability_catalog
             .insert(goal_binding)
             .map_err(|error| AppError::Setup(error.to_string()))?;
-        let (root_prompt, root_presentations) = root_harness_surface(
-            &configuration,
-            subagent_policy.as_ref(),
-        )?;
+        let (root_prompt, root_presentations) =
+            root_harness_surface(&configuration, subagent_policy.as_ref())?;
         let seeded = HarnessSeedBuilder::new(
             Arc::clone(&artifacts),
             Arc::new(LuauExtensionEngine),
@@ -270,7 +270,11 @@ pub(super) fn create_host_harness(
                 created_at_ms,
             )?,
             (None, None, None) => Vec::new(),
-            _ => return Err(AppError::Setup("subagent host setup is internally inconsistent".into())),
+            _ => {
+                return Err(AppError::Setup(
+                    "subagent host setup is internally inconsistent".into(),
+                ))
+            }
         };
         let model_entry_id = EntryId::new(format!("initial-model-{}", nonce))
             .map_err(|error| AppError::Setup(error.to_string()))?;
@@ -321,15 +325,16 @@ pub(super) fn create_host_harness(
         let identity = HarnessIdentity::new(revision.revision_id, snapshot.id, profile.profile_id);
         let subagent_services = match (&subagents, &subagent_policy) {
             (Some(subagents), Some(policy)) => {
-                let host: Arc<dyn tea_core::runtime::SubagentHost> = Arc::new(TuiSubagentHost::new(
-                    workspace.to_path_buf(),
-                    session.directory().to_path_buf(),
-                    session_id.clone(),
-                    workspace.to_string_lossy().into_owned(),
-                    Arc::clone(&subagents.factory),
-                    Arc::clone(&artifacts),
-                    child_harnesses,
-                ));
+                let host: Arc<dyn tea_core::runtime::SubagentHost> =
+                    Arc::new(TuiSubagentHost::new(
+                        workspace.to_path_buf(),
+                        session.directory().to_path_buf(),
+                        session_id.clone(),
+                        workspace.to_string_lossy().into_owned(),
+                        Arc::clone(&subagents.factory),
+                        Arc::clone(&artifacts),
+                        child_harnesses,
+                    ));
                 let tasks: Arc<dyn tea_core::runtime::TaskRuntime> =
                     Arc::new(SmolTaskRuntime::new());
                 Some(SubagentServices {
@@ -339,7 +344,11 @@ pub(super) fn create_host_harness(
                 })
             }
             (None, None) => None,
-            _ => return Err(AppError::Setup("subagent services are internally inconsistent".into())),
+            _ => {
+                return Err(AppError::Setup(
+                    "subagent services are internally inconsistent".into(),
+                ))
+            }
         };
         let harness = SessionSupervisor::create(SessionSupervisorInput {
             session,
@@ -471,10 +480,7 @@ pub(super) fn authorize_host_session_reopen(
     }
     let graph = reduce_agent_graph(&inspection.snapshot)
         .map_err(|error| AppError::Setup(error.to_string()))?;
-    let current_policy = config
-        .features
-        .subagents
-        .then_some(&config.subagents);
+    let current_policy = config.features.subagents.then_some(&config.subagents);
     reopen_subagent_policy(graph.policy.as_ref(), current_policy)?;
     header.model.ok_or_else(|| {
         AppError::Setup("durable session header is missing its immutable model identity".into())
@@ -549,8 +555,8 @@ pub(super) fn reopen_host_harness(
     }
     let artifacts: Arc<dyn tea_session::ArtifactStore> =
         Arc::new(session.artifact_store().map_err(AppError::from)?);
-    let agent_graph = reduce_agent_graph(&snapshot)
-        .map_err(|error| AppError::Setup(error.to_string()))?;
+    let agent_graph =
+        reduce_agent_graph(&snapshot).map_err(|error| AppError::Setup(error.to_string()))?;
     let reduction = reduce_lane(snapshot.clone(), LaneId::main())
         .map_err(|error| AppError::Setup(error.to_string()))?;
     let thinking_level = reduction
@@ -598,7 +604,9 @@ pub(super) fn reopen_host_harness(
                 workspace,
                 Arc::new(super::nonblocking_operations::NonblockingCodingOperations),
             )
-            .map_err(|error| AppError::Setup(format!("invalid child workspace template: {error}")))?;
+            .map_err(|error| {
+                AppError::Setup(format!("invalid child workspace template: {error}"))
+            })?;
             // Keep model-facing context anchored to the durable, original
             // workspace spelling. Only child tool execution gets a physical
             // lease worktree later in `TuiSubagentHost::prepared`.
@@ -810,7 +818,9 @@ async fn stream_host_prompt_to<W: Write>(
     let mut drive = Box::pin(harness.run_root_prompt(prompt));
     loop {
         if let Err(output_error) = drain_prompt_events_to(&subscription, output) {
-            if let Err(cleanup_error) = settle_prompt_after_output_failure(&harness, &mut drive).await {
+            if let Err(cleanup_error) =
+                settle_prompt_after_output_failure(&harness, &mut drive).await
+            {
                 return Err(AppError::Setup(format!(
                     "{output_error}; durable root cleanup requires recovery: {cleanup_error}"
                 )));
@@ -849,7 +859,16 @@ async fn stream_host_prompt_to<W: Write>(
 
 async fn settle_prompt_after_output_failure(
     harness: &Arc<HostHarness>,
-    drive: &mut std::pin::Pin<Box<impl std::future::Future<Output = Result<tea_core::runtime::DurableOperation, tea_core::harness::HarnessError>>>>,
+    drive: &mut std::pin::Pin<
+        Box<
+            impl std::future::Future<
+                Output = Result<
+                    tea_core::runtime::DurableOperation,
+                    tea_core::harness::HarnessError,
+                >,
+            >,
+        >,
+    >,
 ) -> Result<(), tea_core::harness::HarnessError> {
     loop {
         let _ = harness.abort_root();
@@ -1037,9 +1056,8 @@ fn subagent_policy_from_fact(fact: &SubagentPolicyFact) -> Result<SubagentPolicy
     let max_concurrent = NonZeroU32::new(fact.max_concurrent).ok_or_else(|| {
         AppError::Setup("durable subagent concurrent limit must be nonzero".into())
     })?;
-    let max_total_per_operation = NonZeroU32::new(fact.max_total_per_operation).ok_or_else(|| {
-        AppError::Setup("durable subagent total limit must be nonzero".into())
-    })?;
+    let max_total_per_operation = NonZeroU32::new(fact.max_total_per_operation)
+        .ok_or_else(|| AppError::Setup("durable subagent total limit must be nonzero".into()))?;
     let policy = SubagentPolicy {
         models,
         max_concurrent,
@@ -1073,7 +1091,10 @@ fn authorize_reopened_subagent_policy(
     }
     if let Some(allowed_models) = &config.models {
         for model in &policy.models {
-            if !allowed_models.iter().any(|allowed| allowed == &model.descriptor.model) {
+            if !allowed_models
+                .iter()
+                .any(|allowed| allowed == &model.descriptor.model)
+            {
                 return Err(AppError::Setup(format!(
                     "durable subagent session requires model {:?}, absent from current TUI policy",
                     model.descriptor.model
@@ -1187,7 +1208,8 @@ fn seed_child_harnesses(
         let revision = repository
             .seed_revision(snapshot.id.clone(), HarnessActor::Host, created_at_ms)
             .map_err(|error| AppError::Setup(error.to_string()))?;
-        if snapshot.id != seeded.snapshot.id || revision.revision_id != seeded.revision.revision_id {
+        if snapshot.id != seeded.snapshot.id || revision.revision_id != seeded.revision.revision_id
+        {
             return Err(AppError::Setup(
                 "child harness catalog staging did not preserve its deterministic identity".into(),
             ));
@@ -1763,9 +1785,9 @@ mod tests {
         fn next_event<'a>(&'a mut self, cancellation: CancellationToken) -> ModelEventFuture<'a> {
             if !self.sent_text {
                 self.sent_text = true;
-                return Box::pin(std::future::ready(Ok(Some(
-                    ModelStreamEvent::TextDelta("partial".into()),
-                ))));
+                return Box::pin(std::future::ready(Ok(Some(ModelStreamEvent::TextDelta(
+                    "partial".into(),
+                )))));
             }
             Box::pin(async move {
                 cancellation.cancelled().await;
@@ -1782,9 +1804,9 @@ mod tests {
             _request: ModelRequest,
             _cancellation: CancellationToken,
         ) -> ModelFuture<'a> {
-            Box::pin(std::future::ready(Ok(Box::new(TextThenCancellationStream {
-                sent_text: false,
-            }) as _)))
+            Box::pin(std::future::ready(Ok(
+                Box::new(TextThenCancellationStream { sent_text: false }) as _,
+            )))
         }
     }
 
@@ -1813,7 +1835,10 @@ mod tests {
 
     impl Write for FailingOutput {
         fn write(&mut self, _bytes: &[u8]) -> io::Result<usize> {
-            Err(io::Error::new(io::ErrorKind::BrokenPipe, "fixture output closed"))
+            Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "fixture output closed",
+            ))
         }
 
         fn flush(&mut self) -> io::Result<()> {
@@ -1832,7 +1857,8 @@ mod tests {
             _request: ModelRequest,
             _cancellation: CancellationToken,
         ) -> ModelFuture<'a> {
-            let stream: Box<dyn ModelEventStream> = match self.calls.fetch_add(1, Ordering::SeqCst) {
+            let stream: Box<dyn ModelEventStream> = match self.calls.fetch_add(1, Ordering::SeqCst)
+            {
                 0 => Box::new(ModelStream {
                     events: vec![
                         ModelStreamEvent::ToolCall(AgentToolCall {
@@ -1957,7 +1983,9 @@ mod tests {
                     message: "root fixture received an unexpected extra request".into(),
                 }],
             };
-            Box::pin(std::future::ready(Ok(Box::new(ModelStream { events }) as _)))
+            Box::pin(std::future::ready(
+                Ok(Box::new(ModelStream { events }) as _),
+            ))
         }
     }
 
@@ -1990,8 +2018,8 @@ mod tests {
                     .position(|window| window == b"\r\n\r\n")
                     .map(|offset| offset + 4);
                 if let Some(end) = header_end {
-                    let headers = std::str::from_utf8(&bytes[..end])
-                        .expect("fixture HTTP headers are UTF-8");
+                    let headers =
+                        std::str::from_utf8(&bytes[..end]).expect("fixture HTTP headers are UTF-8");
                     let content_length = headers
                         .lines()
                         .find_map(|line| {
@@ -2088,8 +2116,8 @@ mod tests {
         };
 
         let reopened = reopen_subagent_policy(Some(&fact), Some(&config))
-        .expect("a current policy superset remains an authorization ceiling")
-        .expect("durable policy remains enabled");
+            .expect("a current policy superset remains an authorization ceiling")
+            .expect("durable policy remains enabled");
 
         assert_eq!(reopened, policy);
     }
@@ -2101,33 +2129,23 @@ mod tests {
             provider: Some("other".into()),
             ..SubagentTuiConfig::default()
         };
-        assert!(reopen_subagent_policy(
-            Some(&fact),
-            Some(&wrong_provider),
-        )
-        .is_err());
+        assert!(reopen_subagent_policy(Some(&fact), Some(&wrong_provider),).is_err());
 
         let missing_model = SubagentTuiConfig {
             provider: Some("fixture".into()),
             models: Some(vec!["other-model".into()]),
             ..SubagentTuiConfig::default()
         };
-        assert!(reopen_subagent_policy(
-            Some(&fact),
-            Some(&missing_model),
-        )
-        .is_err());
+        assert!(reopen_subagent_policy(Some(&fact), Some(&missing_model),).is_err());
     }
 
     #[test]
     fn reopen_subagent_policy_does_not_retrofit_a_disabled_session() {
         let enabled_later = SubagentTuiConfig::default();
 
-        assert!(
-            reopen_subagent_policy(None, Some(&enabled_later))
-                .expect("disabled session does not need child services")
-                .is_none()
-        );
+        assert!(reopen_subagent_policy(None, Some(&enabled_later))
+            .expect("disabled session does not need child services")
+            .is_none());
     }
 
     #[test]
@@ -2203,7 +2221,10 @@ mod tests {
         })
         .expect("enabled catalog reopens without constructing a child adapter");
         assert_eq!(
-            reopened.snapshot().expect("reopened session snapshots").last_sequence(),
+            reopened
+                .snapshot()
+                .expect("reopened session snapshots")
+                .last_sequence(),
             snapshot.last_sequence()
         );
         drop(reopened);
@@ -2211,13 +2232,17 @@ mod tests {
     }
 
     #[test]
-    fn scripted_subagent_lifecycle_keeps_the_physical_lease_out_of_provider_requests_and_reopens_results() {
+    fn scripted_subagent_lifecycle_keeps_the_physical_lease_out_of_provider_requests_and_reopens_results(
+    ) {
         let home = temporary_home();
         let workspace = home.join("repository");
         fs::create_dir(&workspace).expect("fixture repository creates");
         git(&workspace, &["init"]);
         git(&workspace, &["config", "user.name", "Tea Fixture"]);
-        git(&workspace, &["config", "user.email", "fixture@example.invalid"]);
+        git(
+            &workspace,
+            &["config", "user.email", "fixture@example.invalid"],
+        );
         fs::write(workspace.join("tracked.txt"), "original\n").expect("fixture file writes");
         git(&workspace, &["add", "tracked.txt"]);
         git(&workspace, &["commit", "-m", "initial"]);
@@ -2367,7 +2392,11 @@ data: [DONE]
             .requests
             .lock()
             .expect("root fixture request lock");
-        assert_eq!(root_requests.len(), 3, "root makes spawn, wait, and post-wait turns");
+        assert_eq!(
+            root_requests.len(),
+            3,
+            "root makes spawn, wait, and post-wait turns"
+        );
         let post_wait = &root_requests[2].context;
         assert!(
             post_wait.contains("child finished isolated edit"),
@@ -2384,7 +2413,11 @@ data: [DONE]
         );
         drop(root_requests);
         let requests = provider_requests.lock().expect("fixture request lock");
-        assert_eq!(requests.len(), 2, "the child made an edit turn and a report turn");
+        assert_eq!(
+            requests.len(),
+            2,
+            "the child made an edit turn and a report turn"
+        );
         for request in requests.iter() {
             assert!(
                 request.contains(workspace.to_string_lossy().as_ref()),
@@ -2411,7 +2444,9 @@ data: [DONE]
         })
         .expect("terminal child result reopens without replaying provider work");
         let reopened_graph = reduce_agent_graph(
-            &reopened.snapshot().expect("reopened fixture snapshot reads"),
+            &reopened
+                .snapshot()
+                .expect("reopened fixture snapshot reads"),
         )
         .expect("reopened child graph reduces");
         assert!(
@@ -2572,9 +2607,8 @@ data: [DONE]
             .facts()
             .iter()
             .any(|fact| matches!(fact.fact, tea_session::SessionFact::HarnessCatalog(_))));
-        let operation =
-            smol::block_on(harness.run_root_prompt("persisted prompt"))
-                .expect("durable prompt settles");
+        let operation = smol::block_on(harness.run_root_prompt("persisted prompt"))
+            .expect("durable prompt settles");
         assert!(operation.is_completed());
         let after = harness.snapshot().expect("completed session snapshot");
         assert!(after
@@ -2609,7 +2643,9 @@ data: [DONE]
             subagents: None,
         })
         .expect("host harness creates");
-        let subscription = harness.subscribe_events().expect("event subscription creates");
+        let subscription = harness
+            .subscribe_events()
+            .expect("event subscription creates");
         let mut output = FailingOutput;
         let error = smol::block_on(stream_host_prompt_to(
             Arc::clone(&harness),
@@ -2618,12 +2654,13 @@ data: [DONE]
             &mut output,
         ))
         .expect_err("closed output is reported");
-        assert!(error.to_string().contains("fixture output closed"), "{error}");
-        let reduction = tea_session::reduce_lane(
-            harness.snapshot().expect("snapshot reads"),
-            LaneId::main(),
-        )
-        .expect("root lane reduces");
+        assert!(
+            error.to_string().contains("fixture output closed"),
+            "{error}"
+        );
+        let reduction =
+            tea_session::reduce_lane(harness.snapshot().expect("snapshot reads"), LaneId::main())
+                .expect("root lane reduces");
         assert!(
             reduction.lane_state.active_operation.is_none(),
             "the one-shot driver must settle before returning its output error"
@@ -2638,7 +2675,10 @@ data: [DONE]
         fs::create_dir(&repository).expect("fixture repository creates");
         git(&repository, &["init"]);
         git(&repository, &["config", "user.name", "Tea Fixture"]);
-        git(&repository, &["config", "user.email", "fixture@example.invalid"]);
+        git(
+            &repository,
+            &["config", "user.email", "fixture@example.invalid"],
+        );
         fs::write(repository.join("tracked.txt"), "original\n").expect("fixture file writes");
         git(&repository, &["add", "tracked.txt"]);
         git(&repository, &["commit", "-m", "initial"]);
@@ -2717,7 +2757,9 @@ data: [DONE]
             .header()
             .session_id
             .to_string();
-        let subscription = harness.subscribe_events().expect("event subscription creates");
+        let subscription = harness
+            .subscribe_events()
+            .expect("event subscription creates");
         let mut output = WaitForChildThenFailOutput {
             child_started: Arc::clone(&child_started),
         };
@@ -2730,7 +2772,9 @@ data: [DONE]
         ))
         .expect_err("closed output is reported");
         assert!(
-            error.to_string().contains("fixture output closed with a live child"),
+            error
+                .to_string()
+                .contains("fixture output closed with a live child"),
             "{error}"
         );
         server.join().expect("held child provider fixture settles");
@@ -2794,7 +2838,10 @@ data: [DONE]
         let error = require_root_settled(&harness)
             .expect_err("an active durable operation cannot be reported as settled");
         assert!(
-            matches!(error, tea_core::harness::HarnessError::RecoveryRequired { .. }),
+            matches!(
+                error,
+                tea_core::harness::HarnessError::RecoveryRequired { .. }
+            ),
             "the host preserves the reducer-derived recovery obligation"
         );
 
@@ -2808,12 +2855,11 @@ data: [DONE]
         let home = temporary_home();
         let workspace = home.join("workspace");
         fs::create_dir(&workspace).expect("workspace creates");
-        let configuration =
-            host_configuration(
-                TeaCodingToolsV2::new(&workspace).expect("Tea v2 tools configure"),
-                &workspace.to_string_lossy(),
-            )
-                .expect("durable host configuration assembles");
+        let configuration = host_configuration(
+            TeaCodingToolsV2::new(&workspace).expect("Tea v2 tools configure"),
+            &workspace.to_string_lossy(),
+        )
+        .expect("durable host configuration assembles");
         let harness = create_host_harness(HostHarnessConfig {
             tea_home: &home,
             workspace: &workspace,

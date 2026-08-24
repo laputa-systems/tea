@@ -1,8 +1,8 @@
 //! Host-owned executable services for durable sessions.
 
 use crate::agent::{Agent, AgentConfiguration};
-use crate::harness::{HarnessError, ResolvedHarness};
 use crate::harness::lineage::runtime_hook_bundle_digest;
+use crate::harness::{HarnessError, ResolvedHarness};
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use tea_core::compaction::{AutomaticCompactionPolicy, Compactor};
@@ -54,7 +54,10 @@ fn automatic_compaction_identity(policy: &AutomaticCompactionPolicy) -> Digest {
             crate::compaction::OverflowRecovery::CompactAndRetry => "compact_and_retry",
         },
     );
-    writer.u64("max_compactions_per_run", u64::from(policy.max_compactions_per_run));
+    writer.u64(
+        "max_compactions_per_run",
+        u64::from(policy.max_compactions_per_run),
+    );
     writer.u64(
         "max_overflow_retries_per_run",
         u64::from(policy.max_overflow_retries_per_run),
@@ -67,7 +70,10 @@ fn tool_projection_identity(policy: &ToolResultProjectionPolicy) -> Digest {
     writer.u64("max_content_bytes", policy.max_content_bytes as u64);
     writer.u64("max_details_bytes", policy.max_details_bytes as u64);
     writer.u64("max_total_bytes", policy.max_total_bytes as u64);
-    writer.boolean("deduplicate_repeated_errors", policy.deduplicate_repeated_errors);
+    writer.boolean(
+        "deduplicate_repeated_errors",
+        policy.deduplicate_repeated_errors,
+    );
     writer.finish()
 }
 
@@ -143,9 +149,7 @@ impl RuntimeServices {
                 tool_projection_digest: tool_projection_identity(
                     &ToolResultProjectionPolicy::default(),
                 ),
-                failure_policy_digest: failure_policy_identity(
-                    ToolFailureCircuitBreaker::default(),
-                ),
+                failure_policy_digest: failure_policy_identity(ToolFailureCircuitBreaker::default()),
             },
             replay_safe_tools: BTreeSet::new(),
             artifact_policy: ArtifactPolicy::default(),

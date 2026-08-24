@@ -10,18 +10,16 @@ use super::events::EventHub;
 use super::harness_tool::{STABLE_HARNESS_TOOL_NAME, stable_harness_tools};
 use super::subagents::{
     ActivityWake, ApplyAgentChangesResult, ApplyWorkspaceDeltaRequest, FinalizeSubagentRequest,
-    InterruptAgentResult, PreparedSubagent, ReopenSubagentRequest,
+    InterruptAgentResult, PreparedSubagent, ROOT_SUBAGENT_TOOL_NAMES, ReopenSubagentRequest,
     SpawnAgentRequest, SpawnedAgentHandle, SubagentCoordinator, SubagentModel, SubagentReport,
-    SubagentStatus, SubagentWorkspaceChange, WaitAgentsRequest, WaitAgentsResult,
-    WaitReturnWhen, WaitedSubagent, WorkspaceDelta, WorkspaceFinalization,
-    ROOT_SUBAGENT_TOOL_NAMES, root_subagent_runtime_tools,
+    SubagentStatus, SubagentWorkspaceChange, WaitAgentsRequest, WaitAgentsResult, WaitReturnWhen,
+    WaitedSubagent, WorkspaceDelta, WorkspaceFinalization, root_subagent_runtime_tools,
 };
 use super::trace::{DurableTraceRedactor, TraceCaptureSink};
 mod lane;
 mod operation;
 mod recovery;
 
-use lane::LaneRuntime;
 use crate::agent::Agent;
 use crate::effect::EffectId;
 use crate::error::CoreError;
@@ -38,6 +36,7 @@ use crate::runtime::{
 };
 use crate::scheduler::CancellationToken;
 use crate::tool::truncate_middle;
+use lane::LaneRuntime;
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::pin::Pin;
@@ -51,22 +50,22 @@ use tea_core::effect::{
     ProviderResponse, RunProvenance, ToolEffectOutcome,
 };
 use tea_core::harness::extension::{
-    CollectedExtensionMemoryProposal, ExtensionMemoryCollector, ExtensionMemoryRetention,
-    ExtensionMemoryVisibility, ExtensionCommandInput, ExtensionCommandResult,
-    ExtensionError, ExtensionHostCommandDescription, ExtensionIdleInput,
-    ExtensionOperationOutcome, ExtensionStateStore, ExtensionStateUpdate, ExtensionStateView,
+    CollectedExtensionMemoryProposal, ExtensionCommandInput, ExtensionCommandResult,
+    ExtensionError, ExtensionHostCommandDescription, ExtensionIdleInput, ExtensionMemoryCollector,
+    ExtensionMemoryRetention, ExtensionMemoryVisibility, ExtensionOperationOutcome,
+    ExtensionStateStore, ExtensionStateUpdate, ExtensionStateView,
 };
 use tea_core::state::{
-    AgentMessage, AgentSnapshot, AgentToolCall, MessageId, ModelDescriptor, SerializedJson, StopReason,
-    ThinkingLevel, ToolCallId,
+    AgentMessage, AgentSnapshot, AgentToolCall, MessageId, ModelDescriptor, SerializedJson,
+    StopReason, ThinkingLevel, ToolCallId,
 };
 use tea_core::tool::{AgentTool, AgentToolResult, ToolCall, ToolFailureDisposition, ToolRegistry};
 use tea_core::trace::TraceObserver;
 use tea_protocol::JsonValue;
 use tea_session::{
-    AgentContextMode, AgentId, AgentSpawnedFact, AgentState, AgentTaskFinishedFact, ArtifactStore, CanonicalHashWriter,
-    CoreRunId, Digest, EntryId, EpochFinishReason, EpochFinishedRecord, EpochId,
-    EpochStartedRecord, HarnessRevisionChangedEntry, HarnessRevisionId, HarnessSnapshotId,
+    AgentContextMode, AgentId, AgentSpawnedFact, AgentState, AgentTaskFinishedFact, ArtifactStore,
+    CanonicalHashWriter, CoreRunId, Digest, EntryId, EpochFinishReason, EpochFinishedRecord,
+    EpochId, EpochStartedRecord, HarnessRevisionChangedEntry, HarnessRevisionId, HarnessSnapshotId,
     LaneId, LaneMutation, LaneRecord, MemoryRetention, MemoryVisibility, ModelChangedEntry,
     ModelHarnessProfileId, OperationFinishedRecord, OperationId, OperationKind, OperationOutcome,
     OperationStartedRecord, PayloadRef, PluginMemoryEntry, ProviderRequestId,
@@ -75,9 +74,8 @@ use tea_session::{
     SessionSnapshot, SessionWriter, StepAttemptedRecord, StepId, StepKind, SubagentModelRecord,
     ThinkingChangedEntry, ToolReplayPolicy, ToolResultEntry, ToolSchemaDeviationFact,
     ToolStartedRecord, TraceArtifactFact, Usage, WorkspaceDeltaAppliedFact, WorkspaceDeltaFact,
-    WorkspaceDeltaId, WorkspaceLeaseId,
-    derive_subagent_operation_id,
-    reduce_agent_graph, reduce_lane,
+    WorkspaceDeltaId, WorkspaceLeaseId, derive_subagent_operation_id, reduce_agent_graph,
+    reduce_lane,
 };
 use tea_trace::{JsonLinesSink, RedactingSink, TraceEvent, TraceSink};
 
@@ -248,7 +246,10 @@ impl<S> std::fmt::Debug for SessionSupervisor<S> {
             .debug_struct("SessionSupervisor")
             .field("root_lane", &self.root_lane_id)
             .field("rollover_budget", &self.rollover_budget)
-            .field("lane_count", &self.lanes.lock().map(|lanes| lanes.len()).unwrap_or(0))
+            .field(
+                "lane_count",
+                &self.lanes.lock().map(|lanes| lanes.len()).unwrap_or(0),
+            )
             .finish_non_exhaustive()
     }
 }
@@ -438,7 +439,11 @@ fn validate_child_subagent_surface(
         ));
     }
     for name in ROOT_SUBAGENT_TOOL_NAMES {
-        if snapshot.spec.tool_presentations.iter().any(|tool| tool.name == name)
+        if snapshot
+            .spec
+            .tool_presentations
+            .iter()
+            .any(|tool| tool.name == name)
             || snapshot
                 .spec
                 .plugin_tool_presentations
@@ -456,8 +461,11 @@ fn validate_child_subagent_surface(
 }
 
 fn subagent_entry_id(agent_id: &AgentId, kind: &str) -> Result<EntryId, HarnessError> {
-    EntryId::new(durable_identifier("subagent-entry", [agent_id.as_str(), kind]))
-        .map_err(|error| HarnessError::invalid_state(error.to_string()))
+    EntryId::new(durable_identifier(
+        "subagent-entry",
+        [agent_id.as_str(), kind],
+    ))
+    .map_err(|error| HarnessError::invalid_state(error.to_string()))
 }
 
 impl<S> SessionSupervisor<S>
@@ -570,11 +578,9 @@ where
                 Arc::downgrade(&supervisor),
                 services,
             ));
-            *supervisor
-                .coordinator
-                .lock()
-                .map_err(|_| HarnessError::invalid_state("subagent coordinator mutex is poisoned"))? =
-                Some(coordinator);
+            *supervisor.coordinator.lock().map_err(|_| {
+                HarnessError::invalid_state("subagent coordinator mutex is poisoned")
+            })? = Some(coordinator);
         }
         Ok(supervisor)
     }
@@ -749,7 +755,8 @@ where
     #[cfg(test)]
     pub(crate) async fn recover_subagents_for_test(self: &Arc<Self>) -> Result<(), HarnessError> {
         if let Some(coordinator) = self.subagent_coordinator()? {
-            self.recover_subagents_before_root_resume(&coordinator).await
+            self.recover_subagents_before_root_resume(&coordinator)
+                .await
         } else {
             Ok(())
         }
@@ -872,25 +879,26 @@ where
                 )],
             ),
         )?;
-        self.session_lock()?.append_record(LaneRecord::ToolStarted(ToolStartedRecord::new(
-            tea_session::RecordId::new(durable_identifier(
-                "subagent-tool-record",
-                [agent_id.as_str()],
-            ))
-            .map_err(|error| HarnessError::invalid_state(error.to_string()))?,
-            operation_id.clone(),
-            epoch_id.clone(),
-            assistant_id,
-            0,
-            "fixture-child-open-tool-call",
-            "fixture_child_tool",
-            JsonValue::parse("{}").expect("fixture object is valid JSON"),
-            result_id,
-            ToolReplayPolicy::Never,
-            tea_session::Digest::from_bytes("fixture-child-open-tool-digest"),
-            node.spawned.harness_revision_id.clone(),
-            "fixture-child-open-tool-key",
-        )))?;
+        self.session_lock()?
+            .append_record(LaneRecord::ToolStarted(ToolStartedRecord::new(
+                tea_session::RecordId::new(durable_identifier(
+                    "subagent-tool-record",
+                    [agent_id.as_str()],
+                ))
+                .map_err(|error| HarnessError::invalid_state(error.to_string()))?,
+                operation_id.clone(),
+                epoch_id.clone(),
+                assistant_id,
+                0,
+                "fixture-child-open-tool-call",
+                "fixture_child_tool",
+                JsonValue::parse("{}").expect("fixture object is valid JSON"),
+                result_id,
+                ToolReplayPolicy::Never,
+                tea_session::Digest::from_bytes("fixture-child-open-tool-digest"),
+                node.spawned.harness_revision_id.clone(),
+                "fixture-child-open-tool-key",
+            )))?;
         Ok(())
     }
 
@@ -923,7 +931,9 @@ where
             ));
         };
         self.session_lock()?
-            .append_fact(SessionFact::WorkspaceDelta(self.workspace_delta_fact(&node, delta)?))?;
+            .append_fact(SessionFact::WorkspaceDelta(
+                self.workspace_delta_fact(&node, delta)?,
+            ))?;
         Ok(())
     }
 
@@ -949,7 +959,7 @@ where
 
     #[cfg(test)]
     pub(crate) fn claim_root_before_acceptance_for_test(&self) -> Result<(), HarnessError> {
-        let claim = self.claim_lane_operation(self.root_lane()? )?;
+        let claim = self.claim_lane_operation(self.root_lane()?)?;
         // The test needs the exact post-claim/pre-OperationStarted interval.
         // Keep that claim alive for its short-lived isolated supervisor.
         std::mem::forget(claim);
@@ -1019,8 +1029,10 @@ where
                 .operation_id
                 .clone()
                 .expect("checked durable child operation above");
-            if matches!(existing.state, AgentState::Running | AgentState::Finalizing { .. })
-                && !coordinator.has_handle(&existing.spawned.agent_id)
+            if matches!(
+                existing.state,
+                AgentState::Running | AgentState::Finalizing { .. }
+            ) && !coordinator.has_handle(&existing.spawned.agent_id)
             {
                 // An in-memory handle is intentionally not durable.  On a
                 // restart, or after a task runtime refused a prior handoff,
@@ -1062,7 +1074,12 @@ where
             intent.durable_active,
             intent.durable_total,
         )?;
-        let prepared = match coordinator.services().host.prepare(intent.prepare_request()).await {
+        let prepared = match coordinator
+            .services()
+            .host
+            .prepare(intent.prepare_request())
+            .await
+        {
             Ok(prepared) => prepared,
             Err(error) => {
                 coordinator.release_reservation(&intent.agent_id, &intent.parent_operation_id);
@@ -1131,10 +1148,8 @@ where
                 // registered while the lane was still graph-unclaimed.
                 let snapshot = self.snapshot()?;
                 let reduction = reduce_lane(snapshot, lane_id)?;
-                let configuration = self.configuration_for_reduction_services(
-                    &existing.runtime_services,
-                    &reduction,
-                )?;
+                let configuration = self
+                    .configuration_for_reduction_services(&existing.runtime_services, &reduction)?;
                 validate_reserved_host_tool_names(&existing.runtime_services, &configuration)?;
                 validate_child_subagent_surface(&configuration, &existing.runtime_services)
             }
@@ -1216,10 +1231,8 @@ where
         timeout: Duration,
         coordinator: &SubagentCoordinator<S>,
     ) -> Result<DurableOperation, HarnessError> {
-        let mut drive = Box::pin(self.drive_accepted_subagent(
-            lane_id.clone(),
-            operation_id.clone(),
-        ));
+        let mut drive =
+            Box::pin(self.drive_accepted_subagent(lane_id.clone(), operation_id.clone()));
         let mut deadline = coordinator.services().tasks.sleep(timeout);
         let completed = std::future::poll_fn(|context| {
             // Poll the deadline first so an already-expired deterministic
@@ -1452,7 +1465,8 @@ where
         provenance: &RunProvenance,
         target: &str,
     ) -> Result<InterruptAgentResult, HarnessError> {
-        let parent_operation_id = self.root_operation_from_provenance(provenance, "interrupt_agent")?;
+        let parent_operation_id =
+            self.root_operation_from_provenance(provenance, "interrupt_agent")?;
         let snapshot = self.snapshot()?;
         let mut targets = self.resolve_owned_subagent_targets(
             &snapshot,
@@ -1465,7 +1479,8 @@ where
             .expect("one requested interrupt target resolves exactly once");
         let previous = node.state.clone();
         if node.terminal.is_none() || !coordinator.is_exposable(&node.spawned.agent_id) {
-            self.cancel_join_and_settle_subagent(coordinator, &node).await?;
+            self.cancel_join_and_settle_subagent(coordinator, &node)
+                .await?;
         }
         let graph = reduce_agent_graph(&self.snapshot()?)
             .map_err(|error| HarnessError::invalid_state(error.to_string()))?;
@@ -1496,12 +1511,9 @@ where
         call: &ToolCall,
         delta_id: WorkspaceDeltaId,
     ) -> Result<ApplyAgentChangesResult, HarnessError> {
-        let parent_operation_id = self.root_operation_from_provenance(provenance, "apply_agent_changes")?;
-        let parent_epoch_id = required_provenance_id(
-            &provenance.epoch_id,
-            "epoch",
-            EpochId::new,
-        )?;
+        let parent_operation_id =
+            self.root_operation_from_provenance(provenance, "apply_agent_changes")?;
+        let parent_epoch_id = required_provenance_id(&provenance.epoch_id, "epoch", EpochId::new)?;
         let snapshot = self.snapshot()?;
         let started = snapshot
             .records()
@@ -1537,7 +1549,11 @@ where
         let node = graph
             .agents
             .values()
-            .find(|node| node.workspace_delta.as_ref().is_some_and(|delta| delta.delta_id == delta_id))
+            .find(|node| {
+                node.workspace_delta
+                    .as_ref()
+                    .is_some_and(|delta| delta.delta_id == delta_id)
+            })
             .ok_or_else(|| HarnessError::invalid_state("apply_agent_changes delta is unknown"))?;
         if node.spawned.parent_lane_id != self.root_lane_id
             || node.spawned.parent_operation_id != parent_operation_id
@@ -1569,7 +1585,7 @@ where
                 "apply_agent_changes delta patch is not an immutable artifact",
             )
         })?;
-        self.artifacts.verify_object(patch_artifact.clone())?;
+        self.artifacts.verify_object(patch_artifact)?;
         let delta = WorkspaceDelta {
             id: delta_fact.delta_id.clone(),
             agent_id: delta_fact.agent_id.clone(),
@@ -1577,7 +1593,7 @@ where
             base_commit: delta_fact.base_commit.clone(),
             result_commit: delta_fact.result_commit.clone(),
             changed_paths: delta_fact.changed_paths.clone(),
-            patch_artifact: patch_artifact.clone(),
+            patch_artifact,
         };
 
         match coordinator
@@ -1626,12 +1642,14 @@ where
                         changed_paths: applied.changed_paths.clone(),
                     });
                 }
-                session.append_fact(SessionFact::WorkspaceDeltaApplied(WorkspaceDeltaAppliedFact {
-                    delta_id: delta_id.clone(),
-                    target_lane_id: self.root_lane_id.clone(),
-                    tool_call_id: call.id.to_string(),
-                    changed_paths: changed_paths.clone(),
-                }))?;
+                session.append_fact(SessionFact::WorkspaceDeltaApplied(
+                    WorkspaceDeltaAppliedFact {
+                        delta_id: delta_id.clone(),
+                        target_lane_id: self.root_lane_id.clone(),
+                        tool_call_id: call.id.to_string(),
+                        changed_paths: changed_paths.clone(),
+                    },
+                ))?;
                 Ok(ApplyAgentChangesResult::Applied {
                     delta_id,
                     changed_paths,
@@ -1647,11 +1665,17 @@ where
             }
             super::subagents::WorkspaceApplyOutcome::RolledBack { diagnostic } => {
                 validate_host_apply_diagnostic(&diagnostic)?;
-                Ok(ApplyAgentChangesResult::RolledBack { delta_id, diagnostic })
+                Ok(ApplyAgentChangesResult::RolledBack {
+                    delta_id,
+                    diagnostic,
+                })
             }
             super::subagents::WorkspaceApplyOutcome::Indeterminate { diagnostic } => {
                 validate_host_apply_diagnostic(&diagnostic)?;
-                Ok(ApplyAgentChangesResult::Indeterminate { delta_id, diagnostic })
+                Ok(ApplyAgentChangesResult::Indeterminate {
+                    delta_id,
+                    diagnostic,
+                })
             }
         }
     }
@@ -1731,7 +1755,8 @@ where
         &self,
         root_operation_id: &OperationId,
     ) -> Result<(), HarnessError> {
-        self.settle_root_children_before_finish(root_operation_id).await
+        self.settle_root_children_before_finish(root_operation_id)
+            .await
     }
 
     async fn cancel_join_and_settle_subagent(
@@ -1807,7 +1832,10 @@ where
         }
         let workspace = match workspace.or_else(|| coordinator.workspace(&agent_id)) {
             Some(workspace) => workspace,
-            None => self.reopen_subagent_workspace(coordinator, &initial).await?,
+            None => {
+                self.reopen_subagent_workspace(coordinator, &initial)
+                    .await?
+            }
         };
         if workspace.id != initial.spawned.workspace_lease_id {
             return Err(HarnessError::invalid_state(
@@ -1848,24 +1876,18 @@ where
                         SubagentRecoveryStage::FinalizeWorkspace,
                         error,
                     )
-                })?
-            {
+                })? {
                 WorkspaceFinalization::NoChanges => None,
-                WorkspaceFinalization::Delta(delta) => Some(self.workspace_delta_fact(&node, delta)?),
+                WorkspaceFinalization::Delta(delta) => {
+                    Some(self.workspace_delta_fact(&node, delta)?)
+                }
             }
         } else {
             None
         };
 
         let (final_entry_id, report) = self.subagent_report_payload(&snapshot, &node)?;
-        self.append_subagent_terminal(
-            &node,
-            operation_id,
-            outcome,
-            final_entry_id,
-            report,
-            delta,
-        )?;
+        self.append_subagent_terminal(&node, operation_id, outcome, final_entry_id, report, delta)?;
         // The report and optional patch are now durable. Only after that may
         // the host remove operational worktree state or a waiter observe the
         // completion generation.
@@ -2044,7 +2066,10 @@ where
         }
         let resolved = self
             .manager
-            .resolve_revision(prepared.harness_identity.revision_id(), &prepared.runtime_services)
+            .resolve_revision(
+                prepared.harness_identity.revision_id(),
+                &prepared.runtime_services,
+            )
             .map_err(|_| HarnessError::SubagentRecovery {
                 agent_id: node.spawned.agent_id.clone(),
                 stage: SubagentRecoveryStage::ReopenWorkspace,
@@ -2073,7 +2098,7 @@ where
                 "host workspace delta does not belong to the completing child lease",
             ));
         }
-        let byte_len = self.artifacts.verify_object(delta.patch_artifact.clone())?;
+        let byte_len = self.artifacts.verify_object(delta.patch_artifact)?;
         Ok(WorkspaceDeltaFact {
             delta_id: delta.id,
             agent_id: delta.agent_id,
@@ -2095,20 +2120,27 @@ where
         node: &tea_session::AgentGraphNode,
     ) -> Result<(Option<EntryId>, PayloadRef), HarnessError> {
         let assistant = snapshot.entries().iter().rev().find_map(|entry| {
-            (entry.lane_id == node.spawned.lane_id).then_some(&entry.body).and_then(|body| {
-                let SessionEntry::AssistantMessage(assistant) = body else {
-                    return None;
-                };
-                Some((entry.header.id.clone(), assistant.content.clone()))
-            })
+            (entry.lane_id == node.spawned.lane_id)
+                .then_some(&entry.body)
+                .and_then(|body| {
+                    let SessionEntry::AssistantMessage(assistant) = body else {
+                        return None;
+                    };
+                    Some((entry.header.id.clone(), assistant.content.clone()))
+                })
         });
         let Some((entry_id, content)) = assistant else {
             return Ok((None, PayloadRef::Inline(JsonValue::String(String::new()))));
         };
         if content.len() <= 32 * 1024 {
-            return Ok((Some(entry_id), PayloadRef::Inline(JsonValue::String(content))));
+            return Ok((
+                Some(entry_id),
+                PayloadRef::Inline(JsonValue::String(content)),
+            ));
         }
-        let artifact = self.artifacts.put(content.as_bytes(), "text/plain; charset=utf-8")?;
+        let artifact = self
+            .artifacts
+            .put(content.as_bytes(), "text/plain; charset=utf-8")?;
         Ok((
             Some(entry_id),
             PayloadRef::Artifact {
@@ -2222,7 +2254,8 @@ where
                     None if graph.agents.values().any(|node| {
                         node.spawned.agent_id.as_str() == target
                             || node.spawned.task_name == *target
-                    }) => {
+                    }) =>
+                    {
                         return Err(HarnessError::invalid_state(format!(
                             "{tool_name} target is not owned by the current root operation",
                         )));
@@ -2278,16 +2311,23 @@ where
         let operation_id = node.operation_id.clone().ok_or_else(|| {
             HarnessError::invalid_state("subagent observation has no accepted child operation")
         })?;
-        let workspace_change = node.terminal.as_ref().and(node.workspace_delta.as_ref()).map(|delta| {
-            let patch_artifact = delta.patch.artifact_id().ok_or_else(|| {
-                HarnessError::invalid_state("workspace delta patch is not an immutable artifact")
-            })?;
-            Ok::<SubagentWorkspaceChange, HarnessError>(SubagentWorkspaceChange {
-                delta_id: delta.delta_id.clone(),
-                changed_paths: delta.changed_paths.clone(),
-                patch_artifact,
+        let workspace_change = node
+            .terminal
+            .as_ref()
+            .and(node.workspace_delta.as_ref())
+            .map(|delta| {
+                let patch_artifact = delta.patch.artifact_id().ok_or_else(|| {
+                    HarnessError::invalid_state(
+                        "workspace delta patch is not an immutable artifact",
+                    )
+                })?;
+                Ok::<SubagentWorkspaceChange, HarnessError>(SubagentWorkspaceChange {
+                    delta_id: delta.delta_id.clone(),
+                    changed_paths: delta.changed_paths.clone(),
+                    patch_artifact,
+                })
             })
-        }).transpose()?;
+            .transpose()?;
         Ok(SubagentStatus {
             agent_id: node.spawned.agent_id.clone(),
             operation_id: operation_id.clone(),
@@ -2310,9 +2350,10 @@ where
         _snapshot: &SessionSnapshot,
         node: &tea_session::AgentGraphNode,
     ) -> Result<SubagentReport, HarnessError> {
-        let terminal = node.terminal.as_ref().ok_or_else(|| {
-            HarnessError::invalid_state("pending child has no final report")
-        })?;
+        let terminal = node
+            .terminal
+            .as_ref()
+            .ok_or_else(|| HarnessError::invalid_state("pending child has no final report"))?;
         match &terminal.report {
             PayloadRef::Inline(JsonValue::String(report)) => Ok(SubagentReport {
                 preview: truncate_middle(report, 16 * 1024),
@@ -2322,13 +2363,13 @@ where
                 "subagent terminal report must be a string payload",
             )),
             PayloadRef::Artifact { artifact_id, .. } => {
-                let bytes = self.artifacts.get(artifact_id.clone())?;
+                let bytes = self.artifacts.get(*artifact_id)?;
                 let report = String::from_utf8(bytes).map_err(|_| {
                     HarnessError::invalid_state("subagent report artifact is not UTF-8 text")
                 })?;
                 Ok(SubagentReport {
                     preview: truncate_middle(&report, 16 * 1024),
-                    artifact_id: Some(artifact_id.clone()),
+                    artifact_id: Some(*artifact_id),
                 })
             }
         }
@@ -2351,7 +2392,10 @@ where
             || existing.spawned.context_mode != intent.context_mode
             || existing.spawned.base_leaf_id != intent.parent_source_leaf_id
             || existing.spawned.spawn_tool_call_id != intent.spawn_tool_call_id
-            || existing.operation_id.as_ref().is_some_and(|id| id != &intent.operation_id)
+            || existing
+                .operation_id
+                .as_ref()
+                .is_some_and(|id| id != &intent.operation_id)
         {
             return Err(HarnessError::invalid_state(
                 "spawn_agent replay does not match its existing durable child intent",
@@ -2367,13 +2411,14 @@ where
         request: &SpawnAgentRequest,
     ) -> Result<SubagentSpawnIntent, HarnessError> {
         validate_subagent_spawn_request(request)?;
-        let session_id = required_provenance_id(&provenance.session_id, "session", tea_session::SessionId::new)?;
-        let parent_lane_id = required_provenance_id(&provenance.lane_id, "lane", LaneId::new)?;
-        let parent_operation_id = required_provenance_id(
-            &provenance.operation_id,
-            "operation",
-            OperationId::new,
+        let session_id = required_provenance_id(
+            &provenance.session_id,
+            "session",
+            tea_session::SessionId::new,
         )?;
+        let parent_lane_id = required_provenance_id(&provenance.lane_id, "lane", LaneId::new)?;
+        let parent_operation_id =
+            required_provenance_id(&provenance.operation_id, "operation", OperationId::new)?;
         let parent_epoch_id = required_provenance_id(&provenance.epoch_id, "epoch", EpochId::new)?;
         if parent_lane_id != self.root_lane_id {
             return Err(HarnessError::invalid_state(
@@ -2403,7 +2448,9 @@ where
             .iter()
             .find(|model| model.descriptor.model == request.model)
             .cloned()
-            .ok_or_else(|| HarnessError::invalid_state("spawn_agent selected a disallowed model"))?;
+            .ok_or_else(|| {
+                HarnessError::invalid_state("spawn_agent selected a disallowed model")
+            })?;
         let parent_reduction = reduce_lane(snapshot.clone(), parent_lane_id.clone())?;
         if parent_reduction.lane_state.active_operation.as_ref() != Some(&parent_operation_id) {
             return Err(HarnessError::invalid_state(
@@ -2443,7 +2490,8 @@ where
             .iter()
             .find_map(|stored| match &stored.record {
                 LaneRecord::EpochStarted(record)
-                    if record.id == parent_epoch_id && record.operation_id == parent_operation_id =>
+                    if record.id == parent_epoch_id
+                        && record.operation_id == parent_operation_id =>
                 {
                     Some(record.source_leaf_id.clone())
                 }
@@ -2540,9 +2588,10 @@ where
                 "subagent host runtime services do not bind the selected thinking level",
             ));
         }
-        let resolved = self
-            .manager
-            .resolve_revision(prepared.harness_identity.revision_id(), &prepared.runtime_services)?;
+        let resolved = self.manager.resolve_revision(
+            prepared.harness_identity.revision_id(),
+            &prepared.runtime_services,
+        )?;
         if resolved.identity != prepared.harness_identity {
             return Err(HarnessError::invalid_state(
                 "subagent host harness identity does not match its immutable revision",
@@ -2743,9 +2792,10 @@ where
             subagent_entry_id(&intent.agent_id, "assignment")?,
             intent.task.clone(),
         );
-        let configuration = self
-            .manager
-            .resolve_revision(prepared.harness_identity.revision_id(), &prepared.runtime_services)?;
+        let configuration = self.manager.resolve_revision(
+            prepared.harness_identity.revision_id(),
+            &prepared.runtime_services,
+        )?;
         let mut operation = OperationStartedRecord::new(
             intent.operation_id.clone(),
             intent.lane_id.clone(),
@@ -2990,7 +3040,9 @@ where
             .iter()
             .find(|command| command.command.description().name == name)
             .cloned()
-            .ok_or_else(|| HarnessError::invalid_state(format!("unknown extension command {name}")))?;
+            .ok_or_else(|| {
+                HarnessError::invalid_state(format!("unknown extension command {name}"))
+            })?;
         if lane.active.load(Ordering::Acquire)
             && !selected.command.description().allowed_while_active
         {
@@ -3023,9 +3075,7 @@ where
     /// Evaluate every resolved extension's optional idle policy after a
     /// terminal operation. At most one continuation may be requested; callers
     /// must still re-check idle state immediately before starting it.
-    pub fn evaluate_idle_extensions(
-        &self,
-    ) -> Result<Option<ExtensionContinuation>, HarnessError> {
+    pub fn evaluate_idle_extensions(&self) -> Result<Option<ExtensionContinuation>, HarnessError> {
         let lane = self.root_lane()?;
         if lane.active.load(Ordering::Acquire) {
             return Err(HarnessError::invalid_state(
@@ -3148,8 +3198,7 @@ where
     }
 
     fn active_lane_agent(&self, lane: &LaneRuntime) -> Result<Agent, HarnessError> {
-        lane
-            .active_agent
+        lane.active_agent
             .lock()
             .map_err(|_| HarnessError::invalid_state("active core epoch mutex is poisoned"))?
             .clone()
@@ -3227,7 +3276,8 @@ where
     ) -> Result<DurableOperation, HarnessError> {
         let lane = self.root_lane()?;
         let _claim = self.claim_lane_operation(Arc::clone(&lane))?;
-        let operation = self.accept_extension_continuation(&lane, extension_id.into(), input.into())?;
+        let operation =
+            self.accept_extension_continuation(&lane, extension_id.into(), input.into())?;
         self.drive_fresh_epoch(&lane, operation).await
     }
 
@@ -3291,7 +3341,8 @@ where
     /// host-specific reconciliation policy is supplied.
     pub async fn resume(self: &Arc<Self>) -> Result<DurableOperation, HarnessError> {
         if let Some(coordinator) = self.subagent_coordinator()? {
-            self.recover_subagents_before_root_resume(&coordinator).await?;
+            self.recover_subagents_before_root_resume(&coordinator)
+                .await?;
         }
         self.resume_lane_runtime(self.root_lane()?).await
     }
@@ -3317,7 +3368,7 @@ where
             .filter(|node| {
                 node.spawned.parent_lane_id == self.root_lane_id
                     && node.spawned.parent_operation_id == root_operation_id
-        })
+            })
             .cloned()
             .collect::<Vec<_>>();
         for node in nodes {
@@ -3402,8 +3453,7 @@ where
                         let mut session = self.session_lock()?;
                         let mut sequence = None;
                         for entry in entries {
-                            sequence =
-                                Some(session.append_entry(&lane.lane_id, entry)?.header.seq);
+                            sequence = Some(session.append_entry(&lane.lane_id, entry)?.header.seq);
                         }
                         sequence
                     };
@@ -3425,16 +3475,18 @@ where
                         == "apply_agent_changes"
                     {
                         return Err(HarnessError::RecoveryRequired {
-                            plan: RecoveryPlan::SynthesizeInterruptedToolResult {
-                                result_entry_id,
-                            },
+                            plan: RecoveryPlan::SynthesizeInterruptedToolResult { result_entry_id },
                         });
                     }
                     self.append_interrupted_tool_result(&lane, &snapshot, &result_entry_id)?;
                 }
                 RecoveryPlan::ReplayToolIfStillSafe { tool } => {
                     if !self.replay_is_still_safe(&lane, &tool) {
-                        self.append_interrupted_tool_result(&lane, &snapshot, &tool.result_entry_id)?;
+                        self.append_interrupted_tool_result(
+                            &lane,
+                            &snapshot,
+                            &tool.result_entry_id,
+                        )?;
                         continue;
                     }
                     let epoch_id = open_epoch(&snapshot, &operation_id).ok_or_else(|| {
@@ -3609,7 +3661,10 @@ where
         extension_id: String,
         input: String,
     ) -> Result<OperationId, HarnessError> {
-        if !portable_extension_label(&extension_id) || input.trim().is_empty() || input.len() > 16 * 1024 {
+        if !portable_extension_label(&extension_id)
+            || input.trim().is_empty()
+            || input.len() > 16 * 1024
+        {
             return Err(HarnessError::invalid_state(
                 "extension continuation requires a portable extension ID and bounded non-empty input",
             ));
@@ -3805,7 +3860,8 @@ where
             &configuration.identity,
             provider_surface_digest,
         )?;
-        let host_tools = self.host_tools_for_configuration(&lane_runtime, &configuration, &operation_id)?;
+        let host_tools =
+            self.host_tools_for_configuration(&lane_runtime, &configuration, &operation_id)?;
         let tool_definition_digests =
             all_tool_definition_digests(&runtime_services, &configuration, &host_tools)?;
         let tool_definition_schemas =
@@ -3893,7 +3949,8 @@ where
             // epoch and operation directly, exactly as an abort requested
             // before agent installation requires.
             self.clear_lane_active_agent(&lane_runtime);
-            self.settle_root_children_before_finish(&operation_id).await?;
+            self.settle_root_children_before_finish(&operation_id)
+                .await?;
             self.finish_operation(
                 &lane_runtime,
                 &operation_id,
@@ -3931,8 +3988,11 @@ where
                         &epoch_id,
                         EpochFinishReason::ActivationPending,
                     )?;
-                    let revision =
-                        self.activate_pending_harness(&lane_runtime, &operation_id, &pending.request)?;
+                    let revision = self.activate_pending_harness(
+                        &lane_runtime,
+                        &operation_id,
+                        &pending.request,
+                    )?;
                     self.publish_event(TeaEvent::Harness(HarnessEvent::RolloverStarted {
                         lane_id: lane_runtime.lane_id.clone(),
                         operation_id: operation_id.clone(),
@@ -3949,9 +4009,15 @@ where
                     Box::pin(self.drive_epoch(&lane_runtime, operation_id, next_epoch, None)).await
                 } else {
                     if lane_runtime.lane_id == self.root_lane_id {
-                        self.settle_root_children_before_finish(&operation_id).await?;
+                        self.settle_root_children_before_finish(&operation_id)
+                            .await?;
                     }
-                    self.finish_operation(&lane_runtime, &operation_id, &epoch_id, OperationOutcome::Completed)
+                    self.finish_operation(
+                        &lane_runtime,
+                        &operation_id,
+                        &epoch_id,
+                        OperationOutcome::Completed,
+                    )
                 }
             }
             Err(error @ CoreError::EffectGate(_)) => Err(HarnessError::Core(error)),
@@ -3964,7 +4030,8 @@ where
                     }
                 };
                 if lane_runtime.lane_id == self.root_lane_id {
-                    self.settle_root_children_before_finish(&operation_id).await?;
+                    self.settle_root_children_before_finish(&operation_id)
+                        .await?;
                 }
                 self.finish_operation(&lane_runtime, &operation_id, &epoch_id, outcome)?;
                 Err(HarnessError::Core(error))
@@ -4020,7 +4087,11 @@ where
         Ok(tools)
     }
 
-    fn start_epoch(&self, lane_runtime: &LaneRuntime, operation_id: &OperationId) -> Result<EpochId, HarnessError> {
+    fn start_epoch(
+        &self,
+        lane_runtime: &LaneRuntime,
+        operation_id: &OperationId,
+    ) -> Result<EpochId, HarnessError> {
         let lane = lane_runtime.lane_id.clone();
         let (epoch_id, sequence, revision_id, snapshot_id, profile_id) = {
             let mut session = self.session_lock()?;
@@ -4309,7 +4380,10 @@ where
                 LaneRecord::EpochStarted(record)
                     if &record.id == epoch_id && &record.operation_id == operation_id =>
                 {
-                    Some((record.core_run_id.to_string(), record.source_leaf_id.clone()))
+                    Some((
+                        record.core_run_id.to_string(),
+                        record.source_leaf_id.clone(),
+                    ))
                 }
                 _ => None,
             })
@@ -4489,7 +4563,8 @@ where
         });
         let configuration = match &epoch {
             Some(epoch) => {
-                let configuration = self.configuration_for_revision(lane, &epoch.harness_revision_id)?;
+                let configuration =
+                    self.configuration_for_revision(lane, &epoch.harness_revision_id)?;
                 if configuration.identity.snapshot_id() != &epoch.harness_snapshot_id
                     || configuration.identity.profile_id() != &epoch.model_harness_profile
                 {
@@ -4610,7 +4685,8 @@ where
         lane: &LaneRuntime,
         revision_id: &HarnessRevisionId,
     ) -> Result<ResolvedHarness, HarnessError> {
-        self.manager.resolve_revision(revision_id, &lane.runtime_services)
+        self.manager
+            .resolve_revision(revision_id, &lane.runtime_services)
     }
 
     fn epoch_configuration(
@@ -6020,12 +6096,16 @@ fn child_operation_outcome(
     snapshot: &SessionSnapshot,
     operation_id: &OperationId,
 ) -> Option<OperationOutcome> {
-    snapshot.records().iter().rev().find_map(|stored| match &stored.record {
-        LaneRecord::OperationFinished(record) if &record.operation_id == operation_id => {
-            Some(record.outcome.clone())
-        }
-        _ => None,
-    })
+    snapshot
+        .records()
+        .iter()
+        .rev()
+        .find_map(|stored| match &stored.record {
+            LaneRecord::OperationFinished(record) if &record.operation_id == operation_id => {
+                Some(record.outcome.clone())
+            }
+            _ => None,
+        })
 }
 
 fn core_failure_code(error: &CoreError) -> &'static str {
@@ -6045,7 +6125,10 @@ impl<S> ExtensionStateStore for SessionSupervisor<S>
 where
     S: SessionWriter + Send + 'static,
 {
-    fn read_extension_state(&self, extension_id: &str) -> Result<ExtensionStateView, ExtensionError> {
+    fn read_extension_state(
+        &self,
+        extension_id: &str,
+    ) -> Result<ExtensionStateView, ExtensionError> {
         let snapshot = self
             .snapshot()
             .map_err(|error| ExtensionError::new(error.to_string()))?;
@@ -6159,26 +6242,44 @@ fn terminal_operation(
     snapshot: &SessionSnapshot,
     lane_id: &LaneId,
 ) -> Option<(OperationId, OperationOutcome, u64, u64)> {
-    let finished = snapshot.records().iter().rev().find_map(|stored| match &stored.record {
-        LaneRecord::OperationFinished(record)
-            if operation_lane(snapshot, &record.operation_id).as_ref() == Some(lane_id) =>
-        {
-            Some((record.operation_id.clone(), record.outcome.clone(), stored.timestamp_ms))
-        }
-        _ => None,
-    })?;
-    let started_at_ms = snapshot.records().iter().find_map(|stored| match &stored.record {
-        LaneRecord::OperationStarted(record) if record.id == finished.0 => Some(stored.timestamp_ms),
-        _ => None,
-    })?;
+    let finished = snapshot
+        .records()
+        .iter()
+        .rev()
+        .find_map(|stored| match &stored.record {
+            LaneRecord::OperationFinished(record)
+                if operation_lane(snapshot, &record.operation_id).as_ref() == Some(lane_id) =>
+            {
+                Some((
+                    record.operation_id.clone(),
+                    record.outcome.clone(),
+                    stored.timestamp_ms,
+                ))
+            }
+            _ => None,
+        })?;
+    let started_at_ms = snapshot
+        .records()
+        .iter()
+        .find_map(|stored| match &stored.record {
+            LaneRecord::OperationStarted(record) if record.id == finished.0 => {
+                Some(stored.timestamp_ms)
+            }
+            _ => None,
+        })?;
     Some((finished.0, finished.1, started_at_ms, finished.2))
 }
 
 fn operation_lane(snapshot: &SessionSnapshot, operation_id: &OperationId) -> Option<LaneId> {
-    snapshot.records().iter().find_map(|stored| match &stored.record {
-        LaneRecord::OperationStarted(record) if &record.id == operation_id => Some(record.lane_id.clone()),
-        _ => None,
-    })
+    snapshot
+        .records()
+        .iter()
+        .find_map(|stored| match &stored.record {
+            LaneRecord::OperationStarted(record) if &record.id == operation_id => {
+                Some(record.lane_id.clone())
+            }
+            _ => None,
+        })
 }
 
 fn idle_operation_is_claimed(
@@ -6243,7 +6344,9 @@ fn extension_operation_outcome(outcome: &OperationOutcome) -> ExtensionOperation
     match outcome {
         OperationOutcome::Completed => ExtensionOperationOutcome::Completed,
         OperationOutcome::Aborted => ExtensionOperationOutcome::Aborted,
-        OperationOutcome::Failed { code } => ExtensionOperationOutcome::Failed { code: code.clone() },
+        OperationOutcome::Failed { code } => {
+            ExtensionOperationOutcome::Failed { code: code.clone() }
+        }
     }
 }
 
@@ -6275,10 +6378,13 @@ fn extension_continuation_input(
     snapshot: &SessionSnapshot,
     operation_id: &OperationId,
 ) -> Result<Option<String>, HarnessError> {
-    let record = snapshot.records().iter().find_map(|stored| match &stored.record {
-        LaneRecord::OperationStarted(record) if &record.id == operation_id => Some(record),
-        _ => None,
-    });
+    let record = snapshot
+        .records()
+        .iter()
+        .find_map(|stored| match &stored.record {
+            LaneRecord::OperationStarted(record) if &record.id == operation_id => Some(record),
+            _ => None,
+        });
     let Some(record) = record else {
         return Err(HarnessError::invalid_state(format!(
             "operation {operation_id} has no durable operation-start record",

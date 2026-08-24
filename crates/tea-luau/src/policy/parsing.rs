@@ -6,16 +6,16 @@ use super::types::{
     PolicyMemoryVisibility, PolicyResumeHook,
 };
 use super::{PolicyError, PolicyPromptSection, PolicyTool};
-use crate::bundle::{BUNDLE_ABI_VERSION, BUNDLE_ABI_V2_VERSION};
+use crate::bundle::{BUNDLE_ABI_V2_VERSION, BUNDLE_ABI_VERSION};
 use mlua::{Function, Table, Value};
 use std::collections::BTreeSet;
+use tea_core::harness::extension::{
+    ExtensionCommandResult, ExtensionIdleResult, ExtensionStateUpdate,
+};
 use tea_core::hooks::{AfterToolCall, BeforeToolCall, Replacement};
 use tea_core::state::SerializedJson;
-use tea_core::tool::{
-    AgentToolResult, CancellationSettlementMode, ToolExecutionMode,
-};
+use tea_core::tool::{AgentToolResult, CancellationSettlementMode, ToolExecutionMode};
 use tea_protocol::JsonValue;
-use tea_core::harness::extension::{ExtensionCommandResult, ExtensionIdleResult, ExtensionStateUpdate};
 
 pub(super) struct ParsedDeclaration {
     pub(super) prompt_sections: Vec<PolicyPromptSection>,
@@ -142,7 +142,10 @@ fn parse_host_commands(
                 ),
             });
         }
-        if help.trim().is_empty() || help.len() > 240 || help.bytes().any(|byte| byte.is_ascii_control()) {
+        if help.trim().is_empty()
+            || help.len() > 240
+            || help.bytes().any(|byte| byte.is_ascii_control())
+        {
             return Err(PolicyError::Contract {
                 message: format!("v2 extension command {name:?} help must be non-empty printable text of at most 240 bytes"),
             });
@@ -391,7 +394,8 @@ pub(super) fn parse_extension_result(value: Value) -> Result<ExtensionCommandRes
     }
     let Value::Table(table) = value else {
         return Err(PolicyError::Contract {
-            message: "extension command and on_idle handlers must return nil or a result table".into(),
+            message: "extension command and on_idle handlers must return nil or a result table"
+                .into(),
         });
     };
     require_only_fields(
@@ -400,12 +404,15 @@ pub(super) fn parse_extension_result(value: Value) -> Result<ExtensionCommandRes
         "extension command result",
     )?;
     let notice = optional_string(&table, "notice")?;
-    if notice
-        .as_deref()
-        .is_some_and(|notice| notice.trim().is_empty() || notice.len() > 4096 || notice.bytes().any(|byte| byte.is_ascii_control()))
-    {
+    if notice.as_deref().is_some_and(|notice| {
+        notice.trim().is_empty()
+            || notice.len() > 4096
+            || notice.bytes().any(|byte| byte.is_ascii_control())
+    }) {
         return Err(PolicyError::Contract {
-            message: "extension command notice must be printable non-empty text of at most 4096 bytes".into(),
+            message:
+                "extension command notice must be printable non-empty text of at most 4096 bytes"
+                    .into(),
         });
     }
     let internal_input = optional_string(&table, "internal_input")?;
@@ -414,7 +421,8 @@ pub(super) fn parse_extension_result(value: Value) -> Result<ExtensionCommandRes
         .is_some_and(|input| input.trim().is_empty() || input.len() > 16 * 1024)
     {
         return Err(PolicyError::Contract {
-            message: "extension internal_input must be non-empty text of at most 16384 bytes".into(),
+            message: "extension internal_input must be non-empty text of at most 16384 bytes"
+                .into(),
         });
     }
     let state = table

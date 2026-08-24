@@ -43,8 +43,8 @@ mod tests {
     use tea_core::error::HookError;
     use tea_core::hooks::{AfterToolCall, BeforeToolCall, ContextEnvelope, HookSet, Replacement};
     use tea_core::state::{SerializedJson, ToolCallId, Usage};
-    use tea_core::tool::{AgentToolResult, ToolCall};
     use tea_core::tool::CancellationSettlementMode;
+    use tea_core::tool::{AgentToolResult, ToolCall};
 
     const GAME_POLICY: &str = r#"
         return {

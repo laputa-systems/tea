@@ -919,7 +919,9 @@ data: [DONE]
             let mut bytes = Vec::new();
             let mut chunk = [0_u8; 4096];
             let expected = loop {
-                let read = socket.read(&mut chunk).expect("request should remain readable");
+                let read = socket
+                    .read(&mut chunk)
+                    .expect("request should remain readable");
                 assert_ne!(read, 0, "request must not close before its body");
                 bytes.extend_from_slice(&chunk[..read]);
                 let Some(header_end) = bytes
@@ -935,14 +937,20 @@ data: [DONE]
                     .lines()
                     .find_map(|line| {
                         let (name, value) = line.split_once(':')?;
-                        name.eq_ignore_ascii_case("content-length")
-                            .then(|| value.trim().parse::<usize>().expect("numeric content length"))
+                        name.eq_ignore_ascii_case("content-length").then(|| {
+                            value
+                                .trim()
+                                .parse::<usize>()
+                                .expect("numeric content length")
+                        })
                     })
                     .expect("request should include content length");
                 break header_end + content_length;
             };
             while bytes.len() < expected {
-                let read = socket.read(&mut chunk).expect("request body should remain readable");
+                let read = socket
+                    .read(&mut chunk)
+                    .expect("request body should remain readable");
                 assert_ne!(read, 0, "request must not close before its body");
                 bytes.extend_from_slice(&chunk[..read]);
             }

@@ -32,7 +32,9 @@ impl Compactor for KeepFirstMessage {
         _cancellation: CancellationToken,
     ) -> CompactionFuture<'a> {
         context.messages.truncate(1);
-        Box::pin(std::future::ready(Ok(CompactionResult::new(context.messages))))
+        Box::pin(std::future::ready(Ok(CompactionResult::new(
+            context.messages,
+        ))))
     }
 }
 
@@ -202,15 +204,14 @@ fn lane_ledgers_never_compare_sibling_child_requests_as_adjacent() {
 
 #[test]
 fn same_child_model_and_context_keep_a_stable_task_last_prefix() {
-    let first = task_mode_child_request_with_assignment_last(
-        "A: inspect the first concern",
-        "child-model",
-    );
+    let first =
+        task_mode_child_request_with_assignment_last("A: inspect the first concern", "child-model");
     let second = task_mode_child_request_with_assignment_last(
         "B: inspect the second concern",
         "child-model",
     );
-    let stable_context = "stable child context\nlogical workspace: /workspace/logical\nassignment: ";
+    let stable_context =
+        "stable child context\nlogical workspace: /workspace/logical\nassignment: ";
     let measurement = measure_prompt_cacheability(Some(&first), &second);
 
     assert!(first.context.ends_with("A: inspect the first concern"));

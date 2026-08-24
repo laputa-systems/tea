@@ -179,7 +179,10 @@ mod tests {
             .as_array()
             .and_then(|messages| messages.first())
             .expect("one developer message");
-        assert_eq!(message.get("role").and_then(JsonValue::as_str), Some("developer"));
+        assert_eq!(
+            message.get("role").and_then(JsonValue::as_str),
+            Some("developer")
+        );
         assert_eq!(
             message.get("content").and_then(JsonValue::as_str),
             Some("continue the extension"),

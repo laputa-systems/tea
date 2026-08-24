@@ -6,10 +6,10 @@
 //! the session prefix plus host-owned workspace recovery ports.
 
 use crate::{
-    AgentId, Corruption, EntryId, HarnessRevisionId, HarnessSnapshotId, LaneId,
-    LaneRecord, ModelChangedEntry, ModelHarnessProfileId, OperationId, OperationKind,
-    OperationOutcome, PayloadRef, SessionEntry, SessionMutationRef, SessionSnapshot,
-    SessionHeader, WorkspaceDeltaId, WorkspaceLeaseId, derive_subagent_operation_id,
+    AgentId, Corruption, EntryId, HarnessRevisionId, HarnessSnapshotId, LaneId, LaneRecord,
+    ModelChangedEntry, ModelHarnessProfileId, OperationId, OperationKind, OperationOutcome,
+    PayloadRef, SessionEntry, SessionHeader, SessionMutationRef, SessionSnapshot, WorkspaceDeltaId,
+    WorkspaceLeaseId, derive_subagent_operation_id,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -48,8 +48,16 @@ pub struct SubagentModelRecord {
 
 impl SubagentModelRecord {
     fn validate(&self) -> Result<(), Corruption> {
-        validate_bounded_nonempty("subagent model provider", &self.provider, MAX_MODEL_IDENTIFIER_BYTES)?;
-        validate_bounded_nonempty("subagent model identifier", &self.model, MAX_MODEL_IDENTIFIER_BYTES)?;
+        validate_bounded_nonempty(
+            "subagent model provider",
+            &self.provider,
+            MAX_MODEL_IDENTIFIER_BYTES,
+        )?;
+        validate_bounded_nonempty(
+            "subagent model identifier",
+            &self.model,
+            MAX_MODEL_IDENTIFIER_BYTES,
+        )?;
         if let Some(revision) = &self.revision {
             validate_bounded_nonempty(
                 "subagent model revision",
@@ -114,7 +122,7 @@ impl SubagentPolicyFact {
                 model.revision.clone(),
             )) {
                 return Err(Corruption::new(format!(
-            "subagent policy repeats model {}/{}",
+                    "subagent policy repeats model {}/{}",
                     model.provider, model.model
                 )));
             }
@@ -143,9 +151,7 @@ impl SubagentPolicyFact {
                 "subagent policy max_concurrent must be within 1..=16",
             ));
         }
-        if self.max_total_per_operation < self.max_concurrent
-            || self.max_total_per_operation > 64
-        {
+        if self.max_total_per_operation < self.max_concurrent || self.max_total_per_operation > 64 {
             return Err(Corruption::new(
                 "subagent policy max_total_per_operation must be within max_concurrent..=64",
             ));
@@ -255,9 +261,15 @@ pub enum AgentState {
     /// A terminal report records a failed child operation.
     Failed { code: String },
     /// A terminal report and durable delta exist.
-    DeltaReady { outcome: OperationOutcome, delta_id: WorkspaceDeltaId },
+    DeltaReady {
+        outcome: OperationOutcome,
+        delta_id: WorkspaceDeltaId,
+    },
     /// The parent durably committed application of the child delta.
-    Applied { outcome: OperationOutcome, delta_id: WorkspaceDeltaId },
+    Applied {
+        outcome: OperationOutcome,
+        delta_id: WorkspaceDeltaId,
+    },
 }
 
 /// One child node in the reduced session-owned graph.
@@ -340,7 +352,8 @@ fn reduce_agent_graph_prefix<'a>(
     lanes.insert(header.initial_lane.clone(), (None, crate::Sequence(0)));
     let mut entries = BTreeMap::<EntryId, (LaneId, SessionEntry, crate::Sequence)>::new();
     let mut operations = BTreeMap::<OperationId, OperationInfo>::new();
-    let mut epochs = BTreeMap::<crate::EpochId, (OperationId, Option<EntryId>, crate::Sequence)>::new();
+    let mut epochs =
+        BTreeMap::<crate::EpochId, (OperationId, Option<EntryId>, crate::Sequence)>::new();
     let mut tools = BTreeMap::<String, Vec<ToolInfo>>::new();
     let mut policy = None;
     let mut policy_sequence = None;
@@ -554,9 +567,9 @@ fn reduce_agent_graph_prefix<'a>(
             )));
         }
         if operation.started_seq
-            <= *spawn_sequences.get(agent_id).ok_or_else(|| {
-                Corruption::new(format!("agent {agent_id} has no spawn sequence"))
-            })?
+            <= *spawn_sequences
+                .get(agent_id)
+                .ok_or_else(|| Corruption::new(format!("agent {agent_id} has no spawn sequence")))?
         {
             return Err(Corruption::new(format!(
                 "subagent operation {operation_id} precedes its agent spawn fact"
@@ -599,12 +612,16 @@ fn reduce_agent_graph_prefix<'a>(
         validate_child_operation_identity(operation, &node.spawned)?;
     }
 
-    let mut deltas_by_id = BTreeMap::<WorkspaceDeltaId, (crate::Sequence, WorkspaceDeltaFact)>::new();
+    let mut deltas_by_id =
+        BTreeMap::<WorkspaceDeltaId, (crate::Sequence, WorkspaceDeltaFact)>::new();
     let mut delta_by_agent = BTreeMap::<AgentId, WorkspaceDeltaId>::new();
     for (sequence, delta) in deltas {
         validate_delta(&delta)?;
         let node = nodes.get(&delta.agent_id).ok_or_else(|| {
-            Corruption::new(format!("workspace delta {} refers to unknown agent {}", delta.delta_id, delta.agent_id))
+            Corruption::new(format!(
+                "workspace delta {} refers to unknown agent {}",
+                delta.delta_id, delta.agent_id
+            ))
         })?;
         if node.spawned.workspace_lease_id != delta.workspace_lease_id {
             return Err(Corruption::new(format!(
@@ -618,7 +635,9 @@ fn reduce_agent_graph_prefix<'a>(
                 delta.delta_id, delta.agent_id
             ))
         })?;
-        let operation = operations.get(operation_id).expect("agent operation was indexed");
+        let operation = operations
+            .get(operation_id)
+            .expect("agent operation was indexed");
         let Some((finished_sequence, _)) = &operation.finished else {
             return Err(Corruption::new(format!(
                 "workspace delta {} precedes child operation completion",
@@ -631,7 +650,9 @@ fn reduce_agent_graph_prefix<'a>(
                 delta.delta_id
             )));
         }
-        if delta_by_agent.insert(delta.agent_id.clone(), delta.delta_id.clone()).is_some()
+        if delta_by_agent
+            .insert(delta.agent_id.clone(), delta.delta_id.clone())
+            .is_some()
             || deltas_by_id.contains_key(&delta.delta_id)
         {
             return Err(Corruption::new(format!(
@@ -642,7 +663,7 @@ fn reduce_agent_graph_prefix<'a>(
         deltas_by_id.insert(delta.delta_id.clone(), (sequence, delta));
     }
 
-    for (_, node) in &mut nodes {
+    for node in nodes.values_mut() {
         if let Some(delta_id) = delta_by_agent.get(&node.spawned.agent_id)
             && let Some((_, delta)) = deltas_by_id.get(delta_id)
         {
@@ -654,7 +675,10 @@ fn reduce_agent_graph_prefix<'a>(
     for (sequence, terminal) in terminals {
         validate_terminal(&terminal)?;
         let node = nodes.get_mut(&terminal.agent_id).ok_or_else(|| {
-            Corruption::new(format!("agent terminal result refers to unknown agent {}", terminal.agent_id))
+            Corruption::new(format!(
+                "agent terminal result refers to unknown agent {}",
+                terminal.agent_id
+            ))
         })?;
         if node.operation_id.as_ref() != Some(&terminal.operation_id) {
             return Err(Corruption::new(format!(
@@ -749,20 +773,28 @@ fn reduce_agent_graph_prefix<'a>(
             (None, None) => {}
         }
         if node.terminal.replace(terminal).is_some() {
-            return Err(Corruption::new("agent has more than one terminal result fact"));
+            return Err(Corruption::new(
+                "agent has more than one terminal result fact",
+            ));
         }
         if terminal_sequences
             .insert(node.spawned.agent_id.clone(), sequence)
             .is_some()
         {
-            return Err(Corruption::new("agent has more than one terminal result sequence"));
+            return Err(Corruption::new(
+                "agent has more than one terminal result sequence",
+            ));
         }
     }
 
     let mut used_apply_intents = BTreeSet::new();
     for (sequence, applied_fact) in applied {
         validate_changed_paths(&applied_fact.changed_paths)?;
-        validate_bounded_nonempty("applied delta tool call ID", &applied_fact.tool_call_id, MAX_MODEL_IDENTIFIER_BYTES)?;
+        validate_bounded_nonempty(
+            "applied delta tool call ID",
+            &applied_fact.tool_call_id,
+            MAX_MODEL_IDENTIFIER_BYTES,
+        )?;
         let Some((delta_sequence, delta)) = deltas_by_id.get(&applied_fact.delta_id) else {
             return Err(Corruption::new(format!(
                 "applied workspace delta {} is unknown",
@@ -838,12 +870,19 @@ fn reduce_agent_graph_prefix<'a>(
             ));
         }
         if node.applied.replace(applied_fact).is_some() {
-            return Err(Corruption::new("workspace delta was applied more than once"));
+            return Err(Corruption::new(
+                "workspace delta was applied more than once",
+            ));
         }
     }
 
     for node in nodes.values_mut() {
-        node.state = match (&node.operation_id, &node.terminal, &node.workspace_delta, &node.applied) {
+        node.state = match (
+            &node.operation_id,
+            &node.terminal,
+            &node.workspace_delta,
+            &node.applied,
+        ) {
             (None, _, _, _) => AgentState::Spawned,
             (Some(_), None, _, _) => {
                 let operation = operations
@@ -927,7 +966,10 @@ fn validate_spawn(
     if parent.lane_id != spawn.parent_lane_id
         || parent.lane_id != LaneId::main()
         || matches!(parent.kind, OperationKind::Subagent { .. })
-        || parent.finished.as_ref().is_some_and(|(finished, _)| *finished < sequence)
+        || parent
+            .finished
+            .as_ref()
+            .is_some_and(|(finished, _)| *finished < sequence)
     {
         return Err(Corruption::new(format!(
             "agent {} parent operation is not a root-lane operation",
@@ -991,7 +1033,9 @@ fn validate_spawn(
     match (&spawn.context_mode, &spawn.base_leaf_id) {
         (AgentContextMode::Task, None) | (AgentContextMode::Parent, Some(_)) => {}
         (AgentContextMode::Task, Some(_)) => {
-            return Err(Corruption::new("task-context agent must not inherit a base leaf"));
+            return Err(Corruption::new(
+                "task-context agent must not inherit a base leaf",
+            ));
         }
         (AgentContextMode::Parent, None) => {
             return Err(Corruption::new("parent-context agent requires a base leaf"));
@@ -1086,8 +1130,7 @@ fn spawn_tool_assignment<'a>(
                 ))
             })
     };
-    if string_field("task_name")? != spawn.task_name
-        || string_field("model")? != spawn.model.model
+    if string_field("task_name")? != spawn.task_name || string_field("model")? != spawn.model.model
     {
         return Err(Corruption::new(format!(
             "agent {} spawn fact differs from its durable effective arguments",
@@ -1118,14 +1161,13 @@ fn spawn_tool_assignment<'a>(
             spawn.agent_id
         )));
     }
-    if let Some(thinking) = fields.get("thinking") {
-        if thinking.as_str() != Some(spawn.thinking.as_str()) {
+    if let Some(thinking) = fields.get("thinking")
+        && thinking.as_str() != Some(spawn.thinking.as_str()) {
             return Err(Corruption::new(format!(
                 "agent {} thinking differs from its durable effective arguments",
                 spawn.agent_id
             )));
         }
-    }
     Ok(task)
 }
 
@@ -1137,8 +1179,7 @@ fn validate_apply_tool_args(
         Corruption::new("apply_agent_changes effective arguments are not an object")
     })?;
     if fields.len() != 1
-        || fields.get("delta_id").and_then(crate::JsonValue::as_str)
-            != Some(delta_id.as_str())
+        || fields.get("delta_id").and_then(crate::JsonValue::as_str) != Some(delta_id.as_str())
     {
         return Err(Corruption::new(format!(
             "apply_agent_changes intent does not authorize workspace delta {delta_id}"
@@ -1163,7 +1204,11 @@ fn validate_child_operation_identity(
 }
 
 fn validate_delta(delta: &WorkspaceDeltaFact) -> Result<(), Corruption> {
-    validate_bounded_nonempty("workspace delta base commit", &delta.base_commit, MAX_COMMIT_BYTES)?;
+    validate_bounded_nonempty(
+        "workspace delta base commit",
+        &delta.base_commit,
+        MAX_COMMIT_BYTES,
+    )?;
     validate_bounded_nonempty(
         "workspace delta result commit",
         &delta.result_commit,
@@ -1191,9 +1236,11 @@ fn validate_delta(delta: &WorkspaceDeltaFact) -> Result<(), Corruption> {
             artifact_id: _,
             byte_len,
             media_type,
-        } if *byte_len > 0 => {
-            validate_bounded_nonempty("workspace delta patch media type", media_type, MAX_DISPLAY_NAME_BYTES)
-        }
+        } if *byte_len > 0 => validate_bounded_nonempty(
+            "workspace delta patch media type",
+            media_type,
+            MAX_DISPLAY_NAME_BYTES,
+        ),
         PayloadRef::Artifact { .. } => Err(Corruption::new(
             "workspace delta patch artifact must have a nonzero byte length",
         )),
@@ -1207,7 +1254,9 @@ fn validate_terminal(terminal: &AgentTaskFinishedFact) -> Result<(), Corruption>
     match &terminal.report {
         PayloadRef::Inline(value) => {
             let Some(report) = value.as_str() else {
-                return Err(Corruption::new("inline agent report must be a UTF-8 string"));
+                return Err(Corruption::new(
+                    "inline agent report must be a UTF-8 string",
+                ));
             };
             if report.len() > MAX_INLINE_REPORT_BYTES {
                 return Err(Corruption::new(
@@ -1216,7 +1265,11 @@ fn validate_terminal(terminal: &AgentTaskFinishedFact) -> Result<(), Corruption>
             }
         }
         PayloadRef::Artifact { media_type, .. } => {
-            validate_bounded_nonempty("agent report media type", media_type, MAX_DISPLAY_NAME_BYTES)?;
+            validate_bounded_nonempty(
+                "agent report media type",
+                media_type,
+                MAX_DISPLAY_NAME_BYTES,
+            )?;
         }
     }
     Ok(())
@@ -1256,7 +1309,10 @@ fn validate_changed_paths(paths: &[String]) -> Result<(), Corruption> {
                 "workspace delta path must be a bounded normalized repository-relative path",
             ));
         }
-        if path.split('/').any(|segment| segment.is_empty() || segment == "." || segment == "..") {
+        if path
+            .split('/')
+            .any(|segment| segment.is_empty() || segment == "." || segment == "..")
+        {
             return Err(Corruption::new(
                 "workspace delta path contains an empty, current, or parent component",
             ));

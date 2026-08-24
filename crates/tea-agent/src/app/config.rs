@@ -18,6 +18,7 @@ const DEFAULT_MAX_TOTAL_PER_OPERATION: u32 = 16;
 const DEFAULT_TIMEOUT_SECONDS: u64 = 900;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Default)]
 pub(super) struct TuiConfig {
     pub(super) features: FeatureConfig,
     pub(super) subagents: SubagentTuiConfig,
@@ -37,14 +38,6 @@ pub(super) struct SubagentTuiConfig {
     pub(super) timeout: Duration,
 }
 
-impl Default for TuiConfig {
-    fn default() -> Self {
-        Self {
-            features: FeatureConfig::default(),
-            subagents: SubagentTuiConfig::default(),
-        }
-    }
-}
 
 impl Default for SubagentTuiConfig {
     fn default() -> Self {
@@ -84,7 +77,11 @@ impl std::fmt::Display for ConfigError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(formatter, "invalid TUI config {}", self.path.display())?;
         if let Some(location) = self.location {
-            write!(formatter, " at line {}, column {}", location.line, location.column)?;
+            write!(
+                formatter,
+                " at line {}, column {}",
+                location.line, location.column
+            )?;
         }
         write!(formatter, ": {}", self.message)
     }
@@ -97,7 +94,9 @@ pub(super) fn load_tui_config(tea_home: &Path) -> Result<TuiConfig, ConfigError>
     let path = tea_home.join("config.toml");
     let initial_metadata = match fs::symlink_metadata(&path) {
         Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(TuiConfig::default()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(TuiConfig::default())
+        }
         Err(error) => {
             return Err(ConfigError::new(
                 path,
@@ -107,7 +106,11 @@ pub(super) fn load_tui_config(tea_home: &Path) -> Result<TuiConfig, ConfigError>
         }
     };
     if initial_metadata.file_type().is_symlink() {
-        return Err(ConfigError::new(path, None, "config.toml must not be a symlink"));
+        return Err(ConfigError::new(
+            path,
+            None,
+            "config.toml must not be a symlink",
+        ));
     }
     if !initial_metadata.is_file() {
         return Err(ConfigError::new(
@@ -121,7 +124,9 @@ pub(super) fn load_tui_config(tea_home: &Path) -> Result<TuiConfig, ConfigError>
     // without the handle identity check would leave a check/use window.
     let mut file = match open_config_file(&path) {
         Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(TuiConfig::default()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(TuiConfig::default())
+        }
         Err(error) => {
             return Err(ConfigError::new(
                 path,
@@ -145,7 +150,11 @@ pub(super) fn load_tui_config(tea_home: &Path) -> Result<TuiConfig, ConfigError>
         )
     })?;
     if path_metadata.file_type().is_symlink() {
-        return Err(ConfigError::new(path, None, "config.toml must not be a symlink"));
+        return Err(ConfigError::new(
+            path,
+            None,
+            "config.toml must not be a symlink",
+        ));
     }
     if !opened_metadata.is_file() || !path_metadata.is_file() {
         return Err(ConfigError::new(
@@ -173,7 +182,11 @@ pub(super) fn load_tui_config(tea_home: &Path) -> Result<TuiConfig, ConfigError>
         .take(MAX_CONFIG_BYTES + 1)
         .read_to_end(&mut bytes)
         .map_err(|error| {
-            ConfigError::new(path.clone(), None, format!("could not read config file: {error}"))
+            ConfigError::new(
+                path.clone(),
+                None,
+                format!("could not read config file: {error}"),
+            )
         })?;
     if bytes.len() as u64 > MAX_CONFIG_BYTES {
         return Err(ConfigError::new(
@@ -201,11 +214,27 @@ fn open_config_file(path: &Path) -> std::io::Result<File> {
 
     // `O_NOFOLLOW` closes the precheck/open race and `O_NONBLOCK` ensures a
     // raced special file cannot hang the terminal before handle validation.
-    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "freebsd", target_os = "dragonfly", target_os = "openbsd", target_os = "netbsd"))]
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "dragonfly",
+        target_os = "openbsd",
+        target_os = "netbsd"
+    ))]
     const SAFE_OPEN_FLAGS: i32 = 0x100 | 0x4;
     #[cfg(any(target_os = "linux", target_os = "android"))]
     const SAFE_OPEN_FLAGS: i32 = 0x20_000 | 0x800;
-    #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "freebsd", target_os = "dragonfly", target_os = "openbsd", target_os = "netbsd", target_os = "linux", target_os = "android")))]
+    #[cfg(not(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "dragonfly",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "linux",
+        target_os = "android"
+    )))]
     const SAFE_OPEN_FLAGS: i32 = 0;
 
     OpenOptions::new()
@@ -281,12 +310,7 @@ fn parse_features(path: &Path, source: &str, item: &Item) -> Result<FeatureConfi
     let subagents = match table.get("subagents") {
         None => false,
         Some(item) => item.as_bool().ok_or_else(|| {
-            error_for_item(
-                path,
-                source,
-                item,
-                "[features].subagents must be a boolean",
-            )
+            error_for_item(path, source, item, "[features].subagents must be a boolean")
         })?,
     };
     Ok(FeatureConfig { subagents })
@@ -321,7 +345,10 @@ fn parse_subagents(
     )?;
 
     let provider = optional_string(path, source, table, "provider")?;
-    if provider.as_deref().is_some_and(|value| value.trim().is_empty()) {
+    if provider
+        .as_deref()
+        .is_some_and(|value| value.trim().is_empty())
+    {
         return Err(error_for_item(
             path,
             source,
@@ -380,8 +407,7 @@ fn parse_subagents(
     Ok(SubagentTuiConfig {
         provider,
         models,
-        max_concurrent: NonZeroU32::new(max_concurrent)
-            .expect("minimum max_concurrent is one"),
+        max_concurrent: NonZeroU32::new(max_concurrent).expect("minimum max_concurrent is one"),
         max_total_per_operation: NonZeroU32::new(max_total_per_operation)
             .expect("minimum max_total_per_operation is one"),
         timeout: Duration::from_secs(timeout_seconds),
@@ -436,9 +462,9 @@ fn optional_models(
     let Some(item) = table.get("models") else {
         return Ok(None);
     };
-    let array = item.as_array().ok_or_else(|| {
-        error_for_item(path, source, item, "[subagents].models must be an array")
-    })?;
+    let array = item
+        .as_array()
+        .ok_or_else(|| error_for_item(path, source, item, "[subagents].models must be an array"))?;
     let mut models = Vec::with_capacity(array.len());
     let mut known = BTreeSet::new();
     for value in array.iter() {
@@ -491,9 +517,9 @@ fn optional_u32(
             format!("[subagents].{key} must be an integer"),
         )
     })?;
-    let value = u32::try_from(value).ok().filter(|value| {
-        (*value >= minimum) && (*value <= maximum)
-    });
+    let value = u32::try_from(value)
+        .ok()
+        .filter(|value| (*value >= minimum) && (*value <= maximum));
     value.ok_or_else(|| {
         error_for_item(
             path,
@@ -524,9 +550,9 @@ fn optional_u64(
             format!("[subagents].{key} must be an integer"),
         )
     })?;
-    let value = u64::try_from(value).ok().filter(|value| {
-        (*value >= minimum) && (*value <= maximum)
-    });
+    let value = u64::try_from(value)
+        .ok()
+        .filter(|value| (*value >= minimum) && (*value <= maximum));
     value.ok_or_else(|| {
         error_for_item(
             path,
@@ -574,7 +600,9 @@ fn location_from_offset(source: &[u8], offset: usize) -> Option<ConfigLocation> 
     let line = prefix.bytes().filter(|byte| *byte == b'\n').count() + 1;
     let column = prefix
         .rsplit_once('\n')
-        .map_or(prefix.chars().count() + 1, |(_, line)| line.chars().count() + 1);
+        .map_or(prefix.chars().count() + 1, |(_, line)| {
+            line.chars().count() + 1
+        });
     Some(ConfigLocation { line, column })
 }
 
@@ -612,7 +640,10 @@ mod tests {
     #[test]
     fn missing_and_empty_files_use_defaults() {
         let missing = tea_home("missing");
-        assert_eq!(load_tui_config(&missing).expect("missing defaults"), TuiConfig::default());
+        assert_eq!(
+            load_tui_config(&missing).expect("missing defaults"),
+            TuiConfig::default()
+        );
         assert!(
             !missing.join("config.toml").exists(),
             "loading defaults must not create config.toml"
@@ -620,7 +651,10 @@ mod tests {
 
         let empty = tea_home("empty");
         write_config(&empty, "");
-        assert_eq!(load_tui_config(&empty).expect("empty defaults"), TuiConfig::default());
+        assert_eq!(
+            load_tui_config(&empty).expect("empty defaults"),
+            TuiConfig::default()
+        );
     }
 
     #[test]
@@ -667,7 +701,11 @@ timeout_seconds = 600
 
     #[test]
     fn rejects_unknown_root_feature_and_subagent_keys() {
-        expect_error(&tea_home("unknown-root"), "other = true\n", "unknown root key");
+        expect_error(
+            &tea_home("unknown-root"),
+            "other = true\n",
+            "unknown root key",
+        );
         expect_error(
             &tea_home("unknown-root-table"),
             "[other]\nenabled = true\n",
@@ -688,7 +726,10 @@ timeout_seconds = 600
     #[test]
     fn rejects_duplicate_keys_and_wrong_value_types_with_a_location() {
         let duplicate = tea_home("duplicate");
-        write_config(&duplicate, "[features]\nsubagents = true\nsubagents = false\n");
+        write_config(
+            &duplicate,
+            "[features]\nsubagents = true\nsubagents = false\n",
+        );
         let error = load_tui_config(&duplicate).expect_err("duplicate key rejects");
         assert_eq!(error.path(), duplicate.join("config.toml").as_path());
         assert!(error.to_string().contains("line"), "{error}");
@@ -762,7 +803,10 @@ timeout_seconds = 600
         fs::write(&target, "[features]\nsubagents = true\n").expect("target writes");
         symlink(&target, home.join("config.toml")).expect("config symlink creates");
         let error = load_tui_config(&home).expect_err("symlink rejects");
-        assert!(error.to_string().contains("must not be a symlink"), "{error}");
+        assert!(
+            error.to_string().contains("must not be a symlink"),
+            "{error}"
+        );
     }
 
     #[cfg(unix)]
@@ -783,14 +827,20 @@ timeout_seconds = 600
         );
         symlink(&fifo, home.join("config.toml")).expect("config symlink creates");
         let error = load_tui_config(&home).expect_err("FIFO symlink rejects before open");
-        assert!(error.to_string().contains("must not be a symlink"), "{error}");
+        assert!(
+            error.to_string().contains("must not be a symlink"),
+            "{error}"
+        );
     }
 
     #[test]
     fn rejects_a_file_larger_than_the_config_limit() {
         let home = tea_home("oversized");
-        fs::write(home.join("config.toml"), vec![b'#'; MAX_CONFIG_BYTES as usize + 1])
-            .expect("oversized config writes");
+        fs::write(
+            home.join("config.toml"),
+            vec![b'#'; MAX_CONFIG_BYTES as usize + 1],
+        )
+        .expect("oversized config writes");
         let error = load_tui_config(&home).expect_err("oversized config rejects");
         assert!(error.to_string().contains("256 KiB"), "{error}");
     }
