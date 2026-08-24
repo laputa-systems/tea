@@ -20,7 +20,10 @@ use tea_core::harness::{
     ToolPresentationDescriptor,
 };
 use tea_core::hooks::HookSet;
-use tea_core::runtime::{HarnessEvent, HarnessIdentity, RuntimeServices, SessionRuntime, TeaEvent};
+use tea_core::runtime::{
+    HarnessEvent, HarnessIdentity, RuntimePolicyIdentities, RuntimeServices, SessionRuntime,
+    TeaEvent,
+};
 use tea_core::state::{ModelDescriptor, ThinkingLevel};
 use tea_core::tool::ToolExecutionMode;
 use tea_luau::LuauExtensionEngine;
@@ -329,6 +332,7 @@ fn snapshot_spec(
     configuration: &AgentConfiguration,
     profile: &ModelHarnessProfile,
     mode: HarnessMode,
+    identities: RuntimePolicyIdentities,
 ) -> HarnessSnapshotSpec {
     let tools = configuration
         .tools
@@ -360,15 +364,19 @@ fn snapshot_spec(
         plugin_prompt_sections: Vec::new(),
         tool_presentations: tools,
         plugin_tool_presentations: Vec::new(),
-        hook_bundle_digest: Digest::from_bytes("tea-pi-shootout-openai-context-hook-v1"),
+        // Snapshot policy identities must come from the exact RuntimeServices
+        // instance that will resolve and execute this snapshot. Keeping these
+        // values coupled prevents the resolver's executable-policy guard from
+        // rejecting an otherwise valid evaluation before the provider runs.
+        hook_bundle_digest: identities.hook_bundle_digest,
         capability_bindings: Vec::new(),
         resource_limits: HarnessResourceLimits {
             source_bytes: 16 * 1024,
             ..HarnessResourceLimits::default()
         },
-        compaction_policy_digest: Digest::from_bytes("tea-pi-shootout-no-compaction-v1"),
-        tool_projection_digest: Digest::from_bytes("tea-core-recoverable-projection-v1"),
-        failure_policy_digest: Digest::from_bytes("tea-core-tool-failure-policy-v1"),
+        compaction_policy_digest: identities.compaction_policy_digest,
+        tool_projection_digest: identities.tool_projection_digest,
+        failure_policy_digest: identities.failure_policy_digest,
     }
 }
 
@@ -824,6 +832,17 @@ fn main() -> Result<(), String> {
         revision: None,
     };
     let model_profile = model_profile(&model)?;
+    // Build the live services before seeding the immutable snapshot so its
+    // policy identities are copied from the same executable configuration.
+    // `AgentConfiguration` is cloned only for this composition step; the
+    // original is retained to describe the snapshot surface.
+    let services = RuntimeServices::from_agent_configuration(
+        provider.clone(),
+        configuration.clone(),
+    )
+    .model(model.clone())
+    .thinking_level(args.thinking);
+    let runtime_identities = services.runtime_policy_identities();
     let session_root = args
         .evidence_dir
         .parent()
@@ -871,6 +890,7 @@ fn main() -> Result<(), String> {
             &configuration,
             &model_profile,
             args.harness_mode,
+            runtime_identities,
         ))
         .map_err(|error| error.to_string())?;
     let revision = repository
@@ -913,9 +933,6 @@ fn main() -> Result<(), String> {
             },
         )
         .map_err(|error| error.to_string())?;
-    let services = RuntimeServices::from_agent_configuration(provider.clone(), configuration)
-        .model(model)
-        .thinking_level(args.thinking);
     let manager = Arc::new(
         HarnessResolver::new(repository, services, Default::default())
             .self_extension_mode(args.harness_mode.extension_mode()),
@@ -1081,7 +1098,14 @@ fn main() -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{HarnessMode, REQUIRED_MODEL, sha256};
+    use std::sync::Arc;
+
+    use tea_core::tool::ToolRegistry;
+
+    use super::{
+        model_profile, sha256, snapshot_spec, AgentConfiguration, HarnessMode, ModelDescriptor,
+        OpenAiContextHook, OpenRouterConfig, OpenRouterProvider, REQUIRED_MODEL, RuntimeServices,
+    };
     #[test]
     fn requested_laguna_s_model_is_not_the_xs_model() {
         assert_eq!(REQUIRED_MODEL, "poolside/laguna-s-2.1:free");
@@ -1094,5 +1118,41 @@ mod tests {
             sha256(b"abc"),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
+    }
+
+    #[test]
+    fn snapshot_policy_identities_match_the_runtime_services() {
+        let configuration = AgentConfiguration::new(
+            "shootout test prompt",
+            ToolRegistry::default(),
+            Arc::new(OpenAiContextHook),
+        );
+        let model = ModelDescriptor {
+            provider: "openrouter".into(),
+            model: REQUIRED_MODEL.into(),
+            revision: None,
+        };
+        let profile = model_profile(&model).expect("test model profile");
+        let provider = Arc::new(OpenRouterProvider::new(OpenRouterConfig::new(
+            "test-key",
+            REQUIRED_MODEL,
+        )));
+        let services =
+            RuntimeServices::from_agent_configuration(provider, configuration.clone())
+                .model(model)
+                .thinking_level(super::ThinkingLevel::High);
+        let identities = services.runtime_policy_identities();
+        let snapshot = snapshot_spec(&configuration, &profile, HarnessMode::Jit, identities);
+
+        assert_eq!(snapshot.hook_bundle_digest, identities.hook_bundle_digest);
+        assert_eq!(
+            snapshot.compaction_policy_digest,
+            identities.compaction_policy_digest
+        );
+        assert_eq!(
+            snapshot.tool_projection_digest,
+            identities.tool_projection_digest
+        );
+        assert_eq!(snapshot.failure_policy_digest, identities.failure_policy_digest);
     }
 }

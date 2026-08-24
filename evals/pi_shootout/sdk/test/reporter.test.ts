@@ -39,5 +39,6 @@ test("trace never serializes an environment object", () => {
 
 test("retains a terminal model failure instead of relabeling it completed", () => {
 	assert.equal(terminalFailure({ messages: [{ role: "assistant", stopReason: "error" }] }), "pi_model_error");
+	assert.equal(terminalFailure({ messages: [{ role: "assistant", stopReason: "error", errorMessage: "HTTP 429: too many requests" }] }), "openrouter_response_429");
 	assert.equal(terminalFailure({ messages: [{ role: "assistant", stopReason: "stop" }] }), null);
 });
