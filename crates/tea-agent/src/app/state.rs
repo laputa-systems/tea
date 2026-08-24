@@ -881,10 +881,6 @@ impl AppState {
         self.status = UiStatus::Notice(text.into());
     }
 
-    pub(super) fn error(&mut self, text: impl Into<String>) {
-        self.status = UiStatus::Error(text.into());
-    }
-
     pub(crate) fn welcome_line(&mut self) {
         self.push_entry(
             None,

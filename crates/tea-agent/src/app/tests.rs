@@ -662,7 +662,7 @@ fn cli_parses_explicit_tea_home() {
 }
 
 #[test]
-fn startup_does_not_open_model_picker_without_a_saved_selection() {
+fn startup_does_not_open_model_picker_without_an_explicit_selection() {
     let tea_home = test_tea_home("startup");
     let options = CliOptions::parse(
         [
@@ -683,131 +683,95 @@ fn startup_does_not_open_model_picker_without_a_saved_selection() {
 }
 
 #[test]
-fn restoration_error_has_a_wrapped_red_footer_line() {
-    let mut state = AppState::new();
-    state.error("last model could not be restored: OPENROUTER_API_KEY is required for OpenRouter");
-
-    let presentation = crate::render::main_presentation(
-        &state,
-        &tea_providers::ProviderRegistry::new(),
-        Size {
-            width: 40,
-            height: 8,
-        },
-        0,
-    );
-
-    assert_eq!(
-        presentation.live[2].text(),
-        "provider/model unknown · effort off"
-    );
-    assert_eq!(
-        presentation.live[3].text(),
-        "last model could not be restored:"
-    );
-    assert_eq!(
-        presentation.live[4].text(),
-        "OPENROUTER_API_KEY is required for"
-    );
-    assert_eq!(presentation.live[5].text(), "OpenRouter");
-    assert_eq!(
-        style_at(&presentation.live[4], 0).foreground,
-        Some(Color::Red)
-    );
-}
-
-#[test]
-fn failed_saved_model_restore_keeps_the_provider_and_model_visible() {
-    let tea_home = test_tea_home("failed-last-model");
-    let saved = ModelDescriptor {
-        provider: "missing-provider".into(),
-        model: "missing-model".into(),
-        revision: None,
-    };
-    super::preferences::save_last_model(&tea_home, &saved)
-        .expect("test model preference should save");
-    let options = CliOptions::parse(
+fn session_resumption_restores_its_model_without_global_preferences() {
+    let tea_home = test_tea_home("session-model");
+    let workspace = tea_home.join("workspace");
+    fs::create_dir(&workspace).expect("workspace should be created");
+    let workspace = fs::canonicalize(workspace).expect("workspace should canonicalize");
+    let first_options = CliOptions::parse(
         [
             "tea",
             "--tea-home",
             tea_home.to_str().expect("UTF-8 test path"),
+            "--cwd",
+            workspace.to_str().expect("UTF-8 workspace path"),
+            "--provider",
+            mock::PROVIDER_ID,
         ]
         .map(OsString::from),
     )
-    .expect("startup options parse");
-    let mut app = App::new(options);
-
-    app.assemble_host().expect("host should assemble");
-
-    assert_eq!(app.state().selected_model.as_ref(), Some(&saved));
-    assert_eq!(
-        app.state().footer_lines(&app.registry)[0],
-        "missing-provider/missing-model · effort off"
-    );
-    assert!(matches!(app.state().status(), UiStatus::Error(_)));
-    let _ = fs::remove_dir_all(tea_home);
-}
-
-#[test]
-fn sending_after_provider_configuration_error_does_not_open_model_picker() {
-    let options = CliOptions::parse(["tea"].map(OsString::from)).expect("options parse");
-    let mut app = App::new(options);
-    app.state.selected_model = Some(ModelDescriptor {
-        provider: "openrouter".into(),
-        model: "poolside/laguna-xs-2.1:free".into(),
-        revision: None,
-    });
-    app.state
-        .error("last model could not be restored: OPENROUTER_API_KEY is required for OpenRouter");
-    app.state.composer_mut().replace_from_editor("fresh prompt");
-
-    app.submit_composer()
-        .expect("submitting a prompt should not fail");
-
-    assert_eq!(app.state.surface(), UiSurface::None);
-    assert_eq!(app.state.composer().text(), "fresh prompt");
-    assert!(matches!(app.state.status(), UiStatus::Error(_)));
-
-    app.state.composer_mut().replace_from_editor("/model");
-    app.submit_composer()
-        .expect("model recovery command should work");
-    assert_eq!(app.state.surface(), UiSurface::ModelPicker);
-}
-
-#[test]
-fn selected_model_is_saved_and_restored_without_starting_the_picker() {
-    let tea_home = test_tea_home("last-model");
-    let options = CliOptions::parse(
-        [
-            "tea",
-            "--tea-home",
-            tea_home.to_str().expect("UTF-8 test path"),
-        ]
-        .map(OsString::from),
-    )
-    .expect("startup options parse");
-    let mut first = App::new(options.clone());
+    .expect("first startup options parse");
+    let mut first = App::new(first_options);
     first.assemble_host().expect("first host should assemble");
-    first
-        .select_model(
-            "local".into(),
-            tea_providers::local::LAGUNA_XS_2_1_MODEL.into(),
-        )
-        .expect("local model should be selectable");
-    assert!(tea_home.join("last-model.json").is_file());
+    let harness = first
+        .ensure_durable_harness()
+        .expect("first durable session should create");
+    let session_id = harness
+        .snapshot()
+        .expect("created session snapshot")
+        .header()
+        .session_id
+        .to_string();
+    drop(harness);
+    drop(first);
 
-    let mut second = App::new(options);
-    second.assemble_host().expect("second host should assemble");
-
-    assert_eq!(second.state().surface(), UiSurface::None);
-    assert_eq!(
-        second
-            .state()
-            .selected_model
-            .as_ref()
-            .map(|model| (model.provider.as_str(), model.model.as_str(),)),
-        Some(("local", tea_providers::local::LAGUNA_XS_2_1_MODEL))
+    assert!(
+        !tea_home.join("last-model.json").exists(),
+        "a model selection must not create a global preference"
     );
+    let sessions = super::durable::list_host_sessions(&tea_home, &workspace)
+        .expect("session should be listed");
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].id, session_id);
+    let session_directory = tea_home
+        .join("sessions")
+        .join(
+            fs::read_dir(tea_home.join("sessions"))
+                .expect("workspace directory should be present")
+                .next()
+                .expect("workspace directory entry should be present")
+                .expect("workspace directory should be readable")
+                .file_name(),
+        )
+        .join(format!("{session_id}.tea"));
+    fs::remove_file(session_directory.join("meta.json"))
+        .expect("derived session metadata cache should be removable");
+    fs::write(
+        tea_home.join("last-model.json"),
+        r#"{"model":"ignored-legacy-model","provider":"local","version":1}"#,
+    )
+    .expect("legacy global preference fixture should be written");
+
+    let resumed_options = CliOptions::parse(
+        [
+            "tea",
+            "--tea-home",
+            tea_home.to_str().expect("UTF-8 test path"),
+            "--cwd",
+            workspace.to_str().expect("UTF-8 workspace path"),
+        ]
+        .map(OsString::from),
+    )
+    .expect("resumed startup options parse");
+    let mut resumed = App::new(resumed_options);
+    resumed.assemble_host().expect("resumed host should assemble");
+    assert!(
+        resumed.state().selected_model.is_none(),
+        "a legacy global preference must not choose the startup model"
+    );
+
+    resumed
+        .resume_session(&session_id)
+        .expect("session resumption should restore its durable model");
+    assert_eq!(
+        resumed.state().selected_model.as_ref(),
+        Some(&ModelDescriptor {
+            provider: mock::PROVIDER_ID.into(),
+            model: mock::DEFAULT_MODEL_ID.into(),
+            revision: None,
+        })
+    );
+    assert!(resumed.durable_harness.is_some());
     let _ = fs::remove_dir_all(tea_home);
 }
 

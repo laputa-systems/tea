@@ -11,7 +11,6 @@ use super::error::AppError;
 use super::host::model_candidates;
 use super::mock;
 use super::nonblocking_operations::NonblockingCodingOperations;
-use super::preferences::save_last_model;
 use super::runtime::App;
 use super::state::{Picker, UiSurface};
 use super::support::utc_date;
@@ -62,17 +61,8 @@ impl App {
         else {
             return Err(AppError::Setup("Tea home is not initialized".into()));
         };
-        let summary = list_host_sessions(home, workspace)?
-            .into_iter()
-            .find(|summary| summary.id == id)
-            .ok_or_else(|| AppError::Setup(format!("durable session {id} does not exist")))?;
-        if let Some(model) = summary.model {
-            self.select_model(model.provider, model.model)?;
-        } else {
-            return Err(AppError::Setup(
-                "durable session is missing its immutable model identity".into(),
-            ));
-        }
+        let model = super::durable::read_host_session_model(home, workspace, id)?;
+        self.select_model(model.provider, model.model)?;
         self.reopen_durable_session(id)
     }
 
@@ -318,13 +308,6 @@ impl App {
         self.durable_subscription = None;
         self.state.clear_history();
         self.state.notice("model selected");
-        if let Some(home) = self.tea_home.as_ref() {
-            if let Err(error) = save_last_model(home, &descriptor) {
-                self.state.notice(format!(
-                    "model selected but preference was not saved: {error}"
-                ));
-            }
-        }
         Ok(())
     }
 

@@ -19,7 +19,6 @@ use super::error::AppError;
 use super::host::host_configuration;
 use super::mock;
 use super::nonblocking_operations::NonblockingCodingOperations;
-use super::preferences::load_last_model;
 use super::state::{AppState, UiStatus};
 use std::sync::Arc;
 use tea_core::state::ThinkingLevel;
@@ -156,17 +155,11 @@ impl App {
         let explicit_provider = self.options.provider().map(OsStr::to_owned);
         let explicit_model = self.options.model().map(OsStr::to_owned);
         match (explicit_provider.as_deref(), explicit_model.as_deref()) {
-            (None, None) => {
-                self.restore_last_model(None);
-            }
+            (None, None) => {}
             (Some(provider), None) if provider == OsStr::new(mock::PROVIDER_ID) => {
                 self.select_model(mock::PROVIDER_ID.into(), mock::DEFAULT_MODEL_ID.into())?
             }
-            (Some(provider), None) => {
-                if !self.restore_last_model(provider.to_str()) {
-                    self.state.notice("select a model with /model");
-                }
-            }
+            (Some(_), None) => self.state.notice("select a model with /model"),
             (Some(provider), Some(model)) => {
                 self.select_model(os_text(provider, "--provider")?, os_text(model, "--model")?)?
             }
@@ -177,32 +170,6 @@ impl App {
             }
         }
         Ok(())
-    }
-
-    fn restore_last_model(&mut self, provider_filter: Option<&str>) -> bool {
-        let Some(home) = self.tea_home.as_ref() else {
-            return false;
-        };
-        match load_last_model(home) {
-            Ok(Some(model))
-                if provider_filter.is_none_or(|provider| provider == model.provider) =>
-            {
-                let provider = model.provider.clone();
-                let model_id = model.model.clone();
-                self.state.selected_model = Some(model);
-                if let Err(error) = self.select_model(provider, model_id) {
-                    self.state
-                        .error(format!("last model could not be restored: {error}"));
-                }
-                true
-            }
-            Ok(Some(_)) | Ok(None) => false,
-            Err(error) => {
-                self.state
-                    .error(format!("last model could not be read: {error}"));
-                true
-            }
-        }
     }
 
     async fn event_loop(&mut self, terminal: &mut TerminalGuard) -> Result<(), AppError> {

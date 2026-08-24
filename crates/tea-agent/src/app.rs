@@ -15,7 +15,6 @@ mod mock;
 mod nonblocking_operations;
 mod persistence;
 mod picker;
-mod preferences;
 mod runtime;
 mod state;
 mod support;

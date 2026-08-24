@@ -303,6 +303,39 @@ pub(super) fn list_host_sessions(
     Ok(sessions)
 }
 
+/// Read the model required by one named session from the validated durable
+/// header. Session-picker metadata is intentionally not consulted here: it is
+/// a disposable discovery cache and must not determine resume behavior.
+pub(super) fn read_host_session_model(
+    tea_home: &Path,
+    workspace: &Path,
+    session_id: &str,
+) -> Result<ModelDescriptor, AppError> {
+    let session_id = SessionId::new(session_id.to_owned())
+        .map_err(|error| AppError::Setup(error.to_string()))?;
+    let directory =
+        session_workspace_root(tea_home, workspace).join(format!("{}.tea", session_id.as_str()));
+    let inspection = JsonlSession::inspect(&directory)?;
+    let header = host_session_header_from_snapshot(&inspection.snapshot)?;
+    if header.session_id != session_id.as_str() {
+        return Err(AppError::Setup(format!(
+            "durable session directory {} disagrees with its immutable header",
+            directory.display()
+        )));
+    }
+    if header.workspace != workspace.to_string_lossy() {
+        return Err(AppError::Setup(format!(
+            "durable session {} belongs to workspace {}; current workspace is {}",
+            session_id,
+            header.workspace,
+            workspace.display()
+        )));
+    }
+    header.model.ok_or_else(|| {
+        AppError::Setup("durable session header is missing its immutable model identity".into())
+    })
+}
+
 /// Reconstruct the terminal host's disposable caches from one validated v1
 /// session prefix. The JSONL opener refreshes `HEAD`; `meta.json` is then
 /// replaced from the same snapshot while the writer lock remains held.

@@ -78,6 +78,11 @@ identity. Each is a v1 session directory with its colocated object store.
 - /thinking selects the reasoning effort for future prompts.
 - /quit exits the terminal.
 
+The selected provider/model is sealed in each session's durable header. Opening
+Tea without an explicit model starts unselected; `/resume` restores and
+configures the model required by the selected session rather than consulting a
+global preference.
+
 Normal composer input always starts or continues the managed harness. During an
 active operation, the terminal projects durable session and live harness events
 into the transcript without owning their state.
