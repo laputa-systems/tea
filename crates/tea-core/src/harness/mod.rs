@@ -11,7 +11,10 @@ pub mod profile;
 pub mod resolver;
 mod seed;
 
-pub use capability::{CapabilityBindingError, PluginCapabilityBinding, PluginCapabilityCatalog};
+pub use capability::{
+    CapabilityBindingError, ExtensionStateCapability, PluginCapabilityBinding,
+    PluginCapabilityCatalog,
+};
 pub use error::HarnessError;
 pub use lineage::{
     CandidateHypothesis, CandidateValidation, CapabilityBindingRef, HarnessActor,

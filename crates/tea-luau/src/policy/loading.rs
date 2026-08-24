@@ -2,9 +2,10 @@
 
 use super::parsing::{
     parse_after_tool_output, parse_context_projection, parse_decision, parse_declaration,
-    parse_resume_state, policy_result_fields, runtime_error,
+    parse_extension_result, parse_idle_result, parse_resume_state, policy_result_fields,
+    runtime_error,
 };
-use super::types::{PolicyRuntime, PolicyTool};
+use super::types::{PolicyHostCommand, PolicyRuntime, PolicyTool};
 use super::{
     LuaPolicy, PolicyAfterToolOutput, PolicyContextInput, PolicyContextProjectionPatch,
     PolicyError, PolicyLimits,
@@ -17,6 +18,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tea_core::hooks::{AfterToolCall, BeforeToolCall};
 use tea_core::tool::{AgentToolResult, ToolCall};
+use tea_core::harness::extension::{
+    ExtensionCommandInput, ExtensionCommandResult, ExtensionIdleInput, ExtensionIdleResult,
+    ExtensionOperationOutcome,
+};
 use tea_protocol::{JsonNumber, JsonValue};
 
 const POLICY_CHUNK_NAME: &str = "tea-policy.luau";
@@ -94,11 +99,14 @@ impl LuaPolicy {
                 after_tool_call: declaration.after_tool_call,
                 context_projection: declaration.context_projection,
                 resume_hooks: declaration.resume_hooks,
+                host_commands: declaration.host_command_handlers,
+                on_idle: declaration.on_idle,
                 interrupt_budget,
                 max_interrupt_checks: limits.max_interrupt_checks,
             }),
             prompt_sections: declaration.prompt_sections,
             tools: declaration.tools,
+            host_commands: declaration.host_commands,
         })
     }
 
@@ -192,11 +200,14 @@ impl LuaPolicy {
                 after_tool_call: declaration.after_tool_call,
                 context_projection: declaration.context_projection,
                 resume_hooks: declaration.resume_hooks,
+                host_commands: declaration.host_command_handlers,
+                on_idle: declaration.on_idle,
                 interrupt_budget,
                 max_interrupt_checks: limits.max_interrupt_checks,
             }),
             prompt_sections: declaration.prompt_sections,
             tools: declaration.tools,
+            host_commands: declaration.host_commands,
         })
     }
 
@@ -208,6 +219,55 @@ impl LuaPolicy {
     /// Return the ordered, authority-free tool declarations.
     pub fn tools(&self) -> &[PolicyTool] {
         &self.tools
+    }
+
+    /// Return immutable host-local command metadata.
+    pub fn host_commands(&self) -> &[PolicyHostCommand] {
+        &self.host_commands
+    }
+
+    /// Evaluate one constrained terminal command inside the policy VM.
+    pub fn execute_host_command(
+        &self,
+        name: &str,
+        input: &ExtensionCommandInput,
+    ) -> Result<ExtensionCommandResult, PolicyError> {
+        let runtime = self.runtime.lock().map_err(|_| PolicyError::Runtime {
+            message: "policy VM lock was poisoned".to_owned(),
+        })?;
+        let handler = runtime
+            .host_commands
+            .iter()
+            .find(|handler| handler.name == name)
+            .ok_or_else(|| PolicyError::Contract {
+                message: format!("unknown declared extension command {name:?}"),
+            })?;
+        reset_interrupt_budget(&runtime);
+        let input = extension_command_input_table(&runtime.lua, input)?;
+        let output = handler.function.call::<Value>(input).map_err(runtime_error)?;
+        parse_extension_result(output)
+    }
+
+    /// Return whether the policy contributes an idle continuation callback.
+    pub fn has_idle_hook(&self) -> Result<bool, PolicyError> {
+        let runtime = self.runtime.lock().map_err(|_| PolicyError::Runtime {
+            message: "policy VM lock was poisoned".to_owned(),
+        })?;
+        Ok(runtime.on_idle.is_some())
+    }
+
+    /// Evaluate the bounded post-operation continuation callback.
+    pub fn on_idle(&self, input: &ExtensionIdleInput) -> Result<ExtensionIdleResult, PolicyError> {
+        let runtime = self.runtime.lock().map_err(|_| PolicyError::Runtime {
+            message: "policy VM lock was poisoned".to_owned(),
+        })?;
+        let Some(handler) = runtime.on_idle.as_ref() else {
+            return Ok(ExtensionIdleResult::default());
+        };
+        reset_interrupt_budget(&runtime);
+        let input = extension_idle_input_table(&runtime.lua, input)?;
+        let output = handler.call::<Value>(input).map_err(runtime_error)?;
+        parse_idle_result(output)
     }
 
     /// Return whether this policy contributes metadata-only context behavior.
@@ -448,6 +508,74 @@ fn policy_call_table(lua: &Lua, call: &ToolCall) -> Result<Table, PolicyError> {
         .set("arguments_json", call.arguments.as_str())
         .map_err(runtime_error)?;
     Ok(call_table)
+}
+
+fn extension_command_input_table(
+    lua: &Lua,
+    input: &ExtensionCommandInput,
+) -> Result<Table, PolicyError> {
+    let table = lua.create_table().map_err(runtime_error)?;
+    table
+        .set("arguments", input.arguments.as_str())
+        .map_err(runtime_error)?;
+    table
+        .set("state", extension_state_table(lua, &input.state.latest)?)
+        .map_err(runtime_error)?;
+    Ok(table)
+}
+
+fn extension_idle_input_table(lua: &Lua, input: &ExtensionIdleInput) -> Result<Table, PolicyError> {
+    let table = lua.create_table().map_err(runtime_error)?;
+    table
+        .set("operation_id", input.operation_id.as_str())
+        .map_err(runtime_error)?;
+    table
+        .set(
+            "outcome",
+            match &input.outcome {
+                ExtensionOperationOutcome::Completed => "completed",
+                ExtensionOperationOutcome::Aborted => "aborted",
+                ExtensionOperationOutcome::Failed { .. } => "failed",
+            },
+        )
+        .map_err(runtime_error)?;
+    if let ExtensionOperationOutcome::Failed { code } = &input.outcome {
+        table.set("failure_code", code.as_str()).map_err(runtime_error)?;
+    }
+    table
+        .set("elapsed_active_seconds", input.elapsed_active_seconds)
+        .map_err(runtime_error)?;
+    table
+        .set("state", extension_state_table(lua, &input.state.latest)?)
+        .map_err(runtime_error)?;
+    let usage = lua.create_table().map_err(runtime_error)?;
+    set_optional_u64(&usage, "input_tokens", input.usage.input_tokens)?;
+    set_optional_u64(&usage, "output_tokens", input.usage.output_tokens)?;
+    set_optional_u64(&usage, "reasoning_tokens", input.usage.reasoning_tokens)?;
+    set_optional_u64(&usage, "cache_read_tokens", input.usage.cache_read_tokens)?;
+    set_optional_u64(&usage, "cache_write_tokens", input.usage.cache_write_tokens)?;
+    table.set("usage", usage).map_err(runtime_error)?;
+    Ok(table)
+}
+
+fn extension_state_table(
+    lua: &Lua,
+    values: &BTreeMap<String, JsonValue>,
+) -> Result<Table, PolicyError> {
+    let state = lua.create_table().map_err(runtime_error)?;
+    for (kind, value) in values {
+        state
+            .set(kind.as_str(), json_to_lua(lua, value).map_err(runtime_error)?)
+            .map_err(runtime_error)?;
+    }
+    Ok(state)
+}
+
+fn set_optional_u64(table: &Table, name: &str, value: Option<u64>) -> Result<(), PolicyError> {
+    if let Some(value) = value {
+        table.set(name, value).map_err(runtime_error)?;
+    }
+    Ok(())
 }
 
 fn json_to_lua(lua: &Lua, value: &JsonValue) -> mlua::Result<Value> {

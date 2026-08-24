@@ -1686,3 +1686,19 @@ fn command_completion_includes_durable_session_commands() {
     app.complete_command();
     assert_eq!(app.state.composer().text(), "/new ");
 }
+
+#[test]
+fn bundled_extension_commands_feed_completion_and_help() {
+    let mut app = App::new(CliOptions::default());
+    app.state
+        .set_extension_commands(super::durable::bundled_host_commands().expect("goal bundle resolves"));
+    app.state.composer_mut().insert_str("/go").expect("prefix");
+    app.complete_command();
+    assert_eq!(app.state.composer().text(), "/goal ");
+
+    app.dispatch_command("/help")
+        .expect("help dispatch succeeds");
+    assert!(app.state.surface_lines().is_some_and(|lines| {
+        lines.iter().any(|line| line.contains("/goal"))
+    }));
+}

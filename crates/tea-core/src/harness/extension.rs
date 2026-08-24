@@ -14,7 +14,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use tea_protocol::JsonValue;
 
 /// Exact closed source files selected for one immutable extension resolution.
@@ -73,6 +73,203 @@ pub struct ExtensionToolDescription {
     pub cancellation_settlement_mode: CancellationSettlementMode,
 }
 
+/// A terminal-host command contributed by an immutable extension.
+///
+/// This is deliberately separate from [`ExtensionToolDescription`]: commands
+/// are a host-local control surface and are never advertised to a model.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExtensionHostCommandDescription {
+    /// Literal slash-prefixed command name.
+    pub name: String,
+    /// Concise text for host completion and help surfaces.
+    pub help: String,
+    /// Whether the terminal host may accept the command while a model
+    /// operation is settling. The host queues such controls and never starts
+    /// a continuation until it has observed an idle durable lane.
+    pub allowed_while_active: bool,
+}
+
+/// Latest inline values owned by one extension, indexed by its local kind.
+///
+/// The host derives this view from `PluginMemory`; an extension never receives
+/// a session writer, entry IDs, another extension's values, or artifact paths.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ExtensionStateView {
+    /// Latest value for each extension-local kind on the active branch.
+    pub latest: BTreeMap<String, JsonValue>,
+}
+
+/// One append-only extension-local state update.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExtensionStateUpdate {
+    /// Versioned extension-local state kind.
+    pub kind: String,
+    /// Inline structured state. The durable runtime applies fixed
+    /// external-only/session retention semantics for this control surface.
+    pub content: JsonValue,
+}
+
+/// Bounded input supplied to an extension host-command handler.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExtensionCommandInput {
+    /// Text following the resolved slash command, without the command name.
+    pub arguments: String,
+    /// Latest durable state owned by the command's extension.
+    pub state: ExtensionStateView,
+}
+
+/// A constrained result from an extension host-command handler.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ExtensionCommandResult {
+    /// One bounded host notice or result line.
+    pub notice: Option<String>,
+    /// At most one append-only extension-local state update.
+    pub state: Option<ExtensionStateUpdate>,
+    /// Optional internal model context for a new durable operation. This is
+    /// never represented as a user-authored chat message.
+    pub internal_input: Option<String>,
+}
+
+/// Constrained executable host-command port for one resolved extension.
+pub trait ExtensionHostCommand: Send + Sync {
+    /// Immutable host-local command metadata.
+    fn description(&self) -> &ExtensionHostCommandDescription;
+    /// Evaluate the command without ambient host authority.
+    fn invoke(&self, input: &ExtensionCommandInput) -> Result<ExtensionCommandResult, ExtensionError>;
+}
+
+/// Generic operation outcome made available to an idle extension hook.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ExtensionOperationOutcome {
+    /// The operation settled normally.
+    Completed,
+    /// A durable cancellation settled the operation.
+    Aborted,
+    /// A host-safe failure classification settled the operation.
+    Failed { code: String },
+}
+
+/// Bounded metadata supplied after a durable operation has settled.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExtensionIdleInput {
+    /// Stable operation identity.
+    pub operation_id: String,
+    /// Terminal durable outcome.
+    pub outcome: ExtensionOperationOutcome,
+    /// Provider usage observed for this operation. Unknown fields remain
+    /// absent instead of becoming zero.
+    pub usage: tea_session::Usage,
+    /// Wall-clock duration between the durable operation start and finish.
+    pub elapsed_active_seconds: u64,
+    /// Latest durable state owned by this extension.
+    pub state: ExtensionStateView,
+}
+
+/// Result of an extension's optional idle hook.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ExtensionIdleResult {
+    /// At most one append-only state update made before a continuation starts.
+    pub state: Option<ExtensionStateUpdate>,
+    /// At most one internal follow-up operation request.
+    pub internal_input: Option<String>,
+}
+
+/// Executable idle policy for one resolved extension.
+pub trait ExtensionIdleHook: Send + Sync {
+    /// Evaluate only after the owning durable operation is terminal and the
+    /// lane is idle. The host re-checks that condition before starting any
+    /// returned continuation.
+    fn on_idle(&self, input: &ExtensionIdleInput) -> Result<ExtensionIdleResult, ExtensionError>;
+}
+
+/// Narrow host port for one extension's durable state namespace.
+///
+/// Implementations are trusted host objects. The extension-facing capability
+/// below fixes `extension_id` before this port is invoked, so Luau source
+/// cannot select another extension's namespace or obtain a session writer.
+pub trait ExtensionStateStore: Send + Sync {
+    /// Read the latest inline value for every kind owned by one extension.
+    fn read_extension_state(&self, extension_id: &str) -> Result<ExtensionStateView, ExtensionError>;
+    /// Append one external-only/session-retained value to that extension's
+    /// namespace. Existing values are never mutated.
+    fn append_extension_state(
+        &self,
+        extension_id: &str,
+        update: ExtensionStateUpdate,
+    ) -> Result<(), ExtensionError>;
+}
+
+/// A late-bound host connection for a generic extension-state capability.
+///
+/// A capability catalog is constructed before a `SessionRuntime` exists, so
+/// the composition root attaches the already shared runtime exactly once.
+/// This indirection carries no raw writer into Luau and is equally usable by
+/// any bundled or user-supplied extension.
+#[derive(Clone, Default)]
+pub struct ExtensionStateHandle {
+    store: Arc<Mutex<Option<Weak<dyn ExtensionStateStore>>>>,
+}
+
+impl fmt::Debug for ExtensionStateHandle {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let attached = self.store.lock().map(|store| store.is_some()).unwrap_or(false);
+        formatter
+            .debug_struct("ExtensionStateHandle")
+            .field("attached", &attached)
+            .finish()
+    }
+}
+
+impl ExtensionStateHandle {
+    /// Create a detached handle for a host capability catalog.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Attach the one trusted store used by this live host harness.
+    pub fn attach(&self, store: Arc<dyn ExtensionStateStore>) -> Result<(), ExtensionError> {
+        let mut slot = self
+            .store
+            .lock()
+            .map_err(|_| ExtensionError::new("extension state handle lock was poisoned"))?;
+        if slot.is_some() {
+            return Err(ExtensionError::new(
+                "extension state handle is already attached",
+            ));
+        }
+        *slot = Some(Arc::downgrade(&store));
+        Ok(())
+    }
+
+    /// Read state through the attached trusted runtime.
+    pub fn read(&self, extension_id: &str) -> Result<ExtensionStateView, ExtensionError> {
+        let store = self
+            .store
+            .lock()
+            .map_err(|_| ExtensionError::new("extension state handle lock was poisoned"))?
+            .as_ref()
+            .and_then(Weak::upgrade)
+            .ok_or_else(|| ExtensionError::new("extension state handle is not attached"))?;
+        store.read_extension_state(extension_id)
+    }
+
+    /// Append state through the attached trusted runtime.
+    pub fn append(
+        &self,
+        extension_id: &str,
+        update: ExtensionStateUpdate,
+    ) -> Result<(), ExtensionError> {
+        let store = self
+            .store
+            .lock()
+            .map_err(|_| ExtensionError::new("extension state handle lock was poisoned"))?
+            .as_ref()
+            .and_then(Weak::upgrade)
+            .ok_or_else(|| ExtensionError::new("extension state handle is not attached"))?;
+        store.append_extension_state(extension_id, update)
+    }
+}
+
 /// Provider-visible and lifecycle metadata validated from immutable source.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ExtensionDescriptor {
@@ -82,6 +279,8 @@ pub struct ExtensionDescriptor {
     pub prompt_sections: Vec<ExtensionPromptSection>,
     /// Ordered tool declarations.
     pub tools: Vec<ExtensionToolDescription>,
+    /// Host-local slash commands contributed by this immutable extension.
+    pub host_commands: Vec<ExtensionHostCommandDescription>,
     /// Extension-local lifecycle registration IDs.
     pub lifecycle_hook_ids: Vec<String>,
 }
@@ -492,6 +691,10 @@ pub struct ResolvedExtension {
     pub hooks: Arc<dyn HookSet>,
     /// Executable model-visible extension tools.
     pub tools: ToolRegistry,
+    /// Executable constrained host-command handlers.
+    pub host_commands: Vec<Arc<dyn ExtensionHostCommand>>,
+    /// Optional post-operation continuation policy.
+    pub idle_hook: Option<Arc<dyn ExtensionIdleHook>>,
     /// Optional metadata-only context policy.
     pub context_policy: Option<Arc<dyn ExtensionContextPolicy>>,
     /// Optional process-local lifecycle implementation.
@@ -503,6 +706,8 @@ impl fmt::Debug for ResolvedExtension {
         formatter
             .debug_struct("ResolvedExtension")
             .field("tool_count", &self.tools.names().count())
+            .field("host_command_count", &self.host_commands.len())
+            .field("has_idle_hook", &self.idle_hook.is_some())
             .field("has_context_policy", &self.context_policy.is_some())
             .field("has_lifecycle", &self.lifecycle.is_some())
             .finish_non_exhaustive()
@@ -583,6 +788,7 @@ mod tests {
                 requested_capabilities: BTreeSet::from(["fake.read".into()]),
                 prompt_sections: Vec::new(),
                 tools: Vec::new(),
+                host_commands: Vec::new(),
                 lifecycle_hook_ids: Vec::new(),
             })
         }
@@ -601,6 +807,8 @@ mod tests {
             Ok(ResolvedExtension {
                 hooks: inner_hooks,
                 tools: ToolRegistry::default(),
+                host_commands: Vec::new(),
+                idle_hook: None,
                 context_policy: None,
                 lifecycle: None,
             })

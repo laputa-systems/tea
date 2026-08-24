@@ -17,9 +17,15 @@ use tea_core::agent::AgentConfiguration;
 use tea_core::compaction::AutomaticCompactionPolicy;
 use tea_core::event::AgentEventKind;
 use tea_core::harness::{
-    HarnessActor, HarnessRepository, HarnessResolver, HarnessResourceLimits,
-    HarnessSeedBuilder, ModelHarnessProfile, SelfExtensionMode, ToolPresentationDescriptor,
+    CapabilityBindingRef, ExtensionStateCapability, HarnessActor, HarnessRepository,
+    HarnessResolver, HarnessResourceLimits, HarnessSeedBuilder, HarnessSeedExtension,
+    HarnessSeedExtensionScope, ModelHarnessProfile, PluginCapabilityBinding,
+    PluginCapabilityCatalog, SelfExtensionMode, ToolPresentationDescriptor,
     SELF_EXTENSION_MODE_METADATA_KEY,
+};
+use tea_core::harness::extension::{
+    ExtensionEngine, ExtensionHostCommandDescription, ExtensionLimits, ExtensionStateHandle,
+    ExtensionToolLimits,
 };
 use tea_core::runtime::{
     HarnessIdentity, RuntimeServices, SessionRuntime, TeaEvent, TeaEventSubscription,
@@ -45,6 +51,19 @@ use super::support::{parse_thinking_level as parse_thinking_level_name, thinking
 
 /// Concrete durable supervisor used by the terminal application.
 pub(super) type HostHarness = SessionRuntime<JsonlSession>;
+
+/// Describe bundled host commands before a lazy session exists. This uses the
+/// same immutable source tree and extension engine later pinned in the
+/// durable harness; it does not create a shadow command implementation.
+pub(super) fn bundled_host_commands(
+) -> Result<Vec<ExtensionHostCommandDescription>, AppError> {
+    LuauExtensionEngine
+        .describe(&tea_luau::builtins::goal(extension_limits(
+            &HarnessResourceLimits::default(),
+        )))
+        .map(|descriptor| descriptor.host_commands)
+        .map_err(|error| AppError::Setup(error.to_string()))
+}
 
 /// Bounded metadata shown by the terminal session picker. The complete
 /// durable snapshot remains behind the writer/reopen boundary.
@@ -161,6 +180,18 @@ pub(super) fn create_host_harness(
         };
         let artifacts: Arc<dyn tea_session::ArtifactStore> =
             Arc::new(session.artifact_store().map_err(AppError::from)?);
+        let resource_limits = HarnessResourceLimits::default();
+        let (state_handle, goal_binding) = goal_state_binding()?;
+        let goal_binding_ref = CapabilityBindingRef {
+            plugin_id: goal_binding.plugin_id().to_owned(),
+            capability: goal_binding.capability().to_owned(),
+            capability_version: goal_binding.capability_version().to_owned(),
+            binding_digest: goal_binding.binding_digest(),
+        };
+        let mut capability_catalog = PluginCapabilityCatalog::new();
+        capability_catalog
+            .insert(goal_binding)
+            .map_err(|error| AppError::Setup(error.to_string()))?;
         let seeded = HarnessSeedBuilder::new(
             Arc::clone(&artifacts),
             Arc::new(LuauExtensionEngine),
@@ -168,9 +199,14 @@ pub(super) fn create_host_harness(
             configuration.system_prompt.clone(),
             profile.clone(),
             SelfExtensionMode::Off,
-            HarnessResourceLimits::default(),
+            resource_limits.clone(),
             template.runtime_policy_identities(),
         )
+        .extensions(vec![HarnessSeedExtension {
+            scope: HarnessSeedExtensionScope::Global,
+            source: tea_luau::builtins::goal(extension_limits(&resource_limits)),
+        }])
+        .capability_bindings(vec![goal_binding_ref])
         .trusted_tool_presentations(tool_presentations(&configuration))
         .seed(HarnessActor::Host, created_at_ms)
         .map_err(|error| AppError::Setup(error.to_string()))?;
@@ -216,18 +252,26 @@ pub(super) fn create_host_harness(
         )?;
         let manager = Arc::new(
             HarnessResolver::new(repository, template, Default::default())
+                .capability_catalog(capability_catalog)
+                .reserved_extension_command_names(super::commands::names())
                 .self_extension_mode(SelfExtensionMode::Off),
         );
         let identity = HarnessIdentity::new(revision.revision_id, snapshot.id, profile.profile_id);
-        let harness =
-            SessionRuntime::new_with_artifact_store(session, manager, identity, artifacts)?;
+        let harness = Arc::new(SessionRuntime::new_with_artifact_store(
+            session, manager, identity, artifacts,
+        )?);
+        let state_store: Arc<dyn tea_core::harness::extension::ExtensionStateStore> =
+            Arc::clone(&harness) as Arc<dyn tea_core::harness::extension::ExtensionStateStore>;
+        state_handle
+            .attach(state_store)
+            .map_err(|error| AppError::Setup(error.to_string()))?;
         if let Err(error) = write_host_session_metadata(&directory, &harness.snapshot()?) {
             eprintln!(
                 "warning: durable session metadata cache was not written for {}: {error}",
                 directory.display()
             );
         }
-        return Ok(Arc::new(harness));
+        return Ok(harness);
     }
 
     Err(AppError::Setup(
@@ -426,6 +470,11 @@ pub(super) fn reopen_host_harness(
         compactor,
         automatic_compaction,
     );
+    let (state_handle, goal_binding) = goal_state_binding()?;
+    let mut capability_catalog = PluginCapabilityCatalog::new();
+    capability_catalog
+        .insert(goal_binding)
+        .map_err(|error| AppError::Setup(error.to_string()))?;
     let manager = Arc::new(
         HarnessResolver::new(
             HarnessRepository::with_extension_engine(
@@ -435,11 +484,43 @@ pub(super) fn reopen_host_harness(
             template,
             Default::default(),
         )
+        .capability_catalog(capability_catalog)
+        .reserved_extension_command_names(super::commands::names())
         .self_extension_mode(header.self_extension_mode),
     );
-    let harness = SessionRuntime::reopen_with_artifact_store(session, manager, artifacts)?;
+    let harness = Arc::new(SessionRuntime::reopen_with_artifact_store(session, manager, artifacts)?);
+    let state_store: Arc<dyn tea_core::harness::extension::ExtensionStateStore> =
+        Arc::clone(&harness) as Arc<dyn tea_core::harness::extension::ExtensionStateStore>;
+    state_handle
+        .attach(state_store)
+        .map_err(|error| AppError::Setup(error.to_string()))?;
     harness.verify_durable_state()?;
-    Ok(Arc::new(harness))
+    Ok(harness)
+}
+
+fn extension_limits(resource_limits: &HarnessResourceLimits) -> ExtensionLimits {
+    ExtensionLimits {
+        max_source_bytes: resource_limits.source_bytes,
+        max_memory_bytes: resource_limits.memory_bytes,
+        max_interrupt_checks: resource_limits.instruction_checks as usize,
+    }
+}
+
+fn goal_state_binding() -> Result<(ExtensionStateHandle, PluginCapabilityBinding), AppError> {
+    let state = ExtensionStateHandle::new();
+    let limits = ExtensionToolLimits::default();
+    let capability = ExtensionStateCapability::new("goal", state.clone())
+        .map_err(|error| AppError::Setup(error.to_string()))?;
+    let binding = PluginCapabilityBinding::new(
+        "goal",
+        "extension.state",
+        "v1",
+        Digest::from_bytes("tea-extension-state-capability-v1"),
+        limits,
+        Arc::new(capability),
+    )
+    .map_err(|error| AppError::Setup(error.to_string()))?;
+    Ok((state, binding))
 }
 
 /// Convert the active semantic branch to a presentation-only core-message

@@ -39,6 +39,22 @@ settlement) are host-only execution policy: they have a separate immutable
 digest, are retained in snapshots and catalogs, and produce a distinct candidate
 surface diff without changing the provider-surface digest.
 
+Resolved ABI-v2 extensions may also contribute terminal host commands and one
+idle callback. Command declarations are immutable revision data; the terminal
+uses them for slash completion and help, while the generic runtime invokes their
+sandboxed handler with only command text and that extension's current durable
+state. Extension-local state is append-only `PluginMemory`, reduced to the
+latest value per local kind and fixed to external-only/session retention. The
+extension never receives the raw session writer or another extension's state.
+
+After an operation has settled and the lane is idle, the terminal applies any
+queued extension controls, then asks resolved idle callbacks whether one
+internal continuation is warranted. A continuation is accepted through the
+ordinary `SessionRuntime` operation path and is stored as host-only model
+context, not as a user message. Cancellation and failed operations do not
+produce automatic retries; one settled operation may request at most one
+continuation.
+
 The supervisor persists a content-redacted v1 trace artifact before it records
 the epoch's terminal outcome. Trace provenance joins the operation, epoch,
 core-run ID, revision, snapshot, and profile. See [trace](trace.md) and

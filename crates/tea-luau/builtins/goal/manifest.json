@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "abi_version": 2,
+  "id": "goal",
+  "entrypoint": "init.luau",
+  "modules": ["init.luau", "prompts.luau"],
+  "requested_capabilities": ["extension.state"]
+}

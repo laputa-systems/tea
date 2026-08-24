@@ -119,6 +119,7 @@ impl RuntimeServices {
             input.effect_gate,
             provenance.clone(),
             input.additional_tools,
+            Vec::new(),
         )?;
         Ok(HostedEpoch {
             agent,
@@ -359,6 +360,7 @@ mod tests {
                 Arc::new(NoopEffectGate),
                 RunProvenance::default(),
                 ToolRegistry::default(),
+                Vec::new(),
             )
             .expect("managed construction succeeds");
         let hosted = services

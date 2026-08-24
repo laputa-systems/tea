@@ -6,6 +6,7 @@ use tea_core::event::{
     ProviderRequestSkipReason,
 };
 use tea_core::state::{AgentMessage, ModelDescriptor, ThinkingLevel, ToolCallId, Usage};
+use tea_core::harness::extension::ExtensionHostCommandDescription;
 use tea_providers::ProviderRegistry;
 
 use super::commands;
@@ -165,6 +166,8 @@ pub struct AppState {
     /// the transcript's own viewport and follow state.
     pub(super) surface_offset: usize,
     pub(super) slash_completion: Option<SlashCompletion>,
+    /// Immutable commands resolved from the active durable harness revision.
+    pub(super) extension_commands: Vec<ExtensionHostCommandDescription>,
     /// Field-wise provider accounting observed directly from the lossless event stream.
     pub(super) reported_usage: Usage,
     /// Reasoning effort used by future prompts.
@@ -210,6 +213,33 @@ impl AppState {
     /// Create an empty projection.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Replace the host-command projection after a harness is created or
+    /// reopened. Commands remain source-pinned by that harness revision.
+    pub(super) fn set_extension_commands(
+        &mut self,
+        mut commands: Vec<ExtensionHostCommandDescription>,
+    ) {
+        commands.sort_by(|left, right| left.name.cmp(&right.name));
+        self.extension_commands = commands;
+    }
+
+    pub(super) fn extension_command(&self, name: &str) -> Option<&ExtensionHostCommandDescription> {
+        self.extension_commands
+            .iter()
+            .find(|command| command.name == name)
+    }
+
+    pub(super) fn matching_extension_commands(
+        &self,
+        prefix: &str,
+    ) -> Vec<String> {
+        self.extension_commands
+            .iter()
+            .filter(move |command| command.name.starts_with(prefix))
+            .map(|command| command.name.clone())
+            .collect()
     }
 
     /// Open or close the temporary full-transcript/detail surface.
@@ -641,8 +671,13 @@ impl AppState {
             .skip(start)
             .take(visible)
             .map(|(index, command)| {
-                let help =
-                    commands::find(command).map_or_else(String::new, |spec| spec.help.to_owned());
+                let help = commands::find(command).map_or_else(
+                    || {
+                        self.extension_command(command)
+                            .map_or_else(String::new, |spec| spec.help.clone())
+                    },
+                    |spec| spec.help.to_owned(),
+                );
                 (command.clone(), help, index == menu.selected)
             })
             .collect()
@@ -665,6 +700,7 @@ impl AppState {
                 commands::all()
                     .iter()
                     .map(|command| command.name)
+                    .chain(self.extension_commands.iter().map(|command| command.name.as_str()))
                     .collect::<Vec<_>>()
                     .join(" · ")
             )

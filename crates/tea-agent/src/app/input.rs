@@ -319,11 +319,11 @@ impl App {
         if !prefix.starts_with('/') || input.chars().any(char::is_whitespace) {
             return;
         }
-        let matches = commands::matching(prefix);
+        let matches = self.matching_commands(prefix);
         let Some(command) = self
             .state
             .selected_slash_completion()
-            .or_else(|| matches.first().map(|command| command.name))
+            .or_else(|| matches.first().map(String::as_str))
             .map(str::to_owned)
         else {
             return;
@@ -345,29 +345,50 @@ impl App {
             return;
         }
         self.state.update_slash_completion(
-            commands::matching(prefix)
-                .into_iter()
-                .map(|command| command.name.to_owned())
-                .collect(),
+            self.matching_commands(prefix),
         );
+    }
+
+    fn matching_commands(&self, prefix: &str) -> Vec<String> {
+        commands::matching(prefix)
+            .into_iter()
+            .map(|command| command.name.to_owned())
+            .chain(
+                self.state
+                    .matching_extension_commands(prefix)
+                    .into_iter(),
+            )
+            .collect()
     }
 
     pub(super) fn dispatch_command(&mut self, input: &str) -> Result<(), AppError> {
         self.state.slash_completion = None;
         let mut words = input.split_whitespace();
-        let command = words.next().unwrap_or_default();
+        let command = words.next().unwrap_or_default().to_owned();
+        let arguments = input
+            .get(command.len()..)
+            .unwrap_or_default()
+            .trim()
+            .to_owned();
+        let allowed_while_active = commands::find(&command)
+            .map(|spec| spec.allowed_while_active)
+            .or_else(|| {
+                self.state
+                    .extension_command(&command)
+                    .map(|spec| spec.allowed_while_active)
+            });
         if command != "/new"
             && self.agent_is_active()
-            && commands::find(command).is_some_and(|spec| !spec.allowed_while_active)
+            && allowed_while_active.is_some_and(|allowed| !allowed)
         {
             self.state
                 .notice(format!("{command} is unavailable while a run is active"));
             return Ok(());
         }
-        match command {
+        match command.as_str() {
             "/help" => {
                 self.state
-                    .set_surface_lines(UiSurface::Help, help_surface_lines());
+                    .set_surface_lines(UiSurface::Help, help_surface_lines(&self.state.extension_commands));
             }
             "/model" => {
                 if let (Some(provider), Some(model)) = (words.next(), words.next()) {
@@ -402,7 +423,44 @@ impl App {
                     }
                 }
             }
+            command if self.state.extension_command(command).is_some() => {
+                self.dispatch_extension_command(command, arguments)?;
+            }
             command => self.state.notice(format!("unknown command {command}")),
+        }
+        Ok(())
+    }
+
+    fn dispatch_extension_command(&mut self, command: &str, arguments: String) -> Result<(), AppError> {
+        if self.configured_provider.is_none() && self.durable_harness.is_none() {
+            self.state.notice("select a model first");
+            self.open_model_picker();
+            return Ok(());
+        }
+        let harness = match self.ensure_durable_harness() {
+            Ok(harness) => harness,
+            Err(error) => {
+                self.state.notice(error.to_string());
+                return Ok(());
+            }
+        };
+        if self.agent_is_active() {
+            self.queued_extension_commands
+                .push((command.to_owned(), arguments));
+            self.state
+                .notice(format!("{command} queued until the active run settles"));
+            return Ok(());
+        }
+        match harness.dispatch_extension_command(command, arguments) {
+            Ok(dispatch) => {
+                if let Some(notice) = dispatch.result.notice {
+                    self.state.notice(notice);
+                }
+                if let Some(input) = dispatch.result.internal_input {
+                    self.spawn_extension_continuation(harness, dispatch.extension_id, input);
+                }
+            }
+            Err(error) => self.state.notice(error.to_string()),
         }
         Ok(())
     }
@@ -438,7 +496,9 @@ impl App {
     }
 }
 
-fn help_surface_lines() -> Vec<String> {
+fn help_surface_lines(
+    extensions: &[tea_core::harness::extension::ExtensionHostCommandDescription],
+) -> Vec<String> {
     const GROUPS: &[(&str, &[&str])] = &[
         ("General", &["/help", "/quit"]),
         ("Session", &["/new", "/session", "/resume"]),
@@ -454,6 +514,13 @@ fn help_surface_lines() -> Vec<String> {
         for name in *names {
             let spec = commands::find(name).expect("help groups use registered commands");
             lines.push(format!("  {:<20} {}", spec.name, spec.help));
+        }
+    }
+    if !extensions.is_empty() {
+        lines.push(String::new());
+        lines.push("Extensions".into());
+        for command in extensions {
+            lines.push(format!("  {:<20} {}", command.name, command.help));
         }
     }
     lines.push(String::new());

@@ -73,6 +73,19 @@ pub struct PolicyTool {
     pub handler_source: Option<String>,
 }
 
+/// Metadata for one host-local command declared by an immutable policy.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PolicyHostCommand {
+    /// Literal slash command name.
+    pub name: String,
+    /// Completion and help text.
+    pub help: String,
+    /// Whether the terminal host may accept this command while an operation
+    /// is active. Terminal hosts queue accepted controls until the durable
+    /// idle boundary, where continuations may then be considered.
+    pub allowed_while_active: bool,
+}
+
 /// Visibility requested by a bounded ABI-v1 plugin-memory proposal.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PolicyMemoryVisibility {
@@ -183,6 +196,7 @@ pub struct LuaPolicy {
     pub(super) runtime: Mutex<PolicyRuntime>,
     pub(super) prompt_sections: Vec<PolicyPromptSection>,
     pub(super) tools: Vec<PolicyTool>,
+    pub(super) host_commands: Vec<PolicyHostCommand>,
 }
 
 pub(super) struct PolicyRuntime {
@@ -199,6 +213,10 @@ pub(super) struct PolicyRuntime {
     /// Rust owns the resulting durable record and a policy never receives a
     /// session writer or a shared plugin-memory object.
     pub(super) resume_hooks: Vec<PolicyResumeHook>,
+    /// Constrained terminal-command handlers held inside the sandboxed VM.
+    pub(super) host_commands: Vec<PolicyHostCommandHandler>,
+    /// Optional bounded callback evaluated after a durable operation settles.
+    pub(super) on_idle: Option<Function>,
     pub(super) interrupt_budget: Arc<AtomicUsize>,
     pub(super) max_interrupt_checks: usize,
 }
@@ -214,6 +232,12 @@ pub(super) struct PolicyResumeHook {
     pub(super) before_operation: Option<Function>,
     pub(super) before_epoch: Option<Function>,
     pub(super) before_resume: Option<Function>,
+}
+
+/// One command function paired to its immutable metadata index.
+pub(super) struct PolicyHostCommandHandler {
+    pub(super) name: String,
+    pub(super) function: Function,
 }
 
 /// A policy loading or evaluation failure.

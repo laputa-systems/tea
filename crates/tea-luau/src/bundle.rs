@@ -11,12 +11,23 @@ use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
 
-/// The sole supported bundle ABI.
+/// The original closed-bundle ABI.
 ///
 /// A bundle declares deterministic named prompt sections, bounded lifecycle
 /// callbacks, typed context proposals, and the `before_tool` decision hook.
 /// Older append-style declarations are deliberately not accepted.
 pub const BUNDLE_ABI_VERSION: u32 = 1;
+
+/// The closed-bundle ABI that adds host commands and idle callbacks.
+///
+/// Version 2 intentionally leaves the v1 declaration shape unchanged. A v1
+/// bundle cannot opt into the new host-facing fields by accident.
+pub const BUNDLE_ABI_V2_VERSION: u32 = 2;
+
+/// Whether this build understands a closed-bundle ABI version.
+pub const fn supports_bundle_abi(abi_version: u32) -> bool {
+    matches!(abi_version, BUNDLE_ABI_VERSION | BUNDLE_ABI_V2_VERSION)
+}
 
 /// A canonical, bundle-local module path.
 ///
@@ -293,9 +304,9 @@ impl BundleManifest {
         I: IntoIterator<Item = C>,
         C: AsRef<str>,
     {
-        if abi_version != BUNDLE_ABI_VERSION {
+        if !supports_bundle_abi(abi_version) {
             return Err(ManifestError::UnsupportedAbiVersion {
-                expected: BUNDLE_ABI_VERSION,
+                expected: BUNDLE_ABI_V2_VERSION,
                 actual: abi_version,
             });
         }
@@ -361,10 +372,10 @@ pub enum ManifestError {
 impl fmt::Display for ManifestError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::UnsupportedAbiVersion { expected, actual } => {
+            Self::UnsupportedAbiVersion { expected: _, actual } => {
                 write!(
                     formatter,
-                    "unsupported bundle ABI version {actual}; expected {expected}"
+                    "unsupported bundle ABI version {actual}; supported versions are {BUNDLE_ABI_VERSION} and {BUNDLE_ABI_V2_VERSION}"
                 )
             }
             Self::InvalidEntrypoint(error) => {

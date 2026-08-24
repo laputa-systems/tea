@@ -31,11 +31,21 @@ impl HookSet for OpenAiContextHook {
     }
 
     fn convert_to_llm(&self, context: ContextEnvelope) -> Result<String, HookError> {
-        let messages = context
+        let mut messages = context
             .messages
             .iter()
             .map(openai_message)
             .collect::<Result<Vec<_>, _>>()?;
+        // Host messages are deliberately not `AgentMessage::User` values.
+        // A durable extension continuation uses this explicit provider context
+        // so the model can distinguish internal steering from user-authored
+        // conversation history.
+        messages.extend(context.host_messages.into_iter().map(|message| {
+            JsonValue::object([
+                ("role", JsonValue::from("developer")),
+                ("content", JsonValue::from(message.as_str().to_owned())),
+            ])
+        }));
         JsonValue::Array(messages)
             .to_json_string()
             .map_err(|error| HookError::new("convert_to_llm", error.to_string()))
@@ -151,6 +161,28 @@ mod tests {
                 .get("content")
                 .and_then(JsonValue::as_str)
                 .is_some_and(|content| content.contains("[tool details (serialized JSON):"))
+        );
+    }
+
+    #[test]
+    fn host_only_context_uses_a_developer_message_not_a_user_message() {
+        let context = ContextEnvelope {
+            version: 1,
+            messages: Vec::new(),
+            host_messages: vec![SerializedJson::new("continue the extension")],
+        };
+        let encoded = OpenAiContextHook
+            .convert_to_llm(context)
+            .expect("host-only context converts");
+        let messages = JsonValue::parse(&encoded).expect("encoded context is JSON");
+        let message = messages
+            .as_array()
+            .and_then(|messages| messages.first())
+            .expect("one developer message");
+        assert_eq!(message.get("role").and_then(JsonValue::as_str), Some("developer"));
+        assert_eq!(
+            message.get("content").and_then(JsonValue::as_str),
+            Some("continue the extension"),
         );
     }
 }

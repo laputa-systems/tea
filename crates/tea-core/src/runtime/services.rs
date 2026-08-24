@@ -371,6 +371,7 @@ impl RuntimeServices {
         effect_gate: Arc<dyn EffectGate>,
         provenance: RunProvenance,
         additional_tools: ToolRegistry,
+        host_messages: Vec<crate::state::SerializedJson>,
     ) -> Result<Agent, HarnessError> {
         self.verify_runtime_policy_identities(resolved)?;
         let mut tools = self.trusted_tools.clone();
@@ -423,6 +424,9 @@ impl RuntimeServices {
         }
         if let Some(compactor) = &self.compactor {
             builder = builder.compactor(Arc::clone(compactor));
+        }
+        for message in host_messages {
+            builder = builder.host_message(message);
         }
         builder = builder
             .automatic_compaction(resolved.automatic_compaction_policy().clone())?

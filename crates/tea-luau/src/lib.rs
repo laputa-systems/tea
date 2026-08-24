@@ -9,6 +9,8 @@
 
 /// Caller-driven coroutine support for explicit asynchronous capabilities.
 pub mod async_runtime;
+/// Checked-in immutable extension source trees bundled with Tea.
+pub mod builtins;
 /// Closed, deterministic source bundles and their manifests.
 pub mod bundle;
 /// Per-VM execution of closed bundle-local Luau modules.

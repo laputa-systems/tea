@@ -33,7 +33,9 @@ use tea_core::effect::{
 };
 use tea_core::harness::extension::{
     CollectedExtensionMemoryProposal, ExtensionMemoryCollector, ExtensionMemoryRetention,
-    ExtensionMemoryVisibility,
+    ExtensionMemoryVisibility, ExtensionCommandInput, ExtensionCommandResult,
+    ExtensionError, ExtensionHostCommandDescription, ExtensionIdleInput,
+    ExtensionOperationOutcome, ExtensionStateStore, ExtensionStateUpdate, ExtensionStateView,
 };
 use tea_core::state::{
     AgentMessage, AgentSnapshot, AgentToolCall, MessageId, SerializedJson, StopReason,
@@ -114,6 +116,24 @@ impl HarnessIdentity {
 pub struct DurableOperation {
     id: OperationId,
     outcome: OperationOutcome,
+}
+
+/// Durable result from one extension host command.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExtensionCommandDispatch {
+    /// Immutable extension namespace that owned the handler.
+    pub extension_id: String,
+    /// Constrained command output already persisted by the durable runtime.
+    pub result: ExtensionCommandResult,
+}
+
+/// One idle-approved follow-up operation for an extension.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExtensionContinuation {
+    /// Immutable extension namespace that requested the follow-up.
+    pub extension_id: String,
+    /// Internal model context, never a user-authored message.
+    pub input: String,
 }
 
 impl DurableOperation {
@@ -275,7 +295,7 @@ where
             )
         })?;
         manager.restore_catalog(catalog, Arc::clone(&artifacts))?;
-        let reduction = reduce_lane(snapshot, LaneId::main())?;
+        let reduction = reduce_lane(snapshot.clone(), LaneId::main())?;
         let revision_id = reduction
             .lane_state
             .active_harness_revision
@@ -446,6 +466,134 @@ where
             .map_err(|_| HarnessError::invalid_state("thinking level mutex is poisoned"))
     }
 
+    /// Return immutable extension commands from the active harness revision.
+    pub fn extension_host_commands(
+        &self,
+    ) -> Result<Vec<ExtensionHostCommandDescription>, HarnessError> {
+        let snapshot = self.snapshot()?;
+        let reduction = reduce_lane(snapshot, LaneId::main())?;
+        let configuration = self.configuration_for_reduction(&reduction)?;
+        Ok(configuration
+            .host_commands()
+            .iter()
+            .map(|command| command.command.description().clone())
+            .collect())
+    }
+
+    /// Execute one constrained extension command and persist its append-only
+    /// local state update. The command never receives an application handle,
+    /// session writer, path, or another extension's state.
+    pub fn dispatch_extension_command(
+        &self,
+        name: &str,
+        arguments: impl Into<String>,
+    ) -> Result<ExtensionCommandDispatch, HarnessError> {
+        let snapshot = self.snapshot()?;
+        let reduction = reduce_lane(snapshot.clone(), LaneId::main())?;
+        let configuration = self.configuration_for_reduction(&reduction)?;
+        let selected = configuration
+            .host_commands()
+            .iter()
+            .find(|command| command.command.description().name == name)
+            .cloned()
+            .ok_or_else(|| HarnessError::invalid_state(format!("unknown extension command {name}")))?;
+        if self.active.load(Ordering::Acquire)
+            && !selected.command.description().allowed_while_active
+        {
+            return Err(HarnessError::invalid_state(format!(
+                "extension command {name} is unavailable while a durable operation is active",
+            )));
+        }
+        let state = extension_state_view(&snapshot, &selected.extension_id)?;
+        let result = selected
+            .command
+            .invoke(&ExtensionCommandInput {
+                arguments: arguments.into(),
+                state,
+            })
+            .map_err(extension_error)?;
+        if self.active.load(Ordering::Acquire) && result.internal_input.is_some() {
+            return Err(HarnessError::invalid_state(format!(
+                "extension command {name} requested a continuation before the durable operation became idle",
+            )));
+        }
+        if let Some(update) = result.state.clone() {
+            self.append_extension_state_update(&selected.extension_id, update)?;
+        }
+        Ok(ExtensionCommandDispatch {
+            extension_id: selected.extension_id,
+            result,
+        })
+    }
+
+    /// Evaluate every resolved extension's optional idle policy after a
+    /// terminal operation. At most one continuation may be requested; callers
+    /// must still re-check idle state immediately before starting it.
+    pub fn evaluate_idle_extensions(
+        &self,
+    ) -> Result<Option<ExtensionContinuation>, HarnessError> {
+        if self.active.load(Ordering::Acquire) {
+            return Err(HarnessError::invalid_state(
+                "extension idle hooks require an idle durable harness",
+            ));
+        }
+        let snapshot = self.snapshot()?;
+        let reduction = reduce_lane(snapshot.clone(), LaneId::main())?;
+        if reduction.lane_state.active_operation.is_some() {
+            return Err(HarnessError::invalid_state(
+                "extension idle hooks require no open durable operation",
+            ));
+        }
+        let Some((operation_id, outcome, started_at_ms, finished_at_ms)) =
+            terminal_operation(&snapshot)
+        else {
+            return Ok(None);
+        };
+        if outcome != OperationOutcome::Completed {
+            return Ok(None);
+        }
+        let configuration = self.configuration_for_reduction(&reduction)?;
+        if configuration.idle_hooks().is_empty() {
+            return Ok(None);
+        }
+        if !self.claim_idle_operation(&operation_id)? {
+            return Ok(None);
+        }
+        let usage = operation_usage(&snapshot, &operation_id);
+        let elapsed_active_seconds = finished_at_ms
+            .saturating_sub(started_at_ms)
+            .saturating_div(1000);
+        let mut continuation = None;
+        for idle in configuration.idle_hooks() {
+            let state = extension_state_view(&snapshot, &idle.extension_id)?;
+            let result = idle
+                .hook
+                .on_idle(&ExtensionIdleInput {
+                    operation_id: operation_id.to_string(),
+                    outcome: extension_operation_outcome(&outcome),
+                    usage: usage.clone(),
+                    elapsed_active_seconds,
+                    state,
+                })
+                .map_err(extension_error)?;
+            if let Some(update) = result.state {
+                self.append_extension_state_update(&idle.extension_id, update)?;
+            }
+            if let Some(input) = result.internal_input {
+                if continuation.is_some() {
+                    return Err(HarnessError::invalid_state(
+                        "more than one extension requested an idle continuation",
+                    ));
+                }
+                continuation = Some(ExtensionContinuation {
+                    extension_id: idle.extension_id.clone(),
+                    input,
+                });
+            }
+        }
+        Ok(continuation)
+    }
+
     /// Build a reviewed, reference-aware artifact collection plan while the
     /// harness is idle. Active operations can materialize new references, so
     /// collection deliberately refuses to race an effect drive.
@@ -554,6 +702,19 @@ where
     ) -> Result<DurableOperation, HarnessError> {
         self.run_prompt_with_authoring_authorization(input, false)
             .await
+    }
+
+    /// Start an extension-requested durable operation with host-only model
+    /// context. The input is retained as external-only plugin memory and is
+    /// never appended as a user message.
+    pub async fn run_extension_continuation(
+        &self,
+        extension_id: impl Into<String>,
+        input: impl Into<String>,
+    ) -> Result<DurableOperation, HarnessError> {
+        let _claim = self.claim_operation()?;
+        let operation = self.accept_extension_continuation(extension_id.into(), input.into())?;
+        self.drive_fresh_epoch(operation).await
     }
 
     /// Accept and drive a prompt that the trusted application has explicitly
@@ -786,6 +947,163 @@ where
         Ok(operation_id)
     }
 
+    fn accept_extension_continuation(
+        &self,
+        extension_id: String,
+        input: String,
+    ) -> Result<OperationId, HarnessError> {
+        if !portable_extension_label(&extension_id) || input.trim().is_empty() || input.len() > 16 * 1024 {
+            return Err(HarnessError::invalid_state(
+                "extension continuation requires a portable extension ID and bounded non-empty input",
+            ));
+        }
+        let lane = LaneId::main();
+        let (operation_id, sequence) = {
+            let mut session = self.session_lock()?;
+            let snapshot = session.snapshot()?;
+            let reduction = reduce_lane(snapshot.clone(), lane.clone())?;
+            if reduction.lane_state.active_operation.is_some() {
+                return Err(HarnessError::RecoveryRequired {
+                    plan: reduction.recovery_plan.ok_or_else(|| {
+                        HarnessError::invalid_state(
+                            "main lane has an open operation without a recovery plan",
+                        )
+                    })?,
+                });
+            }
+            let configuration = self.configuration_for_reduction(&reduction)?;
+            let operation_id = OperationId::new(durable_identifier(
+                "extension-operation",
+                [
+                    snapshot.header().session_id.as_str(),
+                    extension_id.as_str(),
+                    &snapshot.last_sequence().0.to_string(),
+                    input.as_str(),
+                ],
+            ))
+            .map_err(|error| HarnessError::invalid_state(error.to_string()))?;
+            let entry_id = EntryId::new(durable_identifier(
+                "entry-extension-continuation",
+                [operation_id.as_str(), extension_id.as_str()],
+            ))
+            .map_err(|error| HarnessError::invalid_state(error.to_string()))?;
+            let input_entry = ProvisionedEntry {
+                id: entry_id,
+                body: SessionEntry::PluginMemory(PluginMemoryEntry {
+                    plugin_id: extension_id.clone(),
+                    kind: "extension.continuation.v1".into(),
+                    content: PayloadRef::Inline(JsonValue::object([(
+                        "input",
+                        JsonValue::String(input),
+                    )])),
+                    provenance: Vec::new(),
+                    visibility: MemoryVisibility::ExternalOnly,
+                    retention: MemoryRetention::Session,
+                }),
+            };
+            let mut record = OperationStartedRecord::new(
+                operation_id.clone(),
+                lane.clone(),
+                reduction.lane_state.leaf_id,
+                OperationKind::Other("extension_continuation".into()),
+                vec![input_entry.clone()],
+                configuration.identity.revision_id().clone(),
+                configuration.identity.profile_id().clone(),
+            );
+            record.operation_resume_data = configuration.lifecycle.before_operation()?;
+            session.append_record(LaneRecord::OperationStarted(record))?;
+            let stored = session.append_entry(&lane, input_entry)?;
+            (operation_id, stored.header.seq)
+        };
+        self.publish_event(TeaEvent::Session(SessionEvent::OperationAccepted {
+            sequence,
+            lane_id: lane,
+            operation_id: operation_id.clone(),
+        }))?;
+        Ok(operation_id)
+    }
+
+    fn append_extension_state_update(
+        &self,
+        extension_id: &str,
+        update: ExtensionStateUpdate,
+    ) -> Result<(), HarnessError> {
+        validate_extension_state_update(extension_id, &update)?;
+        let mut session = self.session_lock()?;
+        let snapshot = session.snapshot()?;
+        let entry_id = EntryId::new(durable_identifier(
+            "entry-extension-state",
+            [
+                extension_id,
+                update.kind.as_str(),
+                &snapshot.next_sequence().0.to_string(),
+            ],
+        ))
+        .map_err(|error| HarnessError::invalid_state(error.to_string()))?;
+        session.append_entry(
+            &LaneId::main(),
+            ProvisionedEntry {
+                id: entry_id,
+                body: SessionEntry::PluginMemory(PluginMemoryEntry {
+                    plugin_id: extension_id.to_owned(),
+                    kind: update.kind,
+                    content: PayloadRef::Inline(update.content),
+                    provenance: Vec::new(),
+                    visibility: MemoryVisibility::ExternalOnly,
+                    retention: MemoryRetention::Session,
+                }),
+            },
+        )?;
+        Ok(())
+    }
+
+    /// Persist the one-shot idle-decision claim before any extension callback
+    /// runs. A crash may conservatively suppress that one continuation, but
+    /// it can never cause a completed operation to launch duplicates after a
+    /// reopen or a repeated terminal notification.
+    fn claim_idle_operation(&self, operation_id: &OperationId) -> Result<bool, HarnessError> {
+        let mut session = self.session_lock()?;
+        let snapshot = session.snapshot()?;
+        let reduction = reduce_lane(snapshot.clone(), LaneId::main())?;
+        if reduction.lane_state.active_operation.is_some() {
+            return Err(HarnessError::invalid_state(
+                "extension idle hooks require no open durable operation",
+            ));
+        }
+        let Some((latest, outcome, _, _)) = terminal_operation(&snapshot) else {
+            return Ok(false);
+        };
+        if latest != *operation_id || outcome != OperationOutcome::Completed {
+            return Ok(false);
+        }
+        if idle_operation_is_claimed(&snapshot, operation_id)? {
+            return Ok(false);
+        }
+        let entry_id = EntryId::new(durable_identifier(
+            "entry-extension-idle-claim",
+            [operation_id.as_str()],
+        ))
+        .map_err(|error| HarnessError::invalid_state(error.to_string()))?;
+        session.append_entry(
+            &LaneId::main(),
+            ProvisionedEntry {
+                id: entry_id,
+                body: SessionEntry::PluginMemory(PluginMemoryEntry {
+                    plugin_id: "tea.extension.runtime".into(),
+                    kind: "idle.evaluated.v1".into(),
+                    content: PayloadRef::Inline(JsonValue::object([(
+                        "operation_id",
+                        JsonValue::String(operation_id.to_string()),
+                    )])),
+                    provenance: Vec::new(),
+                    visibility: MemoryVisibility::ExternalOnly,
+                    retention: MemoryRetention::Session,
+                }),
+            },
+        )?;
+        Ok(true)
+    }
+
     async fn drive_fresh_epoch(
         &self,
         operation_id: OperationId,
@@ -811,6 +1129,7 @@ where
             .thinking_level(thinking_level)
             .prompt_layout_ledger(Arc::clone(&self.prompt_layout_ledger));
         let messages = self.core_messages(&configuration, recovery.as_ref())?;
+        let internal_input = extension_continuation_input(&self.snapshot()?, &operation_id)?;
         let provider_surface_digest = configuration
             .harness_snapshot
             .as_ref()
@@ -855,6 +1174,11 @@ where
             gate,
             provenance.clone(),
             host_tools,
+            internal_input
+                .as_deref()
+                .map(SerializedJson::new)
+                .into_iter()
+                .collect(),
         )?;
         let trace_capture = TraceCaptureSink::default();
         let trace_episode_id = format!(
@@ -884,7 +1208,11 @@ where
             }
             None => {
                 agent.restore_messages(messages)?;
-                agent.start_continue()?
+                if internal_input.is_some() {
+                    agent.start_internal()?
+                } else {
+                    agent.start_continue()?
+                }
             }
         };
         self.install_active_agent(agent)?;
@@ -2912,6 +3240,240 @@ fn core_failure_code(error: &CoreError) -> &'static str {
         CoreError::EffectGate(_) => "effect_gate_error",
         _ => "core_error",
     }
+}
+
+impl<S> ExtensionStateStore for SessionRuntime<S>
+where
+    S: SessionWriter + Send + 'static,
+{
+    fn read_extension_state(&self, extension_id: &str) -> Result<ExtensionStateView, ExtensionError> {
+        let snapshot = self
+            .snapshot()
+            .map_err(|error| ExtensionError::new(error.to_string()))?;
+        extension_state_view(&snapshot, extension_id)
+            .map_err(|error| ExtensionError::new(error.to_string()))
+    }
+
+    fn append_extension_state(
+        &self,
+        extension_id: &str,
+        update: ExtensionStateUpdate,
+    ) -> Result<(), ExtensionError> {
+        self.append_extension_state_update(extension_id, update)
+            .map_err(|error| ExtensionError::new(error.to_string()))
+    }
+}
+
+fn extension_state_view(
+    snapshot: &SessionSnapshot,
+    extension_id: &str,
+) -> Result<ExtensionStateView, HarnessError> {
+    if !portable_extension_label(extension_id) {
+        return Err(HarnessError::invalid_state(
+            "extension state namespace must use a portable extension ID",
+        ));
+    }
+    let mut latest = BTreeMap::new();
+    for entry in active_branch_entries(snapshot)? {
+        let SessionEntry::PluginMemory(memory) = entry.body else {
+            continue;
+        };
+        if memory.plugin_id != extension_id {
+            continue;
+        }
+        let PayloadRef::Inline(content) = memory.content else {
+            continue;
+        };
+        latest.insert(memory.kind, content);
+    }
+    Ok(ExtensionStateView { latest })
+}
+
+fn active_branch_entries(snapshot: &SessionSnapshot) -> Result<Vec<tea_session::StoredEntry>, HarnessError> {
+    let reduction = reduce_lane(snapshot.clone(), LaneId::main())?;
+    let by_id = snapshot
+        .entries()
+        .iter()
+        .map(|entry| (entry.header.id.clone(), entry))
+        .collect::<BTreeMap<_, _>>();
+    let mut chain = Vec::new();
+    let mut seen = BTreeSet::new();
+    let mut cursor = reduction.lane_state.leaf_id;
+    while let Some(id) = cursor {
+        if !seen.insert(id.clone()) {
+            return Err(HarnessError::invalid_state(format!(
+                "extension state branch contains a parent cycle at entry {id}",
+            )));
+        }
+        let entry = by_id.get(&id).ok_or_else(|| {
+            HarnessError::invalid_state(format!(
+                "extension state branch refers to missing entry {id}",
+            ))
+        })?;
+        cursor = entry.header.parent_id.clone();
+        chain.push((*entry).clone());
+    }
+    chain.reverse();
+    Ok(chain)
+}
+
+fn validate_extension_state_update(
+    extension_id: &str,
+    update: &ExtensionStateUpdate,
+) -> Result<(), HarnessError> {
+    if !portable_extension_label(extension_id) || !portable_extension_label(&update.kind) {
+        return Err(HarnessError::invalid_state(
+            "extension state update requires portable extension ID and kind",
+        ));
+    }
+    let bytes = update
+        .content
+        .to_json_string()
+        .map_err(|error| HarnessError::invalid_state(error.to_string()))?;
+    if bytes.len() > 16 * 1024 {
+        return Err(HarnessError::invalid_state(
+            "extension state update content exceeds 16384 bytes",
+        ));
+    }
+    Ok(())
+}
+
+fn portable_extension_label(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 120
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+}
+
+fn terminal_operation(
+    snapshot: &SessionSnapshot,
+) -> Option<(OperationId, OperationOutcome, u64, u64)> {
+    let finished = snapshot.records().iter().rev().find_map(|stored| match &stored.record {
+        LaneRecord::OperationFinished(record) => {
+            Some((record.operation_id.clone(), record.outcome.clone(), stored.timestamp_ms))
+        }
+        _ => None,
+    })?;
+    let started_at_ms = snapshot.records().iter().find_map(|stored| match &stored.record {
+        LaneRecord::OperationStarted(record) if record.id == finished.0 => Some(stored.timestamp_ms),
+        _ => None,
+    })?;
+    Some((finished.0, finished.1, started_at_ms, finished.2))
+}
+
+fn idle_operation_is_claimed(
+    snapshot: &SessionSnapshot,
+    operation_id: &OperationId,
+) -> Result<bool, HarnessError> {
+    for entry in snapshot.entries() {
+        let SessionEntry::PluginMemory(memory) = &entry.body else {
+            continue;
+        };
+        if memory.plugin_id != "tea.extension.runtime" || memory.kind != "idle.evaluated.v1" {
+            continue;
+        }
+        let PayloadRef::Inline(content) = &memory.content else {
+            return Err(HarnessError::invalid_state(
+                "extension idle claim must be inline",
+            ));
+        };
+        let claimed = content
+            .as_object()
+            .and_then(|object| object.get("operation_id"))
+            .and_then(JsonValue::as_str)
+            .ok_or_else(|| {
+                HarnessError::invalid_state("extension idle claim is missing operation_id")
+            })?;
+        if claimed == operation_id.as_str() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn operation_usage(snapshot: &SessionSnapshot, operation_id: &OperationId) -> Usage {
+    let mut total = Usage::default();
+    for stored in snapshot.records() {
+        let LaneRecord::Usage(record) = &stored.record else {
+            continue;
+        };
+        if &record.operation_id != operation_id {
+            continue;
+        }
+        accumulate_usage(&mut total, &record.usage);
+    }
+    total
+}
+
+fn accumulate_usage(total: &mut Usage, next: &Usage) {
+    for (total, next) in [
+        (&mut total.input_tokens, next.input_tokens),
+        (&mut total.output_tokens, next.output_tokens),
+        (&mut total.reasoning_tokens, next.reasoning_tokens),
+        (&mut total.cache_read_tokens, next.cache_read_tokens),
+        (&mut total.cache_write_tokens, next.cache_write_tokens),
+    ] {
+        if let Some(next) = next {
+            *total = Some(total.unwrap_or(0).saturating_add(next));
+        }
+    }
+}
+
+fn extension_operation_outcome(outcome: &OperationOutcome) -> ExtensionOperationOutcome {
+    match outcome {
+        OperationOutcome::Completed => ExtensionOperationOutcome::Completed,
+        OperationOutcome::Aborted => ExtensionOperationOutcome::Aborted,
+        OperationOutcome::Failed { code } => ExtensionOperationOutcome::Failed { code: code.clone() },
+    }
+}
+
+fn extension_continuation_input(
+    snapshot: &SessionSnapshot,
+    operation_id: &OperationId,
+) -> Result<Option<String>, HarnessError> {
+    let record = snapshot.records().iter().find_map(|stored| match &stored.record {
+        LaneRecord::OperationStarted(record) if &record.id == operation_id => Some(record),
+        _ => None,
+    });
+    let Some(record) = record else {
+        return Err(HarnessError::invalid_state(format!(
+            "operation {operation_id} has no durable operation-start record",
+        )));
+    };
+    let mut input = None;
+    for entry in &record.original_input {
+        let SessionEntry::PluginMemory(memory) = &entry.body else {
+            continue;
+        };
+        if memory.kind != "extension.continuation.v1" {
+            continue;
+        }
+        let PayloadRef::Inline(content) = &memory.content else {
+            return Err(HarnessError::invalid_state(
+                "extension continuation input must be inline",
+            ));
+        };
+        let value = content
+            .as_object()
+            .and_then(|object| object.get("input"))
+            .and_then(JsonValue::as_str)
+            .ok_or_else(|| {
+                HarnessError::invalid_state(
+                    "extension continuation input is missing its bounded text",
+                )
+            })?;
+        if input.replace(value.to_owned()).is_some() {
+            return Err(HarnessError::invalid_state(
+                "extension operation contains more than one continuation input",
+            ));
+        }
+    }
+    Ok(input)
+}
+
+fn extension_error(error: ExtensionError) -> HarnessError {
+    HarnessError::invalid_state(format!("extension boundary rejected a value: {error}"))
 }
 
 fn derive_core_messages(

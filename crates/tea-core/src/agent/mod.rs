@@ -694,6 +694,13 @@ impl Agent {
         self.start_run(vec![prompt.into()], false)
     }
 
+    /// Start one host-initiated continuation without appending user content to
+    /// the canonical transcript. Hosts pair this with explicit host-only
+    /// context such as a bounded extension continuation request.
+    pub fn start_internal(&self) -> Result<RunHandle, CoreError> {
+        self.start_run(Vec::new(), true)
+    }
+
     /// Continue from a retained user or tool-result message without adding a new prompt.
     ///
     /// If the transcript ends in an assistant message, Pi permits continuation only by consuming

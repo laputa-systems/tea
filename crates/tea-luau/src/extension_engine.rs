@@ -1,6 +1,6 @@
 //! Luau implementation of the core-owned immutable extension boundary.
 
-use crate::bundle::{Bundle, BundleManifest, BUNDLE_ABI_VERSION};
+use crate::bundle::{supports_bundle_abi, Bundle, BundleManifest};
 use crate::tool_handler::{
     CapabilityBindings, CapabilityError, CapabilityFuture, CapabilityRequest, CapabilityResponse,
     HandlerLimits, LuaToolHandler, LuauCapability, ToolHandlerSpec,
@@ -12,9 +12,10 @@ use tea_core::harness::extension::{
     CollectedExtensionMemoryProposal, ExtensionCapability, ExtensionCapabilityBindings,
     ExtensionCapabilityError, ExtensionCapabilityRequest, ExtensionContextInput,
     ExtensionContextPatch, ExtensionContextPolicy, ExtensionDescriptor, ExtensionEngine,
-    ExtensionError, ExtensionLifecycle, ExtensionLimits, ExtensionMemoryCollector,
-    ExtensionPromptSection, ExtensionSourceTree, ExtensionToolDescription, ExtensionToolLimits,
-    ResolvedExtension,
+    ExtensionError, ExtensionHostCommand, ExtensionHostCommandDescription, ExtensionIdleHook,
+    ExtensionIdleInput, ExtensionIdleResult, ExtensionLifecycle, ExtensionLimits,
+    ExtensionMemoryCollector, ExtensionPromptSection, ExtensionSourceTree,
+    ExtensionToolDescription, ExtensionToolLimits, ResolvedExtension,
 };
 use tea_core::hooks::HookSet;
 use tea_protocol::{JsonNumber, JsonValue};
@@ -97,12 +98,65 @@ impl ExtensionEngine for LuauExtensionEngine {
                     policy: Arc::clone(&policy),
                 }) as Arc<dyn ExtensionLifecycle>
             });
+        let host_commands = policy
+            .host_commands()
+            .iter()
+            .cloned()
+            .map(|command| {
+                Arc::new(LuauHostCommand {
+                    description: ExtensionHostCommandDescription {
+                        name: command.name,
+                        help: command.help,
+                        allowed_while_active: command.allowed_while_active,
+                    },
+                    policy: Arc::clone(&policy),
+                }) as Arc<dyn ExtensionHostCommand>
+            })
+            .collect();
+        let idle_hook = policy
+            .has_idle_hook()
+            .map_err(extension_error)?
+            .then(|| Arc::new(LuauIdlePolicy { policy: Arc::clone(&policy) }) as Arc<dyn ExtensionIdleHook>);
         Ok(ResolvedExtension {
             hooks,
             tools,
+            host_commands,
+            idle_hook,
             context_policy,
             lifecycle,
         })
+    }
+}
+
+#[derive(Clone)]
+struct LuauHostCommand {
+    description: ExtensionHostCommandDescription,
+    policy: Arc<LuaPolicy>,
+}
+
+impl ExtensionHostCommand for LuauHostCommand {
+    fn description(&self) -> &ExtensionHostCommandDescription {
+        &self.description
+    }
+
+    fn invoke(
+        &self,
+        input: &tea_core::harness::extension::ExtensionCommandInput,
+    ) -> Result<tea_core::harness::extension::ExtensionCommandResult, ExtensionError> {
+        self.policy
+            .execute_host_command(&self.description.name, input)
+            .map_err(extension_error)
+    }
+}
+
+#[derive(Clone)]
+struct LuauIdlePolicy {
+    policy: Arc<LuaPolicy>,
+}
+
+impl ExtensionIdleHook for LuauIdlePolicy {
+    fn on_idle(&self, input: &ExtensionIdleInput) -> Result<ExtensionIdleResult, ExtensionError> {
+        self.policy.on_idle(input).map_err(extension_error)
     }
 }
 
@@ -203,6 +257,15 @@ fn descriptor(
                 execution_mode: tool.execution_mode,
                 requires_exclusive_batch: tool.requires_exclusive_batch,
                 cancellation_settlement_mode: tool.cancellation_settlement_mode,
+            })
+            .collect(),
+        host_commands: policy
+            .host_commands()
+            .iter()
+            .map(|command| ExtensionHostCommandDescription {
+                name: command.name.clone(),
+                help: command.help.clone(),
+                allowed_while_active: command.allowed_while_active,
             })
             .collect(),
         lifecycle_hook_ids: policy.resume_hook_ids().map_err(extension_error)?,
@@ -376,7 +439,7 @@ fn parse_manifest(
         ));
     }
     let abi_version = required_u64(object, "abi_version")? as u32;
-    if abi_version != BUNDLE_ABI_VERSION {
+    if !supports_bundle_abi(abi_version) {
         return Err(ExtensionError::new(format!(
             "extension manifest selects unsupported ABI {abi_version}"
         )));

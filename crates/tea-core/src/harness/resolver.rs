@@ -98,6 +98,10 @@ pub struct ResolvedHarness {
     /// Source-pinned executable extension tools. Trusted base tools remain in
     /// `RuntimeServices` and are combined only while constructing an agent.
     pub(crate) extension_tools: ToolRegistry,
+    /// Immutable extension commands retained separately from provider tools.
+    pub(crate) host_commands: Vec<ResolvedHostCommand>,
+    /// Optional extension callbacks evaluated only at a durable idle boundary.
+    pub(crate) idle_hooks: Vec<ResolvedIdleHook>,
     /// Host hooks wrapped by source-pinned extension hooks for this snapshot.
     pub(crate) hooks: Arc<dyn HookSet>,
     /// Immutable policy values selected for this resolved epoch.
@@ -158,6 +162,14 @@ impl ResolvedHarness {
         &self.extension_tools
     }
 
+    pub(crate) fn host_commands(&self) -> &[ResolvedHostCommand] {
+        &self.host_commands
+    }
+
+    pub(crate) fn idle_hooks(&self) -> &[ResolvedIdleHook] {
+        &self.idle_hooks
+    }
+
     pub(crate) fn hooks(&self) -> Arc<dyn HookSet> {
         Arc::clone(&self.hooks)
     }
@@ -183,6 +195,20 @@ impl ResolvedHarness {
     }
 }
 
+/// One executable command paired with the extension that owns its namespace.
+#[derive(Clone)]
+pub(crate) struct ResolvedHostCommand {
+    pub(crate) extension_id: String,
+    pub(crate) command: Arc<dyn tea_core::harness::extension::ExtensionHostCommand>,
+}
+
+/// One executable idle hook paired with the extension whose state it may read.
+#[derive(Clone)]
+pub(crate) struct ResolvedIdleHook {
+    pub(crate) extension_id: String,
+    pub(crate) hook: Arc<dyn tea_core::harness::extension::ExtensionIdleHook>,
+}
+
 /// Session-local immutable harness catalog.
 ///
 /// A host initializes it from the globally pinned source inputs that belong to
@@ -197,6 +223,7 @@ pub struct HarnessResolver {
     extension_engine: Arc<dyn ExtensionEngine>,
     tree_limits: HarnessTreeLimits,
     self_extension_mode: SelfExtensionMode,
+    reserved_command_names: BTreeSet<String>,
 }
 
 impl std::fmt::Debug for HarnessResolver {
@@ -228,6 +255,7 @@ impl HarnessResolver {
             extension_engine,
             tree_limits: HarnessTreeLimits::default(),
             self_extension_mode: SelfExtensionMode::Off,
+            reserved_command_names: BTreeSet::new(),
         }
     }
 
@@ -244,6 +272,17 @@ impl HarnessResolver {
     /// already represented by their immutable snapshot bindings.
     pub fn capability_catalog(mut self, catalog: PluginCapabilityCatalog) -> Self {
         self.capability_catalog = catalog;
+        self
+    }
+
+    /// Reserve native host command names before extensions resolve. A collision
+    /// is a deterministic resolution failure, never registration-order luck.
+    pub fn reserved_extension_command_names<I, S>(mut self, names: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.reserved_command_names = names.into_iter().map(Into::into).collect();
         self
     }
 
@@ -422,6 +461,36 @@ impl HarnessResolver {
                         .map(|policy| (plugin_id.clone(), Arc::clone(policy)))
                 },
             ));
+        let mut command_names = BTreeSet::new();
+        let mut host_commands = Vec::new();
+        let mut idle_hooks = Vec::new();
+        for (plugin_id, resolved) in &resolved_extensions {
+            for command in &resolved.host_commands {
+                let description = command.description();
+                if self.reserved_command_names.contains(&description.name) {
+                    return Err(HarnessError::invalid_state(format!(
+                        "plugin {plugin_id} command {} collides with a native host command",
+                        description.name
+                    )));
+                }
+                if !command_names.insert(description.name.clone()) {
+                    return Err(HarnessError::invalid_state(format!(
+                        "plugins declare duplicate host command {}",
+                        description.name
+                    )));
+                }
+                host_commands.push(ResolvedHostCommand {
+                    extension_id: plugin_id.clone(),
+                    command: Arc::clone(command),
+                });
+            }
+            if let Some(hook) = &resolved.idle_hook {
+                idle_hooks.push(ResolvedIdleHook {
+                    extension_id: plugin_id.clone(),
+                    hook: Arc::clone(hook),
+                });
+            }
+        }
         resolve_snapshot(ResolveSnapshotInput {
             runtime_services: &self.runtime_services,
             revision: &revision,
@@ -429,6 +498,8 @@ impl HarnessResolver {
             self_extension_mode: self.self_extension_mode,
             hooks,
             plugin_tools,
+            host_commands,
+            idle_hooks,
             lifecycle,
             memory_collector,
             context_policies,
@@ -1075,6 +1146,8 @@ fn resolve_snapshot(input: ResolveSnapshotInput<'_>) -> Result<ResolvedHarness, 
         ),
         system_prompt: compose_system_prompt(&input.snapshot.spec),
         extension_tools: input.plugin_tools,
+        host_commands: input.host_commands,
+        idle_hooks: input.idle_hooks,
         hooks: input.hooks,
         automatic_compaction: input.runtime_services.automatic_compaction_policy().clone(),
         tool_result_projection: input
@@ -1099,6 +1172,8 @@ struct ResolveSnapshotInput<'a> {
     self_extension_mode: SelfExtensionMode,
     hooks: Arc<dyn tea_core::hooks::HookSet>,
     plugin_tools: ToolRegistry,
+    host_commands: Vec<ResolvedHostCommand>,
+    idle_hooks: Vec<ResolvedIdleHook>,
     lifecycle: PluginLifecycleRegistry,
     memory_collector: Arc<ExtensionMemoryCollector>,
     context_policies: ContextPolicyRegistry,
@@ -1106,6 +1181,150 @@ struct ResolveSnapshotInput<'a> {
 
 fn lineage_error(error: HarnessLineageError) -> HarnessError {
     HarnessError::invalid_state(error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::harness::extension::{
+        ExtensionCapabilityBindings, ExtensionCommandInput, ExtensionCommandResult,
+        ExtensionEngine, ExtensionError, ExtensionHostCommand, ExtensionHostCommandDescription,
+        ExtensionLimits, ExtensionSourceTree, ResolvedExtension,
+    };
+    use crate::harness::{
+        HarnessSeedBuilder, HarnessSeedExtension, HarnessSeedExtensionScope, ModelHarnessProfile,
+    };
+    use crate::scheduler::{CancellationToken, ModelFuture, ModelProvider, ModelRequest, ModelStream};
+    use crate::tool::ToolRegistry;
+
+    #[derive(Debug)]
+    struct UnusedProvider;
+
+    impl ModelProvider for UnusedProvider {
+        fn stream<'a>(
+            &'a self,
+            _request: ModelRequest,
+            _cancellation: CancellationToken,
+        ) -> ModelFuture<'a> {
+            Box::pin(std::future::ready(Ok(Box::new(ModelStream::default()) as _)))
+        }
+    }
+
+    #[derive(Clone)]
+    struct FixtureCommand {
+        description: ExtensionHostCommandDescription,
+    }
+
+    impl ExtensionHostCommand for FixtureCommand {
+        fn description(&self) -> &ExtensionHostCommandDescription {
+            &self.description
+        }
+
+        fn invoke(
+            &self,
+            _input: &ExtensionCommandInput,
+        ) -> Result<ExtensionCommandResult, ExtensionError> {
+            Ok(ExtensionCommandResult::default())
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    struct CommandExtensionEngine;
+
+    impl ExtensionEngine for CommandExtensionEngine {
+        fn describe(
+            &self,
+            _source: &ExtensionSourceTree,
+        ) -> Result<crate::harness::extension::ExtensionDescriptor, ExtensionError> {
+            Ok(crate::harness::extension::ExtensionDescriptor {
+                requested_capabilities: BTreeSet::new(),
+                prompt_sections: Vec::new(),
+                tools: Vec::new(),
+                host_commands: vec![ExtensionHostCommandDescription {
+                    name: "/native".into(),
+                    help: "fixture command".into(),
+                    allowed_while_active: false,
+                }],
+                lifecycle_hook_ids: Vec::new(),
+            })
+        }
+
+        fn resolve(
+            &self,
+            _source: &ExtensionSourceTree,
+            _bindings: ExtensionCapabilityBindings,
+            inner_hooks: Arc<dyn HookSet>,
+            _extension_index: usize,
+            _memory_collector: Arc<ExtensionMemoryCollector>,
+        ) -> Result<ResolvedExtension, ExtensionError> {
+            Ok(ResolvedExtension {
+                hooks: inner_hooks,
+                tools: ToolRegistry::default(),
+                host_commands: vec![Arc::new(FixtureCommand {
+                    description: ExtensionHostCommandDescription {
+                        name: "/native".into(),
+                        help: "fixture command".into(),
+                        allowed_while_active: false,
+                    },
+                })],
+                idle_hook: None,
+                context_policy: None,
+                lifecycle: None,
+            })
+        }
+    }
+
+    #[test]
+    fn native_host_command_collisions_fail_extension_resolution() {
+        let artifacts = Arc::new(tea_session::MemoryArtifactStore::default());
+        let services = RuntimeServices::new(Arc::new(UnusedProvider), ToolRegistry::default());
+        let profile = ModelHarnessProfile::new(
+            "fixture",
+            "fixture-model",
+            None,
+            "fixture-prompt",
+            "fixture-tools",
+            "fixture-compaction",
+            "fixture-projection",
+        )
+        .expect("fixture profile is valid");
+        let limits = HarnessTreeLimits::default();
+        let resource_limits = crate::harness::HarnessResourceLimits::default();
+        let source = ExtensionSourceTree {
+            extension_id: "fixture.extension".into(),
+            files: BTreeMap::from([("entry.luau".into(), "return {}".into())]),
+            expected_capabilities: Some(BTreeSet::new()),
+            limits: ExtensionLimits {
+                max_source_bytes: resource_limits.source_bytes,
+                max_memory_bytes: resource_limits.memory_bytes,
+                max_interrupt_checks: resource_limits.instruction_checks as usize,
+            },
+        };
+        let seeded = HarnessSeedBuilder::new(
+            artifacts,
+            Arc::new(CommandExtensionEngine),
+            tea_session::Digest::from_bytes("fixture-host-profile"),
+            "fixture system prompt",
+            profile,
+            SelfExtensionMode::Off,
+            resource_limits,
+            services.runtime_policy_identities(),
+        )
+        .tree_limits(limits)
+        .extensions(vec![HarnessSeedExtension {
+            scope: HarnessSeedExtensionScope::Global,
+            source,
+        }])
+        .seed(HarnessActor::Host, 1)
+        .expect("fixture harness seeds");
+        let manager = HarnessResolver::new(seeded.repository, services, BTreeSet::new())
+            .reserved_extension_command_names(["/native"]);
+
+        let error = manager
+            .resolve_revision(&seeded.revision.revision_id)
+            .expect_err("native command collision must fail resolution");
+        assert!(error.to_string().contains("collides with a native host command"));
+    }
 }
 
 #[derive(Clone)]

@@ -12,8 +12,10 @@ use std::fmt;
 use std::sync::Arc;
 use tea_core::harness::extension::{
     ExtensionCapability, ExtensionCapabilityBindings, ExtensionCapabilityError,
-    ExtensionCapabilityFuture, ExtensionCapabilityRequest, ExtensionToolLimits,
+    ExtensionCapabilityFuture, ExtensionCapabilityRequest, ExtensionCapabilityResponse,
+    ExtensionStateHandle, ExtensionStateUpdate, ExtensionToolLimits,
 };
+use tea_protocol::JsonValue;
 use tea_session::{CanonicalHashWriter, Digest, HarnessSnapshotId};
 
 /// One host-owned, versioned capability implementation that a particular
@@ -262,6 +264,94 @@ impl fmt::Display for CapabilityBindingError {
 
 impl std::error::Error for CapabilityBindingError {}
 
+/// Generic capability exposing only one extension's append-only state
+/// namespace. The namespace is fixed by the trusted host at construction;
+/// Luau may request only `get` and `append` under the capability it was
+/// explicitly granted.
+#[derive(Clone, Debug)]
+pub struct ExtensionStateCapability {
+    extension_id: String,
+    state: ExtensionStateHandle,
+}
+
+impl ExtensionStateCapability {
+    /// Construct a state capability fixed to one immutable extension ID.
+    pub fn new(
+        extension_id: impl Into<String>,
+        state: ExtensionStateHandle,
+    ) -> Result<Self, CapabilityBindingError> {
+        let extension_id = extension_id.into();
+        validate_portable_identifier("plugin_id", &extension_id)?;
+        Ok(Self {
+            extension_id,
+            state,
+        })
+    }
+}
+
+impl ExtensionCapability for ExtensionStateCapability {
+    fn invoke(
+        &self,
+        request: ExtensionCapabilityRequest,
+        cancellation: tea_core::scheduler::CancellationToken,
+    ) -> ExtensionCapabilityFuture {
+        let extension_id = self.extension_id.clone();
+        let state = self.state.clone();
+        Box::pin(async move {
+            if cancellation.is_cancelled() {
+                return Err(ExtensionCapabilityError::Cancelled);
+            }
+            let result = match request.method.as_str() {
+                "get" => state
+                    .read(&extension_id)
+                    .map_err(|error| ExtensionCapabilityError::Execution {
+                        message: error.to_string(),
+                    })
+                    .map(|view| ExtensionCapabilityResponse {
+                        value: JsonValue::Object(view.latest),
+                    }),
+                "append" => {
+                    let object = request.arguments.as_object().ok_or_else(|| {
+                        ExtensionCapabilityError::InvalidArguments {
+                            message: "extension.state append arguments must be an object".into(),
+                        }
+                    })?;
+                    let kind = object
+                        .get("kind")
+                        .and_then(JsonValue::as_str)
+                        .ok_or_else(|| ExtensionCapabilityError::InvalidArguments {
+                            message: "extension.state append requires string kind".into(),
+                        })?;
+                    let content = object.get("content").cloned().ok_or_else(|| {
+                        ExtensionCapabilityError::InvalidArguments {
+                            message: "extension.state append requires content".into(),
+                        }
+                    })?;
+                    state
+                        .append(
+                            &extension_id,
+                            ExtensionStateUpdate {
+                                kind: kind.to_owned(),
+                                content,
+                            },
+                        )
+                        .map_err(|error| ExtensionCapabilityError::Execution {
+                            message: error.to_string(),
+                        })
+                        .map(|()| ExtensionCapabilityResponse {
+                            value: JsonValue::Bool(true),
+                        })
+                }
+                method => Err(ExtensionCapabilityError::MethodDenied {
+                    capability: request.capability,
+                    method: method.to_owned(),
+                }),
+            };
+            result
+        })
+    }
+}
+
 struct SnapshotBoundCapability {
     plugin_id: String,
     capability: String,
@@ -340,6 +430,99 @@ fn validate_handler_limits(limits: ExtensionToolLimits) -> Result<(), Capability
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::harness::extension::{ExtensionStateStore, ExtensionStateView};
+    use crate::scheduler::CancellationToken;
+    use crate::state::ToolCallId;
+    use crate::tool::ToolUpdateSink;
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct MemoryStateStore {
+        values: Mutex<BTreeMap<(String, String), JsonValue>>,
+    }
+
+    impl ExtensionStateStore for MemoryStateStore {
+        fn read_extension_state(
+            &self,
+            extension_id: &str,
+        ) -> Result<ExtensionStateView, crate::harness::extension::ExtensionError> {
+            let latest = self
+                .values
+                .lock()
+                .expect("fixture state store lock")
+                .iter()
+                .filter(|((owner, _), _)| owner == extension_id)
+                .map(|((_, kind), content)| (kind.clone(), content.clone()))
+                .collect();
+            Ok(ExtensionStateView { latest })
+        }
+
+        fn append_extension_state(
+            &self,
+            extension_id: &str,
+            update: ExtensionStateUpdate,
+        ) -> Result<(), crate::harness::extension::ExtensionError> {
+            self.values
+                .lock()
+                .expect("fixture state store lock")
+                .insert((extension_id.to_owned(), update.kind), update.content);
+            Ok(())
+        }
+    }
+
+    fn request(method: &str, arguments: JsonValue) -> ExtensionCapabilityRequest {
+        ExtensionCapabilityRequest {
+            call_id: ToolCallId::new("extension-state-capability-test")
+                .expect("fixture tool call ID"),
+            tool_name: "state_tool".into(),
+            capability: "extension.state".into(),
+            method: method.into(),
+            arguments,
+            updates: ToolUpdateSink::disabled(),
+        }
+    }
+
+    #[test]
+    fn extension_state_capability_is_fixed_to_its_extension_namespace() {
+        let handle = ExtensionStateHandle::new();
+        let store = Arc::new(MemoryStateStore::default());
+        handle
+            .attach(Arc::clone(&store) as Arc<dyn ExtensionStateStore>)
+            .expect("state store attaches once");
+        let review = ExtensionStateCapability::new("review", handle.clone())
+            .expect("portable extension ID");
+        let other = ExtensionStateCapability::new("other", handle).expect("portable extension ID");
+
+        let appended = smol::block_on(review.invoke(
+            request(
+                "append",
+                JsonValue::parse(r#"{"kind":"review.state.v1","content":{"phase":"open"}}"#)
+                    .expect("fixture state JSON"),
+            ),
+            CancellationToken::new(),
+        ))
+        .expect("review can append its state");
+        assert_eq!(appended.value, JsonValue::Bool(true));
+
+        let review_state = smol::block_on(review.invoke(
+            request("get", JsonValue::Object(BTreeMap::new())),
+            CancellationToken::new(),
+        ))
+        .expect("review can read its state");
+        assert!(review_state.value.get("review.state.v1").is_some());
+
+        let other_state = smol::block_on(other.invoke(
+            request("get", JsonValue::Object(BTreeMap::new())),
+            CancellationToken::new(),
+        ))
+        .expect("other namespace remains readable");
+        assert_eq!(other_state.value, JsonValue::Object(BTreeMap::new()));
+    }
 }
 
 fn binding_error(error: tea_core::harness::extension::ExtensionError) -> HarnessError {

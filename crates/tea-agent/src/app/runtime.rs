@@ -46,6 +46,10 @@ pub struct App {
     /// The idle prompt handed to the current run, retained only to restore local input after a
     /// failed or cancelled operation. The durable session remains the transcript source of truth.
     pub(super) submitted_prompt: Option<String>,
+    /// Accepted extension controls held until the current durable operation
+    /// settles. They are host-local presentation requests, never fake user
+    /// messages or mutations of an in-flight provider request.
+    pub(super) queued_extension_commands: Vec<(String, String)>,
     /// Number of front-contiguous semantic entries already written once into
     /// native terminal scrollback for this presentation generation.
     pub(super) committed_entries: usize,
@@ -71,6 +75,7 @@ impl App {
             registry: ProviderRegistry::new(),
             workspace: None,
             submitted_prompt: None,
+            queued_extension_commands: Vec::new(),
             committed_entries: 0,
             rendered_projection_generation: 0,
             quitting: false,
@@ -149,6 +154,8 @@ impl App {
         let home = resolve_tea_home(self.options.tea_home())?;
         self.configuration = Some(configuration);
         self.tea_home = Some(home);
+        self.state
+            .set_extension_commands(super::durable::bundled_host_commands()?);
         self.state.set_thinking_level(self.options.thinking_level());
         self.state.welcome_line();
 
@@ -230,7 +237,14 @@ impl App {
                     self.durable_task = None;
                     self.submitted_prompt = None;
                     self.state.status = UiStatus::Idle;
-                    self.start_queued_prompt();
+                    let queued_continuation = self.apply_queued_extension_commands();
+                    if self.state.queued_message().is_some() {
+                        self.start_queued_prompt();
+                    } else if let Some((harness, extension_id, input)) = queued_continuation {
+                        self.spawn_extension_continuation(harness, extension_id, input);
+                    } else {
+                        self.start_idle_extension_continuation();
+                    }
                 }
                 Ok(Err(HarnessError::Core(CoreError::Cancelled))) => {
                     self.durable_task = None;
@@ -273,6 +287,63 @@ impl App {
                 self.state.composer_mut().replace_from_editor(input);
                 self.state.notice(error.to_string());
             }
+        }
+    }
+
+    /// Apply extension controls accepted while an operation was active before
+    /// deciding whether an idle hook may continue it. A queued user prompt
+    /// still takes priority over a returned internal continuation.
+    fn apply_queued_extension_commands(
+        &mut self,
+    ) -> Option<(Arc<super::durable::HostHarness>, String, String)> {
+        let commands = std::mem::take(&mut self.queued_extension_commands);
+        if commands.is_empty() {
+            return None;
+        }
+        let Some(harness) = self.durable_harness.as_ref().cloned() else {
+            self.state.notice("discarded queued extension controls without a durable harness");
+            return None;
+        };
+        let mut continuation = None;
+        for (command, arguments) in commands {
+            match harness.dispatch_extension_command(&command, arguments) {
+                Ok(dispatch) => {
+                    if let Some(notice) = dispatch.result.notice {
+                        self.state.notice(notice);
+                    }
+                    if let Some(input) = dispatch.result.internal_input {
+                        if continuation.is_some() {
+                            self.state.notice(
+                                "only one queued extension continuation may start after a run",
+                            );
+                        } else {
+                            continuation = Some((dispatch.extension_id, input));
+                        }
+                    }
+                }
+                Err(error) => self.state.notice(error.to_string()),
+            }
+        }
+        continuation.map(|(extension_id, input)| (harness, extension_id, input))
+    }
+
+    /// Ask resolved extensions whether the just-settled durable operation
+    /// warrants one host-only continuation. Queued user input is handled
+    /// first by `reap_task`, so this cannot leapfrog an explicit user action.
+    fn start_idle_extension_continuation(&mut self) {
+        let Some(harness) = self.durable_harness.as_ref().cloned() else {
+            return;
+        };
+        match harness.evaluate_idle_extensions() {
+            Ok(Some(continuation)) => {
+                self.spawn_extension_continuation(
+                    harness,
+                    continuation.extension_id,
+                    continuation.input,
+                );
+            }
+            Ok(None) => {}
+            Err(error) => self.state.notice(error.to_string()),
         }
     }
 
@@ -346,6 +417,34 @@ impl App {
         self.state.status = UiStatus::Active;
     }
 
+    /// Start a continuation through the same session-owned operation path as
+    /// ordinary work. The `input` is retained as host-only context, not as a
+    /// user message in the transcript.
+    pub(super) fn spawn_extension_continuation(
+        &mut self,
+        harness: Arc<super::durable::HostHarness>,
+        extension_id: String,
+        input: String,
+    ) {
+        if self.durable_task.is_some() || harness.is_active() {
+            self.state
+                .notice("extension continuation requires an idle durable harness");
+            return;
+        }
+        let (sender, receiver) = sync_channel(1);
+        smol::spawn(async move {
+            let _ = sender.send(
+                harness
+                    .run_extension_continuation(extension_id, input)
+                    .await
+                    .map(|_| ()),
+            );
+        })
+        .detach();
+        self.durable_task = Some(receiver);
+        self.state.status = UiStatus::Active;
+    }
+
     pub(super) fn agent_is_active(&self) -> bool {
         self.durable_harness
             .as_ref()
@@ -412,6 +511,8 @@ impl App {
             automatic_compaction,
         })?;
         self.durable_subscription = Some(harness.subscribe_events()?);
+        self.state
+            .set_extension_commands(harness.extension_host_commands()?);
         self.durable_harness = Some(Arc::clone(&harness));
         Ok(harness)
     }
@@ -474,6 +575,8 @@ impl App {
         let reduction = tea_session::reduce_lane(snapshot, tea_session::LaneId::main())
             .map_err(|error| AppError::Setup(error.to_string()))?;
         self.state.reported_usage = super::durable::core_usage(&reduction.usage_totals);
+        self.state
+            .set_extension_commands(harness.extension_host_commands()?);
         let recovery = reduction.lane_state.active_operation.is_some();
         self.durable_harness = Some(Arc::clone(&harness));
         self.submitted_prompt = None;

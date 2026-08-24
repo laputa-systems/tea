@@ -87,6 +87,23 @@ Normal composer input always starts or continues the managed harness. During an
 active operation, the terminal projects durable session and live harness events
 into the transcript without owning their state.
 
+## Bundled goal extension
+
+`/goal` is a bundled ABI-v2 Luau extension, not a native terminal command. Its
+source is pinned in the immutable harness revision like every other extension,
+so reopening a session uses the persisted source rather than the binary's
+current bundled files. `/goal`, `/goal <objective>`, `/goal edit <objective>`,
+`/goal pause`, `/goal resume`, and `/goal clear` operate on the extension's
+external-only `goal.state.v1` `PluginMemory` value. Status reports include the
+objective, status, goal-associated token use, budget when present, and active
+time.
+
+An active goal may request another ordinary durable operation only after the
+previous one settles. While an operation is live, accepted goal controls are
+queued; after settlement they are applied before the idle continuation decision.
+This avoids mutating an in-flight provider request while ensuring a queued pause
+or clear prevents the next automatic goal turn.
+
 Composer history is scoped to the active durable session. The terminal rebuilds
 it from that session's accepted user-message entries when a session is resumed;
 it does not create a second history file or retain terminal commands and

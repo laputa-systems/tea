@@ -50,6 +50,11 @@ pub(crate) const fn all() -> &'static [CommandSpec] {
     COMMANDS
 }
 
+/// Return native names that immutable extension commands must never shadow.
+pub(crate) fn names() -> impl Iterator<Item = &'static str> {
+    COMMANDS.iter().map(|command| command.name)
+}
+
 pub(crate) fn find(name: &str) -> Option<CommandSpec> {
     COMMANDS
         .iter()
