@@ -326,6 +326,15 @@ impl ProviderFactory {
                         .map_err(|error| AppError::Setup(error.to_string()))?,
                 )
             }
+            "opencode-zen" => {
+                let key = self
+                    .credentials
+                    .load("OPENCODE_API_KEY", "OpenCode Zen")?;
+                ProviderConfiguration::OpencodeZen(
+                    tea_providers::opencode_zen::OpencodeZenConfig::try_new(key, &descriptor.model)
+                        .map_err(|error| AppError::Setup(error.to_string()))?,
+                )
+            }
             "command-code" => {
                 let key = self
                     .credentials

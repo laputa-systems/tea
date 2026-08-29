@@ -3,14 +3,16 @@
 #[cfg(any(
     feature = "provider-commandcode",
     feature = "provider-openrouter",
-    feature = "provider-local"
+    feature = "provider-local",
+    feature = "provider-opencode-zen"
 ))]
 use super::MODEL_CATALOG_VERSION;
 use super::contracts::ProviderEntry;
 #[cfg(any(
     feature = "provider-commandcode",
     feature = "provider-openrouter",
-    feature = "provider-local"
+    feature = "provider-local",
+    feature = "provider-opencode-zen"
 ))]
 use super::contracts::{ModelDescriptor, ProviderCapabilities, ProviderConfigurationKind};
 // Source/update evidence for these lists is intentionally local and reviewable. Model identifiers
@@ -66,6 +68,15 @@ static LOCAL_MODELS: &[ModelDescriptor] = &[ModelDescriptor {
     context_window: Some(32_768),
 }];
 
+#[cfg(feature = "provider-opencode-zen")]
+static OPENCODE_ZEN_MODELS: &[ModelDescriptor] = &[
+    ModelDescriptor {
+        id: "muse-spark-1.2-contributor-free",
+        display_name: "Muse Spark 1.2 Contributor (Free)",
+        context_window: Some(262_144),
+    },
+];
+
 pub(super) static COMPILED_PROVIDERS: &[ProviderEntry] = &[
     #[cfg(feature = "provider-commandcode")]
     ProviderEntry {
@@ -101,6 +112,19 @@ pub(super) static COMPILED_PROVIDERS: &[ProviderEntry] = &[
         models: LOCAL_MODELS,
         allows_custom_models: true,
         configuration: ProviderConfigurationKind::Local,
+        capabilities: ProviderCapabilities {
+            provider_reported_cost: false,
+            concrete_compactor: false,
+        },
+    },
+    #[cfg(feature = "provider-opencode-zen")]
+    ProviderEntry {
+        id: "opencode-zen",
+        display_name: "OpenCode Zen",
+        model_catalog_version: MODEL_CATALOG_VERSION,
+        models: OPENCODE_ZEN_MODELS,
+        allows_custom_models: true,
+        configuration: ProviderConfigurationKind::OpencodeZen,
         capabilities: ProviderCapabilities {
             provider_reported_cost: false,
             concrete_compactor: false,

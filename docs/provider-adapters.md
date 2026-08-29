@@ -19,6 +19,7 @@ opaque caller providers or replay a stream after it has exposed events.
 | `provider-openrouter` | `tea_providers::openrouter` | OpenRouter Chat Completions SSE plus inline usage/accounting | Opt-in incremental rustls + Graviola HTTPS transport with packet-bound model validation and response-stall timeouts. |
 | `provider-commandcode` | `tea_providers::commandcode` | Command Code `/alpha/generate` NDJSON | Opt-in rustls + Graviola HTTPS gateway transport; the evaluation runner selects it with `--provider commandcode`. |
 | `provider-local` | `tea_providers::local` | Caller-selected local OpenAI-compatible Chat Completions SSE endpoint | Opt-in incremental HTTP transport for oMLX and similar local servers; no credentials or endpoint discovery. |
+| `provider-opencode-zen` | `tea_providers::opencode_zen` | OpenCode Zen Responses API SSE (`https://opencode.ai/zen/v1/responses`) via `input` array | Opt-in incremental rustls + Graviola HTTPS transport for `opencode-zen`/`muse-spark-1.2-contributor-free` (free). Mirrors the real `opencode` TUI provider (`opencode` → `https://opencode.ai/zen/v1`, `OPENCODE_API_KEY`, `openai-compatible` for most models, `responses` for `muse-spark`). Uses `Authorization: Bearer` + `Accept: text/event-stream`, `User-Agent: tea/1.0 opencode-zen`, `x-opencode-client: tea`. |
 
 All repository HTTP I/O goes through `tea-http`. Provider adapters share one
 pooled `tea_http::TransportClient` through their `transport_runtime` executor

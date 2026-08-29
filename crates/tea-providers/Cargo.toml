@@ -24,6 +24,11 @@ provider-local = [
     "dep:smol",
     "dep:tea-http",
 ]
+provider-opencode-zen = [
+    "dep:smol",
+    "dep:tea-http",
+]
+provider-opencode-zen-test-support = ["provider-opencode-zen"]
 eval-runner = ["dep:smol", "provider-commandcode", "provider-openrouter"]
 
 [dependencies]

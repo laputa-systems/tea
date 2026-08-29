@@ -58,6 +58,9 @@ pub enum ProviderConfigurationKind {
     /// Local OpenAI-compatible endpoint and model configuration.
     #[cfg(feature = "provider-local")]
     Local,
+    /// OpenCode Zen's caller-owned API key and model configuration.
+    #[cfg(feature = "provider-opencode-zen")]
+    OpencodeZen,
 }
 
 /// Metadata for one adapter compiled into this crate.
@@ -127,6 +130,9 @@ pub enum ProviderConfiguration {
     /// Fully configured local OpenAI-compatible adapter.
     #[cfg(feature = "provider-local")]
     Local(crate::local::LocalConfig),
+    /// Fully configured OpenCode Zen adapter.
+    #[cfg(feature = "provider-opencode-zen")]
+    OpencodeZen(crate::opencode_zen::OpencodeZenConfig),
 }
 
 /// A provider and the exact model descriptor it was configured to serve.

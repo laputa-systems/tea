@@ -24,6 +24,7 @@ tea-providers = { path = "../tea-providers", features = [
     "provider-commandcode",
     "provider-openrouter",
     "provider-local",
+    "provider-opencode-zen",
 ] }
 tea-luau = { path = "../tea-luau" }
 tea-http = { path = "../tea-http" }
