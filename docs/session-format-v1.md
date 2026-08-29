@@ -47,6 +47,10 @@ derived from its allocation digest; newly created IDs have no `session-` prefix.
 Older sessions whose IDs include that prefix remain valid opaque IDs and are not
 renamed during inspection or reopen.
 
+Host-created headers also retain `tea.build.version` and `tea.build.git_sha`.
+Read-only session reports expose those values as `tea_version` and `tea_git_sha`,
+or `null` for sessions created before build identity was recorded.
+
 ## Wire, integrity, and commit contract
 
 The header is one object with exactly these fields: kind, version, session_id,

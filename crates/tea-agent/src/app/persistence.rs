@@ -6,6 +6,7 @@
 //! before reading any records.
 
 use super::{AppError, SessionCommand};
+use super::super::build_info;
 use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::fs;
@@ -317,6 +318,20 @@ fn dump_session(directory: &Path) -> Result<JsonValue, AppError> {
             JsonValue::String(inspection.snapshot.header().session_id.to_string()),
         ),
         (
+            "tea_version",
+            session_metadata_string(
+                &inspection.snapshot,
+                build_info::SESSION_VERSION_METADATA_KEY,
+            ),
+        ),
+        (
+            "tea_git_sha",
+            session_metadata_string(
+                &inspection.snapshot,
+                build_info::SESSION_GIT_SHA_METADATA_KEY,
+            ),
+        ),
+        (
             "through_digest",
             JsonValue::String(inspection.snapshot.last_digest().to_hex()),
         ),
@@ -423,7 +438,25 @@ fn snapshot_identity_fields(
         "through_seq".into(),
         JsonValue::from(snapshot.last_sequence().0),
     );
+    fields.insert(
+        "tea_version".into(),
+        session_metadata_string(snapshot, build_info::SESSION_VERSION_METADATA_KEY),
+    );
+    fields.insert(
+        "tea_git_sha".into(),
+        session_metadata_string(snapshot, build_info::SESSION_GIT_SHA_METADATA_KEY),
+    );
     fields
+}
+
+fn session_metadata_string(snapshot: &tea_session::SessionSnapshot, key: &str) -> JsonValue {
+    snapshot
+        .header()
+        .metadata
+        .get(key)
+        .and_then(JsonValue::as_str)
+        .map(|value| JsonValue::String(value.to_owned()))
+        .unwrap_or(JsonValue::Null)
 }
 
 fn optional_string(value: Option<String>) -> JsonValue {

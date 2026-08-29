@@ -35,6 +35,7 @@ lists, and capability ceiling. Catalog rehydration recomputes that identity,
 so changing any retained candidate evidence is a new immutable candidate
 rather than an in-place edit.
 
-The terminal's /session picker lists only durable session directories for the
-current workspace. /resume reopens one of those directories. App does not
-maintain a second session database or a shadow transcript.
+The terminal's /session picker lists durable session directories for the current
+workspace, excluding the session currently attached to the host. /resume reopens
+one of the remaining directories. App does not maintain a second session database
+or a shadow transcript.

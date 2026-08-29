@@ -2,6 +2,7 @@
 name = "tea-agent"
 version = "1.0.0"
 edition = "2021"
+build = "build.rs"
 description = "Minimal interactive terminal host for tea-core"
 license = "MIT OR Apache-2.0"
 

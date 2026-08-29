@@ -44,6 +44,11 @@ and Tea-home options. It creates a fresh durable session only when it needs one
 and writes the initial model, thinking, harness catalog, snapshot, and revision
 before a prompt can start.
 
+`tea --version` prints the package version and the seven-character Git revision
+captured at build time (or `unknown` outside a readable Git checkout). New durable
+sessions retain both values in their immutable header, and the session reports
+include the creating build identity.
+
 After resolving Tea home, interactive and one-shot startup load
 `<tea-home>/config.toml` exactly once. A missing or empty file uses defaults;
 `--tea-home` redirects this configuration together with session storage. The
@@ -91,6 +96,9 @@ The selected provider/model is sealed in each session's durable header. Opening
 Tea without an explicit model starts unselected; `/resume` restores and
 configures the model required by the selected session rather than consulting a
 global preference.
+
+The `/resume` picker omits the durable session currently attached to the host;
+it only offers other saved sessions.
 
 Normal composer input always starts or continues the managed harness. During an
 active operation, the terminal projects durable session and live harness events

@@ -19,6 +19,10 @@ fn run() -> Result<(), AppError> {
             print!("{}", CliOptions::help_text());
             Ok(())
         }
+        CliCommand::Version => {
+            println!("{}", tea_agent::build_info::version_line());
+            Ok(())
+        }
         CliCommand::Session(command) => match run_session_command(command) {
             Ok(output) => {
                 println!("{output}");

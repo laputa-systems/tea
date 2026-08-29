@@ -27,6 +27,7 @@ impl CliOptions {
         match parse_impl(args, false)? {
             CliCommand::Options(options) => Ok(options),
             CliCommand::Help => unreachable!("help is disabled for CliOptions::parse"),
+            CliCommand::Version => unreachable!("version is disabled for CliOptions::parse"),
             CliCommand::Session(_) => {
                 unreachable!("session commands are disabled for CliOptions::parse")
             }
@@ -43,7 +44,7 @@ impl CliOptions {
 
     /// Render the command-line usage text.
     pub const fn help_text() -> &'static str {
-        "Usage: tea [OPTIONS]\n       tea session <inspect|dump|repair|rebuild-meta|verify|gc|export|restore> ...\n\nRead-only session commands:\n       tea session inspect <session-id> [--tea-home <path>]\n       tea session dump <session-id> [--tea-home <path>]\n\nOptions:\n    -h, --help                  Show this help text\n        --provider <id>         Select a compiled provider\n        --model <id>            Select a compiled model\n        --local-base-url <url>  Set the local provider API root\n        --local-context-window <tokens>\n                                Set explicit local context capacity for automatic compaction\n        --thinking <level>      Set reasoning level (off, minimal, low, medium, high, xhigh, max)\n    -p, --prompt <message>      Stream one response and exit (requires provider/model)\n        --cwd <path>            Use path as the explicit workspace\n        --tea-home <path>       Use path as the explicit Tea extension home (default: ~/.tea)\n\nSession commands emit one JSON object to stdout. `inspect` and `dump` search all workspace roots below Tea home; other session commands take explicit directories. `gc` is a dry run unless --apply is supplied.\n"
+        "Usage: tea [OPTIONS]\n       tea session <inspect|dump|repair|rebuild-meta|verify|gc|export|restore> ...\n\nRead-only session commands:\n       tea session inspect <session-id> [--tea-home <path>]\n       tea session dump <session-id> [--tea-home <path>]\n\nOptions:\n    -h, --help                  Show this help text\n    -V, --version               Show the package version and Git revision\n        --provider <id>         Select a compiled provider\n        --model <id>            Select a compiled model\n        --local-base-url <url>  Set the local provider API root\n        --local-context-window <tokens>\n                                Set explicit local context capacity for automatic compaction\n        --thinking <level>      Set reasoning level (off, minimal, low, medium, high, xhigh, max)\n    -p, --prompt <message>      Stream one response and exit (requires provider/model)\n        --cwd <path>            Use path as the explicit workspace\n        --tea-home <path>       Use path as the explicit Tea extension home (default: ~/.tea)\n\nSession commands emit one JSON object to stdout. `inspect` and `dump` search all workspace roots below Tea home; other session commands take explicit directories. `gc` is a dry run unless --apply is supplied.\n"
     }
 
     /// Borrow the explicitly selected provider, if supplied.
@@ -138,6 +139,8 @@ pub enum CliCommand {
     Options(CliOptions),
     /// Print command-line usage and exit.
     Help,
+    /// Print the package and source revision identity and exit.
+    Version,
     /// Run one explicit, machine-readable durable-session operation.
     Session(SessionCommand),
 }
@@ -195,6 +198,7 @@ where
     while let Some(argument) = arguments.next() {
         let slot = match argument.to_string_lossy().as_ref() {
             "-h" | "--help" if recognize_help => return Ok(CliCommand::Help),
+            "-V" | "--version" if recognize_help => return Ok(CliCommand::Version),
             "--provider" => OptionSlot::Provider,
             "--model" => OptionSlot::Model,
             "--local-base-url" => OptionSlot::LocalBaseUrl,

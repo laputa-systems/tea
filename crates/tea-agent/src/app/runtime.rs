@@ -22,7 +22,7 @@ use super::host::host_configuration;
 use super::mock;
 use super::nonblocking_operations::NonblockingCodingOperations;
 use super::provider_factory::ProviderFactory;
-use super::state::{AppState, UiStatus};
+use super::state::{AppState, TranscriptEntry, UiStatus};
 use std::sync::Arc;
 use tea_core::state::ThinkingLevel;
 
@@ -361,12 +361,28 @@ impl App {
                 self.state.apply_event(&event);
             }
             TeaEvent::Agent { event, .. } => self.state.apply_background_usage_event(&event),
-            TeaEvent::Session(SessionEvent::OperationAccepted { lane_id, .. }) => {
+            TeaEvent::Session(SessionEvent::OperationAccepted {
+                sequence,
+                lane_id,
+                ..
+            }) => {
                 // The session writer appended the root user entry before this
                 // event. Child acceptance must not duplicate the root draft in
                 // local history.
                 if lane_id == tea_session::LaneId::main() {
                     if let Some(prompt) = self.submitted_prompt.as_deref() {
+                        // Root acceptance is the durable boundary for the
+                        // submitted prompt. The core epoch receives that user
+                        // entry as context, but intentionally does not emit it
+                        // as a new live `MessageStart`; project it here so the
+                        // prompt moves from the composer into the transcript
+                        // without disappearing during the first redraw.
+                        self.state.push_entry(
+                            Some(sequence.0),
+                            TranscriptEntry::User {
+                                text: prompt.to_owned(),
+                            },
+                        );
                         self.state.record_history(prompt);
                     }
                 }

@@ -5,7 +5,7 @@ use tea_core::agent::AgentConfiguration;
 use tea_core::compaction::{AutomaticCompactionPolicy, ContextBudgetSource, OverflowRecovery};
 use tea_core::state::{ModelDescriptor, Usage};
 
-use super::durable::list_host_sessions;
+use super::durable::{DurableSessionSummary, list_host_sessions};
 use super::error::AppError;
 use super::host::model_candidates;
 use super::mock;
@@ -35,10 +35,22 @@ impl App {
         else {
             return Err(AppError::Setup("Tea home is not initialized".into()));
         };
-        let entries = list_host_sessions(home, workspace)?;
+        let current_session_id = self
+            .durable_harness
+            .as_ref()
+            .map(|harness| {
+                harness
+                    .snapshot()
+                    .map(|snapshot| snapshot.header().session_id.to_string())
+            })
+            .transpose()?;
+        let entries = without_current_session(
+            list_host_sessions(home, workspace)?,
+            current_session_id.as_deref(),
+        );
         if entries.is_empty() {
             self.state.close_surface();
-            self.state.notice("no saved sessions");
+            self.state.notice("no other saved sessions");
             return Ok(());
         }
         self.state.picker = Some(Picker::Session {
@@ -332,6 +344,40 @@ impl App {
         )
         .map_err(|error| AppError::Setup(format!("invalid --cwd: {error}")))?;
         super::host::host_configuration(tools, &workspace.to_string_lossy())
+    }
+}
+
+fn without_current_session(
+    entries: Vec<DurableSessionSummary>,
+    current_session_id: Option<&str>,
+) -> Vec<DurableSessionSummary> {
+    entries
+        .into_iter()
+        .filter(|entry| current_session_id != Some(entry.id.as_str()))
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DurableSessionSummary, without_current_session};
+
+    #[test]
+    fn resume_entries_omit_only_the_current_session() {
+        let entries = vec![
+            DurableSessionSummary {
+                id: "current".into(),
+                model: None,
+            },
+            DurableSessionSummary {
+                id: "older".into(),
+                model: None,
+            },
+        ];
+
+        let filtered = without_current_session(entries, Some("current"));
+
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].id, "older");
     }
 }
 

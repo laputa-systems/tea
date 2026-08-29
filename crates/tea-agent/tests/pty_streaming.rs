@@ -1182,6 +1182,85 @@ fn real_binary_reopens_tool_detail_after_escape_in_a_pty() {
 }
 
 #[test]
+fn mock_keeps_submitted_user_message_visible_after_acceptance() {
+    let _lock = PTY_TEST_LOCK.lock().expect("PTY test lock is not poisoned");
+    let tea_home = pty_tea_home("mock-submitted-message");
+    let scenario = Scenario::new("mock submitted message")
+        .expect("valid scenario label")
+        .command(CommandSpec::new(env!("CARGO_BIN_EXE_tea")).args([
+            "--provider",
+            "mock",
+            "--tea-home",
+            tea_home.to_str().expect("UTF-8 test path"),
+        ]))
+        .size(Size::new(COLUMNS, ROWS).expect("constant terminal size"))
+        .environment(TestEnv::hermetic().expect("create hermetic test environment"))
+        .protocol_profile(ProtocolProfile::xterm_minimal_v1());
+    let mut terminal = PtyTest::spawn(scenario).expect("real tea binary should start in a PTY");
+    let baseline = terminal.terminal_baseline();
+
+    terminal
+        .wait_for_screen(
+            terminal.deadline(Duration::from_secs(3)),
+            "mock readiness",
+            |screen| screen.contains("mock/mock"),
+        )
+        .expect("mock terminal should become ready");
+    terminal
+        .send_text(
+            terminal.deadline(Duration::from_secs(3)),
+            "submitted user message",
+        )
+        .expect("prompt should type");
+    terminal
+        .send_key(terminal.deadline(Duration::from_secs(3)), Key::Enter)
+        .expect("prompt should submit");
+    terminal
+        .wait_for_screen(
+            terminal.deadline(Duration::from_secs(3)),
+            "submitted message",
+            |screen| {
+                screen
+                    .to_string()
+                    .matches("submitted user message")
+                    .count()
+                    == 1
+            },
+        )
+        .expect("submitted message should remain visible");
+
+    terminal
+        .send_key(terminal.deadline(Duration::from_secs(3)), Key::Ctrl('c'))
+        .expect("cancel active mock request");
+    terminal
+        .wait_for_screen(
+            terminal.deadline(Duration::from_secs(3)),
+            "cancelled submitted message",
+            |screen| screen.contains("submitted user message"),
+        )
+        .expect("cancel redraw must preserve the submitted user message");
+    terminal
+        .send_key(terminal.deadline(Duration::from_secs(3)), Key::Ctrl('c'))
+        .expect("clear restored prompt");
+    terminal
+        .send_key(terminal.deadline(Duration::from_secs(3)), Key::Ctrl('c'))
+        .expect("exit mock terminal");
+    assert_eq!(
+        terminal
+            .wait_for_exit(terminal.deadline(Duration::from_secs(3)))
+            .expect("wait for tea exit"),
+        ExitStatus::Code(0)
+    );
+    terminal
+        .assert_terminal_restored(&baseline)
+        .expect("mock exit restores terminal modes");
+    terminal
+        .finish(terminal.deadline(Duration::from_secs(3)))
+        .expect("reap mock terminal");
+    let _ = fs::remove_dir_all(tea_home);
+}
+
+#[test]
 fn real_binary_keeps_an_overflowing_settled_transcript_in_main_screen_flow() {
     let _lock = PTY_TEST_LOCK.lock().expect("PTY test lock is not poisoned");
     let fixture = start_overflow_fixture();

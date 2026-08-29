@@ -51,6 +51,7 @@ use tea_session::{
 use super::compaction::ProviderCompactor;
 use super::config::{SubagentTuiConfig, TuiConfig};
 use super::error::AppError;
+use super::super::build_info;
 use super::provider_factory::ProviderFactory;
 use super::subagents::{SmolTaskRuntime, TuiSubagentHost};
 use super::support::{parse_thinking_level as parse_thinking_level_name, thinking_level_name};
@@ -206,6 +207,14 @@ pub(super) fn create_host_harness(
         metadata.insert(
             "tea.thinking".into(),
             JsonValue::String(thinking_level_name(thinking_level).into()),
+        );
+        metadata.insert(
+            build_info::SESSION_VERSION_METADATA_KEY.into(),
+            JsonValue::String(build_info::PACKAGE_VERSION.into()),
+        );
+        metadata.insert(
+            build_info::SESSION_GIT_SHA_METADATA_KEY.into(),
+            JsonValue::String(build_info::GIT_SHA.into()),
         );
         let header = SessionHeader::new(
             session_id.clone(),
@@ -2643,6 +2652,22 @@ data: [DONE]
         })
         .expect("host harness creates");
         let before = harness.snapshot().expect("initial session snapshot");
+        assert_eq!(
+            before
+                .header()
+                .metadata
+                .get(crate::build_info::SESSION_VERSION_METADATA_KEY)
+                .and_then(JsonValue::as_str),
+            Some(crate::build_info::PACKAGE_VERSION)
+        );
+        assert_eq!(
+            before
+                .header()
+                .metadata
+                .get(crate::build_info::SESSION_GIT_SHA_METADATA_KEY)
+                .and_then(JsonValue::as_str),
+            Some(crate::build_info::GIT_SHA)
+        );
         assert!(before
             .entries()
             .iter()

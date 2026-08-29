@@ -180,6 +180,14 @@ fn cli_help_accepts_short_and_long_forms() {
         CliOptions::parse_command(["tea", "--help"].map(OsString::from)),
         Ok(CliCommand::Help)
     );
+    assert_eq!(
+        CliOptions::parse_command(["tea", "--version"].map(OsString::from)),
+        Ok(CliCommand::Version)
+    );
+    assert_eq!(
+        CliOptions::parse_command(["tea", "-V"].map(OsString::from)),
+        Ok(CliCommand::Version)
+    );
     assert!(CliOptions::help_text().contains("--provider <id>"));
 }
 
@@ -315,6 +323,49 @@ fn machine_session_inspect_and_verify_emit_authenticated_json() {
 }
 
 #[test]
+fn machine_session_reports_the_build_that_created_it() {
+    let home = test_tea_home("machine-session-build");
+    let directory = home.join("session.tea");
+    let mut metadata = Metadata::new();
+    metadata.insert(
+        "tea.build.version".into(),
+        JsonValue::String("1.0.0".into()),
+    );
+    metadata.insert(
+        "tea.build.git_sha".into(),
+        JsonValue::String("abc1234".into()),
+    );
+    JsonlSession::create(
+        &directory,
+        SessionHeader::new(
+            SessionId::new("machine-session-build").expect("valid session ID"),
+            "workspace-test",
+            metadata,
+        ),
+        DurabilityMode::Strict,
+    )
+    .expect("session creates");
+
+    let output = run_session_command(SessionCommand::InspectPath { directory })
+        .expect("machine inspection succeeds");
+    let fields = JsonValue::parse(&output)
+        .expect("machine output is JSON")
+        .as_object()
+        .expect("machine output is an object")
+        .clone();
+    assert_eq!(
+        fields.get("tea_version").and_then(JsonValue::as_str),
+        Some("1.0.0")
+    );
+    assert_eq!(
+        fields.get("tea_git_sha").and_then(JsonValue::as_str),
+        Some("abc1234")
+    );
+
+    let _ = fs::remove_dir_all(home);
+}
+
+#[test]
 fn machine_session_id_commands_resolve_and_dump_authoritative_prefix() {
     let home = test_tea_home("machine-session-id");
     let workspace = PathBuf::from("/workspace/session-id-test");
@@ -323,12 +374,21 @@ fn machine_session_id_commands_resolve_and_dump_authoritative_prefix() {
         .join(Digest::from_bytes(workspace.to_string_lossy().as_bytes()).to_hex());
     let directory = workspace_root.join("session-id-test.tea");
     fs::create_dir_all(&workspace_root).expect("workspace session root creates");
+    let mut metadata = Metadata::new();
+    metadata.insert(
+        "tea.build.version".into(),
+        JsonValue::String("1.0.0".into()),
+    );
+    metadata.insert(
+        "tea.build.git_sha".into(),
+        JsonValue::String("abc1234".into()),
+    );
     let mut session = JsonlSession::create(
         &directory,
         SessionHeader::new(
             SessionId::new("session-id-test").expect("valid session ID"),
             workspace.to_string_lossy(),
-            Metadata::new(),
+            metadata,
         ),
         DurabilityMode::Strict,
     )
@@ -373,6 +433,14 @@ fn machine_session_id_commands_resolve_and_dump_authoritative_prefix() {
     assert_eq!(
         dump.get("session_id").and_then(JsonValue::as_str),
         Some("session-id-test")
+    );
+    assert_eq!(
+        dump.get("tea_version").and_then(JsonValue::as_str),
+        Some("1.0.0")
+    );
+    assert_eq!(
+        dump.get("tea_git_sha").and_then(JsonValue::as_str),
+        Some("abc1234")
     );
     assert_eq!(dump.get("through_seq").and_then(JsonValue::as_u64), Some(1));
     assert_eq!(
@@ -1449,6 +1517,29 @@ fn child_events_update_aggregate_usage_without_entering_root_transcript() {
 
     assert!(app.state().transcript().is_empty());
     assert!(app.state().footer_lines(&app.registry)[1].contains("↓7"));
+}
+
+#[test]
+fn accepted_root_prompt_enters_the_live_transcript() {
+    let mut app = App::new(CliOptions::default());
+    app.submitted_prompt = Some("accepted prompt".into());
+    let operation_id = tea_session::OperationId::new("operation-test")
+        .expect("test operation ID is portable");
+    app.project_durable_event(tea_core::runtime::TeaEvent::Session(
+        tea_core::runtime::SessionEvent::OperationAccepted {
+            sequence: tea_session::Sequence(7),
+            lane_id: tea_session::LaneId::main(),
+            operation_id,
+        },
+    ));
+
+    assert_eq!(
+        app.state().transcript(),
+        &[TranscriptEntry::User {
+            text: "accepted prompt".into(),
+        }]
+    );
+    assert_eq!(app.state().history, ["accepted prompt"]);
 }
 
 #[test]

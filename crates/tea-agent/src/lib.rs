@@ -9,6 +9,7 @@
 #![allow(clippy::result_large_err)]
 
 pub mod app;
+pub mod build_info;
 pub mod composer;
 pub mod editor;
 pub mod render;
