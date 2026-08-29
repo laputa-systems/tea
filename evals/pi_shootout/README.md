@@ -10,6 +10,14 @@ The live command is deliberately explicit:
 vault OPENROUTER_API_KEY -- make pi-shootout
 ```
 
+For the efficiency mission, use the static-only run:
+
+```sh
+vault OPENROUTER_API_KEY -- make pi-shootout-static
+```
+
+It runs only `tea-static` and `pi-static`; it never instantiates `tea-jit`.
+
 It runs one oracle-isolated `express-3936-medium` workspace under `pi-static`,
 `tea-static`, and `tea-jit` in seeded sequential order. v0 uses exactly
 OpenRouter, `deepseek/deepseek-v4-flash-0731`, high thinking, no output-token

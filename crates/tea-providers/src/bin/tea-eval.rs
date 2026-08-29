@@ -8,8 +8,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use tea_core::agent::AgentConfiguration;
 use tea_core::coding::{
@@ -39,8 +41,9 @@ use tea_providers::openai::OpenAiContextHook;
 use tea_providers::openrouter::{OpenRouterConfig, OpenRouterProvider};
 use tea_session::{
     CanonicalHashWriter, Digest, DurabilityMode, EntryId, HarnessRevisionChangedEntry,
-    JsonlSession, LaneId, ModelChangedEntry, ProvisionedEntry, SessionEntry, SessionHeader,
-    SessionId, SessionWriter, ThinkingChangedEntry,
+    JsonlSession, LaneId, LaneRecord, ModelChangedEntry, ProvisionedEntry, SessionEntry,
+    SessionHeader, SessionId, SessionSnapshot, SessionWriter, StepAttemptedRecord, StepKind,
+    ThinkingChangedEntry,
 };
 
 const RESULT_SCHEMA: &str = "tea-coding-eval-result/v2";
@@ -390,18 +393,28 @@ fn snapshot_spec(
 fn event_name(event: &TeaEvent) -> &'static str {
     match event {
         TeaEvent::Agent { event, .. } => match &event.kind {
+            AgentEventKind::ProviderRequestObserved { .. } => "provider_request_observed",
+            AgentEventKind::PromptLayoutObserved { .. } => "prompt_layout_observed",
+            AgentEventKind::CompactionLifecycle { .. } => "compaction_lifecycle",
             AgentEventKind::AgentStart => "agent_start",
             AgentEventKind::TurnStart { .. } => "turn_start",
+            AgentEventKind::TurnEnd { .. } => "turn_end",
             AgentEventKind::MessageStart { .. } => "message_start",
             AgentEventKind::MessageUpdate { .. } => "message_update",
             AgentEventKind::MessageEnd { .. } => "message_end",
             AgentEventKind::ToolExecutionStart { .. } => "tool_execution_start",
             AgentEventKind::ToolExecutionUpdate { .. } => "tool_execution_update",
             AgentEventKind::ToolExecutionEnd { .. } => "tool_execution_end",
+            AgentEventKind::ToolFailureObserved { .. } => "tool_failure_observed",
             AgentEventKind::CompactionStart { .. } => "compaction_start",
+            AgentEventKind::CompactionResult { .. } => "compaction_result",
             AgentEventKind::CompactionEnd { .. } => "compaction_end",
+            AgentEventKind::AutomaticCompactionStart { .. } => "automatic_compaction_start",
+            AgentEventKind::AutomaticCompactionEnd { .. } => "automatic_compaction_end",
+            AgentEventKind::ContextEstimate { .. } => "context_estimate",
+            AgentEventKind::ProviderRequestSkipped { .. } => "provider_request_skipped",
+            AgentEventKind::ModelTurnUsage { .. } => "model_turn_usage",
             AgentEventKind::AgentEnd { .. } => "agent_end",
-            _ => "runtime_event",
         },
         TeaEvent::Session(_) => "session_event",
         TeaEvent::Harness(_) => "harness_event",
@@ -522,6 +535,7 @@ struct ResultJsonInput<'a> {
     provider: &'a OpenRouterProvider,
     surface: &'a CodingSurface,
     snapshot: &'a tea_core::harness::HarnessSnapshotV1,
+    session_snapshot: &'a SessionSnapshot,
     final_snapshot_id: String,
     terminal: (&'a str, Option<&'a str>),
     agent_ms: u64,
@@ -532,6 +546,149 @@ struct ResultJsonInput<'a> {
     changed_surfaces: Vec<String>,
     hypothesis: Option<String>,
     activated: bool,
+}
+
+struct EventCollection {
+    trace: Vec<JsonValue>,
+    candidate_count: u64,
+    candidate_id: Option<String>,
+    changed_surfaces: Vec<String>,
+    activated: bool,
+    final_snapshot_id: String,
+}
+
+impl EventCollection {
+    fn new(initial_snapshot_id: String) -> Self {
+        Self {
+            trace: Vec::new(),
+            candidate_count: 0,
+            candidate_id: None,
+            changed_surfaces: Vec::new(),
+            activated: false,
+            final_snapshot_id: initial_snapshot_id,
+        }
+    }
+
+    fn observe(&mut self, event: TeaEvent) {
+        let name = event_name(&event);
+        match &event {
+            TeaEvent::Harness(HarnessEvent::CandidateStaged {
+                candidate_id: staged,
+                ..
+            }) => {
+                self.candidate_count = self.candidate_count.saturating_add(1);
+                self.candidate_id = Some(staged.to_string());
+            }
+            TeaEvent::Harness(HarnessEvent::SnapshotActivated {
+                snapshot_id: activated_snapshot,
+                changed_surfaces: surfaces,
+                ..
+            }) => {
+                self.activated = true;
+                self.final_snapshot_id = activated_snapshot.to_string();
+                self.changed_surfaces = surfaces
+                    .iter()
+                    .map(|surface| format!("{surface:?}").to_ascii_lowercase())
+                    .collect();
+            }
+            _ => {}
+        }
+        self.trace.push(JsonValue::object([
+            ("seq", JsonValue::from(self.trace.len() as u64 + 1)),
+            ("type", JsonValue::from(name)),
+        ]));
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SessionCounts {
+    /// Pi-compatible logical turns: durable user messages.
+    user_messages: u64,
+    /// Core model-loop turns, including turns that may not materialize an assistant entry.
+    model_turns: u64,
+    /// Physical provider request intents written before dispatch.
+    provider_requests: u64,
+    /// Provider-emitted assistant tool-call blocks.
+    tool_calls: u64,
+    /// Durable step attempts carrying an explicit retry reason.
+    retries: u64,
+    /// Durable compaction entries committed to session history.
+    compactions: u64,
+}
+
+fn session_counts(snapshot: &SessionSnapshot) -> SessionCounts {
+    let user_messages = snapshot
+        .entries()
+        .iter()
+        .filter(|entry| matches!(&entry.body, SessionEntry::UserMessage(_)))
+        .count() as u64;
+    let tool_calls = snapshot
+        .entries()
+        .iter()
+        .filter_map(|entry| match &entry.body {
+            SessionEntry::AssistantMessage(message) => Some(message.tool_calls.len() as u64),
+            _ => None,
+        })
+        .sum();
+    let compactions = snapshot
+        .entries()
+        .iter()
+        .filter(|entry| matches!(&entry.body, SessionEntry::Compaction(_)))
+        .count() as u64;
+    let mut model_turns = 0_u64;
+    let mut provider_requests = 0_u64;
+    let mut retries = 0_u64;
+    for stored in snapshot.records() {
+        match &stored.record {
+            LaneRecord::StepAttempted(StepAttemptedRecord {
+                kind: StepKind::Assistant,
+                reason,
+                ..
+            }) => {
+                model_turns = model_turns.saturating_add(1);
+                retries = retries.saturating_add(u64::from(reason.is_some()));
+            }
+            LaneRecord::StepAttempted(StepAttemptedRecord { reason, .. }) => {
+                retries = retries.saturating_add(u64::from(reason.is_some()));
+            }
+            LaneRecord::ProviderRequestStarted(_) => {
+                provider_requests = provider_requests.saturating_add(1);
+            }
+            _ => {}
+        }
+    }
+    SessionCounts {
+        user_messages,
+        model_turns,
+        provider_requests,
+        tool_calls,
+        retries,
+        compactions,
+    }
+}
+
+fn uncached_input_tokens(
+    prompt_tokens: Option<u64>,
+    cache_read_tokens: Option<u64>,
+    cache_write_tokens: Option<u64>,
+) -> Option<u64> {
+    prompt_tokens.map(|prompt| {
+        prompt
+            .saturating_sub(cache_read_tokens.unwrap_or(0))
+            .saturating_sub(cache_write_tokens.unwrap_or(0))
+    })
+}
+
+fn prompt_total_tokens(
+    input_tokens: Option<u64>,
+    cache_read_tokens: Option<u64>,
+    cache_write_tokens: Option<u64>,
+) -> Option<u64> {
+    input_tokens.map(|input| {
+        input
+            .saturating_add(cache_read_tokens.unwrap_or(0))
+            .saturating_add(cache_write_tokens.unwrap_or(0))
+    })
 }
 
 /// The resolved, provider-visible coding surface used by one evaluation run.
@@ -637,11 +794,26 @@ fn coding_configuration(
 
 fn result_json(input: ResultJsonInput<'_>) -> JsonValue {
     let usage = input.provider.usage_snapshot();
-    let input_tokens = usage.input_tokens;
+    // OpenRouter's `prompt_tokens` includes provider cache reads/writes. Pi's
+    // `usage.input` is the uncached portion, so normalize Tea at this adapter
+    // boundary while retaining the cache components as separate fields.
+    let input_tokens = uncached_input_tokens(
+        usage.input_tokens,
+        usage.cache_read_tokens,
+        usage.cache_write_tokens,
+    );
+    let prompt_total = prompt_total_tokens(
+        input_tokens,
+        usage.cache_read_tokens,
+        usage.cache_write_tokens,
+    );
     let output = usage.output_tokens;
     let generation = input_tokens
         .zip(output)
         .map(|(input, output)| input.saturating_add(output));
+    let all_tokens = prompt_total
+        .zip(output)
+        .map(|(prompt, output)| prompt.saturating_add(output));
     let prompt = &input.surface.system_prompt;
     let normalized_prompt = prompt.replace(
         &input.args.workspace.to_string_lossy().replace('\\', "/"),
@@ -668,23 +840,7 @@ fn result_json(input: ResultJsonInput<'_>) -> JsonValue {
         .to_json_string()
         .expect("shell environment encodes");
     let cost = input.provider.cost_report();
-    let turns = input
-        .trace
-        .iter()
-        .filter(|event| event.get("type").and_then(JsonValue::as_str) == Some("turn_start"))
-        .count() as u64;
-    let tool_calls = input
-        .trace
-        .iter()
-        .filter(|event| {
-            event.get("type").and_then(JsonValue::as_str) == Some("tool_execution_start")
-        })
-        .count() as u64;
-    let compactions = input
-        .trace
-        .iter()
-        .filter(|event| event.get("type").and_then(JsonValue::as_str) == Some("compaction_end"))
-        .count() as u64;
+    let counts = session_counts(input.session_snapshot);
     JsonValue::object([
         ("schema_version", JsonValue::from(RESULT_SCHEMA)),
         (
@@ -795,19 +951,23 @@ fn result_json(input: ResultJsonInput<'_>) -> JsonValue {
         (
             "counts",
             JsonValue::object([
-                ("turns", JsonValue::from(turns)),
-                ("provider_requests", JsonValue::Null),
-                ("tool_calls", JsonValue::from(tool_calls)),
-                ("retries", JsonValue::from(0_u64)),
-                ("compactions", JsonValue::from(compactions)),
+                // `turns` intentionally follows Pi's user-message semantics.
+                ("turns", JsonValue::from(counts.user_messages)),
+                ("model_turns", JsonValue::from(counts.model_turns)),
+                ("provider_requests", JsonValue::from(counts.provider_requests)),
+                ("tool_calls", JsonValue::from(counts.tool_calls)),
+                ("retries", JsonValue::from(counts.retries)),
+                ("compactions", JsonValue::from(counts.compactions)),
             ]),
         ),
         (
             "usage",
             JsonValue::object([
                 ("input", optional_u64(input_tokens)),
+                ("prompt_total", optional_u64(prompt_total)),
                 ("output", optional_u64(output)),
                 ("generation", optional_u64(generation)),
+                ("all_tokens", optional_u64(all_tokens)),
                 ("reasoning", optional_u64(usage.reasoning_tokens)),
                 ("cache_read", optional_u64(usage.cache_read_tokens)),
                 ("cache_write", optional_u64(usage.cache_write_tokens)),
@@ -1048,6 +1208,33 @@ fn main() -> Result<(), String> {
     let subscription = harness
         .subscribe_events()
         .map_err(|error| error.to_string())?;
+    // The supervisor fanout is deliberately bounded for interactive callers.
+    // Consume it while the run is active so the evaluation trace does not
+    // overflow that queue and silently lose lifecycle events.
+    let initial_snapshot_id = snapshot.id.to_string();
+    let collecting = Arc::new(AtomicBool::new(true));
+    let collector_flag = Arc::clone(&collecting);
+    let collector = thread::spawn(move || {
+        let mut events = EventCollection::new(initial_snapshot_id);
+        loop {
+            match subscription.try_recv() {
+                Ok(event) => events.observe(event),
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    if !collector_flag.load(Ordering::Acquire) {
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(1));
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
+            }
+        }
+        // The producer may have published an event just before the stop flag;
+        // drain the receiver once more before returning the authoritative trace.
+        while let Ok(event) = subscription.try_recv() {
+            events.observe(event);
+        }
+        events
+    });
     let started = Instant::now();
     let outcome = smol::block_on(async {
         if args.harness_mode == HarnessMode::Jit {
@@ -1057,6 +1244,10 @@ fn main() -> Result<(), String> {
         }
     });
     let agent_ms = started.elapsed().as_millis() as u64;
+    collecting.store(false, Ordering::Release);
+    let events = collector
+        .join()
+        .map_err(|_| "event collector thread panicked".to_owned())?;
     let durable = harness.snapshot().map_err(|error| error.to_string())?;
     let final_text = durable
         .entries()
@@ -1067,41 +1258,14 @@ fn main() -> Result<(), String> {
             _ => None,
         })
         .unwrap_or_default();
-    let mut trace = Vec::new();
-    let mut candidate_count = 0_u64;
-    let mut candidate_id = None;
-    let mut changed_surfaces = Vec::new();
-    let mut activated = false;
-    let mut final_snapshot_id = snapshot.id.to_string();
-    while let Ok(event) = subscription.try_recv() {
-        let name = event_name(&event);
-        match &event {
-            TeaEvent::Harness(HarnessEvent::CandidateStaged {
-                candidate_id: staged,
-                ..
-            }) => {
-                candidate_count = candidate_count.saturating_add(1);
-                candidate_id = Some(staged.to_string());
-            }
-            TeaEvent::Harness(HarnessEvent::SnapshotActivated {
-                snapshot_id: activated_snapshot,
-                changed_surfaces: surfaces,
-                ..
-            }) => {
-                activated = true;
-                final_snapshot_id = activated_snapshot.to_string();
-                changed_surfaces = surfaces
-                    .iter()
-                    .map(|surface| format!("{surface:?}").to_ascii_lowercase())
-                    .collect();
-            }
-            _ => {}
-        }
-        trace.push(JsonValue::object([
-            ("seq", JsonValue::from(trace.len() as u64 + 1)),
-            ("type", JsonValue::from(name)),
-        ]));
-    }
+    let EventCollection {
+        trace,
+        candidate_count,
+        candidate_id,
+        changed_surfaces,
+        activated,
+        final_snapshot_id,
+    } = events;
     let provider_error = provider
         .last_error_report()
         .map(|report| match report.status_code {
@@ -1170,6 +1334,7 @@ fn main() -> Result<(), String> {
         provider: &provider,
         surface: &surface,
         snapshot: &snapshot,
+        session_snapshot: &durable,
         final_snapshot_id,
         terminal,
         agent_ms,
@@ -1196,11 +1361,17 @@ fn main() -> Result<(), String> {
 mod tests {
     use std::sync::Arc;
 
+    use tea_core::event::{AgentEvent, AgentEventKind, EventSequence};
+    use tea_core::scheduler::AdapterRequestObservation;
+    use tea_core::state::{RunId, TurnId};
+    use tea_core::runtime::TeaEvent;
     use tea_core::tool::ToolRegistry;
+    use tea_session::LaneId;
 
     use super::{
         AgentConfiguration, HarnessMode, ModelDescriptor, OpenAiContextHook, OpenRouterConfig,
-        OpenRouterProvider, REQUIRED_MODEL, RuntimeServices, model_profile, sha256, snapshot_spec,
+        OpenRouterProvider, REQUIRED_MODEL, RuntimeServices, model_profile, prompt_total_tokens,
+        sha256, snapshot_spec, uncached_input_tokens,
     };
     #[test]
     fn requested_deepseek_model_is_pinned() {
@@ -1214,6 +1385,38 @@ mod tests {
             sha256(b"abc"),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
+    }
+
+    #[test]
+    fn openrouter_prompt_usage_matches_pi_cache_semantics() {
+        assert_eq!(
+            uncached_input_tokens(Some(282_674), Some(260_352), None),
+            Some(22_322)
+        );
+        assert_eq!(
+            prompt_total_tokens(Some(22_322), Some(260_352), None),
+            Some(282_674)
+        );
+        assert_eq!(
+            uncached_input_tokens(Some(4), Some(8), Some(1)),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn provider_request_observation_has_a_stable_trace_name() {
+        let event = TeaEvent::Agent {
+            lane_id: LaneId::main(),
+            event: AgentEvent {
+                run_id: RunId(1),
+                sequence: EventSequence(1),
+                kind: AgentEventKind::ProviderRequestObserved {
+                    turn_id: TurnId(1),
+                    observation: AdapterRequestObservation::default(),
+                },
+            },
+        };
+        assert_eq!(super::event_name(&event), "provider_request_observed");
     }
 
     #[test]

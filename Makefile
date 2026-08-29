@@ -1,4 +1,4 @@
-.PHONY: lint test test-linux tui local-install local-model local quality-fast quality-resources quality-compaction pi-shootout pi-shootout-plan pi-shootout-check
+.PHONY: lint test test-linux tui local-install local-model local quality-fast quality-resources quality-compaction pi-shootout pi-shootout-static pi-shootout-plan pi-shootout-static-plan pi-shootout-check
 
 lint:
 	cargo fmt --all
@@ -117,6 +117,14 @@ pi-shootout-plan:
 	@node -e 'const [major, minor] = process.versions.node.split(".").map(Number); if (major < 22 || (major === 22 && minor < 19)) process.exit(1)' || { echo "node >=22.19.0 is required" >&2; exit 1; }
 	PYTHONDONTWRITEBYTECODE=1 python3 -m evals.pi_shootout plan $(PI_SHOOTOUT_ARGS)
 
+pi-shootout-static-plan:
+	@command -v node >/dev/null 2>&1 || { echo "missing required command: node" >&2; exit 1; }
+	@command -v npm >/dev/null 2>&1 || { echo "missing required command: npm" >&2; exit 1; }
+	@command -v curl >/dev/null 2>&1 || { echo "missing required command: curl" >&2; exit 1; }
+	@command -v git >/dev/null 2>&1 || { echo "missing required command: git" >&2; exit 1; }
+	@node -e 'const [major, minor] = process.versions.node.split(".").map(Number); if (major < 22 || (major === 22 && minor < 19)) process.exit(1)' || { echo "node >=22.19.0 is required" >&2; exit 1; }
+	PYTHONDONTWRITEBYTECODE=1 python3 -m evals.pi_shootout plan $(PI_SHOOTOUT_ARGS) --static-only
+
 pi-shootout-check:
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest evals.pi_shootout.test_contract evals.pi_shootout.test_report
 	npm --prefix evals/pi_shootout/sdk ci
@@ -131,3 +139,9 @@ pi-shootout: pi-shootout-plan
 	npm --prefix evals/pi_shootout/sdk ci
 	cargo +nightly-2026-07-24 build -p tea-providers --bin tea-eval --features eval-runner --locked
 	PYTHONDONTWRITEBYTECODE=1 python3 -m evals.pi_shootout run $(PI_SHOOTOUT_ARGS)
+
+pi-shootout-static: pi-shootout-static-plan
+	@command -v vault >/dev/null 2>&1 || { echo "missing required command: vault (expected: vault OPENROUTER_API_KEY -- <adapter>)" >&2; exit 1; }
+	npm --prefix evals/pi_shootout/sdk ci
+	cargo +nightly-2026-07-24 build -p tea-providers --bin tea-eval --features eval-runner --locked
+	PYTHONDONTWRITEBYTECODE=1 python3 -m evals.pi_shootout run $(PI_SHOOTOUT_ARGS) --static-only

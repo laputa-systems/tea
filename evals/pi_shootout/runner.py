@@ -30,8 +30,8 @@ from evals.quality.coding_cases import (
 )
 from evals.quality.coding_runner import CodingRunError, coding_bundle_capabilities, prepare_cache
 
-from .contract import BASELINES, ContractError, RESULT_SCHEMA, canonical, digest, file_digest, validate_result
-from .report import write_reports
+from .contract import BASELINES, STATIC_BASELINES, ContractError, RESULT_SCHEMA, canonical, digest, file_digest, validate_result
+from .report import write_reports, write_static_report
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -62,6 +62,7 @@ class Config:
     # condition and is excluded from agent-token accounting.
     timeout_seconds: int = 900
     keep_worktrees: bool = False
+    static_only: bool = False
 
     def validate(self) -> None:
         if self.task != "express-3936-medium":
@@ -112,11 +113,11 @@ def adapter_task(case: dict[str, Any], capabilities: list[dict[str, Any]], timeo
     }
 
 
-def randomized_plan(repeats: int, seed: int) -> list[list[str]]:
+def randomized_plan(repeats: int, seed: int, baselines: tuple[str, ...] = BASELINES) -> list[list[str]]:
     if repeats < 1:
         raise ShootoutError("repeats must be positive")
     randomizer = random.Random(seed)
-    return [randomizer.sample(list(BASELINES), len(BASELINES)) for _ in range(repeats)]
+    return [randomizer.sample(list(baselines), len(baselines)) for _ in range(repeats)]
 
 
 def normalized_environment(*, home: Path, temporary: Path, npm_cache: Path | None = None) -> dict[str, str]:
@@ -230,7 +231,8 @@ def _runtime_revision() -> tuple[str, bool, str | None]:
 def plan(config: Config) -> dict[str, Any]:
     config.validate()
     case = selected_case(config.task)
-    condition_order = randomized_plan(config.repeats, config.seed)
+    baselines = STATIC_BASELINES if config.static_only else BASELINES
+    condition_order = randomized_plan(config.repeats, config.seed, baselines)
     return {
         "schema_version": "tea-pi-shootout-plan/v1",
         "task": config.task,
@@ -241,7 +243,8 @@ def plan(config: Config) -> dict[str, Any]:
         "timeout_seconds": config.timeout_seconds,
         "repeats": config.repeats,
         "seed": config.seed,
-        "conditions": list(BASELINES),
+        "conditions": list(baselines),
+        "static_only": config.static_only,
         "condition_order": condition_order,
         "baseline_commit": case["baseline"]["commit"],
         "known_correct_fix_commit": case["baseline"]["fix_commit"],
@@ -359,6 +362,9 @@ def run(config: Config) -> tuple[Path, dict[str, Any]]:
             "attempts": [record for record in attempts if record["attempt_id"].startswith(f"shootout-r{repeat + 1}-")],
         }
         report_root = run_directory / "reports" if config.repeats == 1 else run_directory / "reports" / f"repeat-{repeat + 1}"
-        reports += write_reports(repeat_summary, report_root)
+        if config.static_only:
+            reports += write_static_report(repeat_summary, report_root)
+        else:
+            reports += write_reports(repeat_summary, report_root)
     (run_directory / "summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return run_directory, {"summary": summary, "reports": [str(path) for path in reports]}

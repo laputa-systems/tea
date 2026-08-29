@@ -4,7 +4,7 @@ import copy
 import unittest
 
 from .contract import ContractError, RESULT_SCHEMA, validate_result
-from .runner import Config, DEFAULT_MODEL, DEFAULT_THINKING, ShootoutError, randomized_plan
+from .runner import Config, DEFAULT_MODEL, DEFAULT_THINKING, ShootoutError, plan, randomized_plan
 
 
 def result(*, baseline: str = "tea-jit") -> dict:
@@ -18,8 +18,8 @@ def result(*, baseline: str = "tea-jit") -> dict:
         "model": {"provider": "openrouter", "requested_model": DEFAULT_MODEL, "returned_model": None, "returned_provider": None, "thinking_level": DEFAULT_THINKING, "max_output_tokens": None, "sampling": {"temperature": None, "seed": None, "source": "provider-default"}},
         "surface": {"system_prompt_bytes": 1, "system_prompt_sha256": "a", "workspace_normalized_system_prompt_sha256": "b", "tool_surface_sha256": "c", "active_tools": ["read", "bash", "edit", "find"], "research_tools": [], "subagents": False, "shell_curl_available": True, "shell_environment_sha256": "d"},
         "timings": {"agent_ms": 1, "candidate_validation_ms": 0, "rollover_ms": 0},
-        "counts": {"turns": 1, "provider_requests": None, "tool_calls": 0, "retries": 0, "compactions": 0},
-        "usage": {"input": 2, "output": 3, "generation": 5, "reasoning": None, "cache_read": 0, "cache_write": 0},
+        "counts": {"turns": 1, "model_turns": 1, "provider_requests": None, "tool_calls": 0, "retries": 0, "compactions": 0},
+        "usage": {"input": 2, "prompt_total": 2, "output": 3, "generation": 5, "all_tokens": 5, "reasoning": None, "cache_read": 0, "cache_write": 0},
         "cost": {"kind": "unavailable", "currency": "USD", "total": None},
         "harness": {"mode": "jit", "base_snapshot_id": "base", "initial_snapshot_id": "base", "final_snapshot_id": "base", "decision": "no-change", "candidate_count": 0, "candidate_id": None, "changed_surfaces": [], "candidate_source_bytes": 0, "hypothesis": None},
         "trace": [],
@@ -33,6 +33,12 @@ class ContractTest(unittest.TestCase):
     def test_rejects_incorrect_generation_total(self) -> None:
         value = result()
         value["usage"]["generation"] = 6
+        with self.assertRaises(ContractError):
+            validate_result(value)
+
+    def test_rejects_incorrect_all_token_total(self) -> None:
+        value = result()
+        value["usage"]["all_tokens"] = 4
         with self.assertRaises(ContractError):
             validate_result(value)
 
@@ -52,6 +58,12 @@ class ContractTest(unittest.TestCase):
         first, second = randomized_plan(3, 20260823), randomized_plan(3, 20260823)
         self.assertEqual(first, second)
         self.assertTrue(all(set(order) == {"pi-static", "tea-static", "tea-jit"} for order in first))
+
+    def test_static_only_plan_excludes_jit(self) -> None:
+        config = Config("express-3936-medium", "openrouter", DEFAULT_MODEL, DEFAULT_THINKING, None, 1, 20260823, __import__("pathlib").Path("/tmp/cache"), __import__("pathlib").Path("/tmp/work"), __import__("pathlib").Path("/tmp/out"), static_only=True)
+        value = plan(config)
+        self.assertEqual(value["conditions"], ["pi-static", "tea-static"])
+        self.assertEqual(set(value["condition_order"][0]), {"pi-static", "tea-static"})
 
     def test_configuration_requires_the_fixed_v0_model_and_unbounded_is_valid(self) -> None:
         config = Config("express-3936-medium", "openrouter", DEFAULT_MODEL, DEFAULT_THINKING, None, 1, 1, __import__("pathlib").Path("/tmp/cache"), __import__("pathlib").Path("/tmp/work"), __import__("pathlib").Path("/tmp/out"))

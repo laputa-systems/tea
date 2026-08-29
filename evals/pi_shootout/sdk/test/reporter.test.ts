@@ -26,6 +26,9 @@ test("normalizes successful session accounting and surfaces", async () => {
 	reporter.observe({ type: "tool_execution_update", toolName: "bash", result: "x".repeat(1000) });
 	const result = reporter.finish(session(), { status: "completed", code: null });
 	assert.equal((result.usage as { generation: number }).generation, 7);
+	assert.equal((result.usage as { prompt_total: number }).prompt_total, 14);
+	assert.equal((result.usage as { all_tokens: number }).all_tokens, 18);
+	assert.equal((result.counts as { turns: number }).turns, 2);
 	assert.equal((result.model as { max_output_tokens: null }).max_output_tokens, null);
 	assert.equal(((result.trace as Array<{ content: { bytes: number } }>)[0].content.bytes), 1000);
 	assert.match(await readFile(join(directory, "system-prompt.txt"), "utf8"), /cwd/);

@@ -37,13 +37,16 @@ def _rows(left: dict[str, Any], right: dict[str, Any], reference: dict[str, Any]
         ("Terminal code", lambda record: _result(record)["terminal"]["code"]),
         ("Agent wall time", lambda record: _result(record)["timings"]["agent_ms"]),
         ("Total attempt wall time", lambda record: record["timings"]["total_attempt_ms"]),
-        ("Input tokens", lambda record: _result(record)["usage"]["input"]),
+        ("Uncached input tokens", lambda record: _result(record)["usage"]["input"]),
+        ("Prompt total tokens", lambda record: _result(record)["usage"]["prompt_total"]),
         ("Output tokens", lambda record: _result(record)["usage"]["output"]),
         ("Generation tokens", lambda record: _result(record)["usage"]["generation"]),
+        ("All prompt/output tokens", lambda record: _result(record)["usage"]["all_tokens"]),
         ("Reasoning tokens", lambda record: _result(record)["usage"]["reasoning"]),
         ("Cache read tokens", lambda record: _result(record)["usage"]["cache_read"]),
         ("Cache write tokens", lambda record: _result(record)["usage"]["cache_write"]),
         ("Turns", lambda record: _result(record)["counts"]["turns"]),
+        ("Model turns", lambda record: _result(record)["counts"]["model_turns"]),
         ("Tool calls", lambda record: _result(record)["counts"]["tool_calls"]),
         ("Retries", lambda record: _result(record)["counts"]["retries"]),
         ("Compactions", lambda record: _result(record)["counts"]["compactions"]),
@@ -188,3 +191,19 @@ def write_reports(summary: dict[str, Any], reports: Path) -> tuple[Path, Path, P
             differences.append(f"- `{name}` differs: Pi `{pi_surface[name]}`, Tea `{tea_surface[name]}`")
     surface.write_text("# Static surface difference\n\n" + ("\n".join(differences) if differences else "The exported normalized surfaces are equal.") + "\n", encoding="utf-8")
     return static, evolution, surface
+
+
+def write_static_report(summary: dict[str, Any], reports: Path) -> tuple[Path, Path]:
+    """Write the paired static comparison without requiring a JIT attempt."""
+    reports.mkdir(parents=True, exist_ok=True)
+    static = reports / "static.md"
+    surface = reports / "surface-diff.md"
+    static.write_text(static_report(summary), encoding="utf-8")
+    pi, tea = _attempt(summary, "pi-static"), _attempt(summary, "tea-static")
+    pi_surface, tea_surface = _result(pi)["surface"], _result(tea)["surface"]
+    differences = []
+    for name in ("workspace_normalized_system_prompt_sha256", "tool_surface_sha256", "active_tools"):
+        if pi_surface[name] != tea_surface[name]:
+            differences.append(f"- `{name}` differs: Pi `{pi_surface[name]}`, Tea `{tea_surface[name]}`")
+    surface.write_text("# Static surface difference\n\n" + ("\n".join(differences) if differences else "The exported normalized surfaces are equal.") + "\n", encoding="utf-8")
+    return static, surface

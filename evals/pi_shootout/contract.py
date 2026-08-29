@@ -11,6 +11,7 @@ from typing import Any
 
 RESULT_SCHEMA = "tea-coding-eval-result/v2"
 BASELINES = ("pi-static", "tea-static", "tea-jit")
+STATIC_BASELINES = ("pi-static", "tea-static")
 TERMINAL_STATUSES = {"completed", "failed", "cancelled", "aborted"}
 HARNESS_DECISIONS = {"not-applicable", "no-change", "rejected", "activated"}
 
@@ -126,15 +127,22 @@ def validate_result(value: Any, *, attempt_id: str | None = None, baseline_id: s
     for name in ("agent_ms", "candidate_validation_ms", "rollover_ms"):
         _integer(timings.get(name), f"timings.{name}")
     counts = _object(result.get("counts"), "counts")
-    for name in ("turns", "tool_calls", "retries", "compactions"):
+    for name in ("turns", "model_turns", "tool_calls", "retries", "compactions"):
         _integer(counts.get(name), f"counts.{name}")
     _number(counts.get("provider_requests"), "counts.provider_requests", nullable=True)
     usage = _object(result.get("usage"), "usage")
-    for name in ("input", "output", "generation", "cache_read", "cache_write"):
+    for name in ("input", "prompt_total", "output", "generation", "all_tokens", "cache_read", "cache_write"):
         _number(usage.get(name), f"usage.{name}", nullable=True)
     _number(usage.get("reasoning"), "usage.reasoning", nullable=True)
     if usage["input"] is not None and usage["output"] is not None and usage["generation"] != usage["input"] + usage["output"]:
         raise ContractError("usage.generation must equal input plus output")
+    if usage["prompt_total"] is not None and usage["output"] is not None and usage["all_tokens"] != usage["prompt_total"] + usage["output"]:
+        raise ContractError("usage.all_tokens must equal prompt total plus output")
+    if usage["prompt_total"] is not None and usage["input"] is not None:
+        cache_read = usage["cache_read"] or 0
+        cache_write = usage["cache_write"] or 0
+        if usage["prompt_total"] != usage["input"] + cache_read + cache_write:
+            raise ContractError("usage.prompt_total must include input and cache components")
     cost = _object(result.get("cost"), "cost")
     if cost.get("kind") not in {"provider-reported", "catalog-estimate", "unavailable"}:
         raise ContractError("cost.kind is invalid")

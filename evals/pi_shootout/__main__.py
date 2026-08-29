@@ -30,13 +30,14 @@ def parser() -> argparse.ArgumentParser:
         item.add_argument("--out", type=Path, default=Path("/tmp/tea-pi-shootout"))
         if name == "run":
             item.add_argument("--keep-worktrees", action="store_true")
+        item.add_argument("--static-only", action="store_true", help="run only pi-static and tea-static")
     sub.add_parser("check", help="run only Python provider-free shootout tests")
     return command
 
 
 def _config(args: argparse.Namespace) -> Config:
     maximum = None if args.max_output_tokens == "unlimited" else int(args.max_output_tokens)
-    return Config(args.task, args.provider, args.model, args.thinking, maximum, args.repeats, args.seed, args.cache_root, args.workspace_root, args.out, timeout_seconds=args.timeout_seconds, keep_worktrees=getattr(args, "keep_worktrees", False))
+    return Config(args.task, args.provider, args.model, args.thinking, maximum, args.repeats, args.seed, args.cache_root, args.workspace_root, args.out, timeout_seconds=args.timeout_seconds, keep_worktrees=getattr(args, "keep_worktrees", False), static_only=getattr(args, "static_only", False))
 
 
 def main(argv: list[str] | None = None) -> int:
