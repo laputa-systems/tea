@@ -14,7 +14,7 @@ use tea_core::runtime::{HarnessEvent, SessionEvent, TeaEvent, TeaEventSubscripti
 use tea_providers::ProviderRegistry;
 use tea_tui::Size;
 
-use super::cli::CliOptions;
+use crate::cli::CliOptions;
 use super::compaction::ProviderCompactor;
 use super::config::{load_tui_config, TuiConfig};
 use super::error::AppError;

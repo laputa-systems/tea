@@ -10,6 +10,7 @@
 
 pub mod app;
 pub mod build_info;
+pub mod cli;
 pub mod composer;
 pub mod editor;
 pub mod render;

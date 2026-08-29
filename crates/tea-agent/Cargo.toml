@@ -31,6 +31,9 @@ tea-session = { path = "../tea-session" }
 tea-tui = { path = "../tea-tui" }
 smol = { workspace = true }
 rustix = { version = "=1.1.4", default-features = false, features = ["event", "std", "termios"] }
+# The CLI parser is intentionally kept small and explicit.  All command
+# recognition crosses this lexopt boundary in `src/cli`.
+lexopt = "=0.3.2"
 # The terminal-only global configuration parser.  Keep it out of reusable crates.
 toml_edit = "=0.25.13"
 

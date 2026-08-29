@@ -2,8 +2,7 @@
 
 /// Published package version from the crate manifest.
 pub const PACKAGE_VERSION: &str = env!("CARGO_PKG_VERSION");
-/// Seven-character Git revision captured by `build.rs`, or `unknown` when the
-/// source was built without a readable Git checkout.
+/// Seven-character Git revision captured by `build.rs`.
 pub const GIT_SHA: &str = env!("TEA_BUILD_GIT_SHA");
 /// Immutable session-header key for the package version that created a session.
 pub const SESSION_VERSION_METADATA_KEY: &str = "tea.build.version";

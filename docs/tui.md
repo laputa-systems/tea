@@ -44,10 +44,13 @@ and Tea-home options. It creates a fresh durable session only when it needs one
 and writes the initial model, thinking, harness catalog, snapshot, and revision
 before a prompt can start.
 
-`tea --version` prints the package version and the seven-character Git revision
-captured at build time (or `unknown` outside a readable Git checkout). New durable
-sessions retain both values in their immutable header, and the session reports
-include the creating build identity.
+`tea --version` (or `tea -v`) prints the package version and the seven-character
+Git revision captured at build time. Builds outside a checkout must provide the
+validated `TEA_RELEASE_GIT_SHA` build override; the binary never substitutes an
+unknown identity. New durable sessions retain both values in their immutable
+header, and the session reports include the creating build identity. The
+generated CLI reference is available from `tea --help`, while every command
+also accepts `-h`/`--help` before required arguments are validated.
 
 After resolving Tea home, interactive and one-shot startup load
 `<tea-home>/config.toml` exactly once. A missing or empty file uses defaults;

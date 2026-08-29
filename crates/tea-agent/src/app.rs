@@ -4,7 +4,6 @@
 //! projected state, durable host assembly, runtime/input handling, picker
 //! behavior, and presentation helpers.
 
-mod cli;
 mod commands;
 mod compaction;
 mod config;
@@ -28,7 +27,7 @@ mod support;
 #[cfg(test)]
 mod tests;
 
-pub use cli::{CliCommand, CliError, CliOptions, SessionCommand};
+pub use crate::cli::{CliCommand, CliError, CliOptions, SessionCommand};
 pub use config::ConfigError;
 pub use error::AppError;
 pub use persistence::run_session_command;

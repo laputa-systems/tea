@@ -863,6 +863,7 @@ version = "1.0.0"
 dependencies = [
  "laputa-hi-lite",
  "laputa-ptytest",
+ "lexopt",
  "rustix",
  "smol",
  "tea-core",

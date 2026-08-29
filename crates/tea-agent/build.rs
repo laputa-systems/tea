@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn main() {
+    println!("cargo:rerun-if-env-changed=TEA_RELEASE_GIT_SHA");
     let manifest_dir = PathBuf::from(
         env::var_os("CARGO_MANIFEST_DIR").expect("Cargo always supplies CARGO_MANIFEST_DIR"),
     );
@@ -43,7 +44,16 @@ fn git_build_identity(manifest_dir: &Path) -> (String, Vec<PathBuf>) {
     let sha = run_git(manifest_dir, &["rev-parse", "--short=7", "HEAD"])
         .map(|output| output.trim().to_owned())
         .filter(|sha| sha.len() == 7 && sha.bytes().all(|byte| byte.is_ascii_hexdigit()))
-        .unwrap_or_else(|| "unknown".into());
+        .or_else(|| {
+            env::var("TEA_RELEASE_GIT_SHA")
+                .ok()
+                .filter(|sha| sha.len() == 7 && sha.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "tea-agent requires a 7-character hexadecimal Git SHA; build in a Git checkout or set TEA_RELEASE_GIT_SHA"
+            )
+        });
     (sha, watched_paths)
 }
 
