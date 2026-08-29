@@ -133,6 +133,10 @@ pub struct AppState {
     /// uses it to begin a fresh terminal projection without comparing text.
     pub(super) projection_generation: u64,
     pub(super) selected_model: Option<ModelDescriptor>,
+    /// Durable session identity shown in the footer once a session has been
+    /// allocated or reopened. It remains separate from the provider/model
+    /// selection because idle startup can precede session creation.
+    pub(super) session_id: Option<String>,
     /// Presentation projection of the selected model's durable compaction policy.
     pub(super) automatic_compaction_enabled: bool,
     /// Effective context capacity selected by the host. This may be an explicit local override;
@@ -693,7 +697,8 @@ impl AppState {
         self.projection_generation
     }
 
-    /// Return the compact, event-derived telemetry lines for the fixed footer.
+    /// Return the compact, event-derived text for the fixed footer. The second
+    /// value may contain a newline before the durable session identity.
     pub(crate) fn footer_lines(&self, registry: &ProviderRegistry) -> [String; 2] {
         let selected = self.selected_model.as_ref();
         let model = selected
@@ -801,7 +806,13 @@ impl AppState {
         if let Some((active, maximum)) = self.subagent_activity {
             stats.push(format!("agents {active}/{maximum}"));
         }
-        [hint, stats.join(" · ")]
+        let mut secondary = stats.join(" · ");
+        if let Some(session_id) = self.session_id.as_deref() {
+            secondary.push('\n');
+            secondary.push_str("session ");
+            secondary.push_str(session_id);
+        }
+        [hint, secondary]
     }
 
     /// Install the current durable child activity view. `None` is the
@@ -827,6 +838,16 @@ impl AppState {
 
     pub(crate) fn set_thinking_level(&mut self, level: ThinkingLevel) {
         self.thinking_level = level;
+    }
+
+    /// Return the durable session identity currently attached to the
+    /// presentation state, if a session has been allocated.
+    pub fn session_id(&self) -> Option<&str> {
+        self.session_id.as_deref()
+    }
+
+    pub(crate) fn set_session_id(&mut self, session_id: Option<String>) {
+        self.session_id = session_id;
     }
 
     pub(crate) fn thinking_level(&self) -> ThinkingLevel {

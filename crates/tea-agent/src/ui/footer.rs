@@ -3,7 +3,8 @@
 use crate::app::AppState;
 use tea_providers::ProviderRegistry;
 
-/// The two compact footer lines owned by tea's presentation state.
+/// The compact footer fields owned by tea's presentation state. The secondary
+/// field may contain a newline before the durable session identity.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FooterLines {
     pub primary: String,

@@ -115,6 +115,7 @@ impl App {
         self.state.take_queued_message();
         self.state.composer_mut().clear();
         self.state.context_estimate = None;
+        self.state.set_session_id(None);
         self.state.close_surface();
         self.state
             .notice("new session will begin with the next prompt");
@@ -345,6 +346,7 @@ impl App {
         self.state.selected_context_window = context_window;
         self.state.selected_model = Some(descriptor.clone());
         self.state.context_estimate = None;
+        self.state.set_session_id(None);
         self.state.close_surface();
         self.state.reported_usage = Usage::default();
         // A model/provider change is a new immutable durable profile. Do not
