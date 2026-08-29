@@ -402,9 +402,10 @@ where
     /// external join/reap point.
     pub(crate) fn task_completed(&self, agent_id: &AgentId) {
         if let Ok(mut state) = self.state.lock()
-            && !state.handles.contains_key(agent_id) {
-                state.completed_before_install.insert(agent_id.clone());
-            }
+            && !state.handles.contains_key(agent_id)
+        {
+            state.completed_before_install.insert(agent_id.clone());
+        }
     }
 
     /// Record a task that stopped before cleanup without self-dropping the

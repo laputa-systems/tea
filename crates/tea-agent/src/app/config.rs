@@ -17,8 +17,7 @@ const DEFAULT_MAX_CONCURRENT: u32 = 4;
 const DEFAULT_MAX_TOTAL_PER_OPERATION: u32 = 16;
 const DEFAULT_TIMEOUT_SECONDS: u64 = 900;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-#[derive(Default)]
+#[derive(Clone, Debug, Eq, PartialEq, Default)]
 pub(super) struct TuiConfig {
     pub(super) features: FeatureConfig,
     pub(super) subagents: SubagentTuiConfig,
@@ -37,7 +36,6 @@ pub(super) struct SubagentTuiConfig {
     pub(super) max_total_per_operation: NonZeroU32,
     pub(super) timeout: Duration,
 }
-
 
 impl Default for SubagentTuiConfig {
     fn default() -> Self {

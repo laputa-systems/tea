@@ -1162,12 +1162,13 @@ fn spawn_tool_assignment<'a>(
         )));
     }
     if let Some(thinking) = fields.get("thinking")
-        && thinking.as_str() != Some(spawn.thinking.as_str()) {
-            return Err(Corruption::new(format!(
-                "agent {} thinking differs from its durable effective arguments",
-                spawn.agent_id
-            )));
-        }
+        && thinking.as_str() != Some(spawn.thinking.as_str())
+    {
+        return Err(Corruption::new(format!(
+            "agent {} thinking differs from its durable effective arguments",
+            spawn.agent_id
+        )));
+    }
     Ok(task)
 }
 

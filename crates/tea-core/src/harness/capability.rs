@@ -301,7 +301,7 @@ impl ExtensionCapability for ExtensionStateCapability {
             if cancellation.is_cancelled() {
                 return Err(ExtensionCapabilityError::Cancelled);
             }
-            
+
             match request.method.as_str() {
                 "get" => state
                     .read(&extension_id)
