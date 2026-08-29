@@ -16,7 +16,7 @@ return function(call)
         kind = "capability",
         capability = "extension.state",
         method = "get",
-        arguments_json = "{}",
+        arguments = {},
     })
     local state, unreadable = core.validate_state((stored or {})[core.STATE_KIND])
     if state == nil then
@@ -39,15 +39,15 @@ return function(call)
     end
 
     local function commit(next_state)
-        local encoded, oversized = core.encode_state(next_state)
-        if encoded == nil then
+        local oversized = core.state_size_error(next_state)
+        if oversized ~= nil then
             return oversized
         end
         coroutine.yield({
             kind = "capability",
             capability = "extension.state",
             method = "append",
-            arguments_json = '{"kind":"' .. core.STATE_KIND .. '","content":' .. encoded .. "}",
+            arguments = { kind = core.STATE_KIND, content = next_state },
         })
         state = next_state
         return nil

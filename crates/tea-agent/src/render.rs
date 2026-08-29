@@ -148,7 +148,7 @@ pub(crate) fn main_presentation(
         lines.push(RenderLine::plain(String::new(), Style::default()));
     }
 
-    lines.extend(activity_lines(state));
+    lines.extend(activity_lines(state, width));
     lines.extend(history_search_lines(state, width, 3));
     let desired_composer_rows = composer_layout(state, width).rows.len().max(1);
     let composer_capacity = if entries.is_empty() {
@@ -507,38 +507,94 @@ fn wrap_footer_primary(text: &str, width: u16) -> Vec<RenderLine> {
         .collect()
 }
 
-fn activity_lines(state: &AppState) -> Vec<RenderLine> {
+/// Wrap one activity row after reserving its visible prefix. The first prefix
+/// is always at least as wide as the continuation prefix, so wrapping to its
+/// remaining budget keeps every physical continuation within `width` too.
+fn prefixed_activity_lines(
+    text: &str,
+    first_prefix: &str,
+    first_style: Style,
+    continuation_prefix: &str,
+    continuation_style: Style,
+    width: u16,
+) -> Vec<RenderLine> {
+    if width == 0 {
+        return Vec::new();
+    }
+    let first_prefix = truncate_display(first_prefix, usize::from(width));
+    let continuation_prefix = truncate_display(continuation_prefix, usize::from(width));
+    let payload_width = width.saturating_sub(
+        u16::try_from(display_width(&first_prefix)).unwrap_or(u16::MAX),
+    );
+    let source = RenderLine::plain(text, first_style);
+    let chunks = wrap_styled_line(&source, payload_width, true);
+    if chunks.is_empty() {
+        return vec![RenderLine::plain(first_prefix, first_style)];
+    }
+    chunks
+        .into_iter()
+        .enumerate()
+        .map(|(index, chunk)| {
+            if index == 0 {
+                RenderLine::plain(format!("{first_prefix}{}", chunk.text), first_style)
+            } else {
+                RenderLine::plain(
+                    format!("{continuation_prefix}{}", chunk.text),
+                    continuation_style,
+                )
+            }
+        })
+        .collect()
+}
+
+fn activity_lines(state: &AppState, width: u16) -> Vec<RenderLine> {
     let mut lines = Vec::new();
     if matches!(state.status(), crate::app::UiStatus::Active) {
         let theme = Theme::default();
         match state.activity_text() {
             // Unchanged default presentation when no tool has published one.
-            None => lines.push(RenderLine::plain(
-                format!("• Thinking {}", thinking_spinner()),
+            None => lines.extend(prefixed_activity_lines(
+                "",
+                &format!("• Thinking {}", thinking_spinner()),
                 theme.style(Role::Activity),
+                "  ",
+                theme.style(Role::Muted),
+                width,
             )),
             Some(activity) => {
                 let mut rows = activity.lines();
-                lines.push(RenderLine::plain(
-                    format!(
-                        "• {} {}",
-                        thinking_spinner(),
-                        rows.next().unwrap_or_default()
-                    ),
+                lines.extend(prefixed_activity_lines(
+                    rows.next().unwrap_or_default(),
+                    &format!("• {} ", thinking_spinner()),
                     theme.style(Role::Activity),
+                    "  ",
+                    theme.style(Role::Muted),
+                    width,
                 ));
-                // Continuation rows are subordinate but otherwise plain: no
-                // border, panel, or alternate layout.
-                lines.extend(
-                    rows.map(|row| RenderLine::plain(format!("  {row}"), theme.style(Role::Muted))),
-                );
+                // Logical continuation rows are subordinate but otherwise
+                // plain: no border, panel, or alternate layout. Each is
+                // reflowed independently so its indentation survives.
+                for row in rows {
+                    lines.extend(prefixed_activity_lines(
+                        row,
+                        "  ",
+                        theme.style(Role::Muted),
+                        "  ",
+                        theme.style(Role::Muted),
+                        width,
+                    ));
+                }
             }
         }
     }
     if let Some(message) = state.queued_message() {
-        lines.push(RenderLine::plain(
-            format!("• Queued next: {}", message.replace('\n', " ")),
+        lines.extend(prefixed_activity_lines(
+            &message.replace('\n', " "),
+            "• Queued next: ",
             Theme::default().style(Role::Activity),
+            "  ",
+            Theme::default().style(Role::Muted),
+            width,
         ));
     }
     lines
@@ -1491,7 +1547,7 @@ mod tests {
         state.queue_message("second instruction".into());
 
         assert_eq!(
-            activity_lines(&state)
+            activity_lines(&state, 80)
                 .into_iter()
                 .map(|line| line.text)
                 .collect::<Vec<_>>(),
@@ -1546,7 +1602,7 @@ mod tests {
     #[test]
     fn the_default_activity_row_is_unchanged_without_an_override() {
         let state = active_state();
-        let rows = activity_lines(&state)
+        let rows = activity_lines(&state, 80)
             .into_iter()
             .map(|line| mask_spinner(&line.text))
             .collect::<Vec<_>>();
@@ -1557,7 +1613,7 @@ mod tests {
     fn a_published_activity_replaces_the_default_row_and_keeps_the_spinner() {
         let mut state = active_state();
         publish_activity(&mut state, 2, TODO_ACTIVITY);
-        let lines = activity_lines(&state);
+        let lines = activity_lines(&state, 80);
         let rows = lines
             .iter()
             .map(|line| mask_spinner(&line.text))
@@ -1583,7 +1639,7 @@ mod tests {
         let mut state = active_state();
         publish_activity(&mut state, 2, TODO_ACTIVITY);
         publish_activity(&mut state, 3, "Todo · 2 active\n- [>] Only row");
-        let rows = activity_lines(&state)
+        let rows = activity_lines(&state, 80)
             .into_iter()
             .map(|line| mask_spinner(&line.text))
             .collect::<Vec<_>>();
@@ -1615,6 +1671,30 @@ mod tests {
                 "activity is projected into the mutable tail at width {width}"
             );
         }
+    }
+
+    #[test]
+    fn activity_rows_wrap_to_the_available_width_and_reflow_geometry() {
+        let mut state = active_state();
+        let activity = format!(
+            "Todo · 1 blocked\n- [!] {} — {}",
+            "t".repeat(200),
+            "b".repeat(300),
+        );
+        publish_activity(&mut state, 2, &activity);
+
+        let wide = activity_lines(&state, 80);
+        let narrow = activity_lines(&state, 40);
+        assert!(
+            narrow
+                .iter()
+                .all(|line| display_width(&line.text) <= 40),
+            "every activity physical row fits the terminal width: {narrow:#?}"
+        );
+        assert!(
+            narrow.len() > wide.len(),
+            "narrower activity rows occupy more measured layout rows"
+        );
     }
 
     #[test]

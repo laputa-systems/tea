@@ -254,6 +254,23 @@ fn empty_state_reads_as_an_empty_list_and_publishes_empty_activity() {
     );
     assert_eq!(read.activity(), "Todo · empty");
     assert_eq!(todo.stored(), None, "a read never writes durable state");
+
+    let resynchronized = todo.ok(&markdown_call(&read.content));
+    assert_eq!(resynchronized.content, read.content);
+}
+
+#[test]
+fn only_one_leading_canonical_header_is_accepted_during_structural_sync() {
+    let todo = TodoFixture::new();
+    todo.ok(&markdown_call(ROOT_PLAN));
+    let document = todo.ok("{}").content;
+
+    let refused = todo.err(&markdown_call(&format!("{document}\n\n{document}")));
+    assert!(
+        refused.content.contains("is not a todo row"),
+        "a second generated header must remain document text: {}",
+        refused.content
+    );
 }
 
 #[test]
@@ -276,8 +293,8 @@ fn an_initial_plan_allocates_deterministic_ids_and_activates_the_first_leaf() {
         todo.stored()
             .as_ref()
             .and_then(|state| state.get("next_id"))
-            .and_then(JsonValue::as_u64),
-        Some(4)
+            .and_then(JsonValue::as_f64),
+        Some(4.0)
     );
     // A read returns the same canonical document.
     assert_eq!(todo.ok("{}").content, created.content);
@@ -296,8 +313,8 @@ fn structural_append_keeps_existing_ids_and_allocates_monotonically() {
         todo.stored()
             .as_ref()
             .and_then(|state| state.get("next_id"))
-            .and_then(JsonValue::as_u64),
-        Some(5)
+            .and_then(JsonValue::as_f64),
+        Some(5.0)
     );
 }
 
@@ -319,11 +336,46 @@ fn renaming_reordering_and_reparenting_are_inferred_from_the_document() {
     let stored = todo.stored().expect("state persists");
     let items = stored.get("items").and_then(JsonValue::as_array).unwrap();
     assert_eq!(items.len(), 3);
-    assert_eq!(items[2].get("id").and_then(JsonValue::as_u64), Some(2));
+    assert_eq!(items[2].get("id").and_then(JsonValue::as_f64), Some(2.0));
     assert_eq!(
-        items[2].get("parent_id").and_then(JsonValue::as_u64),
-        Some(3)
+        items[2].get("parent_id").and_then(JsonValue::as_f64),
+        Some(3.0)
     );
+}
+
+#[test]
+fn structural_sync_reopens_a_closed_ancestor_of_active_work() {
+    let todo = TodoFixture::new();
+    todo.ok(&markdown_call("- [ ] Finished parent\n- [ ] Active child\n"));
+    todo.ok(r#"{"updates":[{"id":1,"status":"done"}]}"#);
+
+    let synchronized = todo.ok(&markdown_call(
+        "- [ ] #1 Finished parent\n  - [>] #2 Active child\n",
+    ));
+    assert!(synchronized.content.contains("- [ ] #1 Finished parent"));
+    assert!(synchronized
+        .content
+        .contains("  - [>] #2 Active child"));
+}
+
+#[test]
+fn structural_sync_rejects_open_work_below_a_blocked_ancestor() {
+    let todo = TodoFixture::new();
+    todo.ok(&markdown_call("- [ ] Active work\n- [ ] Blocked parent\n"));
+    todo.ok(r#"{"updates":[{"id":2,"status":"blocked","reason":"waiting for input"}]}"#);
+    let before = todo.stored();
+
+    let refused = todo.err(&markdown_call(
+        "- [ ] #2 Blocked parent\n  - [>] #1 Active work\n",
+    ));
+    assert!(
+        refused
+            .content
+            .contains("open todo #1 beneath blocked todo #2"),
+        "{}",
+        refused.content
+    );
+    assert_eq!(todo.stored(), before, "a refused restructure is atomic");
 }
 
 #[test]
@@ -339,7 +391,7 @@ fn omitting_a_row_removes_it_and_never_reuses_its_id() {
 }
 
 #[test]
-fn structural_markdown_never_reopens_or_closes_an_existing_id() {
+fn structural_markdown_markers_do_not_override_existing_statuses() {
     let todo = TodoFixture::new();
     todo.ok(&markdown_call(ROOT_PLAN));
     todo.ok(r#"{"updates":[{"id":2,"status":"done"}]}"#);
@@ -611,11 +663,10 @@ fn a_blocked_row_round_trips_through_structural_markdown_without_absorbing_its_r
     todo.ok(&markdown_call("- [ ] Alpha\n- [ ] Beta\n"));
     todo.ok(r#"{"updates":[{"id":1,"status":"blocked","reason":"upstream fixture"}]}"#);
     let listed = todo.ok("{}").content;
-    let document = listed
-        .split_once("\n\n")
-        .expect("canonical Markdown has a header")
-        .1;
-    let resynchronized = todo.ok(&markdown_call(document));
+    let before = todo.stored();
+    let resynchronized = todo.ok(&markdown_call(&listed));
+    assert_eq!(resynchronized.content, listed);
+    assert_eq!(todo.stored(), before, "a read document round-trips exactly");
     assert!(
         resynchronized
             .content
@@ -804,11 +855,6 @@ fn the_largest_storable_plan_reads_synchronizes_and_updates_within_budget() {
         "{}",
         blocked.content
     );
-    let document = read
-        .content
-        .split_once("\n\n")
-        .expect("canonical Markdown has a header")
-        .1;
-    todo.ok(&markdown_call(document));
+    todo.ok(&markdown_call(&read.content));
     assert!(todo.todos_command().starts_with("TODO · "));
 }

@@ -19,7 +19,7 @@ core.MAX_ITEMS = 128
 core.MAX_DEPTH = 8
 core.MAX_TEXT_CHARS = 200
 core.MAX_REASON_CHARS = 300
---- Encoded-state ceiling. The host rejects an extension state update above
+--- Serialized-state ceiling. The host rejects an extension state update above
 --- 16384 bytes, so refuse slightly earlier with a message the model can act on
 --- instead of surfacing an opaque capability failure.
 core.MAX_STATE_BYTES = 15360
@@ -477,7 +477,9 @@ local function row_suffix(item): string
 end
 
 --- Canonical Markdown for the model and for `/todos`. Always complete: the
---- model-facing read is never paginated.
+--- model-facing read is never paginated. `parse_markdown` accepts this exact
+--- generated document, including its header, so a read can be edited and sent
+--- straight back to `markdown`.
 function core.format_markdown(state): string
     local header = core.header(state)
     if #state.items == 0 then
@@ -604,47 +606,41 @@ function core.update_receipt(entries, state): string
     return table.concat(lines, "\n")
 end
 
-local JSON_ESCAPES = { ["\\"] = "\\\\", ['"'] = '\\"' }
-
---- Escape one already display-safe string for JSON. The plain searches avoid a
---- pattern pass over text that almost never contains either character.
-local function escape_json(value: string): string
-    if string.find(value, '"', 1, true) == nil and string.find(value, "\\", 1, true) == nil then
-        return value
+--- Return the bytes one validated string occupies in JSON. State text cannot
+--- contain controls, so the generic host encoder need only quote backslash and
+--- double-quote characters. Count rather than encode: capability requests use
+--- the structured `arguments` boundary and the runtime owns JSON serialization.
+local function json_string_bytes(value: string): number
+    local escaped = 0
+    if string.find(value, '"', 1, true) ~= nil or string.find(value, "\\", 1, true) ~= nil then
+        _, escaped = string.gsub(value, '[\\"]', "")
     end
-    return (string.gsub(value, '[\\"]', JSON_ESCAPES))
+    return #value + escaped + 2
 end
 
---- Encode canonical state. Text and blockers are already free of control
---- characters, so only backslash and quote need escaping.
---- Returns the JSON document or `nil, diagnostic` when it is too large to store.
-function core.encode_state(state)
-    local parts = { '{"next_id":', tostring(state.next_id), ',"items":[' }
+--- Preserve an actionable size diagnostic before the host serializes a
+--- structured extension-state request. Returns nil when the state fits.
+function core.state_size_error(state): string?
+    local bytes = #'{"next_id":' + #tostring(state.next_id) + #',"items":[' + 2
     for position, item in ipairs(state.items) do
         if position > 1 then
-            parts[#parts + 1] = ","
+            bytes += 1
         end
-        parts[#parts + 1] = '{"id":'
-            .. item.id
-            .. ',"text":"'
-            .. escape_json(item.text)
-            .. '","status":"'
-            .. item.status
-            .. '"'
+        bytes += #'{"id":' + #tostring(item.id)
+        bytes += #',"text":' + json_string_bytes(item.text)
+        bytes += #',"status":' + json_string_bytes(item.status)
         if item.parent_id ~= nil then
-            parts[#parts + 1] = ',"parent_id":' .. item.parent_id
+            bytes += #',"parent_id":' + #tostring(item.parent_id)
         end
         if item.reason ~= nil then
-            parts[#parts + 1] = ',"reason":"' .. escape_json(item.reason) .. '"'
+            bytes += #',"reason":' + json_string_bytes(item.reason)
         end
-        parts[#parts + 1] = "}"
+        bytes += 1 -- closing item object
     end
-    parts[#parts + 1] = "]}"
-    local encoded = table.concat(parts)
-    if #encoded > core.MAX_STATE_BYTES then
-        return nil, "the todo plan is too large to store; shorten task text or remove finished items"
+    if bytes > core.MAX_STATE_BYTES then
+        return "the todo plan is too large to store; shorten task text or remove finished items"
     end
-    return encoded
+    return nil
 end
 
 --- Parse structural Markdown into ordered rows.
@@ -672,6 +668,26 @@ function core.parse_markdown(markdown)
     end
     if formatting_character(body) then
         return nil, "the plan contains a bidirectional formatting character"
+    end
+
+    -- The read document is also the structural-edit document. Only a leading
+    -- generated header followed by its blank separator is accepted; a header
+    -- elsewhere remains invalid Markdown rather than becoming ignored text.
+    local active, pending, blocked, dropped, done, header_end = string.match(
+        body,
+        "^TODO · (%d+) active · (%d+) pending · (%d+) blocked · (%d+) dropped · (%d+) done\n\n()"
+    )
+    if header_end ~= nil
+        and (active == "0" or string.sub(active, 1, 1) ~= "0")
+        and (pending == "0" or string.sub(pending, 1, 1) ~= "0")
+        and (blocked == "0" or string.sub(blocked, 1, 1) ~= "0")
+        and (dropped == "0" or string.sub(dropped, 1, 1) ~= "0")
+        and (done == "0" or string.sub(done, 1, 1) ~= "0")
+    then
+        body = string.sub(body, header_end)
+        if body == "The todo list is empty." then
+            return {}
+        end
     end
     if string.sub(body, -1) ~= "\n" then
         body ..= "\n"
@@ -750,8 +766,9 @@ end
 --- Rebuild the tree so it structurally matches the submitted document.
 ---
 --- Indentation determines parents, document order determines siblings, listed
---- ids keep their identity and status, omitted ids are removed, and id-less
---- rows are allocated new ids in document order. Ids are never reused.
+--- ids keep their identity and status unless normalization must reopen a
+--- terminal ancestor of open work, omitted ids are removed, and id-less rows
+--- are allocated new ids in document order. Ids are never reused.
 --- Returns `state` or `nil, diagnostic`; nothing is allocated until every row
 --- has been accepted, so a rejected synchronization is fully atomic.
 function core.sync_markdown(state, rows)
@@ -816,7 +833,34 @@ function core.sync_markdown(state, rows)
         open[row.level + 1] = id
         items[position] = { id = id, text = text, status = status, parent_id = parent_id, reason = reason }
     end
-    return { next_id = next_id, items = items }
+    local synchronized = { next_id = next_id, items = items }
+    local synchronized_analysis = core.analyze(synchronized)
+    for position, item in ipairs(synchronized.items) do
+        if item.status == "pending" or item.status == "in_progress" then
+            local parent_id = item.parent_id
+            while parent_id ~= nil do
+                local ancestor = synchronized.items[synchronized_analysis.position_by_id[parent_id]]
+                if ancestor.status == "blocked" then
+                    return nil,
+                        "line "
+                            .. integer(rows[position].line)
+                            .. " would place open todo #"
+                            .. integer(item.id)
+                            .. " beneath blocked todo #"
+                            .. integer(ancestor.id)
+                            .. "; reopen the blocked todo with updates before restructuring"
+                end
+                if ancestor.status == "done" or ancestor.status == "dropped" then
+                    -- A structural move must not strand open work beneath a
+                    -- terminal ancestor. Keep its status meaning intact by
+                    -- reopening the ancestor, just like an explicit update.
+                    set_status(ancestor, "pending")
+                end
+                parent_id = ancestor.parent_id
+            end
+        end
+    end
+    return synchronized
 end
 
 return core

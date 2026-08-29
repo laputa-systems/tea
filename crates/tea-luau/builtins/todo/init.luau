@@ -56,7 +56,8 @@ return {
             description = "Read or update the durable plan. No arguments reads the whole list. "
                 .. "Send `updates` to report status changes; the extension handles hierarchy, recursive "
                 .. "transitions, and the next actionable task. Send `markdown` only to create or restructure "
-                .. "the plan, keeping existing #IDs and omitting the id for a new task.",
+                .. "the plan, keeping existing #IDs and omitting the id for a new task. The complete document "
+                .. "returned by a read can be edited and sent back unchanged as markdown.",
             capability = "extension.state",
             execution_mode = "sequential",
             schema_json = SCHEMA,
