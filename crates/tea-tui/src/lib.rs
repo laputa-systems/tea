@@ -193,6 +193,25 @@ impl<W: Write> InlineTerminal<W> {
         self.writer.flush()
     }
 
+    /// Permanently append the currently visible mutable tail to native
+    /// terminal scrollback.
+    ///
+    /// This is intended for an orderly application shutdown: the live tail
+    /// normally remains redrawable and is cleared by [`Self::finish`], but a
+    /// final terminal frame should survive after the application returns to
+    /// the user's shell.
+    pub fn commit_live(&mut self) -> io::Result<()> {
+        self.ensure_main_screen()?;
+        let lines = self.live_lines.clone();
+        self.clear_live()?;
+        for line in &lines {
+            self.write_line(line)?;
+            self.writer.write_all(b"\r\n")?;
+        }
+        self.writer.write_all(b"\x1b[0m")?;
+        self.writer.flush()
+    }
+
     /// Repaint the bounded mutable main-screen tail.
     pub fn draw_live(
         &mut self,
@@ -646,5 +665,28 @@ mod tests {
         let output = String::from_utf8(output).unwrap();
         assert!(!output.contains("safe\x1b[2J"));
         assert!(output.contains("safe␛[2J�text"));
+    }
+
+    #[test]
+    fn committing_live_rows_flushes_them_as_scrollback() {
+        use std::io::BufWriter;
+
+        let mut output = BufWriter::new(Vec::new());
+        {
+            let mut terminal = InlineTerminal::new(&mut output);
+            terminal
+                .draw_live(
+                    &[line("status")],
+                    Size {
+                        width: 20,
+                        height: 5,
+                    },
+                    None,
+                )
+                .unwrap();
+            terminal.commit_live().unwrap();
+        }
+        let output = String::from_utf8(output.into_inner().unwrap()).unwrap();
+        assert!(output.contains("status\x1b[0m\r\n"));
     }
 }

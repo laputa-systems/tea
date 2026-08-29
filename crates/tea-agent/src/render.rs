@@ -180,7 +180,10 @@ pub(crate) fn main_presentation(
     if !state.slash_completion_rows(1).is_empty() {
         lines.extend(slash_menu_lines(state, width));
     } else {
-        let footer = footer_render_lines(state, registry, width);
+        let session_id_fits = state.session_id().is_none_or(|session_id| {
+            display_width("session ") + display_width(session_id) <= usize::from(width)
+        });
+        let footer = footer_render_lines(state, registry, width, session_id_fits);
         if !footer.is_empty() {
             lines.push(RenderLine::plain(String::new(), Style::default()));
             lines.extend(footer);
@@ -443,6 +446,7 @@ fn footer_render_lines(
     state: &AppState,
     registry: &ProviderRegistry,
     width: u16,
+    show_session_id: bool,
 ) -> Vec<RenderLine> {
     let [primary, secondary] = footer_lines(state, registry);
     let mut lines = wrap_footer_primary(&primary, width);
@@ -454,11 +458,16 @@ fn footer_render_lines(
         };
         lines.extend(wrap_lines(notice, width, style));
     }
-    lines.extend(wrap_lines(
-        &secondary,
-        width,
-        Theme::default().style(Role::Muted),
-    ));
+    let secondary = if show_session_id {
+        secondary
+    } else {
+        secondary
+            .split('\n')
+            .next()
+            .unwrap_or_default()
+            .to_owned()
+    };
+    lines.extend(wrap_lines(&secondary, width, Theme::default().style(Role::Muted)));
     lines
 }
 
@@ -1533,6 +1542,24 @@ mod tests {
             presentation.live[3].text(),
             state.footer_lines(&registry)[1]
         );
+    }
+
+    #[test]
+    fn footer_renders_session_identity_on_the_line_after_context_stats() {
+        let mut state = AppState::new();
+        state.set_session_id(Some("0123456789abcdef".into()));
+        let presentation = main_presentation(
+            &state,
+            &ProviderRegistry::new(),
+            Size {
+                width: 80,
+                height: 8,
+            },
+            0,
+        );
+
+        assert_eq!(presentation.live[3].text(), "ctx ?%/?");
+        assert_eq!(presentation.live[4].text(), "session 0123456789abcdef");
     }
 
     #[test]

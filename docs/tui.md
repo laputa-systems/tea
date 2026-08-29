@@ -182,8 +182,12 @@ They cannot modify an operation, synthesize a completed effect, or change a
 harness revision.
 
 The fixed footer keeps the `{provider}/{model} · effort <level>` identity on
-its own wrapped line, followed by calm context and usage stats. Transient notices
-occupy subsequent wrapped rows; restoration and setup errors use the error color.
+its own wrapped line, followed by calm context and usage stats. Once a durable
+session exists, its identity is shown on the next line when the full opaque ID
+fits the terminal width. On orderly Ctrl-C exit,
+the final mutable tail is committed to native terminal scrollback so this
+status remains visible after tea returns to the shell. Transient notices occupy
+subsequent wrapped rows; restoration and setup errors use the error color.
 A saved provider/model identity remains visible even when
 the provider cannot currently be configured (for example, when its API key is
 missing), while prompting still requires a configured provider.

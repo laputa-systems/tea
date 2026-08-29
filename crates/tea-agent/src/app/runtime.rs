@@ -129,7 +129,29 @@ impl App {
         self.assemble_host()?;
         let loop_result = {
             let mut terminal = crate::terminal::TerminalGuard::enter()?;
-            smol::block_on(self.event_loop(&mut terminal))
+            let loop_result = smol::block_on(self.event_loop(&mut terminal));
+            if self.quitting && loop_result.is_ok() {
+                // A quit requested from a modal surface must still finish on
+                // the main-screen status frame; the alternate surface is
+                // temporary and is not meaningful shell scrollback.
+                self.state.close_surface();
+                let shutdown_result = self
+                    .redraw(&mut terminal)
+                    .and_then(|()| {
+                        terminal
+                            .renderer_mut()
+                            .map_err(AppError::from)?
+                            .commit_live()
+                            .map_err(TerminalError::Io)
+                            .map_err(AppError::from)
+                    });
+                match shutdown_result {
+                    Ok(()) => loop_result,
+                    Err(error) => Err(error),
+                }
+            } else {
+                loop_result
+            }
         };
         // Terminal I/O failure is presentation failure, not permission to
         // abandon the durable root future. Restore the terminal first, then
@@ -752,9 +774,11 @@ impl App {
             automatic_compaction,
             subagents,
         })?;
+        let session_id = harness.snapshot()?.header().session_id.to_string();
         self.durable_subscription = Some(harness.subscribe_events()?);
         self.state
             .set_extension_commands(harness.extension_host_commands()?);
+        self.state.set_session_id(Some(session_id));
         self.durable_harness = Some(Arc::clone(&harness));
         self.refresh_subagent_footer();
         Ok(harness)
@@ -814,6 +838,8 @@ impl App {
         })?;
         self.state.set_thinking_level(harness.thinking_level()?);
         let snapshot = harness.snapshot()?;
+        self.state
+            .set_session_id(Some(snapshot.header().session_id.to_string()));
         let messages = super::durable::project_host_messages(&snapshot)?;
         self.state.restore_messages(&messages);
         self.durable_subscription = Some(harness.subscribe_events()?);

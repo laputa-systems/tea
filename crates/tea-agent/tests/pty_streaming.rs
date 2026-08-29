@@ -540,6 +540,49 @@ fn enabled_subagent_footer_is_visible_in_the_mutable_idle_tail() {
 }
 
 #[test]
+fn ctrl_c_commits_the_final_status_tail_before_returning_to_the_shell() {
+    let _lock = PTY_TEST_LOCK.lock().expect("PTY test lock is not poisoned");
+    let tea_home = pty_tea_home("status-exit");
+    let scenario = Scenario::new("status survives Ctrl-C")
+        .expect("valid scenario label")
+        .command(CommandSpec::new(env!("CARGO_BIN_EXE_tea")).args([
+            "--provider",
+            "mock",
+            "--tea-home",
+            tea_home.to_str().expect("UTF-8 test path"),
+        ]))
+        .size(Size::new(COLUMNS, ROWS).expect("constant terminal size"))
+        .environment(TestEnv::hermetic().expect("create hermetic test environment"))
+        .protocol_profile(ProtocolProfile::xterm_minimal_v1());
+    let mut terminal = PtyTest::spawn(scenario).expect("real tea binary should start in a PTY");
+
+    terminal
+        .wait_for_screen(
+            terminal.deadline(Duration::from_secs(3)),
+            "mock status before exit",
+            |screen| screen.contains("mock/mock") && screen.contains("ctx ?%/16k"),
+        )
+        .expect("status should render before exit");
+    terminal
+        .send_key(terminal.deadline(Duration::from_secs(3)), Key::Ctrl('c'))
+        .expect("exit mock terminal");
+    assert_eq!(
+        terminal
+            .wait_for_exit(terminal.deadline(Duration::from_secs(3)))
+            .expect("wait for tea exit"),
+        ExitStatus::Code(0)
+    );
+    assert!(
+        terminal.screen().contains("ctx ?%/16k"),
+        "the final status tail should remain in terminal scrollback after Ctrl-C"
+    );
+    terminal
+        .finish(terminal.deadline(Duration::from_secs(3)))
+        .expect("reap tea");
+    let _ = fs::remove_dir_all(tea_home);
+}
+
+#[test]
 fn explicitly_disabled_subagents_match_missing_config_presentation_and_output_bytes() {
     let _lock = PTY_TEST_LOCK.lock().expect("PTY test lock is not poisoned");
     let missing = capture_mock_idle_startup("subagents-missing", None);

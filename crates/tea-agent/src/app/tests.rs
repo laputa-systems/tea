@@ -993,6 +993,7 @@ fn session_resumption_restores_its_model_without_global_preferences() {
         .header()
         .session_id
         .to_string();
+    assert_eq!(first.state().session_id(), Some(session_id.as_str()));
     drop(harness);
     drop(first);
 
@@ -1054,6 +1055,7 @@ fn session_resumption_restores_its_model_without_global_preferences() {
             revision: None,
         })
     );
+    assert_eq!(resumed.state().session_id(), Some(session_id.as_str()));
     assert!(resumed.durable_harness.is_some());
     let _ = fs::remove_dir_all(tea_home);
 }
@@ -1628,6 +1630,18 @@ fn footer_reports_unknown_context_and_unavailable_compaction_without_guessing() 
     let state = AppState::new();
     let registry = tea_providers::ProviderRegistry::new();
     assert_eq!(state.footer_lines(&registry)[1], "ctx ?%/?");
+}
+
+#[test]
+fn footer_places_the_session_identity_after_context_stats() {
+    let mut state = AppState::new();
+    state.set_session_id(Some("0123456789abcdef".into()));
+    let registry = tea_providers::ProviderRegistry::new();
+
+    assert_eq!(
+        state.footer_lines(&registry)[1],
+        "ctx ?%/?\nsession 0123456789abcdef"
+    );
 }
 
 #[test]
