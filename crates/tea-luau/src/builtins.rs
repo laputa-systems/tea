@@ -30,14 +30,80 @@ pub fn goal(limits: ExtensionLimits) -> ExtensionSourceTree {
     }
 }
 
+/// Return the immutable default coding-tool source tree.
+///
+/// Provider-facing metadata and ordinary tool semantics live in these Luau
+/// files. The host independently supplies the four fixed capability grants;
+/// changing this source therefore cannot widen workspace or process authority.
+pub fn coding(limits: ExtensionLimits) -> ExtensionSourceTree {
+    ExtensionSourceTree {
+        extension_id: "coding".into(),
+        files: BTreeMap::from([
+            (
+                "manifest.json".into(),
+                include_str!("../builtins/coding/manifest.json").into(),
+            ),
+            (
+                "init.luau".into(),
+                include_str!("../builtins/coding/init.luau").into(),
+            ),
+            (
+                "prompts.luau".into(),
+                include_str!("../builtins/coding/prompts.luau").into(),
+            ),
+            (
+                "tools/read.luau".into(),
+                include_str!("../builtins/coding/tools/read.luau").into(),
+            ),
+            (
+                "tools/bash.luau".into(),
+                include_str!("../builtins/coding/tools/bash.luau").into(),
+            ),
+            (
+                "tools/edit.luau".into(),
+                include_str!("../builtins/coding/tools/edit.luau").into(),
+            ),
+            (
+                "tools/find.luau".into(),
+                include_str!("../builtins/coding/tools/find.luau").into(),
+            ),
+        ]),
+        expected_capabilities: Some(BTreeSet::from([
+            "tea.process.v1".into(),
+            "tea.workspace.mutate.v1".into(),
+            "tea.workspace.read.v1".into(),
+            "tea.workspace.search.v1".into(),
+        ])),
+        limits,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::bundle::{Bundle, BundleManifest, BUNDLE_ABI_V2_VERSION};
     use crate::{LuaPolicy, LuauExtensionEngine, PolicyError};
+    use std::future::Future;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::task::{Context, Poll, Waker};
+    use std::time::Duration;
+    use tea_core::effect::RunProvenance;
+    use tea_core::harness::extension::ExtensionToolLimits;
     use tea_core::harness::extension::{
-        ExtensionCommandInput, ExtensionEngine, ExtensionIdleInput, ExtensionOperationOutcome,
-        ExtensionStateView,
+        ExtensionCapabilityBindings, ExtensionCommandInput, ExtensionEngine, ExtensionIdleInput,
+        ExtensionMemoryCollector, ExtensionOperationOutcome, ExtensionStateView,
+    };
+    use tea_core::hooks::NoHooks;
+    use tea_core::state::{SerializedJson, ToolCallId};
+    use tea_core::{
+        coding::{
+            CodingHost, PROCESS_CAPABILITY_V1, WORKSPACE_MUTATE_CAPABILITY_V1,
+            WORKSPACE_READ_CAPABILITY_V1, WORKSPACE_SEARCH_CAPABILITY_V1,
+        },
+        tool::{
+            CancellationSettlementMode, ToolCall, ToolContext, ToolExecutionMode, ToolUpdateSink,
+        },
     };
 
     fn policy() -> LuaPolicy {
@@ -59,6 +125,191 @@ mod tests {
             .expect("bundle is closed"),
         )
         .expect("goal policy loads")
+    }
+
+    fn block_on<T>(future: impl Future<Output = T>) -> T {
+        let waker = Waker::noop();
+        let mut context = Context::from_waker(waker);
+        let mut future = Box::pin(future);
+        loop {
+            match future.as_mut().poll(&mut context) {
+                Poll::Ready(value) => return value,
+                Poll::Pending => std::thread::sleep(Duration::from_millis(1)),
+            }
+        }
+    }
+
+    #[test]
+    fn coding_is_a_closed_four_tool_bundle_with_fixed_grants() {
+        static NEXT_WORKSPACE: AtomicUsize = AtomicUsize::new(0);
+        let workspace = std::env::temp_dir().join(format!(
+            "tea-luau-coding-builtin-{}-{}",
+            std::process::id(),
+            NEXT_WORKSPACE.fetch_add(1, Ordering::Relaxed),
+        ));
+        std::fs::create_dir_all(&workspace).expect("coding fixture workspace creates");
+        std::fs::write(workspace.join("fixture.txt"), "first\nsecond\n")
+            .expect("coding fixture file writes");
+        let limits = ExtensionLimits {
+            max_source_bytes: 64 * 1024,
+            max_memory_bytes: 1024 * 1024,
+            max_interrupt_checks: 10_000,
+        };
+        let tree = coding(limits);
+        let descriptor = LuauExtensionEngine
+            .describe(&tree)
+            .expect("coding descriptor resolves");
+        assert_eq!(
+            descriptor
+                .tools
+                .iter()
+                .map(|tool| tool.name.as_str())
+                .collect::<Vec<_>>(),
+            ["read", "bash", "edit", "find"],
+        );
+        assert!(descriptor.tools.iter().all(|tool| {
+            !matches!(tool.name.as_str(), "write" | "grep" | "ls")
+                && !tool.description.is_empty()
+                && tool.schema.as_object().is_some()
+                && tool
+                    .schema
+                    .get("type")
+                    .and_then(tea_protocol::JsonValue::as_str)
+                    == Some("object")
+                && tool.execution_mode == ToolExecutionMode::Parallel
+        }));
+        assert_eq!(
+            descriptor
+                .tools
+                .iter()
+                .map(|tool| (tool.name.as_str(), tool.capability.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                ("read", WORKSPACE_READ_CAPABILITY_V1),
+                ("bash", PROCESS_CAPABILITY_V1),
+                ("edit", WORKSPACE_MUTATE_CAPABILITY_V1),
+                ("find", WORKSPACE_SEARCH_CAPABILITY_V1),
+            ],
+        );
+        assert_eq!(descriptor.prompt_sections.len(), 1);
+        assert_eq!(descriptor.prompt_sections[0].id, "coding");
+        assert!(descriptor.prompt_sections[0]
+            .content
+            .contains("There are no separate `write`, `grep`, or `ls`"));
+        let edit = descriptor
+            .tools
+            .iter()
+            .find(|tool| tool.name == "edit")
+            .expect("edit declaration exists");
+        assert!(edit.requires_exclusive_batch);
+        assert_eq!(
+            edit.cancellation_settlement_mode,
+            CancellationSettlementMode::AwaitFuture
+        );
+        assert!(descriptor.tools.iter().all(|tool| {
+            tool.name == "edit"
+                || (!tool.requires_exclusive_batch
+                    && tool.cancellation_settlement_mode == CancellationSettlementMode::DropFuture)
+        }));
+
+        let host = CodingHost::new(&workspace).expect("coding authority configures");
+        let mut bindings = ExtensionCapabilityBindings::new();
+        let limits = ExtensionToolLimits::default();
+        for (name, capability) in [
+            (WORKSPACE_READ_CAPABILITY_V1, host.read_capability()),
+            (WORKSPACE_SEARCH_CAPABILITY_V1, host.search_capability()),
+            (WORKSPACE_MUTATE_CAPABILITY_V1, host.mutate_capability()),
+            (PROCESS_CAPABILITY_V1, host.process_capability()),
+        ] {
+            bindings
+                .insert(name, capability, limits)
+                .expect("capability grant is unique");
+        }
+        let resolved = LuauExtensionEngine
+            .resolve(
+                &tree,
+                bindings,
+                Arc::new(NoHooks),
+                0,
+                Arc::new(ExtensionMemoryCollector::default()),
+            )
+            .expect("each checked-in coding handler loads");
+        assert_eq!(
+            resolved.tools.names().collect::<Vec<_>>(),
+            ["read", "bash", "edit", "find"],
+        );
+        let context = ToolContext {
+            cancellation: tea_core::scheduler::CancellationToken::new(),
+            provenance: RunProvenance::default(),
+        };
+        let call = |name: &str, arguments: &str| ToolCall {
+            id: ToolCallId::new(format!("coding-{name}")).expect("test call ID is valid"),
+            name: name.into(),
+            arguments: SerializedJson::new(arguments),
+        };
+        let read = block_on(
+            resolved
+                .tools
+                .get("read")
+                .expect("read is resolved")
+                .execute(
+                    call("read", r#"{"path":"fixture.txt","limit":1}"#),
+                    context.clone(),
+                    ToolUpdateSink::disabled(),
+                ),
+        )
+        .expect("checked-in read handler executes");
+        assert_eq!(read.content, "first");
+        let edit = block_on(
+            resolved
+                .tools
+                .get("edit")
+                .expect("edit is resolved")
+                .execute(
+                    call(
+                        "edit",
+                        r#"{"files":[{"path":"created.txt","content":"created\n"}]}"#,
+                    ),
+                    context.clone(),
+                    ToolUpdateSink::disabled(),
+                ),
+        )
+        .expect("checked-in edit handler executes");
+        assert!(edit.content.contains("created 1 files"));
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("created.txt")).unwrap(),
+            "created\n"
+        );
+        let find = block_on(
+            resolved
+                .tools
+                .get("find")
+                .expect("find is resolved")
+                .execute(
+                    call("find", r#"{"pattern":"*.txt"}"#),
+                    context.clone(),
+                    ToolUpdateSink::disabled(),
+                ),
+        )
+        .expect("checked-in find handler executes");
+        assert!(find.content.contains("fixture.txt"));
+        let bash = block_on(
+            resolved
+                .tools
+                .get("bash")
+                .expect("bash is resolved")
+                .execute(
+                    call(
+                        "bash",
+                        r#"{"command":"ls fixture.txt >/dev/null && grep -q second fixture.txt && printf luau-bash"}"#,
+                    ),
+                    context,
+                    ToolUpdateSink::disabled(),
+                ),
+        )
+        .expect("checked-in bash handler executes");
+        assert_eq!(bash.content, "luau-bash");
+        let _ = std::fs::remove_dir_all(workspace);
     }
 
     fn load_v2_policy(source: &str) -> Result<LuaPolicy, PolicyError> {

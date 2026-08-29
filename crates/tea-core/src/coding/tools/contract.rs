@@ -1,4 +1,4 @@
-//! Public operation contracts and value types for standard coding tools.
+//! Public operation contracts and value types for trusted coding capabilities.
 
 use crate::scheduler::CancellationToken;
 use crate::tool::ToolUpdateSink;
@@ -40,22 +40,13 @@ impl std::fmt::Display for OperationError {
 
 impl std::error::Error for OperationError {}
 
-/// Metadata needed by the standard tools without exposing `std::fs::Metadata`.
+/// Metadata needed by coding capabilities without exposing `std::fs::Metadata`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct EntryMetadata {
     /// Whether the entry is a directory.
     pub is_directory: bool,
     /// Whether the entry is an ordinary regular file.
     pub is_regular_file: bool,
-}
-
-/// A directory entry returned by an operation adapter.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct DirectoryEntry {
-    /// Entry name, not an ambient absolute path.
-    pub name: String,
-    /// Whether the entry is a directory.
-    pub is_directory: bool,
 }
 
 /// Output from an explicit shell operation.
@@ -89,7 +80,7 @@ pub struct FileSnapshot {
 ///
 /// The adapter must compare `expected_content` with the current complete file
 /// before its commit point. `path` is already a canonical, in-workspace path.
-/// V2 edit never asks this boundary to create, delete, or rename files.
+/// Replacements are distinct from conditional creations in the same request.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConditionalFileEdit {
     /// Canonical existing file path selected by the tool boundary.
@@ -100,16 +91,33 @@ pub struct ConditionalFileEdit {
     pub replacement_content: Vec<u8>,
 }
 
+/// One conditional creation in an edit transaction.
+///
+/// `path` is already a canonical in-workspace path whose parent exists. The
+/// host must establish that it is absent during the transaction's complete
+/// precondition phase, then publish it as part of the same transaction as any
+/// replacements.  Keeping creation in the transaction type prevents the
+/// model-facing edit primitive from degenerating into a loop of writes.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConditionalFileCreate {
+    /// Canonical absent target selected by the workspace authority.
+    pub path: PathBuf,
+    /// Complete bytes to publish if and only if the target remains absent.
+    pub content: Vec<u8>,
+}
+
 /// One explicit conditional edit commit request.
 ///
-/// The core deliberately does not synthesize a write loop when this operation
-/// is not available. V2 has replay semantics of `Never` until a durable host
+/// The core deliberately does not synthesize a per-file mutation loop when this operation
+/// is not available. Mutations have replay semantics of `Never` until a durable host
 /// invocation identity is carried through the tool context; a provider tool
 /// call ID alone is not safe to use as an idempotency key.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EditTransaction {
     /// All file replacements that must be conditionally committed together.
     pub files: Vec<ConditionalFileEdit>,
+    /// All files that must remain absent until the transaction publishes.
+    pub creates: Vec<ConditionalFileCreate>,
 }
 
 /// Receipt from exactly one host-side conditional transaction operation.
@@ -135,7 +143,7 @@ pub enum EditTransactionOutcome {
     },
 }
 
-/// Explicit environment policy for [`bash`](DefaultCodingTools::bash) calls.
+/// Explicit environment policy for trusted process-capability calls.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct CommandEnvironment {
     variables: Vec<(OsString, OsString)>,
@@ -175,7 +183,7 @@ impl CommandEnvironment {
     }
 }
 
-/// Explicit host operations used by all standard tools.
+/// Explicit host operations used by the coding capabilities.
 ///
 /// Every path has already been checked against the [`WorkspaceRoot`] before it
 /// reaches this boundary.  An adapter may therefore map the path to a remote
@@ -185,7 +193,7 @@ pub trait CodingOperations: Send + Sync {
     fn read_file<'a>(&'a self, path: &'a Path) -> OperationFuture<'a, Vec<u8>>;
     /// Read complete snapshots for one edit plan through one host operation.
     ///
-    /// The compatibility implementation is deliberately sequential, but v2
+    /// The compatibility implementation is deliberately sequential, but the mutation capability
     /// calls this method once so remote adapters can batch or pipeline all
     /// snapshots. Adapters should override it when crossing an RPC/runtime
     /// boundary, must inspect kind before opening each path, and must reject a
@@ -220,13 +228,11 @@ pub trait CodingOperations: Send + Sync {
             Ok(snapshots)
         })
     }
-    /// Write all bytes to one file.
-    fn write_file<'a>(&'a self, path: &'a Path, content: &'a [u8]) -> OperationFuture<'a, ()>;
     /// Conditionally commit a complete multi-file edit transaction.
     ///
-    /// This is intentionally one host operation. V2 `edit` does not fall back
-    /// to repeatedly calling [`Self::write_file`], because doing so would make
-    /// its all-file precondition and recovery contract false for remote hosts.
+    /// This is intentionally one host operation. The capability never falls
+    /// back to repeatedly publishing files, because that would make its
+    /// all-file precondition and recovery contract false for remote hosts.
     ///
     /// A cancellation observed before the adapter's commit point must leave all
     /// files untouched and return `OperationError("cancelled")`. Once the
@@ -243,12 +249,8 @@ pub trait CodingOperations: Send + Sync {
             ))
         })
     }
-    /// Create a directory and all missing parents.
-    fn create_dir_all<'a>(&'a self, path: &'a Path) -> OperationFuture<'a, ()>;
     /// Inspect one path.
     fn metadata<'a>(&'a self, path: &'a Path) -> OperationFuture<'a, EntryMetadata>;
-    /// List one directory.
-    fn read_dir<'a>(&'a self, path: &'a Path) -> OperationFuture<'a, Vec<DirectoryEntry>>;
     /// Find paths below `root` using a glob pattern.
     fn find_files<'a>(
         &'a self,
@@ -256,13 +258,6 @@ pub trait CodingOperations: Send + Sync {
         pattern: &'a str,
         limit: usize,
     ) -> OperationFuture<'a, Vec<String>>;
-    /// Search files below `root` for a pattern.
-    fn grep_files<'a>(
-        &'a self,
-        root: &'a Path,
-        pattern: &'a str,
-        options: GrepOptions,
-    ) -> OperationFuture<'a, Vec<GrepMatch>>;
     /// Execute one command in the explicit workspace.
     fn execute_command<'a>(
         &'a self,
@@ -273,30 +268,4 @@ pub trait CodingOperations: Send + Sync {
         cancellation: CancellationToken,
         updates: ToolUpdateSink,
     ) -> OperationFuture<'a, CommandOutput>;
-}
-
-/// Options passed to a grep operation adapter.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct GrepOptions {
-    /// Search case-insensitively.
-    pub ignore_case: bool,
-    /// Treat `pattern` literally rather than as the supported regex subset.
-    pub literal: bool,
-    /// Number of context lines on each side of a match.
-    pub context: usize,
-    /// Maximum number of matching lines.
-    pub limit: usize,
-    /// Optional basename/path glob filter.
-    pub glob: Option<String>,
-}
-
-/// One grep result line.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct GrepMatch {
-    /// Path relative to the search root, using `/` separators.
-    pub path: String,
-    /// One-indexed source line.
-    pub line: usize,
-    /// Rendered matching line.
-    pub text: String,
 }

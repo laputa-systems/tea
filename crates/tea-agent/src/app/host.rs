@@ -1,6 +1,6 @@
 use std::sync::Arc;
 use tea_core::agent::AgentConfiguration;
-use tea_core::coding::{TeaCodingToolsV2, TeaDefaultCodingProfileV2};
+use tea_core::tool::ToolRegistry;
 use tea_providers::{openai::OpenAiContextHook, ModelDescriptor, ProviderRegistry};
 
 use super::error::AppError;
@@ -11,18 +11,14 @@ use super::error::AppError;
 /// execution authority is the session-owned durable harness, which captures this configuration
 /// in a committed revision before starting an epoch.
 pub(super) fn host_configuration(
-    tools: TeaCodingToolsV2,
     logical_workspace_label: &str,
 ) -> Result<AgentConfiguration, AppError> {
-    let profile = TeaDefaultCodingProfileV2::pinned_default()
-        .map_err(|error| AppError::Setup(error.to_string()))?;
-    let registry = tools.registry();
-    profile
-        .validate_registry(&registry)
-        .map_err(|error| AppError::Setup(error.to_string()))?;
+    // The durable coding bundle is resolved as a Luau extension. Leaving the
+    // trusted base registry empty makes a missing or invalid bundle fail
+    // closed instead of restoring a compiled Rust tool implementation.
     Ok(AgentConfiguration::new(
-        profile.system_prompt_for_workspace(std::path::Path::new(logical_workspace_label)),
-        registry,
+        format!("Current working directory: {logical_workspace_label}"),
+        ToolRegistry::default(),
         Arc::new(OpenAiContextHook),
     ))
 }
@@ -38,11 +34,8 @@ mod tests {
             std::process::id()
         ));
         std::fs::create_dir_all(&physical).expect("physical workspace creates");
-        let configuration = host_configuration(
-            TeaCodingToolsV2::new(&physical).expect("physical tools configure"),
-            "/stable/logical/workspace",
-        )
-        .expect("host configuration assembles");
+        let configuration =
+            host_configuration("/stable/logical/workspace").expect("host configuration assembles");
 
         assert!(configuration
             .system_prompt
@@ -66,16 +59,10 @@ mod tests {
         let second_physical = root.join("child-b");
         std::fs::create_dir_all(&first_physical).expect("first physical worktree creates");
         std::fs::create_dir_all(&second_physical).expect("second physical worktree creates");
-        let first = host_configuration(
-            TeaCodingToolsV2::new(&first_physical).expect("first child tools configure"),
-            "/stable/logical/workspace",
-        )
-        .expect("first child configuration assembles");
-        let second = host_configuration(
-            TeaCodingToolsV2::new(&second_physical).expect("second child tools configure"),
-            "/stable/logical/workspace",
-        )
-        .expect("second child configuration assembles");
+        let first = host_configuration("/stable/logical/workspace")
+            .expect("first child configuration assembles");
+        let second = host_configuration("/stable/logical/workspace")
+            .expect("second child configuration assembles");
         let first_request = tea_core::scheduler::ModelRequest {
             system_prompt: first.system_prompt,
             context: "stable child assignment".into(),

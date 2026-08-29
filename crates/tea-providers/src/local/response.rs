@@ -388,7 +388,7 @@ data: [DONE]
         let mut decoder = LocalSseDecoder::new();
         decoder
             .push(
-                br#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"write","arguments":"{\"path\":"}}]},"finish_reason":null}]}
+                br#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"edit","arguments":"{\"path\":"}}]},"finish_reason":null}]}
 
 "#,
             )
@@ -407,7 +407,7 @@ data: [DONE]
             complete.events.first(),
             Some(ModelStreamEvent::ToolCall(call))
                 if call.id.as_str() == "call_1"
-                    && call.name == "write"
+                    && call.name == "edit"
                     && call.arguments.as_str() == "{\"path\":\"a.py\"}"
         ));
         assert_eq!(

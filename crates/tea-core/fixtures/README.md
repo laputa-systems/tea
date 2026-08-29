@@ -18,7 +18,8 @@ verification path.
 Provider response captures and replay artifacts are outside this core fixture corpus.
 
 The corpus covers text turns, cancellation and reuse, tool success/error, parallel completion
-ordering, partial updates, hooks, queues, continuation, and the default profile contract.
+ordering, partial updates, hooks, queues, and continuation. The default coding
+bundle has separate Luau and host-capability contract tests.
 
 ## Compaction reference behavior
 
@@ -54,6 +55,7 @@ starts a Pi CLI, installs packages, contacts a provider, reads ambient configura
 the checked-in fixture tree. Fixture outcomes that represent model/tool errors or cancellation
 are valid data; malformed fixtures and runner failures are verification failures.
 
-The default profile has checked-in captured prompt/definition data under
-`crates/tea-core/profile/`. Rust tests validate that capture and the concrete explicit
-capability boundary. See [`../profile/README.md`](../profile/README.md).
+The historical Pi capture under `crates/tea-core/profile/` is not a runtime
+profile. See [`../profile/README.md`](../profile/README.md) and
+[`../../tea-luau/builtins/coding/`](../../tea-luau/builtins/coding/) for the
+production coding boundary.

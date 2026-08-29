@@ -10,7 +10,7 @@ import { terminalFailure } from "../src/outcome.ts";
 function session() {
 	return {
 		systemPrompt: "cwd /tmp/attempt",
-		getActiveToolNames: () => ["read", "bash", "edit", "write"],
+		getActiveToolNames: () => ["read", "bash", "edit", "find"],
 		getAllTools: () => [{ name: "read", description: "read", parameters: { type: "object" } }],
 		getSessionStats: () => ({ userMessages: 2, toolCalls: 1, tokens: { input: 3, output: 4, cacheRead: 5, cacheWrite: 6 }, cost: 0 }),
 		messages: [{ role: "assistant", content: "finished" }],

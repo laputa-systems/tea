@@ -22,3 +22,9 @@ SelfExtensionMode is stored in session metadata before execution begins:
 
 All modes use the same v1 ABI and catalog. There is no reload command and no
 mutable extension registry outside the durable harness.
+
+The checked-in `coding` extension follows this same rule. A candidate can edit
+its Luau source—for example, `tools/read.luau` formatting or schema—and a new
+revision becomes visible only to a later epoch. Capability bindings remain
+host-owned immutable snapshot data: a changed `read` tool cannot obtain
+workspace mutation or process authority simply by naming another capability.

@@ -8,6 +8,7 @@ use super::specs::{
 };
 use mlua::thread::ThreadStatus;
 use mlua::{Function, Lua, LuaOptions, StdLib, Table, Thread, Value};
+use std::collections::BTreeMap;
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
@@ -54,8 +55,12 @@ impl LuaToolHandler {
     /// capability request is yielded as:
     ///
     /// ```text
-    /// { kind = "capability", capability = "world", method = "mcp.call", arguments_json = "{}" }
+    /// { kind = "capability", capability = "world", method = "mcp.call", arguments = {} }
     /// ```
+    ///
+    /// `arguments_json` remains accepted for existing extensions, but checked-in
+    /// builtins should use the structured `arguments` table. The adapter converts
+    /// it to protocol JSON before the host capability validates it.
     ///
     /// The function returns either a content string or a result table with a
     /// required `content` field and optional `details_json`, `terminate`, and
@@ -292,6 +297,11 @@ impl Future for LuaToolExecution<'_> {
                             .expect("call remains until completion")
                             .name
                             .clone(),
+                        this.context
+                            .as_ref()
+                            .expect("context remains until execution settles")
+                            .provenance
+                            .clone(),
                         this.updates.clone(),
                     ) {
                         Ok(request) => request,
@@ -493,6 +503,7 @@ fn parse_capability_request(
     value: Value,
     call_id: ToolCallId,
     tool_name: String,
+    provenance: RunProvenance,
     updates: ToolUpdateSink,
 ) -> Result<CapabilityRequest, String> {
     let table = match value {
@@ -510,17 +521,98 @@ fn parse_capability_request(
     }
     let capability = required_string(&table, "capability")?;
     let method = required_string(&table, "method")?;
-    let arguments_json = required_string(&table, "arguments_json")?;
-    let arguments = JsonValue::parse(&arguments_json)
-        .map_err(|error| format!("capability arguments_json is invalid: {error}"))?;
+    let has_structured_arguments = table
+        .contains_key("arguments")
+        .map_err(|error| format!("capability arguments lookup failed: {error}"))?;
+    let has_json_arguments = table
+        .contains_key("arguments_json")
+        .map_err(|error| format!("capability arguments lookup failed: {error}"))?;
+    if has_structured_arguments == has_json_arguments {
+        return Err(
+            "capability request must contain exactly one of arguments or arguments_json".into(),
+        );
+    }
+    let arguments = if has_structured_arguments {
+        let arguments = table
+            .get::<Value>("arguments")
+            .map_err(|error| format!("capability arguments is invalid: {error}"))?;
+        lua_to_json(arguments)?
+    } else {
+        let arguments_json = required_string(&table, "arguments_json")?;
+        JsonValue::parse(&arguments_json)
+            .map_err(|error| format!("capability arguments_json is invalid: {error}"))?
+    };
     Ok(CapabilityRequest {
         call_id,
         tool_name,
+        provenance,
         capability,
         method,
         arguments,
         updates,
     })
+}
+
+/// Convert a sandboxed Luau value into the stable protocol JSON value before
+/// it crosses the host capability boundary. Tables are either string-keyed
+/// objects or contiguous one-indexed arrays; mixed/sparse tables are rejected
+/// instead of gaining a host-specific interpretation.
+fn lua_to_json(value: Value) -> Result<JsonValue, String> {
+    match value {
+        Value::Nil => Ok(JsonValue::Null),
+        Value::Boolean(value) => Ok(JsonValue::Bool(value)),
+        Value::Integer(value) => Ok(JsonValue::Number(JsonNumber::Signed(value))),
+        Value::Number(value) if value.is_finite() => {
+            Ok(JsonValue::Number(JsonNumber::Float(value)))
+        }
+        Value::Number(_) => Err("capability arguments cannot contain a non-finite number".into()),
+        Value::String(value) => value
+            .to_str()
+            .map(|value| JsonValue::String(value.to_owned()))
+            .map_err(|error| format!("capability argument string is not UTF-8: {error}")),
+        Value::Table(table) => {
+            let mut object = BTreeMap::new();
+            let mut indexed = BTreeMap::new();
+            for pair in table.pairs::<Value, Value>() {
+                let (key, value) =
+                    pair.map_err(|error| format!("capability argument table is invalid: {error}"))?;
+                match key {
+                    Value::String(key) => {
+                        let key = key
+                            .to_str()
+                            .map_err(|error| format!("capability argument key is not UTF-8: {error}"))?
+                            .to_owned();
+                        object.insert(key, lua_to_json(value)?);
+                    }
+                    Value::Integer(index) if index > 0 => {
+                        indexed.insert(index as usize, lua_to_json(value)?);
+                    }
+                    _ => return Err("capability argument tables require string keys or positive integer array indexes".into()),
+                }
+            }
+            if !object.is_empty() && !indexed.is_empty() {
+                return Err(
+                    "capability argument table cannot mix object fields and array indexes".into(),
+                );
+            }
+            if !indexed.is_empty() {
+                let length = indexed.len();
+                let mut values = Vec::with_capacity(length);
+                for index in 1..=length {
+                    values.push(indexed.remove(&index).ok_or_else(|| {
+                        "capability argument array indexes must be contiguous from 1".to_owned()
+                    })?);
+                }
+                Ok(JsonValue::Array(values))
+            } else {
+                Ok(JsonValue::Object(object))
+            }
+        }
+        other => Err(format!(
+            "capability arguments cannot contain {}",
+            other.type_name()
+        )),
+    }
 }
 
 fn parse_tool_result(value: Value) -> Result<LuaToolResult, String> {

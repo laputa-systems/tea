@@ -517,6 +517,12 @@ pub struct ExtensionCapabilityRequest {
     pub call_id: ToolCallId,
     /// Model-visible tool that yielded the request.
     pub tool_name: String,
+    /// Durable run attribution supplied by the core tool invocation.
+    ///
+    /// This is never chosen by Luau. A host may use the lane identity to
+    /// select already-granted lease-local authority, while the immutable
+    /// capability name remains the authorization boundary.
+    pub provenance: crate::effect::RunProvenance,
     /// Explicit capability binding selected by the host.
     pub capability: String,
     /// Method interpreted by the bound host object.
@@ -636,6 +642,8 @@ impl ExtensionCapabilityBinding {
 #[derive(Clone, Default)]
 pub struct ExtensionCapabilityBindings {
     entries: BTreeMap<String, ExtensionCapabilityBinding>,
+    fixed_tool_capabilities: Option<BTreeMap<String, String>>,
+    additional_read_only_capabilities: BTreeSet<String>,
 }
 
 impl fmt::Debug for ExtensionCapabilityBindings {
@@ -643,6 +651,11 @@ impl fmt::Debug for ExtensionCapabilityBindings {
         formatter
             .debug_struct("ExtensionCapabilityBindings")
             .field("names", &self.entries.keys().collect::<Vec<_>>())
+            .field("fixed_tool_capabilities", &self.fixed_tool_capabilities)
+            .field(
+                "additional_read_only_capabilities",
+                &self.additional_read_only_capabilities,
+            )
             .finish()
     }
 }
@@ -684,6 +697,74 @@ impl ExtensionCapabilityBindings {
     /// Look up only a capability explicitly inserted by the host.
     pub fn get(&self, capability: &str) -> Option<ExtensionCapabilityBinding> {
         self.entries.get(capability).cloned()
+    }
+
+    /// Freeze named tool-to-capability mappings selected by the trusted host.
+    ///
+    /// A source revision may change behavior, presentation, and schemas, but
+    /// it cannot remap a named model tool to another already-bound capability.
+    /// New tool names may use only the separately host-selected read-only
+    /// capability subset.
+    pub fn fix_tool_capabilities(
+        &mut self,
+        tool_capabilities: BTreeMap<String, String>,
+        additional_read_only_capabilities: BTreeSet<String>,
+    ) -> Result<(), ExtensionError> {
+        if self.fixed_tool_capabilities.is_some() {
+            return Err(ExtensionError::new(
+                "tool capability grants are already fixed for this extension",
+            ));
+        }
+        for (tool, capability) in &tool_capabilities {
+            if tool.trim().is_empty() || capability.trim().is_empty() {
+                return Err(ExtensionError::new(
+                    "fixed tool capability names cannot be empty",
+                ));
+            }
+        }
+        if additional_read_only_capabilities
+            .iter()
+            .any(|capability| capability.trim().is_empty())
+        {
+            return Err(ExtensionError::new(
+                "additional read-only capability names cannot be empty",
+            ));
+        }
+        self.fixed_tool_capabilities = Some(tool_capabilities);
+        self.additional_read_only_capabilities = additional_read_only_capabilities;
+        Ok(())
+    }
+
+    /// Resolve the one capability a named model tool may use for this epoch.
+    ///
+    /// Without a fixed map, generic extensions retain the capability declared
+    /// by their source. A host may instead pin named tools while permitting
+    /// new tools to use only an explicit read-only subset of its grants.
+    pub fn capability_for_tool(
+        &self,
+        tool: &str,
+        source_capability: &str,
+    ) -> Result<String, ExtensionError> {
+        let Some(fixed) = &self.fixed_tool_capabilities else {
+            return Ok(source_capability.to_owned());
+        };
+        if let Some(capability) = fixed.get(tool) {
+            if capability != source_capability {
+                return Err(ExtensionError::new(format!(
+                    "tool {tool:?} names source capability {source_capability:?}, but the host fixed it to {capability:?}",
+                )));
+            }
+            return Ok(capability.clone());
+        }
+        if self
+            .additional_read_only_capabilities
+            .contains(source_capability)
+        {
+            return Ok(source_capability.to_owned());
+        }
+        Err(ExtensionError::new(format!(
+            "tool {tool:?} has no trusted capability grant",
+        )))
     }
 
     /// Iterate explicit capability names in deterministic order.
@@ -878,5 +959,45 @@ mod tests {
                 })
             })
         }
+    }
+
+    #[test]
+    fn fixed_tool_authority_pins_named_tools_and_allows_only_safe_additions() {
+        let mut bindings = ExtensionCapabilityBindings::new();
+        bindings
+            .fix_tool_capabilities(
+                BTreeMap::from([
+                    ("read".into(), "tea.workspace.read.v1".into()),
+                    ("bash".into(), "tea.process.v1".into()),
+                ]),
+                BTreeSet::from([
+                    "tea.workspace.read.v1".into(),
+                    "tea.workspace.search.v1".into(),
+                ]),
+            )
+            .expect("host policy fixes once");
+
+        assert_eq!(
+            bindings
+                .capability_for_tool("read", "tea.workspace.read.v1")
+                .expect("named read keeps its host authority"),
+            "tea.workspace.read.v1",
+        );
+        assert!(
+            bindings
+                .capability_for_tool("read", "tea.process.v1")
+                .is_err()
+        );
+        assert_eq!(
+            bindings
+                .capability_for_tool("tree", "tea.workspace.search.v1")
+                .expect("new read-only tools need no new fixed Rust name"),
+            "tea.workspace.search.v1",
+        );
+        assert!(
+            bindings
+                .capability_for_tool("tree", "tea.process.v1")
+                .is_err()
+        );
     }
 }

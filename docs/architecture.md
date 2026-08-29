@@ -13,7 +13,7 @@ tea-protocol  -> serializable model/message/tool/event/error values
         |
 tea-session   -> durable session format, reducers, and immutable artifact store
         |
-tea-core      -> Agent, durable runtime, harness lineage, coding profile, evolution
+tea-core      -> Agent, durable runtime, harness lineage, coding authority, evolution
         |
         +--> tea-trace   (optional immutable event consumer)
         ^                         ^
@@ -29,17 +29,16 @@ The workspace crates are:
 | --- | --- | --- |
 | `tea-protocol` | Shared `JsonValue`, canonical JSON encoding, and JSON conversion seams | Runtime IDs/messages/events, scheduler state, provider SDKs, Luau types, filesystem APIs |
 | `tea-session` | Versioned session format, reducers, immutable artifact storage, export/reopen verification | Agent/provider execution, provider SDKs, policy VMs, UI state |
-| `tea-core` | Agent FSM, durable `runtime::SessionSupervisor`, immutable `harness` lineage, coding profile/tools, evolution control, context conversion, tool scheduling, hooks/queues, cancellation and settlement | HTTP/provider implementations, cwd/home/config discovery, TUI, Luau VM/runtime, Tokio executor |
+| `tea-core` | Agent FSM, durable `runtime::SessionSupervisor`, immutable `harness` lineage, coding host authority, evolution control, context conversion, tool scheduling, hooks/queues, cancellation and settlement | HTTP/provider implementations, cwd/home/config discovery, TUI, Luau VM/runtime, Tokio executor |
 | `tea-trace` | Immutable event-to-linear-episode recorder, redaction and caller-selected JSONL/CBOR sinks | Agent state, session tree, replay mutations, sink-driven behavior |
 | `tea-providers` | Concrete provider wire adapters and evaluation runner | Core state, durable session writes, UI ownership |
 | `tea-luau` (optional policy) | Hermetic VM, capability manifest/modules, policy hooks/tools, script error/limit translation | Core lifecycle/state/scheduling, ambient OS authority, event-loop ownership |
 | `tea-agent` | Application composition of provider adapter, Luau extension engine, core runtime, and terminal host | Reusable core/domain contracts |
 
-`PiDefaultCodingProfile` is owned by `tea-core` alongside the explicit profile/tool adapters.
-The profile implementation and its checked-in capture depend only on the core/protocol boundaries
-and caller-provided operation traits. It must not import the selected contract or make external
-source a runtime dependency. Hosts still own operation implementations and may supply a sterile
-profile or replace any standard tool.
+`tea-core` owns the capability-scoped coding host and never imports Luau. The
+checked-in Pi capture remains historical evidence only. `tea-luau` owns the
+first-party coding-tool declarations, while application hosts select explicit
+workspace/process capability implementations and grants.
 
 ## Ports and adapters
 
@@ -76,7 +75,9 @@ the structural and combinator keywords used by the profile (`type`, `properties`
 `additionalProperties`, `items`, `enum`, `const`, `allOf`, `anyOf`, `oneOf`, `not`, size bounds,
 and numeric bounds); unsupported draft-specific keywords are rejected as invalid tool schemas
 rather than ignored. A tool receives a call ID, validated JSON, cancellation, and an update sink.
-Standard coding tools are ordinary tools behind explicit profile operation ports.
+First-party coding tools are resolved from immutable Luau harness source;
+`CodingHost` supplies their trusted operation ports without owning their
+provider-visible semantics.
 
 The optional `tea_providers` crate is a separate adapter layer behind explicit Cargo
 features. `provider-openrouter`, `provider-commandcode`, and `provider-local` are opt-in blocking
@@ -279,24 +280,25 @@ and between body chunks (and after a finite request settles); the generic core a
 its sequential tool poll on cancellation and records a cancellation result rather than leaving an
 uncooperative future holding run ownership.
 
-## Default coding profile adapter
+## Default coding bundle
 
-The profile is a composition layer over the generic tool port:
+The default coding surface is a revisioned Luau bundle over trusted host
+capabilities:
 
 ```text
-explicit workspace + explicit operation adapters + policy wrapper
+checked-in Luau source + host-selected capability grants
                     |
                     v
-read / bash / edit / write / grep / find / ls definitions
+read / bash / edit / find declarations
                     |
                     v
-ordered prompt template + raw schemas + tool-local guidance
+immutable harness revision + executable tool registry
 ```
 
-Profile construction cannot discover cwd, `$HOME`, `.pi`, settings, skills, sessions, or provider
-credentials. A caller may provide a sterile profile or replace every operation. Profile prompt
-bytes, active order, schemas, snippets, guidelines and behavior are versioned fixture data as
-specified in `docs/default-coding-profile.md`.
+The host never discovers cwd, `$HOME`, `.pi`, settings, skills, sessions, or
+provider credentials. Luau owns prompt bytes, schemas, descriptions, and
+ordinary behavior; Rust independently enforces workspace confinement, process
+authority, and transaction settlement. See `docs/default-coding-profile.md`.
 
 ## Tracing boundary
 
@@ -335,8 +337,8 @@ These contract-bearing choices are settled by fixtures and dependency review:
 | Manual compaction transaction, replacement validation, and cancellation | `tests/compaction.rs` |
 | Cancellation token implementation without Tokio | dependency review + `cancel/checkpoints` |
 | Mixed per-tool sequential override behavior | `crates/tea-core/fixtures/declarative/mixed-tool-execution.json` |
-| Canonical JSON Schema serialization/hash | `crates/tea-core/profile/default-profile.json` and profile tests |
-| Exact generated default prompt bytes/hash and workspace substitution | `crates/tea-core/profile/default-profile.json` |
+| Default coding-tool declarations and grants | `crates/tea-luau/src/builtins.rs` coding-bundle test |
+| Trusted coding authority and transaction behavior | `crates/tea-core/tests/coding_capabilities.rs` |
 | Typed error hierarchy and failure-to-event mapping | `failure/provider-error`, `cancel/failure-shapes` |
 
 No change may introduce an undocumented fallback. A newly unresolved behavior

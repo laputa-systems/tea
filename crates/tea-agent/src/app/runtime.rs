@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{sync_channel, Receiver, TryRecvError};
 use std::time::Duration;
 use tea_core::agent::AgentConfiguration;
-use tea_core::coding::TeaCodingToolsV2;
+use tea_core::coding::CodingHost;
 use tea_core::compaction::AutomaticCompactionPolicy;
 use tea_core::error::CoreError;
 use tea_core::harness::HarnessError;
@@ -213,14 +213,14 @@ impl App {
                 AppError::Setup(format!("cannot read current directory: {error}"))
             })?,
         };
-        let tools =
-            TeaCodingToolsV2::with_operations(&workspace, Arc::new(NonblockingCodingOperations))
+        let coding_host =
+            CodingHost::with_operations(&workspace, Arc::new(NonblockingCodingOperations))
                 .map_err(|error| AppError::Setup(format!("invalid --cwd: {error}")))?;
-        self.workspace = Some(tools.workspace().as_path().to_path_buf());
+        self.workspace = Some(coding_host.workspace().as_path().to_path_buf());
         let configuration = if self.options.provider() == Some(OsStr::new(mock::PROVIDER_ID)) {
             mock::configuration()
         } else {
-            host_configuration(tools, &workspace.to_string_lossy())?
+            host_configuration(&workspace.to_string_lossy())?
         };
         self.configuration = Some(configuration);
         self.state

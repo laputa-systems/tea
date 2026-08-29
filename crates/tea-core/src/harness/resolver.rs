@@ -19,7 +19,9 @@ use crate::runtime::{HarnessIdentity, RuntimeServices};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 use tea_core::compaction::AutomaticCompactionPolicy;
-use tea_core::harness::extension::{ExtensionEngine, ExtensionMemoryCollector};
+use tea_core::harness::extension::{
+    ExtensionEngine, ExtensionMemoryCollector, ExtensionSourceTree,
+};
 use tea_core::hooks::HookSet;
 use tea_core::tool::{ToolFailureCircuitBreaker, ToolRegistry, ToolResultProjectionPolicy};
 use tea_protocol::JsonValue;
@@ -314,6 +316,7 @@ impl HarnessResolver {
         };
         let mut resolved_bindings = BTreeMap::new();
         for loaded in &extensions {
+            self.validate_fixed_tool_authority(&loaded.source)?;
             for capability in &loaded.plugin.requested_capabilities {
                 let reference = snapshot
                     .spec
@@ -389,6 +392,22 @@ impl HarnessResolver {
                     .map_err(|error| {
                         HarnessError::invalid_state(format!(
                             "plugin {} capability {capability} could not bind: {error}",
+                            loaded.plugin.plugin_id,
+                        ))
+                    })?;
+            }
+            if let Some((tool_capabilities, additional_read_only_capabilities)) = self
+                .capability_catalog
+                .fixed_tool_capabilities(&loaded.plugin.plugin_id)
+            {
+                bindings
+                    .fix_tool_capabilities(
+                        tool_capabilities.clone(),
+                        additional_read_only_capabilities.clone(),
+                    )
+                    .map_err(|error| {
+                        HarnessError::invalid_state(format!(
+                            "plugin {} could not fix tool capability grants: {error}",
                             loaded.plugin.plugin_id,
                         ))
                     })?;
@@ -615,6 +634,7 @@ impl HarnessResolver {
         let proposed_snapshot = repository
             .stage_snapshot(proposed_spec)
             .map_err(lineage_error)?;
+        self.validate_fixed_tool_authority_for_snapshot(&repository, &proposed_snapshot)?;
         let changed_surfaces = changed_surfaces(&parent_snapshot, &proposed_snapshot);
         let draft = HarnessCandidateDraft {
             parent_revision_id: request.base_revision_id,
@@ -640,6 +660,60 @@ impl HarnessResolver {
             capability_ceiling: self.capability_ceiling.clone(),
         };
         repository.stage_candidate(draft).map_err(lineage_error)
+    }
+
+    /// Verify any host-pinned model-tool authority map against modifiable
+    /// source before a candidate becomes addressable. This keeps first-party
+    /// coding behavior revisionable without making its tool-to-capability
+    /// mapping source-controlled.
+    fn validate_fixed_tool_authority_for_snapshot(
+        &self,
+        repository: &HarnessRepository,
+        snapshot: &HarnessSnapshotV1,
+    ) -> Result<(), HarnessError> {
+        for loaded in repository
+            .load_extension_sources(snapshot)
+            .map_err(lineage_error)?
+        {
+            self.validate_fixed_tool_authority(&loaded.source)?;
+        }
+        Ok(())
+    }
+
+    fn validate_fixed_tool_authority(
+        &self,
+        source: &ExtensionSourceTree,
+    ) -> Result<(), HarnessError> {
+        let Some((fixed, additional_read_only_capabilities)) = self
+            .capability_catalog
+            .fixed_tool_capabilities(&source.extension_id)
+        else {
+            return Ok(());
+        };
+        let descriptor = self.extension_engine.describe(source).map_err(|error| {
+            HarnessError::invalid_state(format!(
+                "plugin {} could not describe its fixed tool authority: {error}",
+                source.extension_id,
+            ))
+        })?;
+        let actual = descriptor
+            .tools
+            .into_iter()
+            .map(|tool| (tool.name, tool.capability))
+            .collect::<BTreeMap<_, _>>();
+        let fixed_mismatch = fixed
+            .iter()
+            .any(|(tool, capability)| actual.get(tool) != Some(capability));
+        let authority_expansion = actual.iter().any(|(tool, capability)| {
+            !fixed.contains_key(tool) && !additional_read_only_capabilities.contains(capability)
+        });
+        if fixed_mismatch || authority_expansion {
+            return Err(HarnessError::invalid_state(format!(
+                "plugin {} tool capability declarations differ from the host-fixed authority map",
+                source.extension_id,
+            )));
+        }
+        Ok(())
     }
 
     /// Recheck and derive the immutable child revision for a staged candidate.

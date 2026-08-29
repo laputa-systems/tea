@@ -45,16 +45,34 @@ impl ExtensionEngine for LuauExtensionEngine {
         let policy = Arc::new(policy);
         let mut tools = tea_core::tool::ToolRegistry::default();
         for tool in policy.tools() {
-            let handler_source = tool.handler_source.clone().ok_or_else(|| {
+            let handler_source = match (&tool.handler_source, &tool.handler_module) {
+                (Some(source), None) => source.clone(),
+                (None, Some(module)) => source.files.get(module).cloned().ok_or_else(|| {
+                    ExtensionError::new(format!(
+                        "extension {} tool {} names missing handler module {module}",
+                        source.extension_id, tool.name
+                    ))
+                })?,
+                (None, None) => {
+                    return Err(ExtensionError::new(format!(
+                        "extension {} tool {} has no executable handler source",
+                        source.extension_id, tool.name
+                    )));
+                }
+                (Some(_), Some(_)) => {
+                    return Err(ExtensionError::new(format!(
+                        "extension {} tool {} names both handler source and module",
+                        source.extension_id, tool.name
+                    )));
+                }
+            };
+            let capability = bindings
+                .capability_for_tool(&tool.name, &tool.capability)
+                .map_err(extension_error)?;
+            let binding = bindings.get(&capability).ok_or_else(|| {
                 ExtensionError::new(format!(
-                    "extension {} tool {} has no executable handler source",
-                    source.extension_id, tool.name
-                ))
-            })?;
-            let binding = bindings.get(&tool.capability).ok_or_else(|| {
-                ExtensionError::new(format!(
-                    "extension {} tool {} names unbound capability {}",
-                    source.extension_id, tool.name, tool.capability
+                    "extension {} tool {} names unbound capability {capability}",
+                    source.extension_id, tool.name,
                 ))
             })?;
             let limits = handler_limits(binding.limits());
@@ -64,12 +82,12 @@ impl ExtensionEngine for LuauExtensionEngine {
                     name: tool.name.clone(),
                     description: tool.description.clone(),
                     schema: tool.schema.clone(),
-                    capability: tool.capability.clone(),
+                    capability: capability.clone(),
                     execution_mode: tool.execution_mode,
                     requires_exclusive_batch: tool.requires_exclusive_batch,
                     cancellation_settlement_mode: tool.cancellation_settlement_mode,
                 },
-                adapt_binding(&tool.capability, binding)?,
+                adapt_binding(&capability, binding)?,
                 limits,
             )
             .map_err(extension_error)?;
@@ -312,6 +330,7 @@ impl LuauCapability for CoreCapabilityAdapter {
             ExtensionCapabilityRequest {
                 call_id: request.call_id,
                 tool_name: request.tool_name,
+                provenance: request.provenance,
                 capability: request.capability,
                 method: request.method,
                 arguments: request.arguments,

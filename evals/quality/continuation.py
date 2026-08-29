@@ -104,7 +104,7 @@ def _continuation_metrics(operations: Any) -> dict[str, int]:
             repeated_unchanged_read_bytes += int(operation.get("bytes", 0))
         if kind == "command" and duplicate and operation.get("status") == "failed":
             repeated_failed_approaches += 1
-        if kind in {"write", "edit", "delete"}:
+        if kind in {"edit", "delete"}:
             file_generation[target] = generation + 1
             workspace_generation += 1
         if first_productive is None and bool(operation.get("productive", False)):

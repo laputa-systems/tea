@@ -1324,9 +1324,20 @@ fn validate_candidate(
 
 fn tree_has_plugin_layout(tree: &HarnessTree, plugin_id: &str) -> bool {
     let manifest = format!("plugins/{plugin_id}/manifest.json");
-    let entrypoint = format!("plugins/{plugin_id}/main.luau");
+    // First-party checked-in bundles use `init.luau`, while existing authored
+    // session plugins use `main.luau`. The language adapter still validates
+    // the manifest's exact entrypoint; this structural check only verifies
+    // that a candidate retained a closed executable source layout.
+    let entrypoints = [
+        format!("plugins/{plugin_id}/main.luau"),
+        format!("plugins/{plugin_id}/init.luau"),
+    ];
     tree.files.keys().any(|path| path.as_str() == manifest)
-        && tree.files.keys().any(|path| path.as_str() == entrypoint)
+        && tree.files.keys().any(|path| {
+            entrypoints
+                .iter()
+                .any(|entrypoint| path.as_str() == entrypoint)
+        })
 }
 
 fn fingerprints(

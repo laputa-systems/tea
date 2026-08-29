@@ -28,7 +28,7 @@ from evals.quality.coding_cases import (
     remove_worktree,
     run_validator,
 )
-from evals.quality.coding_runner import prepare_cache
+from evals.quality.coding_runner import CodingRunError, coding_bundle_capabilities, prepare_cache
 
 from .contract import BASELINES, ContractError, RESULT_SCHEMA, canonical, digest, file_digest, validate_result
 from .report import write_reports
@@ -91,24 +91,11 @@ def selected_case(task_id: str) -> dict[str, Any]:
 
 
 def capability_manifest() -> list[dict[str, Any]]:
-    """Use the checked-in default profile as the sole source for exact tool parity."""
-    profile = json.loads((ROOT / "crates" / "tea-core" / "profile" / "default-profile.json").read_text(encoding="utf-8"))
-    active = profile.get("active_tools")
-    if not isinstance(active, list):
-        raise ShootoutError("pinned default coding profile has no active tools")
-    capabilities = [
-        {
-            "name": tool.get("name"),
-            "kind": "pi_default_tool",
-            "description": tool.get("description"),
-            "schema": tool.get("parameters"),
-        }
-        for tool in active
-        if isinstance(tool, dict)
-    ]
-    if [item["name"] for item in capabilities] != ["read", "bash", "edit", "write"]:
-        raise ShootoutError("pinned default profile must contain only read/bash/edit/write in order")
-    return capabilities
+    """Use the shared checked-in Luau coding-bundle contract for both adapters."""
+    try:
+        return coding_bundle_capabilities()
+    except CodingRunError as error:
+        raise ShootoutError(str(error)) from error
 
 
 def adapter_task(case: dict[str, Any], capabilities: list[dict[str, Any]], timeout_seconds: int) -> dict[str, Any]:

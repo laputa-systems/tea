@@ -119,7 +119,7 @@ python3 -m evals.quality coding --allow-provider \
   --validator fast
 ```
 
-The Rust profile is captured at
-`crates/tea-core/profile/default-profile.json`. Worktrees are removed
-after each attempt and provider credentials are sourced only at the final
-adapter process boundary.
+The Rust adapter resolves the checked-in Luau coding bundle at
+`crates/tea-luau/builtins/coding/`. Worktrees are removed after each attempt
+and provider credentials are sourced only at the final adapter process
+boundary.

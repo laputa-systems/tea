@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "abi_version": 2,
+  "id": "coding",
+  "entrypoint": "init.luau",
+  "modules": [
+    "init.luau",
+    "prompts.luau",
+    "tools/read.luau",
+    "tools/bash.luau",
+    "tools/edit.luau",
+    "tools/find.luau"
+  ],
+  "requested_capabilities": [
+    "tea.process.v1",
+    "tea.workspace.mutate.v1",
+    "tea.workspace.read.v1",
+    "tea.workspace.search.v1"
+  ]
+}

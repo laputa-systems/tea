@@ -6,20 +6,25 @@
 //! managed harness boundary used by an interactive session; it never creates
 //! a second, direct-core persistence path.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::num::{NonZeroU32, NonZeroU64};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tea_core::agent::AgentConfiguration;
+use tea_core::coding::{
+    CodingHost, PROCESS_CAPABILITY_V1, WORKSPACE_MUTATE_CAPABILITY_V1,
+    WORKSPACE_READ_CAPABILITY_V1, WORKSPACE_SEARCH_CAPABILITY_V1,
+};
 use tea_core::compaction::AutomaticCompactionPolicy;
 use tea_core::event::AgentEventKind;
 use tea_core::harness::extension::{
-    ExtensionEngine, ExtensionHostCommandDescription, ExtensionLimits, ExtensionStateHandle,
-    ExtensionToolLimits,
+    ExtensionCapability, ExtensionCapabilityError, ExtensionCapabilityFuture,
+    ExtensionCapabilityRequest, ExtensionEngine, ExtensionHostCommandDescription, ExtensionLimits,
+    ExtensionStateHandle, ExtensionToolLimits,
 };
 use tea_core::harness::{
     CapabilityBindingRef, ExtensionStateCapability, HarnessActor, HarnessRepository,
@@ -164,13 +169,7 @@ pub(super) fn create_host_harness(
         automatic_compaction,
     );
     let child_configuration = if subagent_policy.is_some() {
-        let tools = tea_core::coding::TeaCodingToolsV2::with_operations(
-            workspace,
-            Arc::new(super::nonblocking_operations::NonblockingCodingOperations),
-        )
-        .map_err(|error| AppError::Setup(format!("invalid child workspace template: {error}")))?;
         Some(super::host::host_configuration(
-            tools,
             &workspace.to_string_lossy(),
         )?)
     } else {
@@ -240,12 +239,50 @@ pub(super) fn create_host_harness(
             capability_version: goal_binding.capability_version().to_owned(),
             binding_digest: goal_binding.binding_digest(),
         };
+        // The local mock intentionally owns a separate no-effect `edit`
+        // fixture. Every ordinary terminal configuration has no trusted
+        // coding tools and receives this revisioned Luau bundle instead.
+        let coding_bindings = configuration
+            .tools
+            .names()
+            .next()
+            .is_none()
+            .then(|| coding_capability_bindings(workspace))
+            .transpose()?;
         let mut capability_catalog = PluginCapabilityCatalog::new();
         capability_catalog
             .insert(goal_binding)
             .map_err(|error| AppError::Setup(error.to_string()))?;
+        if let Some(coding_bindings) = &coding_bindings {
+            for binding in coding_bindings.bindings.iter().cloned() {
+                capability_catalog
+                    .insert(binding)
+                    .map_err(|error| AppError::Setup(error.to_string()))?;
+            }
+            capability_catalog
+                .fix_tool_capabilities(
+                    "coding",
+                    coding_tool_capability_grants(),
+                    coding_additional_read_only_capabilities(),
+                )
+                .map_err(|error| AppError::Setup(error.to_string()))?;
+        }
         let (root_prompt, root_presentations) =
             root_harness_surface(&configuration, subagent_policy.as_ref())?;
+        let mut extensions = vec![HarnessSeedExtension {
+            scope: HarnessSeedExtensionScope::Global,
+            source: tea_luau::builtins::goal(extension_limits(&resource_limits)),
+        }];
+        let mut capability_references = vec![goal_binding_ref.clone()];
+        if let Some(coding_bindings) = &coding_bindings {
+            extensions.push(HarnessSeedExtension {
+                // Coding behavior is session-local revisioned source. Its
+                // capability grants remain fixed separately in the catalog.
+                scope: HarnessSeedExtensionScope::Session,
+                source: tea_luau::builtins::coding(extension_limits(&resource_limits)),
+            });
+            capability_references.extend(coding_bindings.references.iter().cloned());
+        }
         let seeded = HarnessSeedBuilder::new(
             Arc::clone(&artifacts),
             Arc::new(LuauExtensionEngine),
@@ -256,11 +293,8 @@ pub(super) fn create_host_harness(
             resource_limits.clone(),
             template.runtime_policy_identities(),
         )
-        .extensions(vec![HarnessSeedExtension {
-            scope: HarnessSeedExtensionScope::Global,
-            source: tea_luau::builtins::goal(extension_limits(&resource_limits)),
-        }])
-        .capability_bindings(vec![goal_binding_ref.clone()])
+        .extensions(extensions)
+        .capability_bindings(capability_references)
         .trusted_tool_presentations(root_presentations)
         .seed(HarnessActor::Host, created_at_ms)
         .map_err(|error| AppError::Setup(error.to_string()))?;
@@ -276,6 +310,9 @@ pub(super) fn create_host_harness(
                 policy,
                 &resource_limits,
                 &goal_binding_ref,
+                coding_bindings
+                    .as_ref()
+                    .map(|bindings| bindings.references.as_slice()),
                 created_at_ms,
             )?,
             (None, None, None) => Vec::new(),
@@ -343,6 +380,9 @@ pub(super) fn create_host_harness(
                         Arc::clone(&subagents.factory),
                         Arc::clone(&artifacts),
                         child_harnesses,
+                        coding_bindings
+                            .as_ref()
+                            .map(|bindings| bindings.router.clone()),
                     ));
                 let tasks: Arc<dyn tea_core::runtime::TaskRuntime> =
                     Arc::new(SmolTaskRuntime::new());
@@ -596,9 +636,22 @@ pub(super) fn reopen_host_harness(
         capability_version: goal_binding.capability_version().to_owned(),
         binding_digest: goal_binding.binding_digest(),
     };
+    let coding_bindings = coding_capability_bindings(workspace)?;
     let mut capability_catalog = PluginCapabilityCatalog::new();
     capability_catalog
         .insert(goal_binding)
+        .map_err(|error| AppError::Setup(error.to_string()))?;
+    for binding in coding_bindings.bindings.iter().cloned() {
+        capability_catalog
+            .insert(binding)
+            .map_err(|error| AppError::Setup(error.to_string()))?;
+    }
+    capability_catalog
+        .fix_tool_capabilities(
+            "coding",
+            coding_tool_capability_grants(),
+            coding_additional_read_only_capabilities(),
+        )
         .map_err(|error| AppError::Setup(error.to_string()))?;
     let persisted_subagent_policy = reopen_subagent_policy(
         agent_graph.policy.as_ref(),
@@ -609,17 +662,10 @@ pub(super) fn reopen_host_harness(
         // a session that was created without optional child services.
         (None, _) => None,
         (Some(policy), Some(subagents)) => {
-            let tools = tea_core::coding::TeaCodingToolsV2::with_operations(
-                workspace,
-                Arc::new(super::nonblocking_operations::NonblockingCodingOperations),
-            )
-            .map_err(|error| {
-                AppError::Setup(format!("invalid child workspace template: {error}"))
-            })?;
             // Keep model-facing context anchored to the durable, original
             // workspace spelling. Only child tool execution gets a physical
             // lease worktree later in `TuiSubagentHost::prepared`.
-            let child_configuration = super::host::host_configuration(tools, &header.workspace)?;
+            let child_configuration = super::host::host_configuration(&header.workspace)?;
             let resource_limits = HarnessResourceLimits::default();
             let child_harnesses = derive_child_harnesses(
                 Arc::clone(&artifacts),
@@ -628,6 +674,7 @@ pub(super) fn reopen_host_harness(
                 &policy,
                 &resource_limits,
                 &goal_binding_ref,
+                Some(coding_bindings.references.as_slice()),
                 snapshot.header().created_at_ms,
             )?;
             let host: Arc<dyn tea_core::runtime::SubagentHost> = Arc::new(TuiSubagentHost::new(
@@ -638,6 +685,7 @@ pub(super) fn reopen_host_harness(
                 Arc::clone(&subagents.factory),
                 Arc::clone(&artifacts),
                 child_harnesses,
+                Some(coding_bindings.router.clone()),
             ));
             let tasks: Arc<dyn tea_core::runtime::TaskRuntime> = Arc::new(SmolTaskRuntime::new());
             Some(SubagentServices {
@@ -701,6 +749,194 @@ fn goal_state_binding() -> Result<(ExtensionStateHandle, PluginCapabilityBinding
     )
     .map_err(|error| AppError::Setup(error.to_string()))?;
     Ok((state, binding))
+}
+
+struct CodingCapabilityBindings {
+    bindings: Vec<PluginCapabilityBinding>,
+    references: Vec<CapabilityBindingRef>,
+    router: CodingCapabilityRouter,
+}
+
+/// Mutable process-local lease routing beneath a fixed immutable grant set.
+///
+/// Source cannot select a workspace: the terminal installs a lease host for a
+/// durable child lane before that lane can run. Only the root lane may use the
+/// root workspace; an unbound child lane fails closed instead of inheriting
+/// parent authority.
+#[derive(Clone)]
+pub(super) struct CodingCapabilityRouter {
+    root: CodingHost,
+    child_hosts: Arc<Mutex<BTreeMap<String, CodingHost>>>,
+}
+
+impl CodingCapabilityRouter {
+    fn new(root: CodingHost) -> Self {
+        Self {
+            root,
+            child_hosts: Arc::new(Mutex::new(BTreeMap::new())),
+        }
+    }
+
+    pub(super) fn bind_child_lane(
+        &self,
+        lane_id: String,
+        host: CodingHost,
+    ) -> Result<(), AppError> {
+        let mut child_hosts = self
+            .child_hosts
+            .lock()
+            .map_err(|_| AppError::Setup("coding capability lease map is poisoned".into()))?;
+        if child_hosts.insert(lane_id.clone(), host).is_some() {
+            return Err(AppError::Setup(format!(
+                "coding capability lease already exists for child lane {lane_id}"
+            )));
+        }
+        Ok(())
+    }
+
+    fn host_for(
+        &self,
+        request: &ExtensionCapabilityRequest,
+    ) -> Result<CodingHost, ExtensionCapabilityError> {
+        let Some(lane_id) = request.provenance.lane_id.as_deref() else {
+            return Ok(self.root.clone());
+        };
+        if lane_id == LaneId::main().as_str() {
+            return Ok(self.root.clone());
+        }
+        let child_hosts =
+            self.child_hosts
+                .lock()
+                .map_err(|_| ExtensionCapabilityError::Execution {
+                    message: "coding capability lease map is unavailable".into(),
+                })?;
+        child_hosts
+            .get(lane_id)
+            .cloned()
+            .ok_or_else(|| ExtensionCapabilityError::Execution {
+                message: format!("no coding capability lease is bound for child lane {lane_id}"),
+            })
+    }
+
+    fn capability(&self, name: &'static str) -> Arc<dyn ExtensionCapability> {
+        Arc::new(RoutedCodingCapability {
+            name,
+            router: self.clone(),
+        })
+    }
+}
+
+struct RoutedCodingCapability {
+    name: &'static str,
+    router: CodingCapabilityRouter,
+}
+
+impl ExtensionCapability for RoutedCodingCapability {
+    fn invoke(
+        &self,
+        request: ExtensionCapabilityRequest,
+        cancellation: tea_core::scheduler::CancellationToken,
+    ) -> ExtensionCapabilityFuture {
+        match self.router.host_for(&request) {
+            Ok(host) => match self.name {
+                WORKSPACE_READ_CAPABILITY_V1 => {
+                    host.read_capability().invoke(request, cancellation)
+                }
+                WORKSPACE_SEARCH_CAPABILITY_V1 => {
+                    host.search_capability().invoke(request, cancellation)
+                }
+                WORKSPACE_MUTATE_CAPABILITY_V1 => {
+                    host.mutate_capability().invoke(request, cancellation)
+                }
+                PROCESS_CAPABILITY_V1 => host.process_capability().invoke(request, cancellation),
+                _ => unreachable!("coding router has a fixed four-capability catalog"),
+            },
+            Err(error) => Box::pin(async move { Err(error) }),
+        }
+    }
+}
+
+/// Bind the four immutable coding-bundle grants for one host-selected
+/// workspace. The bundle may change its model-facing behavior through a
+/// revision, but neither source nor candidates can add another capability to
+/// this catalog.
+fn coding_capability_bindings(workspace: &Path) -> Result<CodingCapabilityBindings, AppError> {
+    let host = CodingHost::with_operations(
+        workspace,
+        Arc::new(super::nonblocking_operations::NonblockingCodingOperations),
+    )
+    .map_err(|error| AppError::Setup(format!("invalid coding workspace: {error}")))?;
+    let router = CodingCapabilityRouter::new(host);
+    let limits = ExtensionToolLimits::default();
+    let capabilities = [
+        (
+            WORKSPACE_READ_CAPABILITY_V1,
+            router.capability(WORKSPACE_READ_CAPABILITY_V1),
+        ),
+        (
+            WORKSPACE_SEARCH_CAPABILITY_V1,
+            router.capability(WORKSPACE_SEARCH_CAPABILITY_V1),
+        ),
+        (
+            WORKSPACE_MUTATE_CAPABILITY_V1,
+            router.capability(WORKSPACE_MUTATE_CAPABILITY_V1),
+        ),
+        (
+            PROCESS_CAPABILITY_V1,
+            router.capability(PROCESS_CAPABILITY_V1),
+        ),
+    ];
+    let bindings = capabilities
+        .into_iter()
+        .map(|(capability, implementation)| {
+            PluginCapabilityBinding::new(
+                "coding",
+                capability,
+                "v1",
+                Digest::from_bytes(format!("tea-coding-capability:{capability}")),
+                limits,
+                implementation,
+            )
+            .map_err(|error| AppError::Setup(error.to_string()))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let references = bindings
+        .iter()
+        .map(|binding| CapabilityBindingRef {
+            plugin_id: binding.plugin_id().to_owned(),
+            capability: binding.capability().to_owned(),
+            capability_version: binding.capability_version().to_owned(),
+            binding_digest: binding.binding_digest(),
+        })
+        .collect();
+    Ok(CodingCapabilityBindings {
+        bindings,
+        references,
+        router,
+    })
+}
+
+/// Rust fixes this model-tool authority map before any Luau source resolves.
+/// A harness revision may alter coding behavior but cannot remap `read` to a
+/// process grant or introduce another model-facing tool with mutation or
+/// process authority.
+fn coding_tool_capability_grants() -> BTreeMap<String, String> {
+    BTreeMap::from([
+        ("read".into(), WORKSPACE_READ_CAPABILITY_V1.into()),
+        ("bash".into(), PROCESS_CAPABILITY_V1.into()),
+        ("edit".into(), WORKSPACE_MUTATE_CAPABILITY_V1.into()),
+        ("find".into(), WORKSPACE_SEARCH_CAPABILITY_V1.into()),
+    ])
+}
+
+/// A future coding builtin that needs only these effects requires Luau source,
+/// not a new Rust authority. Mutation and process grants remain pinned to the
+/// named `edit` and `bash` tools above.
+fn coding_additional_read_only_capabilities() -> BTreeSet<String> {
+    BTreeSet::from([
+        WORKSPACE_READ_CAPABILITY_V1.into(),
+        WORKSPACE_SEARCH_CAPABILITY_V1.into(),
+    ])
 }
 
 /// Convert the active semantic branch to a presentation-only core-message
@@ -1143,6 +1379,7 @@ fn child_harness_seeds(
     policy: &SubagentPolicy,
     resource_limits: &HarnessResourceLimits,
     goal_binding_ref: &CapabilityBindingRef,
+    coding_binding_refs: Option<&[CapabilityBindingRef]>,
     created_at_ms: u64,
 ) -> Result<Vec<(ModelDescriptor, tea_core::harness::SeededHarness)>, AppError> {
     policy
@@ -1164,6 +1401,18 @@ fn child_harness_seeds(
             .model(model.descriptor.clone())
             .automatic_compaction(automatic_compaction);
             let profile = model_profile(&model.descriptor)?;
+            let mut extensions = vec![HarnessSeedExtension {
+                scope: HarnessSeedExtensionScope::Global,
+                source: tea_luau::builtins::goal(extension_limits(resource_limits)),
+            }];
+            let mut capability_bindings = vec![goal_binding_ref.clone()];
+            if let Some(coding_binding_refs) = coding_binding_refs {
+                extensions.push(HarnessSeedExtension {
+                    scope: HarnessSeedExtensionScope::Session,
+                    source: tea_luau::builtins::coding(extension_limits(resource_limits)),
+                });
+                capability_bindings.extend_from_slice(coding_binding_refs);
+            }
             let seeded = HarnessSeedBuilder::new(
                 Arc::clone(&artifacts),
                 Arc::new(LuauExtensionEngine),
@@ -1174,11 +1423,8 @@ fn child_harness_seeds(
                 resource_limits.clone(),
                 child_template.runtime_policy_identities(),
             )
-            .extensions(vec![HarnessSeedExtension {
-                scope: HarnessSeedExtensionScope::Global,
-                source: tea_luau::builtins::goal(extension_limits(resource_limits)),
-            }])
-            .capability_bindings(vec![goal_binding_ref.clone()])
+            .extensions(extensions)
+            .capability_bindings(capability_bindings)
             .trusted_tool_presentations(tool_presentations(configuration))
             .seed(HarnessActor::Host, created_at_ms)
             .map_err(|error| AppError::Setup(error.to_string()))?;
@@ -1198,6 +1444,7 @@ fn seed_child_harnesses(
     policy: &SubagentPolicy,
     resource_limits: &HarnessResourceLimits,
     goal_binding_ref: &CapabilityBindingRef,
+    coding_binding_refs: Option<&[CapabilityBindingRef]>,
     created_at_ms: u64,
 ) -> Result<Vec<(ModelDescriptor, HarnessIdentity)>, AppError> {
     child_harness_seeds(
@@ -1207,6 +1454,7 @@ fn seed_child_harnesses(
         policy,
         resource_limits,
         goal_binding_ref,
+        coding_binding_refs,
         created_at_ms,
     )?
     .into_iter()
@@ -1241,6 +1489,7 @@ fn derive_child_harnesses(
     policy: &SubagentPolicy,
     resource_limits: &HarnessResourceLimits,
     goal_binding_ref: &CapabilityBindingRef,
+    coding_binding_refs: Option<&[CapabilityBindingRef]>,
     created_at_ms: u64,
 ) -> Result<Vec<(ModelDescriptor, HarnessIdentity)>, AppError> {
     child_harness_seeds(
@@ -1250,6 +1499,7 @@ fn derive_child_harnesses(
         policy,
         resource_limits,
         goal_binding_ref,
+        coding_binding_refs,
         created_at_ms,
     )?
     .into_iter()
@@ -1748,6 +1998,7 @@ fn ensure_private_directory(path: &Path) -> Result<(), AppError> {
 mod tests {
     use super::super::host::host_configuration;
     use super::*;
+    use std::collections::{BTreeSet, VecDeque};
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::process::Command;
@@ -1755,15 +2006,17 @@ mod tests {
     use std::sync::Mutex;
     use std::thread;
     use std::time::{Duration, Instant};
-    use tea_core::coding::TeaCodingToolsV2;
+    use tea_core::effect::{NoopEffectGate, RunProvenance};
+    use tea_core::harness::{CandidateHypothesis, HarnessApplyRequest, HarnessFilePatch};
     use tea_core::hooks::NoHooks;
+    use tea_core::runtime::HostedEpochInput;
     use tea_core::scheduler::{
         CancellationToken, ModelEventFuture, ModelEventStream, ModelFuture, ModelRequest,
         ModelStream, ModelStreamEvent,
     };
     use tea_core::state::StopReason;
     use tea_core::tool::ToolRegistry;
-    use tea_session::ProviderErrorRecord;
+    use tea_session::{MemoryArtifactStore, NormalizedPath, ProviderErrorRecord};
 
     #[derive(Debug)]
     struct StopProvider;
@@ -1780,6 +2033,56 @@ mod tests {
                     ModelStreamEvent::End(StopReason::Stop),
                 ],
             }) as _)))
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct CapturingProvider {
+        requests: Mutex<Vec<ModelRequest>>,
+    }
+
+    impl ModelProvider for CapturingProvider {
+        fn stream<'a>(
+            &'a self,
+            request: ModelRequest,
+            _cancellation: CancellationToken,
+        ) -> ModelFuture<'a> {
+            self.requests
+                .lock()
+                .expect("capturing provider request lock")
+                .push(request);
+            Box::pin(std::future::ready(Ok(Box::new(ModelStream {
+                events: vec![
+                    ModelStreamEvent::TextDelta("durable".into()),
+                    ModelStreamEvent::End(StopReason::Stop),
+                ],
+            }) as _)))
+        }
+    }
+
+    #[derive(Debug)]
+    struct QueuedCapturingProvider {
+        requests: Mutex<Vec<ModelRequest>>,
+        streams: Mutex<VecDeque<ModelStream>>,
+    }
+
+    impl ModelProvider for QueuedCapturingProvider {
+        fn stream<'a>(
+            &'a self,
+            request: ModelRequest,
+            _cancellation: CancellationToken,
+        ) -> ModelFuture<'a> {
+            self.requests
+                .lock()
+                .expect("queued capturing provider request lock")
+                .push(request);
+            let stream = self
+                .streams
+                .lock()
+                .expect("queued capturing provider stream lock")
+                .pop_front()
+                .expect("queued capturing provider has a fixture stream");
+            Box::pin(std::future::ready(Ok(Box::new(stream) as _)))
         }
     }
 
@@ -2368,11 +2671,8 @@ data: [DONE]
             model: "root-scripted-fixture".into(),
             revision: None,
         };
-        let configuration = host_configuration(
-            TeaCodingToolsV2::new(&workspace).expect("root coding tools configure"),
-            &workspace.to_string_lossy(),
-        )
-        .expect("root host configuration builds");
+        let configuration = host_configuration(&workspace.to_string_lossy())
+            .expect("root host configuration builds");
         let subagents = HostSubagentConfig {
             factory: Arc::new(ProviderFactory::new(
                 tea_providers::ProviderRegistry::new(),
@@ -2525,11 +2825,8 @@ data: [DONE]
         let home = temporary_home();
         let workspace = home.join("workspace");
         fs::create_dir(&workspace).expect("workspace creates");
-        let configuration = host_configuration(
-            TeaCodingToolsV2::new(&workspace).expect("coding tools configure"),
-            &workspace.to_string_lossy(),
-        )
-        .expect("child configuration builds");
+        let configuration =
+            host_configuration(&workspace.to_string_lossy()).expect("child configuration builds");
         let policy = SubagentPolicy {
             models: vec![
                 tea_core::runtime::SubagentModel {
@@ -2572,6 +2869,7 @@ data: [DONE]
             &policy,
             &HarnessResourceLimits::default(),
             &binding_ref,
+            None,
             1,
         )
         .expect("initial child catalog seeds");
@@ -2605,6 +2903,7 @@ data: [DONE]
             &policy,
             &HarnessResourceLimits::default(),
             &binding_ref,
+            None,
             1,
         )
         .expect("every authorized child is staged in the resolver catalog");
@@ -2615,6 +2914,7 @@ data: [DONE]
             &policy,
             &HarnessResourceLimits::default(),
             &binding_ref,
+            None,
             99,
         )
         .expect("reopen derives the complete catalog without spawn facts");
@@ -2686,6 +2986,402 @@ data: [DONE]
             .records()
             .iter()
             .any(|record| matches!(record.record, tea_session::LaneRecord::OperationStarted(_))));
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn default_host_resolves_the_revisioned_luau_four_tool_surface() {
+        let home = temporary_home();
+        let workspace = home.join("workspace");
+        fs::create_dir(&workspace).expect("workspace creates");
+        let provider = Arc::new(CapturingProvider::default());
+        let harness = create_host_harness(HostHarnessConfig {
+            tea_home: &home,
+            workspace: &workspace,
+            configuration: AgentConfiguration::new(
+                "trusted system prompt",
+                ToolRegistry::default(),
+                Arc::new(NoHooks),
+            ),
+            model: ModelDescriptor {
+                provider: "fixture".into(),
+                model: "fixture-model".into(),
+                revision: Some("fixture-revision".into()),
+            },
+            provider: Arc::clone(&provider) as Arc<dyn ModelProvider>,
+            thinking_level: Some(ThinkingLevel::Off),
+            compactor: None,
+            automatic_compaction: AutomaticCompactionPolicy::disabled(),
+            subagents: None,
+        })
+        .expect("host harness creates");
+
+        smol::block_on(harness.run_root_prompt("show the coding surface"))
+            .expect("durable prompt settles");
+        let requests = provider
+            .requests
+            .lock()
+            .expect("capturing provider request lock");
+        let request = requests.first().expect("provider receives one request");
+        let names = request
+            .tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            [
+                "read",
+                "bash",
+                "edit",
+                "find",
+                "get_goal",
+                "create_goal",
+                "update_goal",
+                "tea_artifact_read",
+                "tea_artifact_search",
+                "tea_history_search",
+            ]
+        );
+        assert!(request.tools.iter().all(|tool| {
+            !tool.description.is_empty()
+                && tool
+                    .schema
+                    .get("type")
+                    .and_then(tea_protocol::JsonValue::as_str)
+                    == Some("object")
+        }));
+        assert_eq!(
+            request
+                .tools
+                .iter()
+                .take(4)
+                .map(|tool| {
+                    (
+                        tool.execution_mode,
+                        tool.requires_exclusive_batch,
+                        tool.cancellation_settlement_mode,
+                    )
+                })
+                .collect::<Vec<_>>(),
+            [
+                (
+                    ToolExecutionMode::Parallel,
+                    false,
+                    tea_core::tool::CancellationSettlementMode::DropFuture,
+                ),
+                (
+                    ToolExecutionMode::Parallel,
+                    false,
+                    tea_core::tool::CancellationSettlementMode::DropFuture,
+                ),
+                (
+                    ToolExecutionMode::Parallel,
+                    true,
+                    tea_core::tool::CancellationSettlementMode::AwaitFuture,
+                ),
+                (
+                    ToolExecutionMode::Parallel,
+                    false,
+                    tea_core::tool::CancellationSettlementMode::DropFuture,
+                ),
+            ],
+        );
+        assert!(request
+            .system_prompt
+            .contains("There are no separate `write`, `grep`, or `ls`"));
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn coding_builtin_revisions_change_behavior_only_at_a_new_epoch_and_cannot_escalate() {
+        let home = temporary_home();
+        let workspace = home.join("workspace");
+        fs::create_dir(&workspace).expect("workspace creates");
+        fs::write(workspace.join("fixture.txt"), "fixture\n").expect("fixture file writes");
+        let provider = Arc::new(CapturingProvider::default());
+        let configuration = AgentConfiguration::new(
+            "trusted system prompt",
+            ToolRegistry::default(),
+            Arc::new(NoHooks),
+        );
+        let model = ModelDescriptor {
+            provider: "fixture".into(),
+            model: "fixture-model".into(),
+            revision: Some("fixture-revision".into()),
+        };
+        let services = epoch_template(
+            Arc::clone(&provider) as Arc<dyn ModelProvider>,
+            configuration.clone(),
+            model.clone(),
+            ThinkingLevel::Off,
+            None,
+            AutomaticCompactionPolicy::disabled(),
+        );
+        let resource_limits = HarnessResourceLimits::default();
+        let coding_bindings = coding_capability_bindings(&workspace)
+            .expect("coding host capability bindings configure");
+        let mut capability_catalog = PluginCapabilityCatalog::new();
+        for binding in coding_bindings.bindings.iter().cloned() {
+            capability_catalog
+                .insert(binding)
+                .expect("coding capability grant is unique");
+        }
+        capability_catalog
+            .fix_tool_capabilities(
+                "coding",
+                coding_tool_capability_grants(),
+                coding_additional_read_only_capabilities(),
+            )
+            .expect("coding tool authority map fixes once");
+        let coding_source = tea_luau::builtins::coding(extension_limits(&resource_limits));
+        let initial_init = coding_source
+            .files
+            .get("init.luau")
+            .expect("coding init source exists")
+            .clone();
+        let initial_read = coding_source
+            .files
+            .get("tools/read.luau")
+            .expect("coding read source exists")
+            .clone();
+        let artifacts: Arc<dyn tea_session::ArtifactStore> =
+            Arc::new(MemoryArtifactStore::default());
+        let seeded = HarnessSeedBuilder::new(
+            artifacts,
+            Arc::new(LuauExtensionEngine),
+            host_profile_digest(&configuration),
+            configuration.system_prompt.clone(),
+            model_profile(&model).expect("fixture model profile is valid"),
+            SelfExtensionMode::Off,
+            resource_limits.clone(),
+            services.runtime_policy_identities(),
+        )
+        .extensions(vec![HarnessSeedExtension {
+            scope: HarnessSeedExtensionScope::Session,
+            source: coding_source,
+        }])
+        .capability_bindings(coding_bindings.references.clone())
+        .seed(HarnessActor::Host, 1)
+        .expect("coding harness seeds");
+        let manager = HarnessResolver::new(
+            seeded.repository,
+            BTreeSet::from([
+                PROCESS_CAPABILITY_V1.into(),
+                WORKSPACE_MUTATE_CAPABILITY_V1.into(),
+                WORKSPACE_READ_CAPABILITY_V1.into(),
+                WORKSPACE_SEARCH_CAPABILITY_V1.into(),
+            ]),
+        )
+        .capability_catalog(capability_catalog);
+        let initial_revision = seeded.revision.revision_id.clone();
+        let initial_resolved = manager
+            .resolve_revision(&initial_revision, &services)
+            .expect("initial coding revision resolves");
+
+        let read_description = |resolved: &tea_core::harness::ResolvedHarness| {
+            let hosted = services
+                .prepare_hosted_epoch(
+                    resolved,
+                    HostedEpochInput {
+                        effect_gate: Arc::new(NoopEffectGate),
+                        provenance: RunProvenance::default(),
+                        additional_tools: ToolRegistry::default(),
+                    },
+                )
+                .expect("hosted coding epoch prepares");
+            let run = hosted
+                .agent()
+                .start_prompt("inspect the coding surface")
+                .expect("hosted agent starts");
+            smol::block_on(run.drive()).expect("hosted agent settles");
+            provider
+                .requests
+                .lock()
+                .expect("capturing provider request lock")
+                .last()
+                .expect("hosted epoch sends a provider request")
+                .tools
+                .iter()
+                .find(|tool| tool.name == "read")
+                .expect("read remains in the provider surface")
+                .description
+                .clone()
+        };
+        let original_description = read_description(&initial_resolved);
+        assert!(original_description.contains("Inspect a regular workspace file"));
+
+        let revised_init = initial_init.replace(
+            "Inspect a regular workspace file.",
+            "Inspect files through the revision-tested read surface.",
+        );
+        assert_ne!(revised_init, initial_init);
+        let candidate = manager
+            .apply(
+                HarnessApplyRequest {
+                    base_revision_id: initial_revision.clone(),
+                    hypothesis: CandidateHypothesis {
+                        targeted_evidence: "read description was too generic".into(),
+                        expected_effect: "provider sees the revised read description".into(),
+                        regression_risk: "read authority could change with presentation".into(),
+                    },
+                    files: vec![HarnessFilePatch::Upsert {
+                        path: NormalizedPath::new("plugins/coding/init.luau")
+                            .expect("coding init path is normalized"),
+                        content: revised_init.clone(),
+                    }],
+                    registry_operations: Vec::new(),
+                    operation_id: None,
+                    tool_invocation_id: "revision-description".into(),
+                },
+                &services,
+            )
+            .expect("coding description candidate stages");
+        assert!(
+            candidate.validation.accepted,
+            "{:?}",
+            candidate.validation.diagnostics
+        );
+        assert!(!candidate.validation.is_noop);
+
+        assert_eq!(read_description(&initial_resolved), original_description);
+        let revised_revision = manager
+            .activate_candidate(&candidate.candidate_id, HarnessActor::Host, 2)
+            .expect("coding description candidate activates");
+        let revised_resolved = manager
+            .resolve_revision(&revised_revision.revision_id, &services)
+            .expect("revised coding epoch resolves");
+        assert!(read_description(&revised_resolved).contains("revision-tested read surface"));
+
+        let process_attempt = initial_read.replace(
+            r#"        capability = "tea.workspace.read.v1",
+        method = "read",
+        arguments = {
+            path = call.arguments.path,
+            offset = call.arguments.offset,
+            limit = call.arguments.limit,
+            includeDigest = call.arguments.includeDigest,
+        },"#,
+            r#"        capability = "tea.process.v1",
+        method = "run",
+        arguments = { command = "touch capability-escape" },"#,
+        );
+        assert_ne!(process_attempt, initial_read);
+        let process_candidate = manager
+            .apply(
+                HarnessApplyRequest {
+                    base_revision_id: revised_revision.revision_id.clone(),
+                    hypothesis: CandidateHypothesis {
+                        targeted_evidence: "test modified read handler authority".into(),
+                        expected_effect: "read remains constrained to its fixed grant".into(),
+                        regression_risk: "read could invoke a process".into(),
+                    },
+                    files: vec![HarnessFilePatch::Upsert {
+                        path: NormalizedPath::new("plugins/coding/tools/read.luau")
+                            .expect("coding read path is normalized"),
+                        content: process_attempt,
+                    }],
+                    registry_operations: Vec::new(),
+                    operation_id: None,
+                    tool_invocation_id: "revision-escalation".into(),
+                },
+                &services,
+            )
+            .expect("process-attempt candidate still stages as source");
+        assert!(process_candidate.validation.accepted);
+        let process_revision = manager
+            .activate_candidate(&process_candidate.candidate_id, HarnessActor::Host, 3)
+            .expect("process-attempt candidate activates");
+        let process_provider = Arc::new(QueuedCapturingProvider {
+            requests: Mutex::new(Vec::new()),
+            streams: Mutex::new(VecDeque::from([
+                ModelStream {
+                    events: vec![
+                        ModelStreamEvent::ToolCall(AgentToolCall {
+                            id: ToolCallId::new("modified-read")
+                                .expect("fixture tool call ID is valid"),
+                            name: "read".into(),
+                            arguments: SerializedJson::new(r#"{"path":"fixture.txt"}"#),
+                        }),
+                        ModelStreamEvent::End(StopReason::ToolUse),
+                    ],
+                },
+                ModelStream {
+                    events: vec![
+                        ModelStreamEvent::TextDelta("read authority stayed confined".into()),
+                        ModelStreamEvent::End(StopReason::Stop),
+                    ],
+                },
+            ])),
+        });
+        let process_services = epoch_template(
+            Arc::clone(&process_provider) as Arc<dyn ModelProvider>,
+            configuration,
+            model,
+            ThinkingLevel::Off,
+            None,
+            AutomaticCompactionPolicy::disabled(),
+        );
+        let process_resolved = manager
+            .resolve_revision(&process_revision.revision_id, &process_services)
+            .expect("modified read source resolves under the same grants");
+        let hosted = process_services
+            .prepare_hosted_epoch(
+                &process_resolved,
+                HostedEpochInput {
+                    effect_gate: Arc::new(NoopEffectGate),
+                    provenance: RunProvenance::default(),
+                    additional_tools: ToolRegistry::default(),
+                },
+            )
+            .expect("modified read hosted epoch prepares");
+        let run = hosted
+            .agent()
+            .start_prompt("try the modified read tool")
+            .expect("modified read hosted agent starts");
+        smol::block_on(run.drive()).expect("capability denial remains a recoverable tool result");
+        assert_eq!(
+            process_provider
+                .requests
+                .lock()
+                .expect("process provider request lock")
+                .len(),
+            2,
+            "the denied read call returns control to the model without running a shell"
+        );
+        assert!(
+            !workspace.join("capability-escape").exists(),
+            "a revised read handler must not gain process authority"
+        );
+
+        let remapped_init = revised_init.replace(
+            "capability = \"tea.workspace.read.v1\"",
+            "capability = \"tea.process.v1\"",
+        );
+        let error = manager
+            .apply(
+                HarnessApplyRequest {
+                    base_revision_id: process_revision.revision_id,
+                    hypothesis: CandidateHypothesis {
+                        targeted_evidence: "test remapped read declaration authority".into(),
+                        expected_effect: "host rejects a source-controlled authority remap".into(),
+                        regression_risk: "read could be rebound to process authority".into(),
+                    },
+                    files: vec![HarnessFilePatch::Upsert {
+                        path: NormalizedPath::new("plugins/coding/init.luau")
+                            .expect("coding init path is normalized"),
+                        content: remapped_init,
+                    }],
+                    registry_operations: Vec::new(),
+                    operation_id: None,
+                    tool_invocation_id: "revision-remap".into(),
+                },
+                &services,
+            )
+            .expect_err("a candidate cannot remap read to the process capability");
+        assert!(error
+            .to_string()
+            .contains("differ from the host-fixed authority map"));
         let _ = fs::remove_dir_all(home);
     }
 
@@ -2792,11 +3488,8 @@ data: [DONE]
             model: "root-output-failure-fixture".into(),
             revision: None,
         };
-        let configuration = host_configuration(
-            TeaCodingToolsV2::new(&workspace).expect("root coding tools configure"),
-            &workspace.to_string_lossy(),
-        )
-        .expect("root host configuration builds");
+        let configuration = host_configuration(&workspace.to_string_lossy())
+            .expect("root host configuration builds");
         let subagents = HostSubagentConfig {
             factory: Arc::new(ProviderFactory::new(
                 tea_providers::ProviderRegistry::new(),
@@ -2926,11 +3619,8 @@ data: [DONE]
         let home = temporary_home();
         let workspace = home.join("workspace");
         fs::create_dir(&workspace).expect("workspace creates");
-        let configuration = host_configuration(
-            TeaCodingToolsV2::new(&workspace).expect("Tea v2 tools configure"),
-            &workspace.to_string_lossy(),
-        )
-        .expect("durable host configuration assembles");
+        let configuration = host_configuration(&workspace.to_string_lossy())
+            .expect("durable host configuration assembles");
         let harness = create_host_harness(HostHarnessConfig {
             tea_home: &home,
             workspace: &workspace,

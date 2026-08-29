@@ -49,6 +49,22 @@ These fields control scheduling and cancellation settlement; they are not sent
 to the provider and are included in the immutable host execution-policy
 fingerprint instead.
 
+## Default coding bundle
+
+The first-party `coding` bundle is an ordinary closed v2 source tree. It
+declares exactly `read`, `bash`, `edit`, and `find`, each with one distinct
+host capability grant. Handlers yield structured `arguments` tables; the Luau
+runtime converts only finite JSON-compatible values before the request crosses
+into Rust.
+
+The host grants `tea.workspace.read.v1`, `tea.workspace.search.v1`,
+`tea.workspace.mutate.v1`, and `tea.process.v1` independently. The source may
+change tool descriptions, schemas, formatting, and ordinary behavior in a
+future revision, but it cannot acquire another grant or select a different
+workspace/process authority. Rust validates capability methods and arguments,
+enforces workspace confinement and transaction safety, and retains process
+lifecycle ownership.
+
 The optional generic `extension.state` capability is bound by the host to one
 immutable extension identity. It exposes only `get` of that extension's latest
 local values and `append` of one bounded value. The runtime writes those values

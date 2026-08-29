@@ -9,7 +9,7 @@ from unittest.mock import call, patch
 
 from . import coding_cases
 from .coding_cases import CodingCaseError, assert_oracle_isolated_worktree, cache_bare_repository, load_cases
-from .coding_runner import _adapter_task, _profile_capabilities
+from .coding_runner import _adapter_task, coding_bundle_capabilities
 
 
 class CodingCasesTest(unittest.TestCase):
@@ -21,7 +21,7 @@ class CodingCasesTest(unittest.TestCase):
         )
         for case in cases:
             self.assertEqual(case["setup"]["network"], False)
-            self.assertEqual(case["setup"]["tools"], ["read", "bash", "edit", "write"])
+            self.assertEqual(case["setup"]["tools"], ["read", "bash", "edit", "find"])
             self.assertEqual(case["validators"]["full"]["audit_command"], "npm install && npm test")
             self.assertEqual(case["validators"]["fast"]["evidence"]["baseline"], "fails")
             self.assertEqual(case["validators"]["fast"]["evidence"]["known_correct"], "passes")
@@ -54,11 +54,11 @@ class CodingCasesTest(unittest.TestCase):
                 git.call_args_list,
             )
 
-    def test_adapter_task_uses_the_pinned_default_profile_tool_contract(self) -> None:
-        capabilities = _profile_capabilities()
+    def test_adapter_task_uses_the_default_coding_bundle_tool_contract(self) -> None:
+        capabilities = coding_bundle_capabilities()
         task = _adapter_task(load_cases()[0], capabilities)
         self.assertEqual(task["capabilities"], capabilities)
-        self.assertEqual([tool["name"] for tool in capabilities], ["read", "bash", "edit", "write"])
+        self.assertEqual([tool["name"] for tool in capabilities], ["read", "bash", "edit", "find"])
 
     def test_oracle_isolation_rejects_a_worktree_that_contains_the_fix(self) -> None:
         with tempfile.TemporaryDirectory(prefix="tea-quality-worktree-") as temporary:

@@ -16,9 +16,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use tea_core::coding::{
-    CodingOperations, CommandEnvironment, CommandOutput, DirectoryEntry, EditTransaction,
-    EditTransactionOutcome, EntryMetadata, FileSnapshot, GrepMatch, GrepOptions,
-    LocalCodingOperations, OperationError, OperationFuture,
+    CodingOperations, CommandEnvironment, CommandOutput, EditTransaction, EditTransactionOutcome,
+    EntryMetadata, FileSnapshot, LocalCodingOperations, OperationError, OperationFuture,
 };
 use tea_core::scheduler::CancellationToken;
 use tea_core::tool::{ToolUpdate, ToolUpdateSink};
@@ -37,21 +36,6 @@ impl CodingOperations for NonblockingCodingOperations {
         let path = path.to_path_buf();
         Box::pin(smol::unblock(move || {
             fs::read(path).map_err(|error| OperationError::new(error.to_string()))
-        }))
-    }
-
-    fn write_file<'a>(&'a self, path: &'a Path, content: &'a [u8]) -> OperationFuture<'a, ()> {
-        let path = path.to_path_buf();
-        let content = content.to_vec();
-        Box::pin(smol::unblock(move || {
-            fs::write(path, content).map_err(|error| OperationError::new(error.to_string()))
-        }))
-    }
-
-    fn create_dir_all<'a>(&'a self, path: &'a Path) -> OperationFuture<'a, ()> {
-        let path = path.to_path_buf();
-        Box::pin(smol::unblock(move || {
-            fs::create_dir_all(path).map_err(|error| OperationError::new(error.to_string()))
         }))
     }
 
@@ -91,26 +75,6 @@ impl CodingOperations for NonblockingCodingOperations {
         }))
     }
 
-    fn read_dir<'a>(&'a self, path: &'a Path) -> OperationFuture<'a, Vec<DirectoryEntry>> {
-        let path = path.to_path_buf();
-        Box::pin(smol::unblock(move || {
-            let mut entries = Vec::new();
-            for entry in
-                fs::read_dir(path).map_err(|error| OperationError::new(error.to_string()))?
-            {
-                let entry = entry.map_err(|error| OperationError::new(error.to_string()))?;
-                let metadata = entry
-                    .metadata()
-                    .map_err(|error| OperationError::new(error.to_string()))?;
-                entries.push(DirectoryEntry {
-                    name: entry.file_name().to_string_lossy().into_owned(),
-                    is_directory: metadata.is_dir(),
-                });
-            }
-            Ok(entries)
-        }))
-    }
-
     fn find_files<'a>(
         &'a self,
         root: &'a Path,
@@ -124,20 +88,6 @@ impl CodingOperations for NonblockingCodingOperations {
         Box::pin(smol::unblock(move || {
             let local = LocalCodingOperations;
             smol::block_on(local.find_files(&root, &pattern, limit))
-        }))
-    }
-
-    fn grep_files<'a>(
-        &'a self,
-        root: &'a Path,
-        pattern: &'a str,
-        options: GrepOptions,
-    ) -> OperationFuture<'a, Vec<GrepMatch>> {
-        let root = root.to_path_buf();
-        let pattern = pattern.to_owned();
-        Box::pin(smol::unblock(move || {
-            let local = LocalCodingOperations;
-            smol::block_on(local.grep_files(&root, &pattern, options))
         }))
     }
 
@@ -366,9 +316,12 @@ fn remove_captures(stdout: &Path, stderr: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tea_core::coding::{CodingHost, PROCESS_CAPABILITY_V1};
     use tea_core::effect::RunProvenance;
-    use tea_core::state::{SerializedJson, ToolCallId};
-    use tea_core::tool::{ToolCall, ToolContext, ToolUpdateSink};
+    use tea_core::harness::extension::ExtensionCapabilityRequest;
+    use tea_core::state::ToolCallId;
+    use tea_core::tool::ToolUpdateSink;
+    use tea_protocol::JsonValue;
 
     fn workspace() -> PathBuf {
         let path = std::env::temp_dir().join(format!(
@@ -452,28 +405,28 @@ mod tests {
     #[test]
     fn bash_streams_an_update_before_the_tool_finishes() {
         let root = workspace();
-        let tools = tea_core::coding::DefaultCodingTools::with_operations(
-            &root,
-            std::sync::Arc::new(NonblockingCodingOperations),
-        )
-        .expect("tools configure");
-        let tool = tools.bash();
+        let host =
+            CodingHost::with_operations(&root, std::sync::Arc::new(NonblockingCodingOperations))
+                .expect("host configures");
+        let capability = host.process_capability();
         let (sender, receiver) = smol::channel::bounded(1);
-        let context = ToolContext {
-            cancellation: CancellationToken::new(),
-            provenance: RunProvenance::default(),
-        };
-        let call = ToolCall {
-            id: ToolCallId::new("stream").expect("call ID"),
-            name: "bash".into(),
-            arguments: SerializedJson::new(
-                r#"{"command":"printf first; sleep 0.2; printf second"}"#,
-            ),
-        };
         let updates = ToolUpdateSink::new(move |update| {
             let _ = sender.try_send(update);
         });
-        let task = smol::spawn(async move { tool.execute(call, context, updates).await });
+        let request = ExtensionCapabilityRequest {
+            call_id: ToolCallId::new("stream").expect("call ID"),
+            tool_name: "bash".into(),
+            provenance: RunProvenance::default(),
+            capability: PROCESS_CAPABILITY_V1.into(),
+            method: "run".into(),
+            arguments: JsonValue::object([(
+                "command",
+                JsonValue::String("printf first; sleep 0.2; printf second".into()),
+            )]),
+            updates,
+        };
+        let task =
+            smol::spawn(async move { capability.invoke(request, CancellationToken::new()).await });
         let update = smol::block_on(async {
             smol::future::race(receiver.recv(), async {
                 smol::Timer::after(Duration::from_secs(1)).await;
@@ -484,8 +437,13 @@ mod tests {
         .expect("streamed update arrives");
         assert!(update.content.contains("first"));
         let result = smol::block_on(task).expect("bash settles");
-        assert!(result.content.contains("first"));
-        assert!(result.content.contains("second"));
+        let content = result
+            .value
+            .get("content")
+            .and_then(JsonValue::as_str)
+            .expect("process result includes content");
+        assert!(content.contains("first"));
+        assert!(content.contains("second"));
         let _ = fs::remove_dir_all(root);
     }
 

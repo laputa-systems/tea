@@ -8,7 +8,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use tea_core::coding::TeaCodingToolsV2;
+use tea_core::coding::CodingHost;
 use tea_core::compaction::AutomaticCompactionPolicy;
 use tea_core::runtime::{
     ApplyWorkspaceDeltaRequest, FinalizeSubagentRequest, HarnessIdentity, PreparedSubagent,
@@ -26,6 +26,7 @@ use super::{
     WorkspaceApplyRequest, WorkspaceFinalization as GitWorkspaceFinalization,
     WorkspaceLease as GitWorkspaceLease, WorkspaceLeaseRequest,
 };
+use crate::app::durable::CodingCapabilityRouter;
 use crate::app::host::host_configuration;
 use crate::app::nonblocking_operations::NonblockingCodingOperations;
 use crate::app::picker::automatic_compaction_policy;
@@ -41,6 +42,7 @@ pub(crate) struct TuiSubagentHost {
     factory: Arc<ProviderFactory>,
     artifacts: Arc<dyn ArtifactStore>,
     child_harnesses: BTreeMap<ChildHarnessKey, HarnessIdentity>,
+    coding_capability_router: Option<CodingCapabilityRouter>,
     engine: GitWorkspaceEngine,
     leases: Mutex<BTreeMap<WorkspaceLeaseId, GitWorkspaceLease>>,
     deltas: Mutex<BTreeMap<WorkspaceDeltaId, GitWorkspaceDelta>>,
@@ -88,6 +90,7 @@ impl TuiSubagentHost {
         factory: Arc<ProviderFactory>,
         artifacts: Arc<dyn ArtifactStore>,
         child_harnesses: impl IntoIterator<Item = (ModelDescriptor, HarnessIdentity)>,
+        coding_capability_router: Option<CodingCapabilityRouter>,
     ) -> Self {
         Self {
             workspace,
@@ -100,6 +103,7 @@ impl TuiSubagentHost {
                 .into_iter()
                 .map(|(descriptor, identity)| (ChildHarnessKey::from(&descriptor), identity))
                 .collect(),
+            coding_capability_router,
             engine: GitWorkspaceEngine,
             leases: Mutex::new(BTreeMap::new()),
             deltas: Mutex::new(BTreeMap::new()),
@@ -147,6 +151,7 @@ impl TuiSubagentHost {
 
     fn prepared(
         &self,
+        agent_id: AgentId,
         lease: GitWorkspaceLease,
         model: SubagentModel,
         thinking: ThinkingLevel,
@@ -161,15 +166,20 @@ impl TuiSubagentHost {
             .configured(&model.descriptor)
             .map_err(app_error)?;
         let compactor = self.factory.compactor(&configured).map_err(app_error)?;
-        let tools = TeaCodingToolsV2::with_operations(
-            lease.worktree_path(),
-            Arc::new(NonblockingCodingOperations),
-        )
-        .map_err(|error| host_error(format!("invalid isolated child workspace: {error}")))?;
+        if let Some(router) = &self.coding_capability_router {
+            let coding_host = CodingHost::with_operations(
+                lease.worktree_path(),
+                Arc::new(NonblockingCodingOperations),
+            )
+            .map_err(|error| host_error(format!("invalid isolated child workspace: {error}")))?;
+            router
+                .bind_child_lane(agent_id.lane_id().to_string(), coding_host)
+                .map_err(app_error)?;
+        }
         // Tool authority is the lease worktree; model-facing host context is
         // the stable original workspace label retained by the lease.
         let configuration =
-            host_configuration(tools, lease.logical_workspace_label()).map_err(app_error)?;
+            host_configuration(lease.logical_workspace_label()).map_err(app_error)?;
         // The persisted model catalog carries the context capacity that
         // seeded this child's immutable runtime policy. Do not re-read a
         // changed current registry on reopen and accidentally mismatch that
@@ -233,9 +243,9 @@ impl SubagentHost for TuiSubagentHost {
             let agent_id = request.agent_id;
             let workspace_lease_id = WorkspaceLeaseId::derive(&agent_id);
             let lease = self
-                .prepare_workspace(agent_id, workspace_lease_id, false)
+                .prepare_workspace(agent_id.clone(), workspace_lease_id, false)
                 .await?;
-            self.prepared(lease, request.model, request.thinking)
+            self.prepared(agent_id, lease, request.model, request.thinking)
         })
     }
 
@@ -249,10 +259,11 @@ impl SubagentHost for TuiSubagentHost {
                     "subagent reopen request belongs to another session",
                 ));
             }
+            let agent_id = request.agent_id;
             let lease = self
-                .prepare_workspace(request.agent_id, request.workspace_lease_id, true)
+                .prepare_workspace(agent_id.clone(), request.workspace_lease_id, true)
                 .await?;
-            self.prepared(lease, request.model, request.thinking)
+            self.prepared(agent_id, lease, request.model, request.thinking)
         })
     }
 
@@ -515,6 +526,7 @@ mod tests {
             )),
             artifacts,
             Vec::new(),
+            None,
         )
     }
 

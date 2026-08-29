@@ -7,7 +7,7 @@
 //! its stable identity is persisted in a [`CapabilityBindingRef`](crate::CapabilityBindingRef).
 
 use crate::harness::HarnessError;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::sync::Arc;
 use tea_core::harness::extension::{
@@ -116,6 +116,8 @@ impl PluginCapabilityBinding {
 #[derive(Clone, Default)]
 pub struct PluginCapabilityCatalog {
     bindings: BTreeMap<(String, String), PluginCapabilityBinding>,
+    fixed_tool_capabilities: BTreeMap<String, BTreeMap<String, String>>,
+    additional_read_only_capabilities: BTreeMap<String, BTreeSet<String>>,
 }
 
 impl fmt::Debug for PluginCapabilityCatalog {
@@ -123,6 +125,11 @@ impl fmt::Debug for PluginCapabilityCatalog {
         formatter
             .debug_struct("PluginCapabilityCatalog")
             .field("bindings", &self.bindings.keys().collect::<Vec<_>>())
+            .field("fixed_tool_capabilities", &self.fixed_tool_capabilities)
+            .field(
+                "additional_read_only_capabilities",
+                &self.additional_read_only_capabilities,
+            )
             .finish()
     }
 }
@@ -149,6 +156,49 @@ impl PluginCapabilityCatalog {
         }
         self.bindings.insert(key, binding);
         Ok(())
+    }
+
+    /// Freeze named model-tool authorities in one host-selected extension,
+    /// plus the only capabilities future additive tools may use. This is
+    /// separate from source because a revision must never turn (for example)
+    /// a read tool into a process tool.
+    pub fn fix_tool_capabilities(
+        &mut self,
+        plugin_id: impl Into<String>,
+        tool_capabilities: BTreeMap<String, String>,
+        additional_read_only_capabilities: BTreeSet<String>,
+    ) -> Result<(), CapabilityBindingError> {
+        let plugin_id = plugin_id.into();
+        validate_portable_identifier("plugin_id", &plugin_id)?;
+        for (tool, capability) in &tool_capabilities {
+            validate_portable_identifier("tool", tool)?;
+            validate_portable_identifier("capability", capability)?;
+        }
+        for capability in &additional_read_only_capabilities {
+            validate_portable_identifier("capability", capability)?;
+        }
+        if self.fixed_tool_capabilities.contains_key(&plugin_id) {
+            return Err(CapabilityBindingError::ToolGrantsAlreadyFixed { plugin_id });
+        }
+        self.fixed_tool_capabilities
+            .insert(plugin_id.clone(), tool_capabilities);
+        self.additional_read_only_capabilities
+            .insert(plugin_id, additional_read_only_capabilities);
+        Ok(())
+    }
+
+    pub(crate) fn fixed_tool_capabilities(
+        &self,
+        plugin_id: &str,
+    ) -> Option<(&BTreeMap<String, String>, &BTreeSet<String>)> {
+        self.fixed_tool_capabilities.get(plugin_id).map(|fixed| {
+            (
+                fixed,
+                self.additional_read_only_capabilities
+                    .get(plugin_id)
+                    .expect("fixed tool grants retain their read-only capability set"),
+            )
+        })
     }
 
     /// Resolve a persisted reference into a capability set for one immutable
@@ -236,6 +286,11 @@ pub enum CapabilityBindingError {
         /// Capability name.
         capability: String,
     },
+    /// The host attempted to replace a plugin's fixed tool-authority policy.
+    ToolGrantsAlreadyFixed {
+        /// Plugin identity.
+        plugin_id: String,
+    },
 }
 
 impl fmt::Display for CapabilityBindingError {
@@ -257,6 +312,10 @@ impl fmt::Display for CapabilityBindingError {
             } => write!(
                 formatter,
                 "plugin {plugin_id} capability {capability} is already bound by this host catalog",
+            ),
+            Self::ToolGrantsAlreadyFixed { plugin_id } => write!(
+                formatter,
+                "plugin {plugin_id} already has a fixed tool capability map in this host catalog",
             ),
         }
     }
@@ -484,6 +543,7 @@ mod tests {
             call_id: ToolCallId::new("extension-state-capability-test")
                 .expect("fixture tool call ID"),
             tool_name: "state_tool".into(),
+            provenance: crate::effect::RunProvenance::default(),
             capability: "extension.state".into(),
             method: method.into(),
             arguments,

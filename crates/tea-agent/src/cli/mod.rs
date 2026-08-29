@@ -299,9 +299,9 @@ fn find_owned_option(
     options: &'static [OptionSpec],
 ) -> Option<&'static OptionSpec> {
     match argument {
-        OwnedArg::Short(short) => options.iter().find(|spec| {
-            spec.short == Some(*short) || spec.aliases.contains(short)
-        }),
+        OwnedArg::Short(short) => options
+            .iter()
+            .find(|spec| spec.short == Some(*short) || spec.aliases.contains(short)),
         OwnedArg::Long(long) => options.iter().find(|spec| spec.long == long),
         OwnedArg::Value(_) => None,
     }

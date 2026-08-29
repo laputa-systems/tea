@@ -16,6 +16,10 @@ OpenRouter, `poolside/laguna-s-2.1:free`, high thinking, no output-token
 ceiling, and the same 900-second attempt timeout. It never substitutes
 `poolside/laguna-xs-2.1:free`.
 
+Both adapters receive the repository's closed `read`, `bash`, `edit`, `find`
+coding-bundle contract. Their implementations remain intentionally different;
+the shared bundle records the comparable model-facing surface.
+
 Each adapter publishes `tea-coding-eval-result/v2`. The Python runner keeps
 the complete patch and bounded process logs, runs the same external fast
 validator, and writes `reports/static.md` and `reports/evolution.md` below a

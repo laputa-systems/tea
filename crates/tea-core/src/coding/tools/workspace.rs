@@ -1,4 +1,4 @@
-//! Workspace path authority for standard coding tools.
+//! Workspace path authority for trusted coding capabilities.
 
 use super::contract::OperationError;
 use std::path::{Path, PathBuf};
@@ -34,7 +34,7 @@ impl WorkspaceRoot {
         Ok(resolved)
     }
 
-    /// Resolve a path that may not exist yet (for `write`). Existing parents
+    /// Resolve a path that may not exist yet (for a transactional mutation). Existing parents
     /// are canonicalized so symlink escapes remain rejected.
     pub fn resolve_for_write(&self, input: &str) -> Result<PathBuf, OperationError> {
         let candidate = self.lexically_resolve(input)?;
@@ -42,13 +42,13 @@ impl WorkspaceRoot {
         let mut suffix = Vec::new();
         while !existing.exists() {
             let name = existing.file_name().ok_or_else(|| {
-                OperationError::new("write path has no existing workspace parent")
+                OperationError::new("mutation path has no existing workspace parent")
             })?;
             suffix.push(name.to_os_string());
             existing.pop();
         }
         let canonical_existing = std::fs::canonicalize(&existing).map_err(|error| {
-            OperationError::new(format!("write parent is not accessible: {error}"))
+            OperationError::new(format!("mutation parent is not accessible: {error}"))
         })?;
         self.ensure_inside(&canonical_existing)?;
         let mut resolved = canonical_existing;

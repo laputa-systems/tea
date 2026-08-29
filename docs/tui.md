@@ -61,11 +61,12 @@ path plus parser source location when available. `tea session ...` commands do
 not load this file (including ID-based `inspect` and `dump`), and reusable
 crates never inspect it.
 
-The terminal installs an application-owned `CodingOperations` adapter through
-`TeaCodingToolsV2::with_operations`. Filesystem and search calls run on
-Smol's blocking pool, while bash polls daemon-safe capture files there and
-delivers bounded output updates before settlement. Cancellation kills and
-reaps the shell; the core remains executor-agnostic.
+The terminal binds its application-owned `CodingOperations` adapter to the
+four capability grants of the revisioned Luau coding bundle. Filesystem and
+optimized search calls run on Smol's blocking pool, while `bash` polls
+daemon-safe capture files there and delivers bounded output updates before
+settlement. Cancellation kills and reaps the shell; the core remains
+executor-agnostic.
 
 A one-shot prompt uses the same durable harness boundary as an interactive
 prompt:

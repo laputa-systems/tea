@@ -143,33 +143,15 @@ let policy = AutomaticCompactionPolicy {
 # let _ = policy;
 ```
 
-## Add Tea's default coding profile
+## Add Tea's default coding bundle
 
-The default profile is optional. When selected, provide an existing workspace
-explicitly; it never infers a working directory or reads ambient configuration.
-
-```rust,no_run
-use tea_core::Agent;
-use tea_core::coding::{TeaCodingToolsV2, TeaDefaultCodingProfileV2};
-
-let tools = TeaCodingToolsV2::new("/absolute/workspace")?;
-let profile = TeaDefaultCodingProfileV2::pinned_default()?;
-let registry = tools.registry();
-profile.validate_registry(&registry)?;
-let agent = Agent::builder()
-    // Also configure .model_provider(...) before running.
-    .system_prompt(profile.system_prompt_for_workspace(tools.workspace().as_path()))
-    .tools(registry)
-    .build();
-# let _ = agent;
-# Ok::<(), Box<dyn std::error::Error>>(())
-```
-
-The active tools are `read`, `bash`, transactional multi-file `edit`, and
-`write`; every operation is replaceable through
-`TeaCodingToolsV2::with_operations`. `DefaultCodingTools` remains available
-only for explicit compatibility with the pinned Pi v1 profile. See the
-[default-profile guide](default-coding-profile.md) before granting a real
+The repository-owned terminal resolves the checked-in Luau coding bundle through
+its durable harness. Its model-facing surface is exactly `read`, `bash`,
+transactional `edit`, and optimized `find`; Rust binds the narrow workspace and
+process capabilities beneath it. A library embedding that wants this bundle
+should use the same `HarnessSeedBuilder`/capability-catalog path rather than
+constructing Rust coding tools directly. See the
+[default coding bundle guide](default-coding-profile.md) before granting a real
 filesystem or process capability.
 
 ## Enable durable subagents explicitly

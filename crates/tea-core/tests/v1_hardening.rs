@@ -10,15 +10,14 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use tea_core::agent::Agent;
-use tea_core::coding::{PiDefaultCodingProfile, ProfileSpec};
 use tea_core::event::AgentEventKind;
 use tea_core::scheduler::{
     CancellationToken, ModelFuture, ModelProvider, ModelRequest, ModelStream, ModelStreamEvent,
 };
 use tea_core::state::{AgentMessage, AgentPhase, AgentToolCall, RunPhase, StopReason, ToolCallId};
 use tea_core::tool::{
-    AgentTool, AgentToolResult, ToolCall, ToolContext, ToolDefinition, ToolExecutionMode,
-    ToolFuture, ToolRegistry, ToolUpdateSink,
+    AgentTool, AgentToolResult, ToolCall, ToolContext, ToolExecutionMode, ToolFuture, ToolRegistry,
+    ToolUpdateSink,
 };
 
 fn schema() -> tea_protocol::JsonValue {
@@ -461,7 +460,7 @@ impl AgentTool for NamedTool {
 }
 
 #[test]
-fn profile_composition_matrix_keeps_prompt_explicit_while_tools_replace_or_remove() {
+fn tool_registry_composition_keeps_prompt_explicit_while_tools_replace_or_remove() {
     let alpha = Arc::new(NamedTool {
         name: "alpha",
         description: "original alpha",
@@ -472,21 +471,9 @@ fn profile_composition_matrix_keeps_prompt_explicit_while_tools_replace_or_remov
         description: "original beta",
         schema: schema(),
     });
-    let profile = PiDefaultCodingProfile::from_spec(ProfileSpec {
-        system_prompt: "profile prompt".into(),
-        tools: vec![
-            ToolDefinition::from_tool(alpha.as_ref()),
-            ToolDefinition::from_tool(beta.as_ref()),
-        ],
-        tool_guidance: vec!["profile guidance".into()],
-    })
-    .expect("fixture profile is valid");
     let mut registry = ToolRegistry::default();
     registry.insert(alpha);
     registry.insert(beta);
-    profile
-        .validate_registry(&registry)
-        .expect("registry satisfies profile");
 
     let replacement = Arc::new(NamedTool {
         name: "alpha",
@@ -494,7 +481,7 @@ fn profile_composition_matrix_keeps_prompt_explicit_while_tools_replace_or_remov
         schema: schema(),
     });
     let replaced = Agent::builder()
-        .system_prompt(profile.system_prompt())
+        .system_prompt("profile prompt\nprofile guidance")
         .tools(registry.clone())
         .tool(replacement)
         .build();
@@ -515,7 +502,7 @@ fn profile_composition_matrix_keeps_prompt_explicit_while_tools_replace_or_remov
     );
 
     let removed = Agent::builder()
-        .system_prompt(profile.system_prompt())
+        .system_prompt("profile prompt\nprofile guidance")
         .tools(registry)
         .remove_tool("beta")
         .build();

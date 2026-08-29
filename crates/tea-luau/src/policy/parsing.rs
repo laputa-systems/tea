@@ -286,6 +286,7 @@ fn parse_tool(declaration: &Table) -> Result<PolicyTool, PolicyError> {
             "cancellation_settlement_mode",
             "schema_json",
             "handler_source",
+            "handler_module",
         ],
         "policy tool declaration",
     )?;
@@ -295,6 +296,9 @@ fn parse_tool(declaration: &Table) -> Result<PolicyTool, PolicyError> {
     let schema_json = required_field(declaration, "schema_json")?;
     let handler_source = declaration
         .get::<Option<String>>("handler_source")
+        .map_err(contract_error)?;
+    let handler_module = declaration
+        .get::<Option<String>>("handler_module")
         .map_err(contract_error)?;
     for (field, value) in [
         ("name", name.as_str()),
@@ -350,6 +354,19 @@ fn parse_tool(declaration: &Table) -> Result<PolicyTool, PolicyError> {
             message: format!("tool {name:?} handler_source must not be empty when declared"),
         });
     }
+    if handler_module
+        .as_deref()
+        .is_some_and(|module| module.trim().is_empty())
+    {
+        return Err(PolicyError::Contract {
+            message: format!("tool {name:?} handler_module must not be empty when declared"),
+        });
+    }
+    if handler_source.is_some() && handler_module.is_some() {
+        return Err(PolicyError::Contract {
+            message: format!("tool {name:?} cannot declare both handler_source and handler_module"),
+        });
+    }
     Ok(PolicyTool {
         name,
         description,
@@ -359,6 +376,7 @@ fn parse_tool(declaration: &Table) -> Result<PolicyTool, PolicyError> {
         requires_exclusive_batch,
         cancellation_settlement_mode,
         handler_source,
+        handler_module,
     })
 }
 

@@ -1,28 +1,18 @@
-//! Standard coding tools assembled behind an explicit workspace authority.
+//! Trusted coding host-operation substrate.
+//!
+//! This module contains no model-facing tool definitions. The revisioned Luau
+//! coding bundle owns that surface; Rust retains only operations, transactions,
+//! workspace authority, and optimized workspace search.
 
-pub(crate) mod arguments;
-pub(crate) mod bash;
 pub(crate) mod contract;
-pub(crate) mod edit;
-pub(crate) mod factory;
-pub(crate) mod find;
-pub(crate) mod grep;
 pub(crate) mod local_operations;
-pub(crate) mod ls;
-pub(crate) mod multiedit;
-pub(crate) mod read;
-pub(crate) mod schemas;
 pub(crate) mod search;
-#[cfg(test)]
-mod tests;
 pub(crate) mod workspace;
-pub(crate) mod write;
 
 pub use contract::{
-    CodingOperations, CommandEnvironment, CommandOutput, ConditionalFileEdit, DirectoryEntry,
-    EditTransaction, EditTransactionOutcome, EntryMetadata, FileSnapshot, GrepMatch, GrepOptions,
+    CodingOperations, CommandEnvironment, CommandOutput, ConditionalFileCreate,
+    ConditionalFileEdit, EditTransaction, EditTransactionOutcome, EntryMetadata, FileSnapshot,
     OperationError, OperationFuture,
 };
-pub use factory::{DefaultCodingTools, TeaCodingToolsV2};
 pub use local_operations::LocalCodingOperations;
 pub use workspace::WorkspaceRoot;

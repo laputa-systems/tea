@@ -5,8 +5,8 @@ The maintained evaluation surfaces are under `evals/quality`:
 - `fast` runs deterministic core cases through the Rust fixture adapter.
 - `resources` records Rust allocation and process diagnostics.
 - `multiedit-disabled` materializes, runs, and grades the repository-owned
-  isolated hidden-runner design eval with Tea v2 multiedit unavailable to the
-  candidate.
+  isolated hidden-runner design eval with an unavailable legacy batch-edit
+  capability.
 - `coding` is an explicit provider-opt-in check for the pinned Express cases.
 
 The core fixture corpus is owned by the crate at

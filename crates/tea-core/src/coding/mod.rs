@@ -1,15 +1,17 @@
-//! Provider-independent coding profile composition and standard tools.
+//! Provider-independent coding workspace/process authority.
 //!
-//! The profile capture and its factories require explicit workspace and operation authority;
-//! constructing them never discovers a provider, credential, session, or current directory.
+//! `CodingHost` requires explicit workspace and operation authority; constructing
+//! it never discovers a provider, credential, session, or current directory.
 
-pub mod profile;
+pub mod capabilities;
 pub mod tools;
 
-pub use profile::{PiDefaultCodingProfile, ProfileSpec, TeaDefaultCodingProfileV2};
+pub use capabilities::{
+    CodingHost, PROCESS_CAPABILITY_V1, WORKSPACE_MUTATE_CAPABILITY_V1,
+    WORKSPACE_READ_CAPABILITY_V1, WORKSPACE_SEARCH_CAPABILITY_V1,
+};
 pub use tools::{
-    CodingOperations, CommandEnvironment, CommandOutput, ConditionalFileEdit, DefaultCodingTools,
-    DirectoryEntry, EditTransaction, EditTransactionOutcome, EntryMetadata, FileSnapshot,
-    GrepMatch, GrepOptions, LocalCodingOperations, OperationError, OperationFuture,
-    TeaCodingToolsV2, WorkspaceRoot,
+    CodingOperations, CommandEnvironment, CommandOutput, ConditionalFileCreate,
+    ConditionalFileEdit, EditTransaction, EditTransactionOutcome, EntryMetadata, FileSnapshot,
+    LocalCodingOperations, OperationError, OperationFuture, WorkspaceRoot,
 };

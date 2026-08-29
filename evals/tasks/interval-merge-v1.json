@@ -1,72 +1,81 @@
 {
   "schema_version": "tea-coding-eval-task/v1",
   "task_id": "interval-merge-v1",
-  "task_version": 2,
+  "task_version": 3,
   "kind": "coding",
-  "prompt": "Work only inside this workspace. Using only the Python standard library, write one complete intervals.py file defining merge_intervals(intervals: list[tuple[int, int]]) -> list[tuple[int, int]]. Return a new list sorted by start, merge overlapping and adjacent integer intervals, leave a one-integer gap unmerged, preserve the input, and raise ValueError when start > end. Use Pi's default write tool exactly once to create intervals.py. Do not create tests, invoke bash, or call any other tool; the evaluator will run hidden standard-library checks after you settle.",
+  "prompt": "Work only inside this workspace. Using only the Python standard library, create one complete intervals.py file defining merge_intervals(intervals: list[tuple[int, int]]) -> list[tuple[int, int]]. Return a new list sorted by start, merge overlapping and adjacent integer intervals, leave a one-integer gap unmerged, preserve the input, and raise ValueError when start > end. Use the edit tool once with a content file entry to create intervals.py. Do not create tests, invoke bash, or call any other tool; the evaluator will run hidden standard-library checks after you settle.",
   "initial_workspace": [],
   "capabilities": [
     {
       "name": "read",
-      "kind": "pi_default_tool",
-      "description": "Read the contents of a file. Supports text files and images (jpg, png, gif, webp, bmp). Images are sent as attachments. For text files, output is truncated to 2000 lines or 50KB (whichever is hit first). Use offset/limit for large files. When you need the full file, continue with offset until complete.",
+      "kind": "tea_coding_bundle",
+      "description": "Inspect a regular workspace file.",
       "schema": {
         "type": "object",
+        "additionalProperties": false,
         "required": ["path"],
         "properties": {
-          "path": {"type": "string", "description": "Path to the file to read (relative or absolute)"},
-          "offset": {"type": "number", "description": "Line number to start reading from (1-indexed)"},
-          "limit": {"type": "number", "description": "Maximum number of lines to read"}
+          "path": {"type": "string"},
+          "offset": {"type": "integer", "minimum": 1},
+          "limit": {"type": "integer", "minimum": 1},
+          "includeDigest": {"type": "boolean"}
         }
       }
     },
     {
       "name": "bash",
-      "kind": "pi_default_tool",
-      "description": "Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to last 2000 lines or 50KB (whichever is hit first). If truncated, full output is saved to a temp file. Optionally provide a timeout in seconds.",
+      "kind": "tea_coding_bundle",
+      "description": "Run a bash command in the workspace.",
       "schema": {
         "type": "object",
+        "additionalProperties": false,
         "required": ["command"],
         "properties": {
-          "command": {"type": "string", "description": "Bash command to execute"},
-          "timeout": {"type": "number", "description": "Timeout in seconds (optional, no default timeout)"}
+          "command": {"type": "string", "minLength": 1},
+          "timeout": {"type": "number", "exclusiveMinimum": 0}
         }
       }
     },
     {
       "name": "edit",
-      "kind": "pi_default_tool",
-      "description": "Edit a single file using exact text replacement. Every edits[].oldText must match a unique, non-overlapping region of the original file. If two changes affect the same block or nearby lines, merge them into one edit instead of emitting overlapping edits. Do not include large unchanged regions just to connect distant changes.",
+      "kind": "tea_coding_bundle",
+      "description": "Create, replace, or precisely modify workspace files in one transaction.",
       "schema": {
         "type": "object",
-        "required": ["path", "edits"],
+        "additionalProperties": false,
+        "required": ["files"],
         "properties": {
-          "path": {"type": "string", "description": "Path to the file to edit (relative or absolute)"},
-          "edits": {
+          "files": {
             "type": "array",
+            "minItems": 1,
             "items": {
               "type": "object",
-              "required": ["oldText", "newText"],
+              "additionalProperties": false,
+              "required": ["path"],
               "properties": {
-                "oldText": {"type": "string", "description": "Exact text for one targeted replacement. It must be unique in the original file and must not overlap with any other edits[].oldText in the same call."},
-                "newText": {"type": "string", "description": "Replacement text for this targeted edit."}
-              }
-            },
-            "description": "One or more targeted replacements. Each edit is matched against the original file, not incrementally. Do not include overlapping or nested edits. If two changes touch the same block or nearby lines, merge them into one edit instead."
+                "path": {"type": "string"},
+                "expectedDigest": {"type": "string"},
+                "edits": {"type": "array"},
+                "content": {"type": "string"}
+              },
+              "oneOf": [{"required": ["edits"]}, {"required": ["content"]}]
+            }
           }
         }
       }
     },
     {
-      "name": "write",
-      "kind": "pi_default_tool",
-      "description": "Write content to a file. Creates the file if it doesn't exist, overwrites if it does. Automatically creates parent directories.",
+      "name": "find",
+      "kind": "tea_coding_bundle",
+      "description": "Efficiently locate workspace files with bounded glob search.",
       "schema": {
         "type": "object",
-        "required": ["path", "content"],
+        "additionalProperties": false,
+        "required": ["pattern"],
         "properties": {
-          "path": {"type": "string", "description": "Path to the file to write (relative or absolute)"},
-          "content": {"type": "string", "description": "Content to write to the file"}
+          "pattern": {"type": "string", "minLength": 1},
+          "path": {"type": "string"},
+          "limit": {"type": "integer", "minimum": 1}
         }
       }
     }

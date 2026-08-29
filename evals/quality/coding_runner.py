@@ -30,7 +30,7 @@ from .coding_cases import (
 
 
 ROOT = Path(__file__).resolve().parents[2]
-PROFILE = ROOT / "crates" / "tea-core" / "profile" / "default-profile.json"
+CODING_BUNDLE = ROOT / "crates" / "tea-luau" / "builtins" / "coding" / "manifest.json"
 RESULT_SCHEMA = "tea-coding-eval-result/v1"
 CODING_SCHEMA = "tea-quality-coding-run/v1"
 
@@ -82,28 +82,20 @@ def _peak_rss(stderr: str, style: str | None) -> int | None:
     return None
 
 
-def _profile_capabilities() -> list[dict[str, Any]]:
+def coding_bundle_capabilities() -> list[dict[str, Any]]:
     try:
-        profile = json.loads(PROFILE.read_text(encoding="utf-8"))
+        manifest = json.loads(CODING_BUNDLE.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
-        raise CodingRunError(f"cannot read pinned default coding profile: {error}") from error
-    tools = profile.get("active_tools") if isinstance(profile, dict) else None
-    if not isinstance(tools, list):
-        raise CodingRunError("pinned default coding profile has no active_tools")
-    capabilities: list[dict[str, Any]] = []
-    for tool in tools:
-        if not isinstance(tool, dict) or not isinstance(tool.get("name"), str):
-            raise CodingRunError("pinned default coding profile contains an invalid tool")
-        capabilities.append(
-            {
-                "name": tool["name"],
-                "kind": "pi_default_tool",
-                "description": tool.get("description"),
-                "schema": tool.get("parameters"),
-            }
-        )
-    if [item["name"] for item in capabilities] != ["read", "bash", "edit", "write"]:
-        raise CodingRunError("pinned default coding profile must expose read/bash/edit/write in order")
+        raise CodingRunError(f"cannot read default coding bundle manifest: {error}") from error
+    if not isinstance(manifest, dict) or manifest.get("id") != "coding":
+        raise CodingRunError("default coding bundle manifest is invalid")
+    # The concrete provider surface is resolved from the Luau bundle by the
+    # Rust adapter. This task manifest records its closed four-tool contract;
+    # it intentionally does not duplicate the bundle's schemas or descriptions.
+    capabilities = [
+        {"name": name, "kind": "tea_coding_bundle", "description": None, "schema": {"type": "object"}}
+        for name in ("read", "bash", "edit", "find")
+    ]
     return capabilities
 
 
@@ -310,7 +302,7 @@ def run_coding_cases(
     missing = selected - {case["id"] for case in cases}
     if missing:
         raise CodingRunError(f"unknown coding case(s): {', '.join(sorted(missing))}")
-    capabilities = _profile_capabilities()
+    capabilities = coding_bundle_capabilities()
     destination = out.resolve()
     destination.mkdir(parents=True, exist_ok=True)
     records: list[dict[str, Any]] = []

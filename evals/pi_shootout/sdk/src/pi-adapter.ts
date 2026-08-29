@@ -56,7 +56,7 @@ function assertInputs(args: Arguments, task: Record<string, unknown>, capabiliti
 	if (args.baselineId !== "pi-static" || args.provider !== "openrouter" || args.thinkingLevel !== "high") throw new Error("unsupported Pi shootout condition")
 	if (args.model !== "poolside/laguna-s-2.1:free") throw new Error("Pi shootout requires poolside/laguna-s-2.1:free")
 	if (task.capabilities === undefined || canonical(task.capabilities) !== canonical(capabilities)) throw new Error("task and capability manifest disagree")
-	if (!Array.isArray(capabilities) || capabilities.map((item) => (item as { name?: unknown }).name).join(",") !== "read,bash,edit,write") throw new Error("Pi shootout requires read/bash/edit/write")
+	if (!Array.isArray(capabilities) || capabilities.map((item) => (item as { name?: unknown }).name).join(",") !== "read,bash,edit,find") throw new Error("Pi shootout requires read/bash/edit/find")
 	if (args.maxOutputTokens !== null) throw new Error("Pi shootout requires unlimited max output tokens")
 }
 
@@ -88,7 +88,7 @@ async function main(): Promise<void> {
 	const first = await createAgentSessionFromServices({ services, sessionManager: manager, model, thinkingLevel: args.thinkingLevel, tools: [] });
 	first.session.dispose();
 	const tools = createCodingTools(args.workspace, { bash: { exposeSessionEnvironment: false, spawnHook: ({ command, cwd }) => ({ command, cwd, env: { ...args.shell } }) } });
-	const second = new AgentSession({ agent: first.session.agent, sessionManager: manager, settingsManager: settings, cwd: args.workspace, resourceLoader: services.resourceLoader, modelRuntime, initialActiveToolNames: ["read", "bash", "edit", "write"], allowedToolNames: ["read", "bash", "edit", "write"], baseToolsOverride: Object.fromEntries(tools.map((tool) => [tool.name, tool])) });
+	const second = new AgentSession({ agent: first.session.agent, sessionManager: manager, settingsManager: settings, cwd: args.workspace, resourceLoader: services.resourceLoader, modelRuntime, initialActiveToolNames: ["read", "bash", "edit", "find"], allowedToolNames: ["read", "bash", "edit", "find"], baseToolsOverride: Object.fromEntries(tools.map((tool) => [tool.name, tool])) });
 	const shellHash = sha256(canonical(Object.fromEntries(Object.entries(args.shell).map(([name, value]) => [name, name === "HOME" ? "{HOME}" : name === "TMPDIR" ? "{TMPDIR}" : name === "npm_config_cache" ? "{NPM_CACHE}" : normalizeWorkspace(value, args.workspace)]))));
 	const reporter = new Reporter({ attemptId: args.attemptId, baselineId: args.baselineId, requestedModel: args.model, thinkingLevel: args.thinkingLevel, maxOutputTokens: args.maxOutputTokens, workspace: args.workspace, evidenceDir: args.evidenceDir, shellEnvironmentSha256: shellHash, shellCurlAvailable: true });
 	reporter.start();
@@ -96,7 +96,7 @@ async function main(): Promise<void> {
 	let terminal: { status: "completed" | "failed" | "cancelled" | "aborted"; code: string | null } = { status: "completed", code: null };
 	try {
 		await reporter.captureSurface(second);
-		if (second.getActiveToolNames().join(",") !== "read,bash,edit,write") throw new Error("Pi active tool surface drifted")
+		if (second.getActiveToolNames().join(",") !== "read,bash,edit,find") throw new Error("Pi active tool surface drifted")
 		await second.prompt(prompt, { expandPromptTemplates: false });
 		const failure = terminalFailure(second);
 		if (failure) terminal = { status: "failed", code: failure };

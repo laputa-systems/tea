@@ -32,12 +32,13 @@ class ControllerContractTests(unittest.TestCase):
         with self.assertRaises(controller.ContractError):
             controller.select_tasks(tasks, ["not-a-task"])
 
-    def test_interval_task_declares_the_exact_active_profile_tool_schemas(self) -> None:
+    def test_interval_task_declares_the_closed_default_coding_surface(self) -> None:
         task = controller.load_tasks(controller.TASKS)[0]
-        profile = controller.read_json(controller.ROOT.parent / "crates" / "tea-core" / "profile" / "default-profile.json")
-        task_schemas = {capability["name"]: capability["schema"] for capability in task["capabilities"]}
-        profile_schemas = {tool["name"]: tool["parameters"] for tool in profile["active_tools"]}
-        self.assertEqual(task_schemas, profile_schemas)
+        self.assertEqual(
+            [capability["name"] for capability in task["capabilities"]],
+            ["read", "bash", "edit", "find"],
+        )
+        self.assertTrue(all(capability["kind"] == "tea_coding_bundle" for capability in task["capabilities"]))
 
     def test_baseline_manifest_requires_explicit_versioned_adapter_contract(self) -> None:
         config = controller.load_baselines(controller.ROOT / "baselines.example.json")

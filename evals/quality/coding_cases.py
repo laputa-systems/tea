@@ -138,7 +138,7 @@ def validate_case(case: dict[str, Any], source: str = "case") -> dict[str, Any]:
         raise CodingCaseError(f"{source}: setup.clean_worktree must be true")
     if setup.get("network") is not False:
         raise CodingCaseError(f"{source}: setup.network must be false")
-    if setup.get("tools") != ["read", "bash", "edit", "write"]:
+    if setup.get("tools") != ["read", "bash", "edit", "find"]:
         raise CodingCaseError(f"{source}: coding tool surface must be pinned")
     validators = case.get("validators")
     if not isinstance(validators, dict) or not isinstance(validators.get("full"), dict):

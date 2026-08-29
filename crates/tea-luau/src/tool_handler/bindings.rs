@@ -26,6 +26,8 @@ pub struct CapabilityRequest {
     /// Hosts use this stable name when narrowing a shared capability to an
     /// exact model-facing operation, such as one MCP tool or resource method.
     pub tool_name: String,
+    /// Core-owned durable attribution for this tool invocation.
+    pub provenance: tea_core::effect::RunProvenance,
     /// Explicit capability binding selected by the host.
     pub capability: String,
     /// Method inside the capability, interpreted by the bound host object.

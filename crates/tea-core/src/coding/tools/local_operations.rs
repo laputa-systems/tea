@@ -1,11 +1,11 @@
 //! Local filesystem and shell implementation of the coding operation contract.
 
 use super::contract::{
-    CodingOperations, CommandEnvironment, CommandOutput, ConditionalFileEdit, DirectoryEntry,
-    EditTransaction, EditTransactionOutcome, EntryMetadata, FileSnapshot, GrepMatch, GrepOptions,
+    CodingOperations, CommandEnvironment, CommandOutput, ConditionalFileCreate,
+    ConditionalFileEdit, EditTransaction, EditTransactionOutcome, EntryMetadata, FileSnapshot,
     OperationError, OperationFuture,
 };
-use super::search::{GlobMatcher, local_grep, walk_files};
+use super::search::{GlobMatcher, walk_files};
 use crate::scheduler::CancellationToken;
 use crate::tool::{ToolUpdate, ToolUpdateSink};
 use std::fs::{self, File, OpenOptions};
@@ -18,6 +18,7 @@ use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::task::{Context, Poll, Waker};
+use std::time::{Duration, Instant};
 
 static COMMAND_CAPTURE_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
 static EDIT_TRANSACTION_STAGE_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
@@ -118,14 +119,6 @@ impl CodingOperations for LocalCodingOperations {
         }))
     }
 
-    fn write_file<'a>(&'a self, path: &'a Path, content: &'a [u8]) -> OperationFuture<'a, ()> {
-        let path = path.to_path_buf();
-        let content = content.to_vec();
-        Box::pin(blocking_operation(move || {
-            std::fs::write(path, content).map_err(|error| OperationError::new(error.to_string()))
-        }))
-    }
-
     fn commit_edit_transaction<'a>(
         &'a self,
         transaction: &'a EditTransaction,
@@ -134,13 +127,6 @@ impl CodingOperations for LocalCodingOperations {
         let transaction = transaction.clone();
         Box::pin(blocking_operation(move || {
             commit_local_edit_transaction(&transaction, &cancellation)
-        }))
-    }
-
-    fn create_dir_all<'a>(&'a self, path: &'a Path) -> OperationFuture<'a, ()> {
-        let path = path.to_path_buf();
-        Box::pin(blocking_operation(move || {
-            std::fs::create_dir_all(path).map_err(|error| OperationError::new(error.to_string()))
         }))
     }
 
@@ -200,26 +186,6 @@ impl CodingOperations for LocalCodingOperations {
         }))
     }
 
-    fn read_dir<'a>(&'a self, path: &'a Path) -> OperationFuture<'a, Vec<DirectoryEntry>> {
-        let path = path.to_path_buf();
-        Box::pin(blocking_operation(move || {
-            let mut entries = Vec::new();
-            for entry in
-                std::fs::read_dir(path).map_err(|error| OperationError::new(error.to_string()))?
-            {
-                let entry = entry.map_err(|error| OperationError::new(error.to_string()))?;
-                let metadata = entry
-                    .metadata()
-                    .map_err(|error| OperationError::new(error.to_string()))?;
-                entries.push(DirectoryEntry {
-                    name: entry.file_name().to_string_lossy().into_owned(),
-                    is_directory: metadata.is_dir(),
-                });
-            }
-            Ok(entries)
-        }))
-    }
-
     fn find_files<'a>(
         &'a self,
         root: &'a Path,
@@ -234,19 +200,6 @@ impl CodingOperations for LocalCodingOperations {
             walk_files(&root, &root, &matcher, limit, &mut output)?;
             output.sort();
             Ok(output)
-        }))
-    }
-
-    fn grep_files<'a>(
-        &'a self,
-        root: &'a Path,
-        pattern: &'a str,
-        options: GrepOptions,
-    ) -> OperationFuture<'a, Vec<GrepMatch>> {
-        let root = root.to_path_buf();
-        let pattern = pattern.to_owned();
-        Box::pin(blocking_operation(move || {
-            local_grep(&root, &pattern, options)
         }))
     }
 
@@ -290,7 +243,7 @@ fn commit_local_edit_transaction(
     if cancellation.is_cancelled() {
         return Err(OperationError::new("cancelled"));
     }
-    if transaction.files.is_empty() {
+    if transaction.files.is_empty() && transaction.creates.is_empty() {
         return Ok(EditTransactionOutcome::RolledBack {
             reason: "transaction contains no files".into(),
         });
@@ -321,6 +274,25 @@ fn commit_local_edit_transaction(
             return Ok(outcome);
         }
     }
+    for create in &transaction.creates {
+        if create.path.exists() {
+            return Ok(EditTransactionOutcome::RolledBack {
+                reason: "a requested creation target already exists; no files were written".into(),
+            });
+        }
+        let parent = create
+            .path
+            .parent()
+            .ok_or_else(|| OperationError::new("creation target has no parent directory"))?;
+        let parent_metadata =
+            fs::metadata(parent).map_err(|error| OperationError::new(error.to_string()))?;
+        if !parent_metadata.is_dir() {
+            return Ok(EditTransactionOutcome::RolledBack {
+                reason: "a requested creation parent is not a directory; no files were written"
+                    .into(),
+            });
+        }
+    }
     if cancellation.is_cancelled() {
         return Err(OperationError::new("cancelled"));
     }
@@ -329,10 +301,10 @@ fn commit_local_edit_transaction(
     // mutation. Unix publication uses same-directory rename replacement;
     // platforms without replace-on-rename may briefly remove one pathname.
     // The transaction does not claim a globally atomic multi-file view.
-    let mut staged = Vec::with_capacity(transaction.files.len());
+    let mut staged = Vec::with_capacity(transaction.files.len() + transaction.creates.len());
     for edit in &transaction.files {
         match stage_local_edit(edit) {
-            Ok(value) => staged.push(value),
+            Ok(value) => staged.push(StagedLocalMutation::Replace(value)),
             Err(error) => {
                 cleanup_staged(&staged);
                 let outcome = EditTransactionOutcome::RolledBack {
@@ -345,6 +317,20 @@ fn commit_local_edit_transaction(
             }
         }
     }
+    for create in &transaction.creates {
+        match stage_local_create(create) {
+            Ok(value) => staged.push(StagedLocalMutation::Create(value)),
+            Err(error) => {
+                cleanup_staged(&staged);
+                return Ok(EditTransactionOutcome::RolledBack {
+                    reason: format!(
+                        "could not stage the transaction; no target files were changed: {}",
+                        crate::tool::truncate_middle(error.message(), 256),
+                    ),
+                });
+            }
+        }
+    }
     if cancellation.is_cancelled() {
         cleanup_staged(&staged);
         return Err(OperationError::new("cancelled"));
@@ -353,15 +339,13 @@ fn commit_local_edit_transaction(
     // Commit has now been requested. Do not turn a later cancellation into an
     // untruthful cancelled result: settle a receipt after publication.
     for index in 0..staged.len() {
-        if let Err(error) =
-            publish_staged_file(&staged[index].replacement_path, &staged[index].edit.path)
-        {
+        if let Err(error) = staged[index].publish() {
             // Restore every target from a separately staged original, including
             // the currently failing path. `rename` should not partially mutate
             // a path on error, but recovery must not rely on that assumption.
             let mut rollback_ok = true;
             for entry in staged.iter().rev() {
-                if publish_staged_file(&entry.rollback_path, &entry.edit.path).is_err() {
+                if entry.rollback().is_err() {
                     rollback_ok = false;
                 }
             }
@@ -391,6 +375,59 @@ struct StagedLocalEdit<'a> {
     rollback_path: PathBuf,
 }
 
+struct StagedLocalCreate<'a> {
+    create: &'a ConditionalFileCreate,
+    publication_path: PathBuf,
+    published: bool,
+}
+
+enum StagedLocalMutation<'a> {
+    Replace(StagedLocalEdit<'a>),
+    Create(StagedLocalCreate<'a>),
+}
+
+impl StagedLocalMutation<'_> {
+    fn publish(&mut self) -> std::io::Result<()> {
+        match self {
+            Self::Replace(edit) => publish_staged_file(&edit.replacement_path, &edit.edit.path),
+            // A hard link is the no-replace publication primitive we need for
+            // an absent-target precondition. `rename` would overwrite a file
+            // created by another process after validation.
+            Self::Create(create) => {
+                fs::hard_link(&create.publication_path, &create.create.path)?;
+                create.published = true;
+                fs::remove_file(&create.publication_path)
+            }
+        }
+    }
+
+    fn rollback(&self) -> std::io::Result<()> {
+        match self {
+            Self::Replace(edit) => publish_staged_file(&edit.rollback_path, &edit.edit.path),
+            Self::Create(create) if create.published => {
+                match fs::remove_file(&create.create.path) {
+                    Ok(()) => Ok(()),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                    Err(error) => Err(error),
+                }
+            }
+            Self::Create(_) => Ok(()),
+        }
+    }
+
+    fn cleanup(&self) {
+        match self {
+            Self::Replace(edit) => {
+                let _ = fs::remove_file(&edit.replacement_path);
+                let _ = fs::remove_file(&edit.rollback_path);
+            }
+            Self::Create(create) => {
+                let _ = fs::remove_file(&create.publication_path);
+            }
+        }
+    }
+}
+
 fn stage_local_edit(edit: &ConditionalFileEdit) -> Result<StagedLocalEdit<'_>, OperationError> {
     let permissions = fs::metadata(&edit.path)
         .map_err(|error| OperationError::new(error.to_string()))?
@@ -416,6 +453,24 @@ fn stage_local_edit(edit: &ConditionalFileEdit) -> Result<StagedLocalEdit<'_>, O
     })
 }
 
+fn stage_local_create(
+    create: &ConditionalFileCreate,
+) -> Result<StagedLocalCreate<'_>, OperationError> {
+    let parent = create
+        .path
+        .parent()
+        .ok_or_else(|| OperationError::new("creation target has no parent directory"))?;
+    let permissions = fs::metadata(parent)
+        .map_err(|error| OperationError::new(error.to_string()))?
+        .permissions();
+    let publication_path = stage_local_file(&create.path, "create", &create.content, &permissions)?;
+    Ok(StagedLocalCreate {
+        create,
+        publication_path,
+        published: false,
+    })
+}
+
 fn stage_local_file(
     target: &Path,
     kind: &str,
@@ -432,7 +487,7 @@ fn stage_local_file(
     for _ in 0..32 {
         let sequence = EDIT_TRANSACTION_STAGE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         let candidate = parent.join(format!(
-            ".tea-edit-v2-{}-{}-{}-{}",
+            ".tea-edit-transaction-{}-{}-{}-{}",
             std::process::id(),
             sequence,
             kind,
@@ -462,10 +517,9 @@ fn stage_local_file(
     ))
 }
 
-fn cleanup_staged(staged: &[StagedLocalEdit<'_>]) {
+fn cleanup_staged(staged: &[StagedLocalMutation<'_>]) {
     for entry in staged {
-        let _ = fs::remove_file(&entry.replacement_path);
-        let _ = fs::remove_file(&entry.rollback_path);
+        entry.cleanup();
     }
 }
 
@@ -526,7 +580,12 @@ fn execute_local_command(
             return Err(OperationError::new(error.to_string()));
         }
     };
-    let status = wait_for_shell_or_cancellation(&mut child, cancellation)?;
+    let timeout = timeout_seconds
+        .map(|seconds| {
+            Duration::try_from_secs_f64(seconds).map_err(|_| OperationError::new("invalid timeout"))
+        })
+        .transpose()?;
+    let status = wait_for_shell_or_cancellation(&mut child, cancellation, timeout)?;
     let stdout = read_command_capture(&stdout_path);
     let stderr = read_command_capture(&stderr_path);
     let _ = fs::remove_file(&stdout_path);
@@ -535,12 +594,6 @@ fn execute_local_command(
     let stderr = stderr?;
     if cancellation.is_cancelled() {
         return Err(OperationError::new("cancelled"));
-    }
-    if let Some(timeout) = timeout_seconds {
-        // Validation happens at the tool boundary. Retaining this branch
-        // documents that the local adapter does not claim to enforce a tool
-        // timeout after a blocking child has started.
-        let _ = timeout;
     }
     let mut update = Vec::new();
     update.extend_from_slice(&stdout);
@@ -561,7 +614,9 @@ fn execute_local_command(
 fn wait_for_shell_or_cancellation(
     child: &mut Child,
     cancellation: &CancellationToken,
+    timeout: Option<Duration>,
 ) -> Result<ExitStatus, OperationError> {
+    let started = Instant::now();
     loop {
         if let Some(status) = child
             .try_wait()
@@ -581,6 +636,17 @@ fn wait_for_shell_or_cancellation(
             return child
                 .wait()
                 .map_err(|error| OperationError::new(error.to_string()));
+        }
+        if timeout.is_some_and(|limit| started.elapsed() >= limit) {
+            if let Err(error) = child.kill()
+                && error.kind() != std::io::ErrorKind::InvalidInput
+            {
+                return Err(OperationError::new(error.to_string()));
+            }
+            child
+                .wait()
+                .map_err(|error| OperationError::new(error.to_string()))?;
+            return Err(OperationError::new("command timed out"));
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
     }

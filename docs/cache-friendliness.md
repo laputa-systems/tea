@@ -25,7 +25,7 @@ An enabled root cache domain includes its five ordered collaboration tools
 (`spawn_agent`, `wait_agent`, `list_agents`, `interrupt_agent`, and
 `apply_agent_changes`) and the persisted ordered child-model enum; changing
 that catalog is an intentional domain change. A child request keeps this prefix
-order: stable Tea v2 child system prompt, ordered coding tools, child instruction
+order: stable child system prompt, ordered revisioned coding tools, child instruction
 suffix, optional exact parent semantic context, stable logical workspace
 descriptor, and the explicit assignment last. Agent/task IDs, task state,
 timestamps and physical worktree paths are excluded. Consequently two children

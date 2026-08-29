@@ -24,7 +24,7 @@
   "setup": {
     "clean_worktree": true,
     "network": false,
-    "tools": ["read", "bash", "edit", "write"],
+    "tools": ["read", "bash", "edit", "find"],
     "dependency_cache": "package-lock-sha256"
   },
   "validators": {

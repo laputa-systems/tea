@@ -71,6 +71,13 @@ pub struct PolicyTool {
     /// deliberately adapts it into an explicit Rust capability; declaring a
     /// handler never grants a world effect by itself.
     pub handler_source: Option<String>,
+    /// Optional closed-bundle module containing this tool's coroutine handler.
+    ///
+    /// Unlike `handler_source`, this keeps ordinary checked-in Luau files
+    /// inspectable and revisionable without serializing executable source into
+    /// a declaration string. The host resolves it only from the bundle's
+    /// immutable module set.
+    pub handler_module: Option<String>,
 }
 
 /// Metadata for one host-local command declared by an immutable policy.

@@ -16,7 +16,7 @@ def result(*, baseline: str = "tea-jit") -> dict:
         "final_text": "done",
         "runtime": {"implementation": "tea", "version": "1.0.0", "revision": "abc", "dirty": False, "dirty_digest": None},
         "model": {"provider": "openrouter", "requested_model": DEFAULT_MODEL, "returned_model": None, "returned_provider": None, "thinking_level": DEFAULT_THINKING, "max_output_tokens": None, "sampling": {"temperature": None, "seed": None, "source": "provider-default"}},
-        "surface": {"system_prompt_bytes": 1, "system_prompt_sha256": "a", "workspace_normalized_system_prompt_sha256": "b", "tool_surface_sha256": "c", "active_tools": ["read", "bash", "edit", "write"], "research_tools": [], "subagents": False, "shell_curl_available": True, "shell_environment_sha256": "d"},
+        "surface": {"system_prompt_bytes": 1, "system_prompt_sha256": "a", "workspace_normalized_system_prompt_sha256": "b", "tool_surface_sha256": "c", "active_tools": ["read", "bash", "edit", "find"], "research_tools": [], "subagents": False, "shell_curl_available": True, "shell_environment_sha256": "d"},
         "timings": {"agent_ms": 1, "candidate_validation_ms": 0, "rollover_ms": 0},
         "counts": {"turns": 1, "provider_requests": None, "tool_calls": 0, "retries": 0, "compactions": 0},
         "usage": {"input": 2, "output": 3, "generation": 5, "reasoning": None, "cache_read": 0, "cache_write": 0},

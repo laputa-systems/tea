@@ -12,8 +12,15 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use tea_core::agent::AgentConfiguration;
-use tea_core::coding::{CommandEnvironment, DefaultCodingTools, PiDefaultCodingProfile};
+use tea_core::coding::{
+    CodingHost, CommandEnvironment, PROCESS_CAPABILITY_V1, WORKSPACE_MUTATE_CAPABILITY_V1,
+    WORKSPACE_READ_CAPABILITY_V1, WORKSPACE_SEARCH_CAPABILITY_V1,
+};
 use tea_core::event::AgentEventKind;
+use tea_core::harness::extension::{
+    ExtensionCapabilityBindings, ExtensionEngine, ExtensionLimits, ExtensionMemoryCollector,
+    ExtensionToolLimits,
+};
 use tea_core::harness::{
     HarnessActor, HarnessRepository, HarnessResolver, HarnessResourceLimits, HarnessSnapshotSpec,
     ModelHarnessProfile, SELF_EXTENSION_MODE_METADATA_KEY, SelfExtensionMode,
@@ -26,7 +33,7 @@ use tea_core::runtime::{
 };
 use tea_core::state::{ModelDescriptor, ThinkingLevel};
 use tea_core::tool::ToolExecutionMode;
-use tea_luau::LuauExtensionEngine;
+use tea_luau::{LuauExtensionEngine, builtins};
 use tea_protocol::{JsonNumber, JsonValue};
 use tea_providers::openai::OpenAiContextHook;
 use tea_providers::openrouter::{OpenRouterConfig, OpenRouterProvider};
@@ -513,7 +520,7 @@ fn write_jit_evidence(
 struct ResultJsonInput<'a> {
     args: &'a Args,
     provider: &'a OpenRouterProvider,
-    profile: &'a PiDefaultCodingProfile,
+    surface: &'a CodingSurface,
     snapshot: &'a tea_core::harness::HarnessSnapshotV1,
     final_snapshot_id: String,
     terminal: (&'a str, Option<&'a str>),
@@ -527,6 +534,75 @@ struct ResultJsonInput<'a> {
     activated: bool,
 }
 
+/// The resolved, provider-visible coding surface used by one evaluation run.
+///
+/// This is derived from the checked-in Luau bundle rather than a Rust tool
+/// factory or profile copy. It is retained only to record the exact surface in
+/// evaluation evidence after the run has settled.
+struct CodingSurface {
+    system_prompt: String,
+    tools: Vec<tea_core::tool::ToolDefinition>,
+}
+
+fn coding_configuration(
+    workspace: &Path,
+    environment: CommandEnvironment,
+) -> Result<(AgentConfiguration, CodingSurface), String> {
+    let source = builtins::coding(ExtensionLimits {
+        max_source_bytes: 64 * 1024,
+        max_memory_bytes: 1024 * 1024,
+        max_interrupt_checks: 10_000,
+    });
+    let engine = LuauExtensionEngine;
+    let descriptor = engine
+        .describe(&source)
+        .map_err(|error| error.to_string())?;
+    let host = CodingHost::new(workspace)
+        .map_err(|error| error.to_string())?
+        .with_environment(environment);
+    let mut bindings = ExtensionCapabilityBindings::new();
+    for (name, capability) in [
+        (WORKSPACE_READ_CAPABILITY_V1, host.read_capability()),
+        (WORKSPACE_SEARCH_CAPABILITY_V1, host.search_capability()),
+        (WORKSPACE_MUTATE_CAPABILITY_V1, host.mutate_capability()),
+        (PROCESS_CAPABILITY_V1, host.process_capability()),
+    ] {
+        bindings
+            .insert(name, capability, ExtensionToolLimits::default())
+            .map_err(|error| error.to_string())?;
+    }
+    let resolved = engine
+        .resolve(
+            &source,
+            bindings,
+            Arc::new(OpenAiContextHook) as Arc<dyn HookSet>,
+            0,
+            Arc::new(ExtensionMemoryCollector::default()),
+        )
+        .map_err(|error| error.to_string())?;
+    let system_prompt = format!(
+        "{}\nCurrent working directory: {}",
+        descriptor
+            .prompt_sections
+            .iter()
+            .map(|section| section.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        host.workspace()
+            .as_path()
+            .to_string_lossy()
+            .replace('\\', "/"),
+    );
+    let surface = CodingSurface {
+        system_prompt: system_prompt.clone(),
+        tools: resolved.tools.definitions(),
+    };
+    Ok((
+        AgentConfiguration::new(system_prompt, resolved.tools, resolved.hooks),
+        surface,
+    ))
+}
+
 fn result_json(input: ResultJsonInput<'_>) -> JsonValue {
     let usage = input.provider.usage_snapshot();
     let input_tokens = usage.input_tokens;
@@ -534,17 +610,15 @@ fn result_json(input: ResultJsonInput<'_>) -> JsonValue {
     let generation = input_tokens
         .zip(output)
         .map(|(input, output)| input.saturating_add(output));
-    let prompt = input
-        .profile
-        .system_prompt_for_workspace(&input.args.workspace);
+    let prompt = &input.surface.system_prompt;
     let normalized_prompt = prompt.replace(
         &input.args.workspace.to_string_lossy().replace('\\', "/"),
         "{WORKSPACE}",
     );
     let tools = JsonValue::Array(
         input
-            .profile
-            .tool_definitions()
+            .surface
+            .tools
             .iter()
             .map(|tool| {
                 JsonValue::object([
@@ -662,9 +736,10 @@ fn result_json(input: ResultJsonInput<'_>) -> JsonValue {
                     "active_tools",
                     JsonValue::Array(
                         input
-                            .profile
-                            .active_tool_names()
-                            .map(|name| JsonValue::from(name.to_owned()))
+                            .surface
+                            .tools
+                            .iter()
+                            .map(|tool| JsonValue::from(tool.name.clone()))
                             .collect(),
                     ),
                 ),
@@ -801,8 +876,8 @@ fn main() -> Result<(), String> {
         .map(|tool| tool.get("name").and_then(JsonValue::as_str))
         .collect::<Option<Vec<_>>>()
         .ok_or_else(|| "capability has no name".to_owned())?;
-    if actual != ["read", "bash", "edit", "write"] {
-        return Err("active tool list must be read/bash/edit/write".into());
+    if actual != ["read", "bash", "edit", "find"] {
+        return Err("active tool list must be read/bash/edit/find".into());
     }
     let api_key = env::var("OPENROUTER_API_KEY")
         .map_err(|_| "OPENROUTER_API_KEY must be supplied by vault".to_owned())?;
@@ -813,19 +888,8 @@ fn main() -> Result<(), String> {
         None => OpenRouterConfig::new(api_key, args.model.clone()),
     };
     let provider = Arc::new(OpenRouterProvider::new(provider_config));
-    let tools = DefaultCodingTools::new(&args.workspace)
-        .map_err(|error| error.to_string())?
-        .with_environment(args.shell_environment.clone());
-    let profile = PiDefaultCodingProfile::pinned_default().map_err(|error| error.to_string())?;
-    let registry = tools.registry();
-    profile
-        .validate_registry(&registry)
-        .map_err(|error| error.to_string())?;
-    let configuration = AgentConfiguration::new(
-        profile.system_prompt_for_workspace(tools.workspace().as_path()),
-        registry,
-        Arc::new(OpenAiContextHook) as Arc<dyn HookSet>,
-    );
+    let (configuration, surface) =
+        coding_configuration(&args.workspace, args.shell_environment.clone())?;
     let model = ModelDescriptor {
         provider: "openrouter".into(),
         model: args.model.clone(),
@@ -1026,12 +1090,12 @@ fn main() -> Result<(), String> {
         ),
     };
     fs::create_dir_all(&args.evidence_dir).map_err(|error| error.to_string())?;
-    let system_prompt = profile.system_prompt_for_workspace(&args.workspace);
-    fs::write(args.evidence_dir.join("system-prompt.txt"), &system_prompt)
+    let system_prompt = &surface.system_prompt;
+    fs::write(args.evidence_dir.join("system-prompt.txt"), system_prompt)
         .map_err(|error| error.to_string())?;
     let tool_surface = JsonValue::Array(
-        profile
-            .tool_definitions()
+        surface
+            .tools
             .iter()
             .map(|tool| {
                 JsonValue::object([
@@ -1072,7 +1136,7 @@ fn main() -> Result<(), String> {
     let result = result_json(ResultJsonInput {
         args: &args,
         provider: &provider,
-        profile: &profile,
+        surface: &surface,
         snapshot: &snapshot,
         final_snapshot_id,
         terminal,

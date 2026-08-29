@@ -1,6 +1,6 @@
 """Hermetic disabled-tool evaluation for coordinated edit-tool design.
 
-The public task receives no Tea v2 schema, host boundary, or oracle. A trusted
+The public task receives no legacy batch-edit schema, host boundary, or oracle. A trusted
 runner keeps the hidden case outside the disposable agent workspace, executes
 the candidate, probes failure paths, and asks this module to derive checks from
 the resulting workspace. The CLI must never treat agent-authored evidence as a
@@ -17,7 +17,7 @@ from typing import Any, Mapping
 
 
 SCHEMA = "tea-multiedit-disabled-quality/v2"
-PUBLIC_CAPABILITIES = ("read", "bash", "edit", "write")
+PUBLIC_CAPABILITIES = ("read", "bash", "edit", "find")
 TRUSTED_RUNNER_ID = "tea-quality-isolated-runner/v1"
 HIDDEN_CASE_PATH = Path(__file__).resolve().parent / "cases" / "multiedit" / "hidden.json"
 SEMANTIC_CHECKS = (

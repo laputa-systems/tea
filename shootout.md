@@ -61,7 +61,7 @@ The three conditions are:
   * `read`
   * `bash`
   * `edit`
-  * `write`
+  * `find`
 * No discovered extensions.
 * No discovered skills.
 * No discovered global prompts.
@@ -73,7 +73,7 @@ The three conditions are:
 
 ### `tea-static`
 
-* Tea’s pinned default coding profile.
+* Tea’s pinned default Luau coding bundle.
 * Tea’s normal durable runtime path.
 * Self-extension disabled.
 * Same model and task authority as Pi.
@@ -82,7 +82,7 @@ The three conditions are:
   * `read`
   * `bash`
   * `edit`
-  * `write`
+  * `find`
 * No task-local plugins.
 * No subagents.
 * No dedicated web-search or browser tool.
@@ -90,7 +90,7 @@ The three conditions are:
 
 ### `tea-jit`
 
-* Exactly the same Tea base profile and durable runtime as `tea-static`.
+* Exactly the same Tea base bundle and durable runtime as `tea-static`.
 * Task-local harness authoring enabled.
 * The same model performs both coding and harness adaptation.
 * No separate optimizer model.
@@ -168,7 +168,7 @@ evals/quality/cases/coding/express-3936-medium/fast-validator.js
 Inspect the final post-refactor locations of:
 
 ```text
-Tea default coding profile
+Tea default Luau coding bundle
 Tea runtime/session construction
 Tea provider evaluation binary
 Tea harness snapshots and candidate lifecycle
@@ -595,7 +595,7 @@ no discovered skills
 no discovered prompt templates
 no discovered custom providers
 no task-provided subagent tools
-active model-facing tools are exactly read/bash/edit/write
+active model-facing tools are exactly read/bash/edit/find
 ```
 
 If a repository resource is discovered unexpectedly, fail the adapter as an infrastructure/configuration error rather than silently including it.
@@ -907,8 +907,8 @@ Do not write to the user’s normal Tea home.
 Configure:
 
 ```text
-pinned default coding profile
-read/bash/edit/write
+pinned default Luau coding bundle
+read/bash/edit/find
 OpenRouter provider
 same model
 same thinking level
@@ -922,7 +922,7 @@ no preloaded plugins
 Configure:
 
 ```text
-same pinned default coding profile
+same pinned default Luau coding bundle
 same coding tools
 same provider/model
 same runtime
@@ -1897,7 +1897,7 @@ The implementation is complete only when:
 * The known fix commit is absent from attempt object databases.
 * Every condition uses the same external validator.
 * Every condition uses the same requested model and thinking level.
-* Both Pi and Tea have `read/bash/edit/write`.
+* Both Pi and Tea have `read/bash/edit/find`.
 * Neither Pi nor Tea has a web-search tool.
 * Both can run `curl` through bash.
 * Provider keys are absent from coding-tool child environments.

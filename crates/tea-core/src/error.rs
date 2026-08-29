@@ -234,27 +234,3 @@ impl fmt::Display for SchedulerError {
 }
 
 impl std::error::Error for SchedulerError {}
-
-/// A profile specification failure.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ProfileError {
-    /// Human-readable explanation.
-    pub message: String,
-}
-
-impl ProfileError {
-    /// Construct a profile error.
-    pub fn new(message: impl Into<String>) -> Self {
-        Self {
-            message: message.into(),
-        }
-    }
-}
-
-impl fmt::Display for ProfileError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.message)
-    }
-}
-
-impl std::error::Error for ProfileError {}

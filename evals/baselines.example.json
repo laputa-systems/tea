@@ -55,7 +55,7 @@
     },
     {
       "id": "rust",
-      "label": "Rust PiDefaultCodingProfile",
+      "label": "Rust Luau coding bundle",
       "profile_version": "PIN_RUST_PROFILE_VERSION",
       "runtime_version": "PIN_RUST_RUNTIME_VERSION",
       "revision": "PIN_RUST_REVISION",

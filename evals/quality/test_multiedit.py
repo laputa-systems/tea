@@ -23,7 +23,7 @@ from .multiedit_runner import run_multiedit
 class MultiEditQualityTest(unittest.TestCase):
     def test_public_task_never_exposes_the_disabled_capability_or_grader(self) -> None:
         task = public_task()
-        self.assertEqual(task["capabilities"], ["read", "bash", "edit", "write"])
+        self.assertEqual(task["capabilities"], ["read", "bash", "edit", "find"])
         self.assertEqual(task["disabled_capabilities"], ["multiedit"])
         self.assertNotIn("files[]", task["task"])
         with tempfile.TemporaryDirectory(prefix="tea-multiedit-quality-") as temporary:
@@ -123,7 +123,7 @@ def _record(root: Path) -> dict[str, object]:
     no_partial = {"outcome": "rejected", "unchanged": True}
     return {
         "schema_version": SCHEMA,
-        "capabilities": ["read", "bash", "edit", "write"],
+        "capabilities": ["read", "bash", "edit", "find"],
         "trusted_grader": {
             "runner_id": TRUSTED_RUNNER_ID,
             "case_id": case["id"],

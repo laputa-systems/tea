@@ -325,8 +325,8 @@ mod tests {
                 system_prompt: "system".into(),
                 context: "[{\"role\":\"user\",\"content\":\"hello\"}]".into(),
                 tools: vec![ToolDefinition {
-                    name: "write".into(),
-                    description: "write a file".into(),
+                    name: "edit".into(),
+                    description: "change a file".into(),
                     schema: JsonValue::object([("type", JsonValue::from("object"))]),
                     execution_mode: crate::tool::ToolExecutionMode::Parallel,
                     requires_exclusive_batch: false,
@@ -547,7 +547,7 @@ data: [DONE]
                     "tool_calls": [{
                         "id": "call_1",
                         "type": "function",
-                        "function": {"name": "write", "arguments": "{\"path\":\"a.py\"}"}
+                        "function": {"name": "edit", "arguments": "{\"path\":\"a.py\"}"}
                     }]
                 }
             }],

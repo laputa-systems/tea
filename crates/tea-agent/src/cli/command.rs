@@ -395,9 +395,9 @@ pub fn find_option<'a>(
     options: &'static [OptionSpec],
 ) -> Option<&'static OptionSpec> {
     match argument {
-        lexopt::Arg::Short(short) => options.iter().find(|spec| {
-            spec.short == Some(*short) || spec.aliases.contains(short)
-        }),
+        lexopt::Arg::Short(short) => options
+            .iter()
+            .find(|spec| spec.short == Some(*short) || spec.aliases.contains(short)),
         lexopt::Arg::Long(long) => options.iter().find(|spec| spec.long == *long),
         lexopt::Arg::Value(_) => None,
     }
