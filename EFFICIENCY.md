@@ -95,13 +95,17 @@ and `tool_calls` is assistant-emitted tool-call blocks. Tea additionally emits
 `model_turns` and durable `provider_requests`; `retries` is the number of
 durable step attempts carrying an explicit retry reason. A null provider
 counter remains an honest "not exposed" value for Pi.
+The adapter and contract own this normalization; an efficiency agent should
+consume these fields directly and must not recompute generation from raw cache
+components or mix trace-event counts with durable counters.
 
 If a provider reports a different convention, retain its raw fields and make
 the conversion explicit in the adapter rather than guessing in the report.
 
-The retained artifacts are under
-`/private/tmp/tea-pi-shootout/runs/20260829T223033Z-4e98a8d2748b/` while that
-run directory exists. The durable report is
+The retained successful static-only artifacts are under
+`/private/tmp/tea-pi-shootout/runs/20260829T232452Z-d6b21971c820/` while that
+run directory exists. A later final-label rerun had a model-side validator
+failure and is retained as a non-comparable attempt. The durable report is
 `evals/pi_shootout/reports` output from the run; treat the raw provider usage
 and adapter source as authoritative when the report fields disagree.
 

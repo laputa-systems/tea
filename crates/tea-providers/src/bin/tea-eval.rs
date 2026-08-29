@@ -612,7 +612,7 @@ struct SessionCounts {
     tool_calls: u64,
     /// Durable step attempts carrying an explicit retry reason.
     retries: u64,
-    /// Durable compaction entries committed to session history.
+    /// Pi-compatible completed compaction lifecycle events.
     compactions: u64,
 }
 
@@ -630,11 +630,6 @@ fn session_counts(snapshot: &SessionSnapshot) -> SessionCounts {
             _ => None,
         })
         .sum();
-    let compactions = snapshot
-        .entries()
-        .iter()
-        .filter(|entry| matches!(&entry.body, SessionEntry::Compaction(_)))
-        .count() as u64;
     let mut model_turns = 0_u64;
     let mut provider_requests = 0_u64;
     let mut retries = 0_u64;
@@ -663,7 +658,7 @@ fn session_counts(snapshot: &SessionSnapshot) -> SessionCounts {
         provider_requests,
         tool_calls,
         retries,
-        compactions,
+        compactions: 0,
     }
 }
 
@@ -840,7 +835,15 @@ fn result_json(input: ResultJsonInput<'_>) -> JsonValue {
         .to_json_string()
         .expect("shell environment encodes");
     let cost = input.provider.cost_report();
-    let counts = session_counts(input.session_snapshot);
+    let mut counts = session_counts(input.session_snapshot);
+    // Pi defines this field from completed compaction lifecycle events. The
+    // Tea trace is collected concurrently, so this remains lossless while
+    // preserving the shared event-level meaning.
+    counts.compactions = input
+        .trace
+        .iter()
+        .filter(|event| event.get("type").and_then(JsonValue::as_str) == Some("compaction_end"))
+        .count() as u64;
     JsonValue::object([
         ("schema_version", JsonValue::from(RESULT_SCHEMA)),
         (

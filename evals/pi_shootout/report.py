@@ -47,6 +47,7 @@ def _rows(left: dict[str, Any], right: dict[str, Any], reference: dict[str, Any]
         ("Cache write tokens", lambda record: _result(record)["usage"]["cache_write"]),
         ("Turns", lambda record: _result(record)["counts"]["turns"]),
         ("Model turns", lambda record: _result(record)["counts"]["model_turns"]),
+        ("Provider requests", lambda record: _result(record)["counts"]["provider_requests"]),
         ("Tool calls", lambda record: _result(record)["counts"]["tool_calls"]),
         ("Retries", lambda record: _result(record)["counts"]["retries"]),
         ("Compactions", lambda record: _result(record)["counts"]["compactions"]),
@@ -110,6 +111,7 @@ def static_report(summary: dict[str, Any]) -> str:
         "## Observed comparison",
         "",
         _comparability_note(pi, tea),
+        "Provider requests are shown when an adapter exposes an exact count; Pi currently leaves this field null rather than inferring wire requests from turn totals.",
         "",
     ]
     return "\n".join(lines)
