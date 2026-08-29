@@ -500,8 +500,20 @@ mod tests {
         let (finish_response, wait_for_finish) = mpsc::channel();
         let server = std::thread::spawn(move || {
             let (mut socket, _) = listener.accept().expect("native client should connect");
-            let mut request = [0_u8; 1024];
-            let _ = std::io::Read::read(&mut socket, &mut request);
+            // Drain the complete request headers before closing the peer. If a single read
+            // happens to return only a prefix, dropping the socket with unread request bytes can
+            // produce a platform-dependent TCP reset instead of a clean response EOF.
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 1024];
+            loop {
+                let read = std::io::Read::read(&mut socket, &mut buffer)
+                    .expect("native client request should read");
+                assert!(read > 0, "native client closed before request headers");
+                request.extend_from_slice(&buffer[..read]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
             socket
                 .write_all(
                     b"HTTP/1.1 200 OK\r\nContent-Length: 12\r\nConnection: close\r\n\r\nfirst ",

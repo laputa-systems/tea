@@ -345,7 +345,7 @@ mod tests {
         assert!(payload.contains("chat_template_kwargs"));
         assert!(payload.contains("enable_thinking"));
         assert!(payload.contains("\"tools\""));
-        assert!(payload.contains("\"write\""));
+        assert!(payload.contains("\"edit\""));
     }
 
     #[cfg(unix)]
