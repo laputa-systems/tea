@@ -1105,6 +1105,83 @@ fn real_binary_keeps_native_multiline_editing_and_history_inside_a_pty() {
 }
 
 #[test]
+fn real_binary_reopens_tool_detail_after_escape_in_a_pty() {
+    let _lock = PTY_TEST_LOCK.lock().expect("PTY test lock is not poisoned");
+    let tea_home = pty_tea_home("tool-detail-reopen");
+    let scenario = Scenario::new("tool detail reopen")
+        .expect("valid scenario label")
+        .command(CommandSpec::new(env!("CARGO_BIN_EXE_tea")).args([
+            "--provider",
+            "mock",
+            "--tea-home",
+            tea_home.to_str().expect("UTF-8 test path"),
+        ]))
+        .size(Size::new(COLUMNS, ROWS).expect("constant terminal size"))
+        .environment(TestEnv::hermetic().expect("create hermetic test environment"))
+        .protocol_profile(ProtocolProfile::xterm_minimal_v1());
+    let mut terminal = PtyTest::spawn(scenario).expect("real tea binary should start in a PTY");
+    let baseline = terminal.terminal_baseline();
+
+    terminal
+        .wait_for_screen(
+            terminal.deadline(Duration::from_secs(3)),
+            "mock readiness",
+            |screen| screen.contains("mock/mock"),
+        )
+        .expect("mock terminal should become ready");
+    terminal
+        .send_key(terminal.deadline(Duration::from_secs(3)), Key::Ctrl('o'))
+        .expect("open tool detail");
+    terminal
+        .wait_for_screen(
+            terminal.deadline(Duration::from_secs(3)),
+            "tool detail open",
+            |screen| screen.contains("Full detail"),
+        )
+        .expect("Ctrl-O should open tool detail");
+    terminal
+        .send_key(terminal.deadline(Duration::from_secs(3)), Key::Escape)
+        .expect("close tool detail");
+    terminal
+        .wait_for_screen(
+            terminal.deadline(Duration::from_secs(3)),
+            "tool detail closed",
+            |screen| !screen.contains("Full detail"),
+        )
+        .expect("Escape should close tool detail");
+    terminal
+        .send_key(terminal.deadline(Duration::from_secs(3)), Key::Ctrl('o'))
+        .expect("reopen tool detail");
+    terminal
+        .wait_for_screen(
+            terminal.deadline(Duration::from_secs(3)),
+            "tool detail reopened",
+            |screen| screen.contains("Full detail"),
+        )
+        .expect("Ctrl-O should reopen tool detail after Escape");
+
+    terminal
+        .send_key(terminal.deadline(Duration::from_secs(3)), Key::Escape)
+        .expect("close reopened tool detail");
+    terminal
+        .send_key(terminal.deadline(Duration::from_secs(3)), Key::Ctrl('c'))
+        .expect("exit mock terminal");
+    assert_eq!(
+        terminal
+            .wait_for_exit(terminal.deadline(Duration::from_secs(3)))
+            .expect("wait for tea exit"),
+        ExitStatus::Code(0)
+    );
+    terminal
+        .assert_terminal_restored(&baseline)
+        .expect("tool detail exit restores terminal modes");
+    terminal
+        .finish(terminal.deadline(Duration::from_secs(3)))
+        .expect("reap tea");
+    let _ = fs::remove_dir_all(tea_home);
+}
+
+#[test]
 fn real_binary_keeps_an_overflowing_settled_transcript_in_main_screen_flow() {
     let _lock = PTY_TEST_LOCK.lock().expect("PTY test lock is not poisoned");
     let fixture = start_overflow_fixture();

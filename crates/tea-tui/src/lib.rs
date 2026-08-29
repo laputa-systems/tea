@@ -303,6 +303,9 @@ impl<W: Write> InlineTerminal<W> {
     }
 
     /// Return from a temporary full-screen surface to the untouched main screen.
+    ///
+    /// The mode transition is flushed before returning, even when the caller's
+    /// next main-screen redraw has no content changes to write.
     pub fn leave_surface(&mut self) -> io::Result<()> {
         if self.alternate_screen {
             self.writer.write_all(b"\x1b[0m\x1b[?1049l")?;
@@ -310,6 +313,10 @@ impl<W: Write> InlineTerminal<W> {
             self.surface_lines.clear();
             self.surface_size = None;
             self.surface_cursor = None;
+            // A following live redraw may be a no-op when the main-screen
+            // tail did not change. Flush the mode transition here so leaving
+            // a modal surface is visible even in that case.
+            self.writer.flush()?;
         }
         Ok(())
     }
@@ -608,6 +615,27 @@ mod tests {
         assert_eq!(output.matches("?1049l").count(), 1);
         assert!(!output.contains("?7h"));
         assert!(!output.contains("?7l"));
+    }
+
+    #[test]
+    fn leaving_surface_flushes_before_an_unchanged_live_redraw() {
+        use std::io::BufWriter;
+
+        let mut output = BufWriter::new(Vec::new());
+        {
+            let mut terminal = InlineTerminal::new(&mut output);
+            let size = Size {
+                width: 20,
+                height: 5,
+            };
+            terminal.draw_live(&[line("main")], size, None).unwrap();
+            terminal.draw_surface(&[line("modal")], size, None).unwrap();
+            terminal.draw_live(&[line("main")], size, None).unwrap();
+        }
+        let output = output.get_ref();
+        assert!(output.windows(b"\x1b[?1049l".len()).any(|window| {
+            window == b"\x1b[?1049l"
+        }));
     }
 
     #[test]
