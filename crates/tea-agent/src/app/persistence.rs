@@ -5,8 +5,8 @@
 //! below the caller's Tea home, then validate the immutable session header
 //! before reading any records.
 
-use super::{AppError, SessionCommand};
 use super::super::build_info;
+use super::{AppError, SessionCommand};
 use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::fs;
@@ -34,7 +34,10 @@ pub fn run_session_command(command: SessionCommand) -> Result<String, AppError> 
                 None,
             )
         }
-        SessionCommand::Inspect { session_id, tea_home } => {
+        SessionCommand::Inspect {
+            session_id,
+            tea_home,
+        } => {
             let directory = resolve_session_id(&session_id, tea_home.as_deref())?;
             let inspection = JsonlSession::inspect(&directory)?;
             inspection_json(
@@ -46,7 +49,10 @@ pub fn run_session_command(command: SessionCommand) -> Result<String, AppError> 
                 None,
             )
         }
-        SessionCommand::Dump { session_id, tea_home } => {
+        SessionCommand::Dump {
+            session_id,
+            tea_home,
+        } => {
             let directory = resolve_session_id(&session_id, tea_home.as_deref())?;
             dump_session(&directory)?
         }
@@ -200,9 +206,7 @@ fn resolve_session_id(
             .or_else(|| std::env::var_os("USERPROFILE"))
             .map(std::path::PathBuf::from)
             .map(|path| path.join(".tea"))
-            .ok_or_else(|| {
-                AppError::Setup("could not resolve the user home directory".into())
-            })?,
+            .ok_or_else(|| AppError::Setup("could not resolve the user home directory".into()))?,
     };
     let root = home.join("sessions");
     let root_metadata = match fs::symlink_metadata(&root) {
@@ -258,7 +262,10 @@ fn resolve_session_id(
             )));
         }
         let inspection = JsonlSession::inspect(&candidate).map_err(|error| {
-            AppError::Setup(format!("could not inspect session {}: {error}", candidate.display()))
+            AppError::Setup(format!(
+                "could not inspect session {}: {error}",
+                candidate.display()
+            ))
         })?;
         if inspection.snapshot.header().session_id.as_str() != id {
             return Err(AppError::Setup(format!(
@@ -289,7 +296,9 @@ fn dump_session(directory: &Path) -> Result<JsonValue, AppError> {
         .torn_tail_offset
         .map(|offset| {
             usize::try_from(offset).map_err(|_| {
-                AppError::Setup(format!("session tail offset exceeds addressable memory: {offset}"))
+                AppError::Setup(format!(
+                    "session tail offset exceeds addressable memory: {offset}"
+                ))
             })
         })
         .transpose()?
@@ -335,7 +344,10 @@ fn dump_session(directory: &Path) -> Result<JsonValue, AppError> {
             "through_digest",
             JsonValue::String(inspection.snapshot.last_digest().to_hex()),
         ),
-        ("through_seq", JsonValue::from(inspection.snapshot.last_sequence().0)),
+        (
+            "through_seq",
+            JsonValue::from(inspection.snapshot.last_sequence().0),
+        ),
         (
             "torn_tail_offset",
             inspection

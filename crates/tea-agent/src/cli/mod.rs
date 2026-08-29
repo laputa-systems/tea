@@ -5,9 +5,9 @@
 //! command.rs. The application modules receive typed values only after this
 //! boundary has accepted the complete command.
 
-mod error;
 pub mod command;
 mod dump;
+mod error;
 mod export;
 mod gc;
 pub mod help;
@@ -160,15 +160,41 @@ pub enum CliCommand {
 /// An explicit persistence operation over a durable session.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SessionCommand {
-    Inspect { session_id: OsString, tea_home: Option<PathBuf> },
-    InspectPath { directory: PathBuf },
-    Dump { session_id: OsString, tea_home: Option<PathBuf> },
-    Repair { directory: PathBuf },
-    RebuildMeta { directory: PathBuf },
-    Verify { directory: PathBuf, additional_roots: Vec<OsString> },
-    Gc { directory: PathBuf, additional_roots: Vec<OsString>, apply: bool },
-    Export { source: PathBuf, destination: PathBuf, additional_roots: Vec<OsString> },
-    Restore { source: PathBuf, destination: PathBuf },
+    Inspect {
+        session_id: OsString,
+        tea_home: Option<PathBuf>,
+    },
+    InspectPath {
+        directory: PathBuf,
+    },
+    Dump {
+        session_id: OsString,
+        tea_home: Option<PathBuf>,
+    },
+    Repair {
+        directory: PathBuf,
+    },
+    RebuildMeta {
+        directory: PathBuf,
+    },
+    Verify {
+        directory: PathBuf,
+        additional_roots: Vec<OsString>,
+    },
+    Gc {
+        directory: PathBuf,
+        additional_roots: Vec<OsString>,
+        apply: bool,
+    },
+    Export {
+        source: PathBuf,
+        destination: PathBuf,
+        additional_roots: Vec<OsString>,
+    },
+    Restore {
+        source: PathBuf,
+        destination: PathBuf,
+    },
 }
 
 fn parse_impl<I>(args: I, recognize_control: bool) -> Result<CliCommand, CliError>
@@ -176,15 +202,10 @@ where
     I: IntoIterator<Item = OsString>,
 {
     let mut parser = Parser::from_iter(args);
-    let first = parser
-        .next()
-        .map_err(map_lexopt_error)?
-        .map(OwnedArg::from);
+    let first = parser.next().map_err(map_lexopt_error)?.map(OwnedArg::from);
     match first {
         None => Ok(CliCommand::Options(CliOptions::default())),
-        Some(OwnedArg::Value(command))
-            if command == OsStr::new(command::SESSION.name) =>
-        {
+        Some(OwnedArg::Value(command)) if command == OsStr::new(command::SESSION.name) => {
             if recognize_control {
                 session::parse(&mut parser, true)
             } else {
@@ -279,7 +300,7 @@ fn find_owned_option(
 ) -> Option<&'static OptionSpec> {
     match argument {
         OwnedArg::Short(short) => options.iter().find(|spec| {
-            spec.short == Some(*short) || spec.aliases.iter().any(|alias| *alias == *short)
+            spec.short == Some(*short) || spec.aliases.contains(short)
         }),
         OwnedArg::Long(long) => options.iter().find(|spec| spec.long == long),
         OwnedArg::Value(_) => None,
@@ -296,7 +317,9 @@ fn unknown_owned_option(argument: &OwnedArg) -> OsString {
 
 fn map_lexopt_error(error: lexopt::Error) -> CliError {
     match error {
-        lexopt::Error::MissingValue { option: Some(option) } => CliError::MissingValueOwned(option),
+        lexopt::Error::MissingValue {
+            option: Some(option),
+        } => CliError::MissingValueOwned(option),
         lexopt::Error::UnexpectedArgument(argument) => CliError::UnexpectedArgument(argument),
         lexopt::Error::UnexpectedOption(option) => CliError::UnknownOption(OsString::from(option)),
         lexopt::Error::UnexpectedValue { value, .. } => CliError::UnexpectedArgument(value),
@@ -317,7 +340,10 @@ fn parse_thinking_level(value: &OsStr) -> Result<ThinkingLevel, CliError> {
         "high" => Ok(ThinkingLevel::High),
         "xhigh" => Ok(ThinkingLevel::XHigh),
         "max" => Ok(ThinkingLevel::Max),
-        _ => Err(CliError::InvalidValue { flag: "--thinking", value: value.to_owned() }),
+        _ => Err(CliError::InvalidValue {
+            flag: "--thinking",
+            value: value.to_owned(),
+        }),
     }
 }
 
@@ -400,11 +426,11 @@ fn print_session_error(error: &AppError) {
 
 #[cfg(test)]
 mod tests {
-    use super::{help, CliCommand, CliError, CliOptions, SessionCommand};
     use super::command;
+    use super::{help, CliCommand, CliError, CliOptions, SessionCommand};
+    use lexopt::{Arg, Parser};
     use std::ffi::OsString;
     use std::path::PathBuf;
-    use lexopt::{Arg, Parser};
 
     fn args(values: &[&str]) -> Vec<OsString> {
         values.iter().map(OsString::from).collect()
@@ -415,11 +441,24 @@ mod tests {
         command::validate_schema().expect("command metadata is valid");
         let help = help::render_root();
         for name in [
-            "inspect", "dump", "repair", "rebuild-meta", "verify", "gc", "export", "restore",
+            "inspect",
+            "dump",
+            "repair",
+            "rebuild-meta",
+            "verify",
+            "gc",
+            "export",
+            "restore",
         ] {
-            assert!(help.contains(&format!("tea session {name}")), "missing {name} reference");
+            assert!(
+                help.contains(&format!("tea session {name}")),
+                "missing {name} reference"
+            );
         }
-        assert!(!help.contains("Commands:"), "root help must not add a duplicate index");
+        assert!(
+            !help.contains("Commands:"),
+            "root help must not add a duplicate index"
+        );
     }
 
     #[test]
@@ -442,7 +481,10 @@ mod tests {
                     args(&["tea", "session", operation, help_flag])
                 };
                 assert!(
-                    matches!(CliOptions::parse_command(invocation), Ok(CliCommand::CommandHelp(_))),
+                    matches!(
+                        CliOptions::parse_command(invocation),
+                        Ok(CliCommand::CommandHelp(_))
+                    ),
                     "{operation} did not accept {help_flag}"
                 );
             }
@@ -452,11 +494,25 @@ mod tests {
     #[test]
     fn lexopt_clusters_equals_values_and_repeated_session_roots() {
         let mut parser = Parser::from_iter(args(&["tea", "-phello", "--provider=mock", "tail"]));
-        assert!(matches!(parser.next().expect("short token parses"), Some(Arg::Short('p'))));
-        assert_eq!(parser.value().expect("short value parses"), OsString::from("hello"));
-        assert!(matches!(parser.next().expect("long token parses"), Some(Arg::Long("provider"))));
-        assert_eq!(parser.value().expect("equals value parses"), OsString::from("mock"));
-        assert!(matches!(parser.next().expect("positional token parses"), Some(Arg::Value(value)) if value == OsString::from("tail")));
+        assert!(matches!(
+            parser.next().expect("short token parses"),
+            Some(Arg::Short('p'))
+        ));
+        assert_eq!(
+            parser.value().expect("short value parses"),
+            OsString::from("hello")
+        );
+        assert!(matches!(
+            parser.next().expect("long token parses"),
+            Some(Arg::Long("provider"))
+        ));
+        assert_eq!(
+            parser.value().expect("equals value parses"),
+            OsString::from("mock")
+        );
+        assert!(
+            matches!(parser.next().expect("positional token parses"), Some(Arg::Value(value)) if value == "tail")
+        );
         assert_eq!(
             CliOptions::parse_command(args(&["tea", "-phello", "--provider=mock"])),
             Ok(CliCommand::Options(CliOptions {
@@ -489,7 +545,9 @@ mod tests {
             Ok(CliCommand::Version)
         );
         assert_eq!(crate::build_info::GIT_SHA.len(), 7);
-        assert!(crate::build_info::GIT_SHA.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert!(crate::build_info::GIT_SHA
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit()));
         assert!(matches!(
             CliOptions::parse_command(args(&["tea", "not-a-command"])),
             Err(CliError::UnknownCommand(_))
@@ -511,9 +569,12 @@ mod tests {
     fn positional_values_preserve_non_utf8_bytes() {
         use std::os::unix::ffi::OsStringExt;
         let session_id = OsString::from_vec(vec![b's', b'i', 0xff]);
-        let parsed = CliOptions::parse_command(
-            [OsString::from("tea"), OsString::from("session"), OsString::from("inspect"), session_id.clone()]
-        )
+        let parsed = CliOptions::parse_command([
+            OsString::from("tea"),
+            OsString::from("session"),
+            OsString::from("inspect"),
+            session_id.clone(),
+        ])
         .expect("non-UTF-8 session ID remains an opaque CLI value");
         assert_eq!(
             parsed,

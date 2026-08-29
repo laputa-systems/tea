@@ -264,30 +264,30 @@ pub static VERIFY_POSITIONALS: &[PositionalSpec] = DIRECTORY_POSITIONALS;
 pub static GC_POSITIONALS: &[PositionalSpec] = DIRECTORY_POSITIONALS;
 pub static EXPORT_POSITIONALS: &[PositionalSpec] = &[
     PositionalSpec {
-    name: "SOURCE",
-    required: true,
-    repeatable: false,
-    help: "Source session directory.",
+        name: "SOURCE",
+        required: true,
+        repeatable: false,
+        help: "Source session directory.",
     },
     PositionalSpec {
-    name: "DESTINATION",
-    required: true,
-    repeatable: false,
-    help: "Non-overwriting export directory.",
+        name: "DESTINATION",
+        required: true,
+        repeatable: false,
+        help: "Non-overwriting export directory.",
     },
 ];
 pub static RESTORE_POSITIONALS: &[PositionalSpec] = &[
     PositionalSpec {
-    name: "SOURCE",
-    required: true,
-    repeatable: false,
-    help: "Source export directory.",
+        name: "SOURCE",
+        required: true,
+        repeatable: false,
+        help: "Source export directory.",
     },
     PositionalSpec {
-    name: "DESTINATION",
-    required: true,
-    repeatable: false,
-    help: "Non-overwriting restore directory.",
+        name: "DESTINATION",
+        required: true,
+        repeatable: false,
+        help: "Non-overwriting restore directory.",
     },
 ];
 
@@ -337,7 +337,10 @@ pub static GC: CommandSpec = CommandSpec {
     options: GC_OPTIONS,
     positionals: GC_POSITIONALS,
     subcommands: &[],
-    examples: &["tea session gc SESSION_DIRECTORY", "tea session gc SESSION_DIRECTORY --apply"],
+    examples: &[
+        "tea session gc SESSION_DIRECTORY",
+        "tea session gc SESSION_DIRECTORY --apply",
+    ],
 };
 pub static EXPORT: CommandSpec = CommandSpec {
     name: "export",
@@ -361,7 +364,16 @@ pub static SESSION: CommandSpec = CommandSpec {
     description: "Inspect, repair, verify, collect, export, or restore durable sessions.",
     options: SESSION_OPTIONS,
     positionals: &[],
-    subcommands: &[&INSPECT, &DUMP, &REPAIR, &REBUILD_META, &VERIFY, &GC, &EXPORT, &RESTORE],
+    subcommands: &[
+        &INSPECT,
+        &DUMP,
+        &REPAIR,
+        &REBUILD_META,
+        &VERIFY,
+        &GC,
+        &EXPORT,
+        &RESTORE,
+    ],
     examples: &["tea session inspect SESSION_ID"],
 };
 
@@ -371,7 +383,10 @@ pub static ROOT_COMMAND: CommandSpec = CommandSpec {
     options: ROOT_OPTIONS,
     positionals: &[],
     subcommands: &[&SESSION],
-    examples: &["tea --provider PROVIDER --model MODEL", "tea session inspect SESSION_ID"],
+    examples: &[
+        "tea --provider PROVIDER --model MODEL",
+        "tea session inspect SESSION_ID",
+    ],
 };
 
 /// Find an option by the lexopt token that introduced it.
@@ -381,7 +396,7 @@ pub fn find_option<'a>(
 ) -> Option<&'static OptionSpec> {
     match argument {
         lexopt::Arg::Short(short) => options.iter().find(|spec| {
-            spec.short == Some(*short) || spec.aliases.iter().any(|alias| *alias == *short)
+            spec.short == Some(*short) || spec.aliases.contains(short)
         }),
         lexopt::Arg::Long(long) => options.iter().find(|spec| spec.long == *long),
         lexopt::Arg::Value(_) => None,
@@ -407,14 +422,19 @@ pub fn validate_schema() -> Result<(), &'static str> {
             }
             for other in command.options.iter().skip(index + 1) {
                 if option.long == other.long
-                    || option.short.is_some_and(|short| option.aliases.contains(&short))
-                    || other.short.is_some_and(|short| other.aliases.contains(&short))
                     || option
                         .short
-                        .is_some_and(|short| other.short == Some(short) || other.aliases.contains(&short))
-                    || option.aliases.iter().any(|short| {
-                        other.short == Some(*short) || other.aliases.contains(short)
+                        .is_some_and(|short| option.aliases.contains(&short))
+                    || other
+                        .short
+                        .is_some_and(|short| other.aliases.contains(&short))
+                    || option.short.is_some_and(|short| {
+                        other.short == Some(short) || other.aliases.contains(&short)
                     })
+                    || option
+                        .aliases
+                        .iter()
+                        .any(|short| other.short == Some(*short) || other.aliases.contains(short))
                 {
                     return Err("option spellings must be unique within a command");
                 }
@@ -433,7 +453,12 @@ pub fn validate_schema() -> Result<(), &'static str> {
             }
         }
         for child in command.subcommands {
-            if command.subcommands.iter().filter(|candidate| candidate.name == child.name).count() > 1
+            if command
+                .subcommands
+                .iter()
+                .filter(|candidate| candidate.name == child.name)
+                .count()
+                > 1
             {
                 return Err("command names must be unique within a scope");
             }

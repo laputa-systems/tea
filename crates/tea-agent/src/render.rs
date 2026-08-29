@@ -365,9 +365,7 @@ pub(crate) fn surface_presentation(
             UiSurface::ModelPicker
             | UiSurface::CustomModel
             | UiSurface::ThinkingPicker
-            | UiSurface::SessionPicker => {
-                "↑↓ Navigate · Enter Select · Esc Close"
-            }
+            | UiSurface::SessionPicker => "↑↓ Navigate · Enter Select · Esc Close",
             UiSurface::None => "Esc Close",
         };
         rows[usize::from(height - 1)] = RenderLine::plain(hint, theme.style(Role::Muted));
@@ -941,14 +939,7 @@ fn code_lines(
     chunks
         .into_iter()
         .enumerate()
-        .map(|(index, line)| {
-            prepend_code_gutter(
-                line,
-                line_number,
-                line_number_width,
-                index == 0,
-            )
-        })
+        .map(|(index, line)| prepend_code_gutter(line, line_number, line_number_width, index == 0))
         .collect()
 }
 
@@ -1305,7 +1296,10 @@ mod tests {
     #[test]
     fn fenced_code_gutter_aligns_numbers_and_wrapped_continuations() {
         let lines = markdown_lines("```text\na\nb\nlong line that wraps\n```", 18, true);
-        let text = lines.iter().map(|line| line.text.as_str()).collect::<Vec<_>>();
+        let text = lines
+            .iter()
+            .map(|line| line.text.as_str())
+            .collect::<Vec<_>>();
         assert_eq!(text, ["1 │ a", "2 │ b", "3 │ long line", "  │ that wraps"]);
     }
 
@@ -1546,11 +1540,7 @@ mod tests {
         let mut state = AppState::new();
         state.welcome_line();
         state.composer_mut().insert('/').expect("insert slash");
-        state.update_slash_completion(vec![
-            "/help".into(),
-            "/models".into(),
-            "/new".into(),
-        ]);
+        state.update_slash_completion(vec!["/help".into(), "/models".into(), "/new".into()]);
         let presentation = main_presentation(
             &state,
             &ProviderRegistry::new(),

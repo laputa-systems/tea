@@ -14,7 +14,6 @@ use tea_core::runtime::{HarnessEvent, SessionEvent, TeaEvent, TeaEventSubscripti
 use tea_providers::ProviderRegistry;
 use tea_tui::Size;
 
-use crate::cli::CliOptions;
 use super::compaction::ProviderCompactor;
 use super::config::{load_tui_config, TuiConfig};
 use super::error::AppError;
@@ -23,6 +22,7 @@ use super::mock;
 use super::nonblocking_operations::NonblockingCodingOperations;
 use super::provider_factory::ProviderFactory;
 use super::state::{AppState, TranscriptEntry, UiStatus};
+use crate::cli::CliOptions;
 use std::sync::Arc;
 use tea_core::state::ThinkingLevel;
 
@@ -362,9 +362,7 @@ impl App {
             }
             TeaEvent::Agent { event, .. } => self.state.apply_background_usage_event(&event),
             TeaEvent::Session(SessionEvent::OperationAccepted {
-                sequence,
-                lane_id,
-                ..
+                sequence, lane_id, ..
             }) => {
                 // The session writer appended the root user entry before this
                 // event. Child acceptance must not duplicate the root draft in

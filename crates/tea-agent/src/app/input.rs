@@ -473,7 +473,6 @@ impl App {
         }
         Ok(())
     }
-
 }
 
 fn help_surface_lines(

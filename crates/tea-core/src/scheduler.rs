@@ -7,13 +7,13 @@
 use crate::error::SchedulerError;
 use crate::state::{AgentToolCall, ModelDescriptor, ThinkingLevel, ToolCallId};
 use crate::tool::{AgentToolResult, ToolCall, ToolDefinition, ToolExecutionMode};
-use tea_session::ProviderErrorRecord;
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
+use tea_session::ProviderErrorRecord;
 
 /// A boxed provider stream operation, driven by the embedding executor.
 pub type ModelFuture<'a> =

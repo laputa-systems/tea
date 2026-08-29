@@ -5,10 +5,8 @@ use std::path::PathBuf;
 
 use lexopt::{Arg, Parser};
 
-use super::command::{
-    find_option, CommandSpec, OptionKey,
-};
 use super::command::SESSION_OPTIONS;
+use super::command::{find_option, CommandSpec, OptionKey};
 use super::{
     dump, export, gc, inspect, rebuild_meta, repair, restore, verify, CliCommand, CliError,
     SessionCommand,
@@ -29,7 +27,9 @@ pub(crate) fn parse(parser: &mut Parser, recognize_control: bool) -> Result<CliC
             } else if recognize_control && option.key == OptionKey::Version {
                 super::control_result(parser, CliCommand::Version)
             } else {
-                Err(CliError::UnknownSessionOperation(argument_os_string(&operation)))
+                Err(CliError::UnknownSessionOperation(argument_os_string(
+                    &operation,
+                )))
             }
         }
         Arg::Value(operation) => {
@@ -98,7 +98,9 @@ fn parse_leaf(
                     return Err(CliError::UnexpectedArgument(value));
                 }
                 if value.is_empty() {
-                    return Err(CliError::EmptyValue(spec.positionals[positionals.len()].name));
+                    return Err(CliError::EmptyValue(
+                        spec.positionals[positionals.len()].name,
+                    ));
                 }
                 positionals.push(value);
             }
@@ -181,11 +183,11 @@ fn argument_os_string(argument: &Arg<'_>) -> OsString {
 
 fn map_lexopt_error(error: lexopt::Error) -> CliError {
     match error {
-        lexopt::Error::MissingValue { option: Some(option) } => CliError::MissingValueOwned(option),
+        lexopt::Error::MissingValue {
+            option: Some(option),
+        } => CliError::MissingValueOwned(option),
         lexopt::Error::UnexpectedArgument(argument) => CliError::UnexpectedArgument(argument),
-        lexopt::Error::UnexpectedOption(option) => {
-            CliError::UnknownOption(OsString::from(option))
-        }
+        lexopt::Error::UnexpectedOption(option) => CliError::UnknownOption(OsString::from(option)),
         lexopt::Error::UnexpectedValue { value, .. } => CliError::UnexpectedArgument(value),
         other => CliError::Lexopt(other.to_string()),
     }

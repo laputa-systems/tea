@@ -633,9 +633,9 @@ mod tests {
             terminal.draw_live(&[line("main")], size, None).unwrap();
         }
         let output = output.get_ref();
-        assert!(output.windows(b"\x1b[?1049l".len()).any(|window| {
-            window == b"\x1b[?1049l"
-        }));
+        assert!(output
+            .windows(b"\x1b[?1049l".len())
+            .any(|window| { window == b"\x1b[?1049l" }));
     }
 
     #[test]

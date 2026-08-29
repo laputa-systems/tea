@@ -1338,10 +1338,12 @@ data: [DONE]
                         == Some(br#"{"error":{"message":"maximum context length exceeded"}}"#.len() as u64)
                     && error.response_body.as_deref().is_some_and(|body| body.contains("maximum context length exceeded"))
         ));
-        assert!(stream.pending.iter().any(|event| matches!(
-            event,
-            ModelStreamEvent::ContextOverflow { .. }
-        )));
+        assert!(
+            stream
+                .pending
+                .iter()
+                .any(|event| matches!(event, ModelStreamEvent::ContextOverflow { .. }))
+        );
     }
 
     #[test]

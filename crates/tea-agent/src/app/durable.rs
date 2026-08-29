@@ -48,10 +48,10 @@ use tea_session::{
     SESSION_FORMAT_VERSION,
 };
 
+use super::super::build_info;
 use super::compaction::ProviderCompactor;
 use super::config::{SubagentTuiConfig, TuiConfig};
 use super::error::AppError;
-use super::super::build_info;
 use super::provider_factory::ProviderFactory;
 use super::subagents::{SmolTaskRuntime, TuiSubagentHost};
 use super::support::{parse_thinking_level as parse_thinking_level_name, thinking_level_name};
@@ -1696,8 +1696,7 @@ fn new_session_id(workspace: &Path, created_at_ms: u64, nonce: u64) -> Result<Se
     writer.u64("created_at_ms", created_at_ms);
     writer.u64("process_id", u64::from(std::process::id()));
     writer.u64("nonce", nonce);
-    SessionId::new(writer.finish().to_hex())
-        .map_err(|error| AppError::Setup(error.to_string()))
+    SessionId::new(writer.finish().to_hex()).map_err(|error| AppError::Setup(error.to_string()))
 }
 
 fn now_ms() -> Result<u64, AppError> {
@@ -2172,7 +2171,10 @@ mod tests {
 
         assert!(!session_id.as_str().starts_with("session-"));
         assert_eq!(session_id.as_str().len(), 64);
-        assert!(session_id.as_str().bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert!(session_id
+            .as_str()
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit()));
     }
 
     #[test]
@@ -2980,7 +2982,9 @@ data: [DONE]
 
         let error = smol::block_on(harness.run_root_prompt("trigger a provider error"))
             .expect_err("provider error must fail the durable operation");
-        assert!(error.to_string().contains("OpenRouter rejected the request"));
+        assert!(error
+            .to_string()
+            .contains("OpenRouter rejected the request"));
         let snapshot = harness.snapshot().expect("durable snapshot reads");
         assert!(snapshot.records().iter().any(|stored| {
             matches!(

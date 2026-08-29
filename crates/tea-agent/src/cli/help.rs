@@ -9,10 +9,23 @@ use super::command::{CommandSpec, OptionSpec, ROOT_COMMAND, ROOT_OPTIONS, SESSIO
 pub fn render_root() -> String {
     let mut output = String::new();
     writeln!(output, "tea: {}", ROOT_COMMAND.description).ok();
-    writeln!(output, "\nUsage: {}", usage(&ROOT_COMMAND, ROOT_COMMAND.name)).ok();
-    writeln!(output, "\nCommon options (shown once; command pages show placement):").ok();
+    writeln!(
+        output,
+        "\nUsage: {}",
+        usage(&ROOT_COMMAND, ROOT_COMMAND.name)
+    )
+    .ok();
+    writeln!(
+        output,
+        "\nCommon options (shown once; command pages show placement):"
+    )
+    .ok();
     render_options(&mut output, ROOT_OPTIONS, 2);
-    writeln!(output, "\nEvery command also accepts -h/--help and -v/--version.").ok();
+    writeln!(
+        output,
+        "\nEvery command also accepts -h/--help and -v/--version."
+    )
+    .ok();
     writeln!(output, "\nCommand reference:").ok();
     for command in ROOT_COMMAND.subcommands {
         render_reference(&mut output, command, ROOT_COMMAND.name, 2);
@@ -31,7 +44,11 @@ pub fn render_command(command: &'static CommandSpec) -> String {
         render_options(&mut output, command.options, 2);
     }
     if command.name != ROOT_COMMAND.name {
-        writeln!(output, "\nCommon options (accepted at the root; placement is shown here):").ok();
+        writeln!(
+            output,
+            "\nCommon options (accepted at the root; placement is shown here):"
+        )
+        .ok();
         render_inherited_options(&mut output, command, 2);
     }
     if !command.positionals.is_empty() {
@@ -62,7 +79,12 @@ pub fn usage_hint() -> String {
     )
 }
 
-fn render_reference(output: &mut String, command: &'static CommandSpec, parent: &str, indent: usize) {
+fn render_reference(
+    output: &mut String,
+    command: &'static CommandSpec,
+    parent: &str,
+    indent: usize,
+) {
     let path = format!("{parent} {}", command.name);
     let padding = " ".repeat(indent);
     writeln!(output, "{padding}{}", usage(command, &path)).ok();
@@ -70,7 +92,12 @@ fn render_reference(output: &mut String, command: &'static CommandSpec, parent: 
     let local_options = command
         .options
         .iter()
-        .filter(|option| !matches!(option.key, super::command::OptionKey::Help | super::command::OptionKey::Version))
+        .filter(|option| {
+            !matches!(
+                option.key,
+                super::command::OptionKey::Help | super::command::OptionKey::Version
+            )
+        })
         .copied()
         .collect::<Vec<_>>();
     if !local_options.is_empty() {
@@ -121,7 +148,12 @@ fn render_options(output: &mut String, options: &[OptionSpec], indent: usize) {
 fn render_inherited_options(output: &mut String, command: &CommandSpec, indent: usize) {
     let inherited = ROOT_OPTIONS
         .iter()
-        .filter(|root_option| !command.options.iter().any(|option| option.key == root_option.key))
+        .filter(|root_option| {
+            !command
+                .options
+                .iter()
+                .any(|option| option.key == root_option.key)
+        })
         .copied()
         .collect::<Vec<_>>();
     render_options(output, &inherited, indent);
@@ -137,7 +169,12 @@ fn render_positionals(output: &mut String, command: &CommandSpec, indent: usize)
         if positional.repeatable {
             markers.push_str(" repeatable");
         }
-        writeln!(output, "{padding}{:<24} {}{markers}", positional.name, positional.help).ok();
+        writeln!(
+            output,
+            "{padding}{:<24} {}{markers}",
+            positional.name, positional.help
+        )
+        .ok();
     }
 }
 
@@ -163,7 +200,11 @@ fn usage(command: &CommandSpec, path: &str) -> String {
 fn command_path(command: &CommandSpec) -> String {
     if command.name == ROOT_COMMAND.name {
         "tea".to_owned()
-    } else if ROOT_COMMAND.subcommands.iter().any(|candidate| candidate.name == command.name) {
+    } else if ROOT_COMMAND
+        .subcommands
+        .iter()
+        .any(|candidate| candidate.name == command.name)
+    {
         format!("tea {}", command.name)
     } else {
         format!("{} {} {}", ROOT_COMMAND.name, SESSION.name, command.name)

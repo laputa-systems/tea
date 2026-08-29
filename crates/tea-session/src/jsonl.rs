@@ -3235,11 +3235,12 @@ fn encode_provider_error(error: &ProviderErrorRecord) -> JsonValue {
         ),
         (
             "request_bytes",
-            error
-                .request_bytes
-                .map_or(JsonValue::Null, JsonValue::from),
+            error.request_bytes.map_or(JsonValue::Null, JsonValue::from),
         ),
-        ("response_body", optional_string(error.response_body.as_deref())),
+        (
+            "response_body",
+            optional_string(error.response_body.as_deref()),
+        ),
     ])
 }
 

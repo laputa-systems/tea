@@ -5,7 +5,7 @@ use tea_core::agent::AgentConfiguration;
 use tea_core::compaction::{AutomaticCompactionPolicy, ContextBudgetSource, OverflowRecovery};
 use tea_core::state::{ModelDescriptor, Usage};
 
-use super::durable::{DurableSessionSummary, list_host_sessions};
+use super::durable::{list_host_sessions, DurableSessionSummary};
 use super::error::AppError;
 use super::host::model_candidates;
 use super::mock;
@@ -386,9 +386,25 @@ fn without_current_session(
         .collect()
 }
 
+pub(super) fn automatic_compaction_policy(context_window: NonZeroU64) -> AutomaticCompactionPolicy {
+    let capacity = context_window.get();
+    // Reserve room for the summary request and keep a bounded intact suffix. Large
+    // OpenRouter windows use fixed practical bounds; smaller windows retain proportional room.
+    AutomaticCompactionPolicy {
+        enabled: true,
+        context_budget: ContextBudgetSource::ContextWindow(context_window),
+        reserved_tokens: (capacity / 4).min(16_384),
+        minimum_headroom_tokens: (capacity / 4).min(16_384),
+        recent_tokens: (capacity / 2).min(20_000),
+        overflow_recovery: OverflowRecovery::CompactAndRetry,
+        max_compactions_per_run: 4,
+        max_overflow_retries_per_run: 1,
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{DurableSessionSummary, without_current_session};
+    use super::{without_current_session, DurableSessionSummary};
 
     #[test]
     fn resume_entries_omit_only_the_current_session() {
@@ -407,21 +423,5 @@ mod tests {
 
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].id, "older");
-    }
-}
-
-pub(super) fn automatic_compaction_policy(context_window: NonZeroU64) -> AutomaticCompactionPolicy {
-    let capacity = context_window.get();
-    // Reserve room for the summary request and keep a bounded intact suffix. Large
-    // OpenRouter windows use fixed practical bounds; smaller windows retain proportional room.
-    AutomaticCompactionPolicy {
-        enabled: true,
-        context_budget: ContextBudgetSource::ContextWindow(context_window),
-        reserved_tokens: (capacity / 4).min(16_384),
-        minimum_headroom_tokens: (capacity / 4).min(16_384),
-        recent_tokens: (capacity / 2).min(20_000),
-        overflow_recovery: OverflowRecovery::CompactAndRetry,
-        max_compactions_per_run: 4,
-        max_overflow_retries_per_run: 1,
     }
 }

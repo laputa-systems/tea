@@ -228,7 +228,15 @@ fn new_reaps_a_completed_task_but_never_drops_a_pending_task_receiver() {
 fn cli_parses_explicit_machine_session_commands() {
     assert_eq!(
         CliOptions::parse_command(
-            ["tea", "session", "inspect", "session-id", "--tea-home", "/tmp/tea"].map(OsString::from)
+            [
+                "tea",
+                "session",
+                "inspect",
+                "session-id",
+                "--tea-home",
+                "/tmp/tea"
+            ]
+            .map(OsString::from)
         ),
         Ok(CliCommand::Session(SessionCommand::Inspect {
             session_id: OsString::from("session-id"),
@@ -236,9 +244,7 @@ fn cli_parses_explicit_machine_session_commands() {
         }))
     );
     assert_eq!(
-        CliOptions::parse_command(
-            ["tea", "session", "dump", "session-id"].map(OsString::from)
-        ),
+        CliOptions::parse_command(["tea", "session", "dump", "session-id"].map(OsString::from)),
         Ok(CliCommand::Session(SessionCommand::Dump {
             session_id: OsString::from("session-id"),
             tea_home: None,
@@ -456,8 +462,7 @@ fn machine_session_id_commands_resolve_and_dump_authoritative_prefix() {
         .append(true)
         .open(directory.join("session.jsonl"))
         .expect("session JSONL opens for the torn-tail fixture");
-    file.write_all(br#"{"#)
-        .expect("torn tail writes");
+    file.write_all(br#"{"#).expect("torn tail writes");
     drop(file);
     let dump = run_session_command(SessionCommand::Dump {
         session_id: OsString::from("session-id-test"),
@@ -1524,8 +1529,8 @@ fn child_events_update_aggregate_usage_without_entering_root_transcript() {
 fn accepted_root_prompt_enters_the_live_transcript() {
     let mut app = App::new(CliOptions::default());
     app.submitted_prompt = Some("accepted prompt".into());
-    let operation_id = tea_session::OperationId::new("operation-test")
-        .expect("test operation ID is portable");
+    let operation_id =
+        tea_session::OperationId::new("operation-test").expect("test operation ID is portable");
     app.project_durable_event(tea_core::runtime::TeaEvent::Session(
         tea_core::runtime::SessionEvent::OperationAccepted {
             sequence: tea_session::Sequence(7),
@@ -1550,15 +1555,21 @@ fn thinking_command_is_not_a_terminal_command() {
     app.dispatch_command("/thinking high")
         .expect("unknown command should dispatch as a notice");
 
-    assert!(matches!(app.state().status(), UiStatus::Notice(text) if text == "unknown command /thinking"));
+    assert!(
+        matches!(app.state().status(), UiStatus::Notice(text) if text == "unknown command /thinking")
+    );
 
     app.dispatch_command("/quit")
         .expect("removed command should dispatch as a notice");
-    assert!(matches!(app.state().status(), UiStatus::Notice(text) if text == "unknown command /quit"));
+    assert!(
+        matches!(app.state().status(), UiStatus::Notice(text) if text == "unknown command /quit")
+    );
 
     app.dispatch_command("/session")
         .expect("removed alias should dispatch as a notice");
-    assert!(matches!(app.state().status(), UiStatus::Notice(text) if text == "unknown command /session"));
+    assert!(
+        matches!(app.state().status(), UiStatus::Notice(text) if text == "unknown command /session")
+    );
 }
 
 #[test]
@@ -2273,10 +2284,7 @@ fn command_completion_expands_a_slash_prefix_without_submitting_it() {
 #[test]
 fn command_completion_includes_models_resume_and_new_session_commands() {
     let mut app = App::new(CliOptions::default());
-    app.state
-        .composer_mut()
-        .insert_str("/res")
-        .expect("prefix");
+    app.state.composer_mut().insert_str("/res").expect("prefix");
     app.complete_command();
     assert_eq!(app.state.composer().text(), "/resume ");
 

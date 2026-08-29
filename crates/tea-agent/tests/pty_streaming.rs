@@ -1219,13 +1219,7 @@ fn mock_keeps_submitted_user_message_visible_after_acceptance() {
         .wait_for_screen(
             terminal.deadline(Duration::from_secs(3)),
             "submitted message",
-            |screen| {
-                screen
-                    .to_string()
-                    .matches("submitted user message")
-                    .count()
-                    == 1
-            },
+            |screen| screen.to_string().matches("submitted user message").count() == 1,
         )
         .expect("submitted message should remain visible");
 

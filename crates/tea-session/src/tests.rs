@@ -1455,7 +1455,10 @@ fn generated_operation_session_fixture_measures_buffered_append_and_replay() {
                             && error.response_body.as_deref() == Some("{\"error\":\"redacted\"}"))
             )
         });
-    assert!(persisted_provider_error, "typed provider error survives JSONL replay");
+    assert!(
+        persisted_provider_error,
+        "typed provider error survives JSONL replay"
+    );
     let replay_elapsed = replay_started.elapsed();
     eprintln!(
         "generated-operations operations={OPERATION_COUNT} mutations={} jsonl_bytes={jsonl_bytes} append_ms={} replay_ms={}",

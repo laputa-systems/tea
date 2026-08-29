@@ -6,8 +6,8 @@ use tea_core::harness::HarnessError;
 use tea_providers::RegistryError;
 use tea_session::{ArtifactError, SessionError as DurableSessionError};
 
-use crate::cli::CliError;
 use super::config::ConfigError;
+use crate::cli::CliError;
 
 /// Local application failures. Provider and core failures retain their typed source.
 #[derive(Debug)]
