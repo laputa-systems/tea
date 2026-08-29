@@ -119,7 +119,7 @@ python3 -m evals.quality coding --allow-provider \
   --validator fast
 ```
 
-The Rust adapter resolves the checked-in Luau coding bundle at
-`crates/tea-luau/builtins/coding/`. Worktrees are removed after each attempt
-and provider credentials are sourced only at the final adapter process
-boundary.
+The Rust adapter resolves the four checked-in Luau coding builtins under
+`crates/tea-luau/builtins/{read,bash,edit,find}/`. Worktrees are removed after
+each attempt and provider credentials are sourced only at the final adapter
+process boundary.

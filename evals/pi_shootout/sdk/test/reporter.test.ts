@@ -14,13 +14,13 @@ function session() {
 		getAllTools: () => [{ name: "read", description: "read", parameters: { type: "object" } }],
 		getSessionStats: () => ({ userMessages: 2, toolCalls: 1, tokens: { input: 3, output: 4, cacheRead: 5, cacheWrite: 6 }, cost: 0 }),
 		messages: [{ role: "assistant", content: "finished" }],
-		model: { id: "poolside/laguna-s-2.1:free", provider: "openrouter" },
+		model: { id: "deepseek/deepseek-v4-flash-0731", provider: "openrouter" },
 	};
 }
 
 test("normalizes successful session accounting and surfaces", async () => {
 	const directory = await mkdtemp(join(tmpdir(), "tea-pi-reporter-"));
-	const reporter = new Reporter({ attemptId: "a", baselineId: "pi-static", requestedModel: "poolside/laguna-s-2.1:free", thinkingLevel: "high", maxOutputTokens: null, workspace: "/tmp/attempt", evidenceDir: directory, shellEnvironmentSha256: "environment", shellCurlAvailable: true });
+	const reporter = new Reporter({ attemptId: "a", baselineId: "pi-static", requestedModel: "deepseek/deepseek-v4-flash-0731", thinkingLevel: "high", maxOutputTokens: null, workspace: "/tmp/attempt", evidenceDir: directory, shellEnvironmentSha256: "environment", shellCurlAvailable: true });
 	reporter.start();
 	await reporter.captureSurface(session());
 	reporter.observe({ type: "tool_execution_update", toolName: "bash", result: "x".repeat(1000) });
@@ -32,7 +32,7 @@ test("normalizes successful session accounting and surfaces", async () => {
 });
 
 test("trace never serializes an environment object", () => {
-	const reporter = new Reporter({ attemptId: "a", baselineId: "pi-static", requestedModel: "poolside/laguna-s-2.1:free", thinkingLevel: "high", maxOutputTokens: null, workspace: "/tmp/attempt", evidenceDir: "/tmp/unused", shellEnvironmentSha256: "environment", shellCurlAvailable: true });
+	const reporter = new Reporter({ attemptId: "a", baselineId: "pi-static", requestedModel: "deepseek/deepseek-v4-flash-0731", thinkingLevel: "high", maxOutputTokens: null, workspace: "/tmp/attempt", evidenceDir: "/tmp/unused", shellEnvironmentSha256: "environment", shellCurlAvailable: true });
 	reporter.observe({ type: "message_update", environment: { OPENROUTER_API_KEY: "secret" } });
 	assert.equal(JSON.stringify(reporter.trace).includes("secret"), false);
 });

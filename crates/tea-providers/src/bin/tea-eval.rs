@@ -44,7 +44,7 @@ use tea_session::{
 };
 
 const RESULT_SCHEMA: &str = "tea-coding-eval-result/v2";
-const REQUIRED_MODEL: &str = "poolside/laguna-s-2.1:free";
+const REQUIRED_MODEL: &str = "deepseek/deepseek-v4-flash-0731";
 const REQUIRED_THINKING: &str = "high";
 const JIT_ADDENDUM: &str = "Task-local harness adaptation is available but optional.\n\nFirst inspect the task and repository using the normal coding tools. Use NoChange unless you have concrete evidence that one bounded harness change is likely to improve this task.\n\nYou may stage at most one task-local harness candidate. It may alter only currently supported prompt, tool-presentation, hook, context, memory-selection, failure-policy, or compaction-policy surfaces. It cannot grant new authority, change the provider or model, access hidden validators, use subagents, or add a web-research tool.\n\nA candidate must include observed task or failure evidence, a root-cause hypothesis, expected effect, regression risk, and the harness surfaces changed. If it activates, continue solving the same task under the new immutable harness revision. All adaptation time and model usage count toward the task result.";
 
@@ -1203,9 +1203,9 @@ mod tests {
         OpenRouterProvider, REQUIRED_MODEL, RuntimeServices, model_profile, sha256, snapshot_spec,
     };
     #[test]
-    fn requested_laguna_s_model_is_not_the_xs_model() {
-        assert_eq!(REQUIRED_MODEL, "poolside/laguna-s-2.1:free");
-        assert_ne!(REQUIRED_MODEL, "poolside/laguna-xs-2.1:free");
+    fn requested_deepseek_model_is_pinned() {
+        assert_eq!(REQUIRED_MODEL, "deepseek/deepseek-v4-flash-0731");
+        assert_ne!(REQUIRED_MODEL, "poolside/laguna-s-2.1:free");
         assert_eq!(HarnessMode::parse("jit").unwrap().name(), "jit");
     }
     #[test]

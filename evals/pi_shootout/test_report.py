@@ -18,7 +18,7 @@ def record(baseline: str, *, passed: bool, decision: str = "not-applicable") -> 
 
 
 def summary(*, pi: bool = False, static: bool = False, jit: bool = False, decision: str = "no-change") -> dict:
-    return {"run": {"run_id": "run", "task_id": "express-3936-medium", "task_manifest_sha256": "task", "baseline_commit": "base", "validator_sha256": "validator", "model": "poolside/laguna-s-2.1:free", "provider": "openrouter", "thinking_level": "high", "max_output_tokens": None, "timeout_seconds": 900, "condition_order": ["pi-static", "tea-static", "tea-jit"]}, "attempts": [record("pi-static", passed=pi), record("tea-static", passed=static), record("tea-jit", passed=jit, decision=decision)]}
+    return {"run": {"run_id": "run", "task_id": "express-3936-medium", "task_manifest_sha256": "task", "baseline_commit": "base", "validator_sha256": "validator", "model": "deepseek/deepseek-v4-flash-0731", "provider": "openrouter", "thinking_level": "high", "max_output_tokens": None, "timeout_seconds": 900, "condition_order": ["pi-static", "tea-static", "tea-jit"]}, "attempts": [record("pi-static", passed=pi), record("tea-static", passed=static), record("tea-jit", passed=jit, decision=decision)]}
 
 
 class ReportTest(unittest.TestCase):

@@ -12,9 +12,9 @@ vault OPENROUTER_API_KEY -- make pi-shootout
 
 It runs one oracle-isolated `express-3936-medium` workspace under `pi-static`,
 `tea-static`, and `tea-jit` in seeded sequential order. v0 uses exactly
-OpenRouter, `poolside/laguna-s-2.1:free`, high thinking, no output-token
-ceiling, and the same 900-second attempt timeout. It never substitutes
-`poolside/laguna-xs-2.1:free`.
+OpenRouter, `deepseek/deepseek-v4-flash-0731`, high thinking, no output-token
+ceiling, and the same 900-second attempt timeout. The model ID is fixed for
+this v0 run and is not silently substituted.
 
 Both adapters receive the repository's closed `read`, `bash`, `edit`, `find`
 coding-bundle contract. Their implementations remain intentionally different;

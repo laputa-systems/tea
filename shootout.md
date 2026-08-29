@@ -58,10 +58,10 @@ The three conditions are:
 * Pi default coding harness.
 * Active coding tools:
 
-  * `read`
-  * `bash`
   * `edit`
   * `find`
+  * `bash`
+  * `read`
 * No discovered extensions.
 * No discovered skills.
 * No discovered global prompts.
@@ -79,10 +79,10 @@ The three conditions are:
 * Same model and task authority as Pi.
 * Active coding tools:
 
-  * `read`
-  * `bash`
   * `edit`
   * `find`
+  * `bash`
+  * `read`
 * No task-local plugins.
 * No subagents.
 * No dedicated web-search or browser tool.
@@ -595,7 +595,7 @@ no discovered skills
 no discovered prompt templates
 no discovered custom providers
 no task-provided subagent tools
-active model-facing tools are exactly read/bash/edit/find
+active model-facing tools are exactly edit/find/bash/read
 ```
 
 If a repository resource is discovered unexpectedly, fail the adapter as an infrastructure/configuration error rather than silently including it.
@@ -794,14 +794,10 @@ Do not implement a provider matrix.
 For this v0 experiment, use exactly this model ID:
 
 ```text
-poolside/laguna-s-2.1:free
+deepseek/deepseek-v4-flash-0731
 ```
 
-Do not substitute the similarly named but different:
-
-```text
-poolside/laguna-xs-2.1:free
-```
+Do not substitute a different model ID.
 
 The provider credential must be injected only at the final live-process
 boundary using:
@@ -830,7 +826,7 @@ Fixed v0 configuration:
 
 ```text
 provider = openrouter
-model = poolside/laguna-s-2.1:free
+model = deepseek/deepseek-v4-flash-0731
 thinking level = high
 maximum output tokens = unconstrained
 attempt timeout = 900 seconds
@@ -907,7 +903,7 @@ Configure:
 
 ```text
 pinned default Luau coding bundle
-read/bash/edit/find
+edit/find/bash/read
 OpenRouter provider
 same model
 same thinking level
@@ -1641,7 +1637,7 @@ Use approximately:
 ```make
 PI_SHOOTOUT_TASK ?= express-3936-medium
 PI_SHOOTOUT_PROVIDER ?= openrouter
-PI_SHOOTOUT_MODEL ?= poolside/laguna-s-2.1:free
+PI_SHOOTOUT_MODEL ?= deepseek/deepseek-v4-flash-0731
 PI_SHOOTOUT_THINKING ?= high
 PI_SHOOTOUT_MAX_OUTPUT_TOKENS ?= unlimited
 PI_SHOOTOUT_TIMEOUT_SECONDS ?= 900
@@ -1896,7 +1892,7 @@ The implementation is complete only when:
 * The known fix commit is absent from attempt object databases.
 * Every condition uses the same external validator.
 * Every condition uses the same requested model and thinking level.
-* Both Pi and Tea have `read/bash/edit/find`.
+* Both Pi and Tea have `edit/find/bash/read`.
 * Neither Pi nor Tea has a web-search tool.
 * Both can run `curl` through bash.
 * Provider keys are absent from coding-tool child environments.

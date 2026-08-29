@@ -30,7 +30,8 @@ from .coding_cases import (
 
 
 ROOT = Path(__file__).resolve().parents[2]
-CODING_BUNDLE = ROOT / "crates" / "tea-luau" / "builtins" / "coding" / "manifest.json"
+CODING_BUILTINS_ROOT = ROOT / "crates" / "tea-luau" / "builtins"
+CODING_BUILTIN_NAMES = ("read", "bash", "edit", "find")
 RESULT_SCHEMA = "tea-coding-eval-result/v1"
 CODING_SCHEMA = "tea-quality-coding-run/v1"
 
@@ -83,18 +84,22 @@ def _peak_rss(stderr: str, style: str | None) -> int | None:
 
 
 def coding_bundle_capabilities() -> list[dict[str, Any]]:
-    try:
-        manifest = json.loads(CODING_BUNDLE.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
-        raise CodingRunError(f"cannot read default coding bundle manifest: {error}") from error
-    if not isinstance(manifest, dict) or manifest.get("id") != "coding":
-        raise CodingRunError("default coding bundle manifest is invalid")
-    # The concrete provider surface is resolved from the Luau bundle by the
-    # Rust adapter. This task manifest records its closed four-tool contract;
-    # it intentionally does not duplicate the bundle's schemas or descriptions.
+    # The coding surface is a closed set of independent Luau builtins. Verify
+    # each checked-in manifest at the process boundary instead of relying on
+    # the pre-split aggregate ``builtins/coding/manifest.json`` that no longer
+    # exists. The concrete provider surface is still resolved by the Rust
+    # adapter; this task manifest records only the shared four-tool contract.
+    for name in CODING_BUILTIN_NAMES:
+        manifest_path = CODING_BUILTINS_ROOT / name / "manifest.json"
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise CodingRunError(f"cannot read default {name} builtin manifest: {error}") from error
+        if not isinstance(manifest, dict) or manifest.get("id") != name:
+            raise CodingRunError(f"default {name} builtin manifest is invalid")
     capabilities = [
         {"name": name, "kind": "tea_coding_bundle", "description": None, "schema": {"type": "object"}}
-        for name in ("read", "bash", "edit", "find")
+        for name in CODING_BUILTIN_NAMES
     ]
     return capabilities
 

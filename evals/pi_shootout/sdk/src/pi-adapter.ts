@@ -2,7 +2,7 @@ import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { AgentSession, createAgentSessionFromServices, createAgentSessionServices, createCodingTools, ModelRuntime, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
+import { AgentSession, createAgentSessionFromServices, createAgentSessionServices, createBashTool, createEditTool, createFindTool, createReadTool, ModelRuntime, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { getModel } from "@earendil-works/pi-ai/compat";
 
 import { canonical, normalizeWorkspace, sha256 } from "./canonical.ts";
@@ -54,7 +54,7 @@ async function readJson(path: string): Promise<unknown> {
 
 function assertInputs(args: Arguments, task: Record<string, unknown>, capabilities: unknown): void {
 	if (args.baselineId !== "pi-static" || args.provider !== "openrouter" || args.thinkingLevel !== "high") throw new Error("unsupported Pi shootout condition")
-	if (args.model !== "poolside/laguna-s-2.1:free") throw new Error("Pi shootout requires poolside/laguna-s-2.1:free")
+	if (args.model !== "deepseek/deepseek-v4-flash-0731") throw new Error("Pi shootout requires deepseek/deepseek-v4-flash-0731")
 	if (task.capabilities === undefined || canonical(task.capabilities) !== canonical(capabilities)) throw new Error("task and capability manifest disagree")
 	if (!Array.isArray(capabilities) || capabilities.map((item) => (item as { name?: unknown }).name).join(",") !== "read,bash,edit,find") throw new Error("Pi shootout requires read/bash/edit/find")
 	if (args.maxOutputTokens !== null) throw new Error("Pi shootout requires unlimited max output tokens")
@@ -87,7 +87,12 @@ async function main(): Promise<void> {
 	const manager = SessionManager.inMemory(args.workspace);
 	const first = await createAgentSessionFromServices({ services, sessionManager: manager, model, thinkingLevel: args.thinkingLevel, tools: [] });
 	first.session.dispose();
-	const tools = createCodingTools(args.workspace, { bash: { exposeSessionEnvironment: false, spawnHook: ({ command, cwd }) => ({ command, cwd, env: { ...args.shell } }) } });
+	const tools = [
+		createReadTool(args.workspace),
+		createBashTool(args.workspace, { exposeSessionEnvironment: false, spawnHook: ({ command, cwd }) => ({ command, cwd, env: { ...args.shell } }) }),
+		createEditTool(args.workspace),
+		createFindTool(args.workspace),
+	];
 	const second = new AgentSession({ agent: first.session.agent, sessionManager: manager, settingsManager: settings, cwd: args.workspace, resourceLoader: services.resourceLoader, modelRuntime, initialActiveToolNames: ["read", "bash", "edit", "find"], allowedToolNames: ["read", "bash", "edit", "find"], baseToolsOverride: Object.fromEntries(tools.map((tool) => [tool.name, tool])) });
 	const shellHash = sha256(canonical(Object.fromEntries(Object.entries(args.shell).map(([name, value]) => [name, name === "HOME" ? "{HOME}" : name === "TMPDIR" ? "{TMPDIR}" : name === "npm_config_cache" ? "{NPM_CACHE}" : normalizeWorkspace(value, args.workspace)]))));
 	const reporter = new Reporter({ attemptId: args.attemptId, baselineId: args.baselineId, requestedModel: args.model, thinkingLevel: args.thinkingLevel, maxOutputTokens: args.maxOutputTokens, workspace: args.workspace, evidenceDir: args.evidenceDir, shellEnvironmentSha256: shellHash, shellCurlAvailable: true });

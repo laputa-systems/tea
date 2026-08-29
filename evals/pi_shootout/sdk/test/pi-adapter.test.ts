@@ -15,7 +15,7 @@ test("accepts the array capability manifest before checking the live credential"
 	await writeFile(capabilities, JSON.stringify([{ name: "read" }, { name: "bash" }, { name: "edit" }, { name: "find" }]));
 	let output = "";
 	try {
-		execFileSync(process.execPath, [adapter, "--task-json", task, "--workspace", directory, "--capabilities-json", capabilities, "--result-json", join(directory, "result.json"), "--evidence-dir", directory, "--attempt-id", "attempt", "--baseline-id", "pi-static", "--provider", "openrouter", "--model", "poolside/laguna-s-2.1:free", "--thinking-level", "high", "--max-output-tokens", "unlimited"], { env: { PATH: process.env.PATH ?? "" }, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+		execFileSync(process.execPath, [adapter, "--task-json", task, "--workspace", directory, "--capabilities-json", capabilities, "--result-json", join(directory, "result.json"), "--evidence-dir", directory, "--attempt-id", "attempt", "--baseline-id", "pi-static", "--provider", "openrouter", "--model", "deepseek/deepseek-v4-flash-0731", "--thinking-level", "high", "--max-output-tokens", "unlimited"], { env: { PATH: process.env.PATH ?? "" }, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
 		assert.fail("adapter should reject its missing live credential")
 	} catch (error) {
 		output = String((error as { stderr?: string }).stderr ?? "");

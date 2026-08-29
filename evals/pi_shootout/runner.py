@@ -36,7 +36,7 @@ from .report import write_reports
 
 ROOT = Path(__file__).resolve().parents[2]
 SDK = ROOT / "evals" / "pi_shootout" / "sdk"
-DEFAULT_MODEL = "poolside/laguna-s-2.1:free"
+DEFAULT_MODEL = "deepseek/deepseek-v4-flash-0731"
 DEFAULT_THINKING = "high"
 MAX_LOG_BYTES = 256 * 1024
 

@@ -94,10 +94,10 @@ quality-compaction:
 	PYTHONDONTWRITEBYTECODE=1 python3 -m evals.quality compaction --out /tmp/tea-compaction-quality
 
 # This is an explicit, provider-opt-in one-task experiment. The model is fixed
-# for v0 so a typo cannot silently compare Laguna XS rather than Laguna S.
+# for v0 so a typo cannot silently compare a different model.
 PI_SHOOTOUT_TASK ?= express-3936-medium
 PI_SHOOTOUT_PROVIDER ?= openrouter
-PI_SHOOTOUT_MODEL ?= poolside/laguna-s-2.1:free
+PI_SHOOTOUT_MODEL ?= deepseek/deepseek-v4-flash-0731
 PI_SHOOTOUT_THINKING ?= high
 PI_SHOOTOUT_MAX_OUTPUT_TOKENS ?= unlimited
 PI_SHOOTOUT_TIMEOUT_SECONDS ?= 900
