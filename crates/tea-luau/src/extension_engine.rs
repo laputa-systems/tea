@@ -1,6 +1,7 @@
 //! Luau implementation of the core-owned immutable extension boundary.
 
 use crate::bundle::{supports_bundle_abi, Bundle, BundleManifest};
+use crate::bundle_runtime::BundleRuntime;
 use crate::tool_handler::{
     CapabilityBindings, CapabilityError, CapabilityFuture, CapabilityRequest, CapabilityResponse,
     HandlerLimits, LuaToolHandler, LuauCapability, ToolHandlerSpec,
@@ -41,18 +42,52 @@ impl ExtensionEngine for LuauExtensionEngine {
         extension_index: usize,
         memory_collector: Arc<ExtensionMemoryCollector>,
     ) -> Result<ResolvedExtension, ExtensionError> {
+        let bundle = build_bundle(source)?;
         let (policy, _) = load_policy(source)?;
         let policy = Arc::new(policy);
+        // Shared only when a tool actually names a handler module, so an
+        // inline handler keeps its no-loader VM exactly as before.
+        let mut module_runtime = None;
         let mut tools = tea_core::tool::ToolRegistry::default();
         for tool in policy.tools() {
-            let handler_source = match (&tool.handler_source, &tool.handler_module) {
-                (Some(source), None) => source.clone(),
-                (None, Some(module)) => source.files.get(module).cloned().ok_or_else(|| {
-                    ExtensionError::new(format!(
-                        "extension {} tool {} names missing handler module {module}",
-                        source.extension_id, tool.name
-                    ))
-                })?,
+            let capability = bindings
+                .capability_for_tool(&tool.name, &tool.capability)
+                .map_err(extension_error)?;
+            let binding = bindings.get(&capability).ok_or_else(|| {
+                ExtensionError::new(format!(
+                    "extension {} tool {} names unbound capability {capability}",
+                    source.extension_id, tool.name,
+                ))
+            })?;
+            let limits = handler_limits(binding.limits());
+            let spec = ToolHandlerSpec {
+                name: tool.name.clone(),
+                description: tool.description.clone(),
+                schema: tool.schema.clone(),
+                capability: capability.clone(),
+                execution_mode: tool.execution_mode,
+                requires_exclusive_batch: tool.requires_exclusive_batch,
+                cancellation_settlement_mode: tool.cancellation_settlement_mode,
+            };
+            let capability_bindings = adapt_binding(&capability, binding)?;
+            let handler = match (&tool.handler_source, &tool.handler_module) {
+                (Some(handler_source), None) => LuaToolHandler::new_with_limits(
+                    handler_source.clone(),
+                    spec,
+                    capability_bindings,
+                    limits,
+                ),
+                (None, Some(module)) => {
+                    let runtime = module_runtime
+                        .get_or_insert_with(|| Arc::new(BundleRuntime::new(bundle.clone())));
+                    LuaToolHandler::new_bundle_module(
+                        Arc::clone(runtime),
+                        module.clone(),
+                        spec,
+                        capability_bindings,
+                        limits,
+                    )
+                }
                 (None, None) => {
                     return Err(ExtensionError::new(format!(
                         "extension {} tool {} has no executable handler source",
@@ -65,31 +100,7 @@ impl ExtensionEngine for LuauExtensionEngine {
                         source.extension_id, tool.name
                     )));
                 }
-            };
-            let capability = bindings
-                .capability_for_tool(&tool.name, &tool.capability)
-                .map_err(extension_error)?;
-            let binding = bindings.get(&capability).ok_or_else(|| {
-                ExtensionError::new(format!(
-                    "extension {} tool {} names unbound capability {capability}",
-                    source.extension_id, tool.name,
-                ))
-            })?;
-            let limits = handler_limits(binding.limits());
-            let handler = LuaToolHandler::new_with_limits(
-                handler_source,
-                ToolHandlerSpec {
-                    name: tool.name.clone(),
-                    description: tool.description.clone(),
-                    schema: tool.schema.clone(),
-                    capability: capability.clone(),
-                    execution_mode: tool.execution_mode,
-                    requires_exclusive_batch: tool.requires_exclusive_batch,
-                    cancellation_settlement_mode: tool.cancellation_settlement_mode,
-                },
-                adapt_binding(&capability, binding)?,
-                limits,
-            )
+            }
             .map_err(extension_error)?;
             tools.insert(Arc::new(handler));
         }
@@ -367,6 +378,17 @@ fn map_capability_error(error: ExtensionCapabilityError) -> CapabilityError {
     }
 }
 
+/// Assemble the closed module graph declared by an extension's manifest.
+fn build_bundle(source: &ExtensionSourceTree) -> Result<Bundle, ExtensionError> {
+    let manifest = source.files.get("manifest.json").ok_or_else(|| {
+        ExtensionError::new(format!(
+            "extension {} is missing manifest.json",
+            source.extension_id
+        ))
+    })?;
+    bundle_from_manifest(&parse_manifest(manifest, source)?, source)
+}
+
 fn load_policy(
     source: &ExtensionSourceTree,
 ) -> Result<(LuaPolicy, BTreeSet<String>), ExtensionError> {
@@ -377,7 +399,25 @@ fn load_policy(
         ))
     })?;
     let manifest = parse_manifest(manifest, source)?;
-    let bundle = Bundle::from_sources(
+    let bundle = bundle_from_manifest(&manifest, source)?;
+    let requested_capabilities = manifest.requested_capabilities.clone();
+    LuaPolicy::load_bundle_with_limits(
+        bundle,
+        PolicyLimits {
+            max_source_bytes: manifest.limits.max_source_bytes,
+            max_memory_bytes: manifest.limits.max_memory_bytes,
+            max_interrupt_checks: manifest.limits.max_interrupt_checks,
+        },
+    )
+    .map(|policy| (policy, requested_capabilities))
+    .map_err(extension_error)
+}
+
+fn bundle_from_manifest(
+    manifest: &ParsedManifest,
+    source: &ExtensionSourceTree,
+) -> Result<Bundle, ExtensionError> {
+    Bundle::from_sources(
         BundleManifest::new(
             manifest.abi_version,
             &manifest.entrypoint,
@@ -402,17 +442,6 @@ fn load_policy(
             })
             .collect::<Result<Vec<_>, _>>()?,
     )
-    .map_err(extension_error)?;
-    let requested_capabilities = manifest.requested_capabilities.clone();
-    LuaPolicy::load_bundle_with_limits(
-        bundle,
-        PolicyLimits {
-            max_source_bytes: manifest.limits.max_source_bytes,
-            max_memory_bytes: manifest.limits.max_memory_bytes,
-            max_interrupt_checks: manifest.limits.max_interrupt_checks,
-        },
-    )
-    .map(|policy| (policy, requested_capabilities))
     .map_err(extension_error)
 }
 

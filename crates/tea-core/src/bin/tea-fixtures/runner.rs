@@ -312,6 +312,7 @@ impl AgentTool for FixtureTool {
                 updates.emit(tea_core::tool::ToolUpdate {
                     content: content.clone(),
                     details: None,
+                    activity: None,
                 });
                 if response.cancel_after_update {
                     context.cancellation.cancel();

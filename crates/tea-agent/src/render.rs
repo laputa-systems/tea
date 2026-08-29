@@ -461,13 +461,13 @@ fn footer_render_lines(
     let secondary = if show_session_id {
         secondary
     } else {
-        secondary
-            .split('\n')
-            .next()
-            .unwrap_or_default()
-            .to_owned()
+        secondary.split('\n').next().unwrap_or_default().to_owned()
     };
-    lines.extend(wrap_lines(&secondary, width, Theme::default().style(Role::Muted)));
+    lines.extend(wrap_lines(
+        &secondary,
+        width,
+        Theme::default().style(Role::Muted),
+    ));
     lines
 }
 
@@ -510,10 +510,30 @@ fn wrap_footer_primary(text: &str, width: u16) -> Vec<RenderLine> {
 fn activity_lines(state: &AppState) -> Vec<RenderLine> {
     let mut lines = Vec::new();
     if matches!(state.status(), crate::app::UiStatus::Active) {
-        lines.push(RenderLine::plain(
-            format!("• Thinking {}", thinking_spinner()),
-            Theme::default().style(Role::Activity),
-        ));
+        let theme = Theme::default();
+        match state.activity_text() {
+            // Unchanged default presentation when no tool has published one.
+            None => lines.push(RenderLine::plain(
+                format!("• Thinking {}", thinking_spinner()),
+                theme.style(Role::Activity),
+            )),
+            Some(activity) => {
+                let mut rows = activity.lines();
+                lines.push(RenderLine::plain(
+                    format!(
+                        "• {} {}",
+                        thinking_spinner(),
+                        rows.next().unwrap_or_default()
+                    ),
+                    theme.style(Role::Activity),
+                ));
+                // Continuation rows are subordinate but otherwise plain: no
+                // border, panel, or alternate layout.
+                lines.extend(
+                    rows.map(|row| RenderLine::plain(format!("  {row}"), theme.style(Role::Muted))),
+                );
+            }
+        }
     }
     if let Some(message) = state.queued_message() {
         lines.push(RenderLine::plain(
@@ -531,11 +551,8 @@ fn thinking_spinner() -> &'static str {
     // of their time replaying redraws instead of observing user-visible state.
     const FRAME_INTERVAL: Duration = Duration::from_millis(500);
     static STARTED: OnceLock<Instant> = OnceLock::new();
-    let frame = STARTED
-        .get_or_init(Instant::now)
-        .elapsed()
-        .as_millis()
-        / FRAME_INTERVAL.as_millis();
+    let frame =
+        STARTED.get_or_init(Instant::now).elapsed().as_millis() / FRAME_INTERVAL.as_millis();
     FRAMES[frame as usize % FRAMES.len()]
 }
 
@@ -1480,6 +1497,149 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["• Queued next: first instruction  second instruction"]
         );
+    }
+
+    fn agent_event(
+        sequence: u64,
+        kind: tea_core::event::AgentEventKind,
+    ) -> tea_core::event::AgentEvent {
+        tea_core::event::AgentEvent {
+            run_id: tea_core::state::RunId(1),
+            sequence: tea_core::event::EventSequence(sequence),
+            kind,
+        }
+    }
+
+    fn publish_activity(state: &mut AppState, sequence: u64, activity: &str) {
+        state.apply_event(&agent_event(
+            sequence,
+            tea_core::event::AgentEventKind::ToolExecutionUpdate {
+                tool_call_id: tea_core::state::ToolCallId::new(format!("call-{sequence}"))
+                    .expect("fixture call id"),
+                tool_name: "todo".into(),
+                update: tea_core::tool::ToolUpdate {
+                    content: String::new(),
+                    details: None,
+                    activity: Some(activity.into()),
+                },
+            },
+        ));
+    }
+
+    fn active_state() -> AppState {
+        let mut state = AppState::new();
+        state.apply_event(&agent_event(1, tea_core::event::AgentEventKind::AgentStart));
+        state
+    }
+
+    /// Replace the animated glyph so presentation assertions never depend on
+    /// an instantaneous spinner frame.
+    fn mask_spinner(text: &str) -> String {
+        let spinner = thinking_spinner();
+        text.replacen(&format!("• {spinner} "), "• <spin> ", 1)
+            .replacen(&format!("• Thinking {spinner}"), "• Thinking <spin>", 1)
+    }
+
+    const TODO_ACTIVITY: &str =
+        "Todo · 1 active · 2 pending\n- [>] State machine\n- [ ] Durable integration\n- [ ] Tests";
+
+    #[test]
+    fn the_default_activity_row_is_unchanged_without_an_override() {
+        let state = active_state();
+        let rows = activity_lines(&state)
+            .into_iter()
+            .map(|line| mask_spinner(&line.text))
+            .collect::<Vec<_>>();
+        assert_eq!(rows, ["• Thinking <spin>"]);
+    }
+
+    #[test]
+    fn a_published_activity_replaces_the_default_row_and_keeps_the_spinner() {
+        let mut state = active_state();
+        publish_activity(&mut state, 2, TODO_ACTIVITY);
+        let lines = activity_lines(&state);
+        let rows = lines
+            .iter()
+            .map(|line| mask_spinner(&line.text))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            rows,
+            [
+                "• <spin> Todo · 1 active · 2 pending",
+                "  - [>] State machine",
+                "  - [ ] Durable integration",
+                "  - [ ] Tests",
+            ]
+        );
+        let theme = Theme::default();
+        assert_eq!(lines[0].style, theme.style(Role::Activity));
+        assert!(lines[1..]
+            .iter()
+            .all(|line| line.style == theme.style(Role::Muted)));
+    }
+
+    #[test]
+    fn a_later_activity_atomically_replaces_the_previous_one() {
+        let mut state = active_state();
+        publish_activity(&mut state, 2, TODO_ACTIVITY);
+        publish_activity(&mut state, 3, "Todo · 2 active\n- [>] Only row");
+        let rows = activity_lines(&state)
+            .into_iter()
+            .map(|line| mask_spinner(&line.text))
+            .collect::<Vec<_>>();
+        assert_eq!(rows, ["• <spin> Todo · 2 active", "  - [>] Only row"]);
+    }
+
+    #[test]
+    fn activity_rows_stay_in_the_mutable_tail_and_reflow_on_resize() {
+        let mut state = AppState::new();
+        state.welcome_line();
+        state.apply_event(&agent_event(1, tea_core::event::AgentEventKind::AgentStart));
+        publish_activity(&mut state, 2, TODO_ACTIVITY);
+        for width in [80_u16, 40] {
+            let presentation = main_presentation(
+                &state,
+                &ProviderRegistry::new(),
+                Size { width, height: 24 },
+                1,
+            );
+            assert!(
+                presentation.commit.is_empty(),
+                "activity never joins the stable scrollback prefix"
+            );
+            assert!(
+                presentation
+                    .live
+                    .iter()
+                    .any(|line| line.text().contains("Todo · 1 active · 2 pending")),
+                "activity is projected into the mutable tail at width {width}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_tiny_terminal_clips_activity_before_losing_the_composer() {
+        let mut state = AppState::new();
+        state.welcome_line();
+        state.apply_event(&agent_event(1, tea_core::event::AgentEventKind::AgentStart));
+        publish_activity(&mut state, 2, TODO_ACTIVITY);
+        let presentation = main_presentation(
+            &state,
+            &ProviderRegistry::new(),
+            Size {
+                width: 40,
+                height: 2,
+            },
+            1,
+        );
+        assert!(presentation
+            .live
+            .iter()
+            .any(|line| line.text().starts_with("┃")));
+        assert!(!presentation
+            .live
+            .iter()
+            .any(|line| line.text().contains("State machine")));
     }
 
     #[test]

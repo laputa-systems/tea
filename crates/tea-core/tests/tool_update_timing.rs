@@ -86,6 +86,7 @@ impl Future for GatedToolFuture {
                 self.updates.emit(ToolUpdate {
                     content: update.into(),
                     details: None,
+                    activity: None,
                 });
             }
             self.emitted = true;

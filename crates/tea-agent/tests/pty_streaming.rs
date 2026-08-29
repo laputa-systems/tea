@@ -8,7 +8,7 @@ use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -1056,8 +1056,11 @@ fn real_binary_keeps_native_multiline_editing_and_history_inside_a_pty() {
             |screen| {
                 screen.row(3).is_some_and(|row| row.starts_with('─'))
                     && screen.row(4).is_some_and(|row| row.starts_with("  /help"))
+                    // Bundled extension commands fill the menu to its row cap.
+                    && screen.row(8).is_some_and(|row| row.starts_with("  /goal"))
+                    && screen.row(9).is_some_and(|row| row.starts_with("  /todos"))
                     && screen
-                        .row(10)
+                        .row(11)
                         .is_some_and(|row| row.starts_with("↑↓ Navigate"))
             },
         )
@@ -1411,4 +1414,238 @@ fn real_binary_keeps_an_overflowing_settled_transcript_in_main_screen_flow() {
     terminal
         .finish(terminal.deadline(Duration::from_secs(3)))
         .expect("reap tea");
+}
+
+/// One scripted conversation that exercises the live todo activity view.
+///
+/// Every provider response is held until the test releases it. While a
+/// response is held the application is waiting on the provider, so the frame it
+/// drew after the previous turn settled stays on screen and can be inspected.
+struct TodoActivityFixture {
+    arrived: Receiver<usize>,
+    release: Sender<()>,
+    server: thread::JoinHandle<()>,
+    url: String,
+}
+
+impl TodoActivityFixture {
+    fn start() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("todo fixture should bind");
+        let address = listener
+            .local_addr()
+            .expect("todo fixture address resolves");
+        let (arrived_sender, arrived) = mpsc::channel();
+        let (release, release_receiver) = mpsc::channel::<()>();
+        let server = thread::spawn(move || {
+            let plan = concat!(
+                "- [ ] Implement state\\n",
+                "- [ ] Wire persistence\\n",
+                "- [ ] Integrate spinner\\n",
+                "- [ ] Verify",
+            );
+            let responses = [
+                tool_call_response("todo-plan", "todo", &format!(r#"{{"markdown":"{plan}"}}"#)),
+                tool_call_response("unrelated-find", "find", r#"{"pattern":"*.toml","limit":1}"#),
+                tool_call_response(
+                    "todo-progress",
+                    "todo",
+                    r#"{"updates":[{"id":1,"status":"done"}]}"#,
+                ),
+                "data: {\"choices\":[{\"delta\":{\"content\":\"plan handled\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"
+                    .to_owned(),
+            ];
+            for (index, body) in responses.into_iter().enumerate() {
+                let (mut socket, _) = listener
+                    .accept()
+                    .expect("todo fixture should accept each provider request");
+                let _ = read_complete_http_request(&mut socket);
+                arrived_sender
+                    .send(index)
+                    .expect("test observes each provider request");
+                release_receiver
+                    .recv()
+                    .expect("test releases each provider response");
+                write_sse_response(&mut socket, &body);
+            }
+        });
+        Self {
+            arrived,
+            release,
+            server,
+            url: format!("http://{address}/v1"),
+        }
+    }
+
+    /// Block until the agent has requested turn `index`. Everything the
+    /// previous turn started has settled and been drawn by then.
+    fn await_request(&self, terminal: &mut PtyTest, index: usize) {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            match self.arrived.try_recv() {
+                Ok(observed) => {
+                    assert_eq!(observed, index);
+                    return;
+                }
+                Err(TryRecvError::Empty) => {}
+                Err(error) => panic!("todo fixture channel closed early: {error:?}"),
+            }
+            assert!(
+                Instant::now() < deadline,
+                "provider request {index} did not arrive"
+            );
+            let _ = terminal.drain(terminal.deadline(Duration::from_millis(50)));
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn release_response(&self) {
+        self.release.send(()).expect("fixture awaits its release");
+    }
+
+    fn finish(self) {
+        self.server.join().expect("todo fixture server finishes");
+    }
+}
+
+#[test]
+fn real_binary_shows_the_live_todo_plan_in_the_activity_region() {
+    let _lock = PTY_TEST_LOCK.lock().expect("PTY test lock is not poisoned");
+    let tea_home = pty_tea_home("todo-activity");
+    let fixture = TodoActivityFixture::start();
+    let scenario = Scenario::new("todo activity presentation")
+        .expect("valid scenario label")
+        .command(CommandSpec::new(env!("CARGO_BIN_EXE_tea")).args([
+            "--provider",
+            LOCAL_PROVIDER,
+            "--model",
+            FIXTURE_MODEL,
+            "--local-base-url",
+            fixture.url.as_str(),
+            "--tea-home",
+            tea_home.to_str().expect("UTF-8 test path"),
+        ]))
+        .size(Size::new(COLUMNS, ROWS).expect("constant terminal size"))
+        .environment(TestEnv::hermetic().expect("create hermetic test environment"))
+        .protocol_profile(ProtocolProfile::xterm_minimal_v1());
+    let mut terminal = PtyTest::spawn(scenario).expect("real tea binary should start in a PTY");
+    let baseline = terminal.terminal_baseline();
+
+    terminal
+        .wait_for_screen(
+            terminal.deadline(Duration::from_secs(5)),
+            "model readiness",
+            |screen| screen.contains(&format!("{LOCAL_PROVIDER}/{FIXTURE_MODEL}")),
+        )
+        .expect("model selection should render");
+
+    terminal
+        .send_text(
+            terminal.deadline(Duration::from_secs(3)),
+            "plan the multi-step work",
+        )
+        .expect("send the planning prompt");
+    terminal
+        .send_key(terminal.deadline(Duration::from_secs(3)), Key::Enter)
+        .expect("submit the planning prompt");
+
+    // Before any todo call the default activity row is unchanged.
+    fixture.await_request(&mut terminal, 0);
+    terminal
+        .wait_for_screen(
+            terminal.deadline(Duration::from_secs(10)),
+            "the default activity row",
+            |screen| screen.contains("Thinking") && !screen.contains("Todo · "),
+        )
+        .expect("the default activity row is unchanged until a tool publishes one");
+    fixture.release_response();
+
+    // The todo call replaces that row with the live plan.
+    fixture.await_request(&mut terminal, 1);
+    terminal
+        .wait_for_screen(
+            terminal.deadline(Duration::from_secs(10)),
+            "the todo activity",
+            |screen| {
+                screen.contains("Todo · 1 active · 3 pending")
+                    && screen.contains("- [>] Implement state")
+                    && screen.contains("- [ ] Verify")
+                    && !screen.contains("Thinking")
+            },
+        )
+        .expect("the todo plan replaces the default activity row");
+    fixture.release_response();
+
+    // An unrelated tool call runs without disturbing the activity region.
+    fixture.await_request(&mut terminal, 2);
+    terminal
+        .wait_for_screen(
+            terminal.deadline(Duration::from_secs(10)),
+            "the todo activity after unrelated work",
+            |screen| {
+                screen.contains("find")
+                    && screen.contains("Todo · 1 active · 3 pending")
+                    && screen.contains("- [>] Implement state")
+            },
+        )
+        .expect("an unrelated tool must not clear the published activity");
+    fixture.release_response();
+
+    // The status report redraws the same region with the next task active.
+    fixture.await_request(&mut terminal, 3);
+    terminal
+        .wait_for_screen(
+            terminal.deadline(Duration::from_secs(10)),
+            "the todo activity after a status report",
+            |screen| {
+                screen.contains("Todo · 1 active · 2 pending")
+                    && screen.contains("- [x] Implement state")
+                    && screen.contains("- [>] Wire persistence")
+            },
+        )
+        .expect("a status report redraws the same activity region");
+    fixture.release_response();
+    fixture.finish();
+
+    terminal
+        .wait_for_screen(
+            terminal.deadline(Duration::from_secs(10)),
+            "the settled operation",
+            |screen| screen.contains("plan handled") && !screen.contains("Todo · 1 active"),
+        )
+        .expect("transient activity leaves the screen when the operation settles");
+
+    // `/todos` prints the durable list for an idle human.
+    terminal
+        .send_text(terminal.deadline(Duration::from_secs(3)), "/todos")
+        .expect("type the todo command");
+    terminal
+        .send_key(terminal.deadline(Duration::from_secs(3)), Key::Enter)
+        .expect("submit the todo command");
+    terminal
+        .wait_for_screen(
+            terminal.deadline(Duration::from_secs(10)),
+            "the printed todo list",
+            |screen| {
+                screen.contains("- [x] #1 Implement state")
+                    && screen.contains("- [>] #2 Wire persistence")
+            },
+        )
+        .expect("/todos prints the canonical list while idle");
+
+    terminal
+        .send_key(terminal.deadline(Duration::from_secs(3)), Key::Ctrl('c'))
+        .expect("send clean interrupt");
+    assert_eq!(
+        terminal
+            .wait_for_exit(terminal.deadline(Duration::from_secs(5)))
+            .expect("wait for tea exit"),
+        ExitStatus::Code(0)
+    );
+    terminal
+        .assert_terminal_restored(&baseline)
+        .expect("normal exit restores applicable terminal modes");
+    terminal
+        .finish(terminal.deadline(Duration::from_secs(3)))
+        .expect("reap tea");
+    let _ = fs::remove_dir_all(tea_home);
 }

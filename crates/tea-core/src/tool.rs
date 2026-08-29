@@ -444,6 +444,15 @@ pub struct ToolUpdate {
     pub content: String,
     /// Optional serialized host details.
     pub details: Option<SerializedJson>,
+    /// Optional replacement for the host's transient activity presentation.
+    ///
+    /// A running tool may use this to describe what the enclosing operation is
+    /// currently doing, in the host's own live/mutable region. It is
+    /// presentation-only: it never enters canonical agent state, model
+    /// context, durable storage, or an effect boundary, and a host that has no
+    /// live region may ignore it entirely. `None` means "leave whatever the
+    /// host is presenting unchanged"; it never clears an earlier value.
+    pub activity: Option<String>,
 }
 
 /// A cancellation handle shared by model and tool operations.

@@ -422,10 +422,15 @@ pub(super) fn parse_extension_result(value: Value) -> Result<ExtensionCommandRes
         "extension command result",
     )?;
     let notice = optional_string(&table, "notice")?;
+    // A notice is printable text. Line breaks are permitted so a command can
+    // print a small document, such as a checklist; every other control byte
+    // remains rejected because it could rewrite a host terminal.
     if notice.as_deref().is_some_and(|notice| {
         notice.trim().is_empty()
             || notice.len() > 4096
-            || notice.bytes().any(|byte| byte.is_ascii_control())
+            || notice
+                .bytes()
+                .any(|byte| byte.is_ascii_control() && byte != b'\n')
     }) {
         return Err(PolicyError::Contract {
             message:

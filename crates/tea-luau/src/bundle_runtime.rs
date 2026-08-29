@@ -102,6 +102,25 @@ impl BundleRuntime {
         let entrypoint = self.bundle.manifest().entrypoint().clone();
         load_module(lua, &state, entrypoint)
     }
+
+    /// Evaluate and return one named module's value.
+    ///
+    /// The module resolves its own relative imports inside this bundle, so a
+    /// checked-in extension can factor shared code out of an executable
+    /// handler without gaining any authority beyond the closed bundle.
+    /// `install` must have succeeded on the same Lua state first.
+    pub fn eval_module(&self, lua: &Lua, path: &str) -> Result<Value, BundleRuntimeError> {
+        let state = installed_state(lua)?;
+        {
+            let guard = lock_state(&state)?;
+            if !Arc::ptr_eq(&guard.bundle, &self.bundle) {
+                return Err(BundleRuntimeError::BundleMismatch);
+            }
+        }
+        let path = ModulePath::new(path)
+            .map_err(|error| BundleRuntimeError::Resolve(ResolveError::InvalidPath(error)))?;
+        load_module(lua, &state, path)
+    }
 }
 
 fn installed_state(lua: &Lua) -> Result<RuntimeStateHandle, BundleRuntimeError> {

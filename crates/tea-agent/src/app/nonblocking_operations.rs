@@ -266,6 +266,7 @@ fn emit_capture_updates(
         updates.emit(ToolUpdate {
             content: String::from_utf8_lossy(&bytes[..read]).into_owned(),
             details: None,
+            activity: None,
         });
     }
     Ok(())

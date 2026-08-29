@@ -1,7 +1,25 @@
 //! Checked-in closed source trees for Tea's bundled extensions.
 
 use std::collections::{BTreeMap, BTreeSet};
-use tea_core::harness::extension::{ExtensionLimits, ExtensionSourceTree};
+use tea_core::harness::extension::{ExtensionLimits, ExtensionSourceTree, ExtensionToolLimits};
+
+/// Resource grant a host should give the bundled todo extension's
+/// `extension.state` binding.
+///
+/// One invocation parses, normalizes, transforms, encodes, and formats a plan
+/// of up to 128 items. Luau charges an interrupt per position scanned by a
+/// string pattern, so that work costs several passes over a document of some
+/// tens of kilobytes rather than the handful of checks a forwarding handler
+/// needs. The grant stays finite and adds no authority; it only makes the
+/// extension's own documented ceilings reachable. A host must still keep it
+/// within its frozen harness resource limits.
+pub fn todo_tool_limits() -> ExtensionToolLimits {
+    ExtensionToolLimits {
+        max_interrupt_checks: 200_000,
+        max_memory_bytes: 4 * 1024 * 1024,
+        ..ExtensionToolLimits::default()
+    }
+}
 
 /// Return the exact bundled goal extension source tree.
 ///
@@ -23,6 +41,46 @@ pub fn goal(limits: ExtensionLimits) -> ExtensionSourceTree {
             (
                 "prompts.luau".into(),
                 include_str!("../builtins/goal/prompts.luau").into(),
+            ),
+        ]),
+        expected_capabilities: Some(BTreeSet::from(["extension.state".into()])),
+        limits,
+    }
+}
+
+/// Return the exact bundled todo extension source tree.
+///
+/// Every todo semantic — Markdown parsing, ordering, identity allocation,
+/// recursive status transitions, automatic promotion, counts, and the bounded
+/// activity projection — lives in these Luau assets. Rust contributes only
+/// generic extension persistence and generic presentation plumbing.
+///
+/// `core.luau` holds that state machine exactly once: `init.luau` requires it
+/// for the read-only `/todos` command, and `handler.luau` requires it as the
+/// executable tool module, so the two can never drift apart.
+pub fn todo(limits: ExtensionLimits) -> ExtensionSourceTree {
+    ExtensionSourceTree {
+        extension_id: "todo".into(),
+        files: BTreeMap::from([
+            (
+                "manifest.json".into(),
+                include_str!("../builtins/todo/manifest.json").into(),
+            ),
+            (
+                "init.luau".into(),
+                include_str!("../builtins/todo/init.luau").into(),
+            ),
+            (
+                "prompts.luau".into(),
+                include_str!("../builtins/todo/prompts.luau").into(),
+            ),
+            (
+                "core.luau".into(),
+                include_str!("../builtins/todo/core.luau").into(),
+            ),
+            (
+                "handler.luau".into(),
+                include_str!("../builtins/todo/handler.luau").into(),
             ),
         ]),
         expected_capabilities: Some(BTreeSet::from(["extension.state".into()])),
@@ -234,7 +292,9 @@ mod tests {
             .iter()
             .find(|tool| tool.name == "edit")
             .expect("edit declaration exists");
-        assert!(edit.description.contains("parent directory must already exist"));
+        assert!(edit
+            .description
+            .contains("parent directory must already exist"));
         assert!(edit.requires_exclusive_batch);
         assert_eq!(
             edit.cancellation_settlement_mode,
@@ -392,16 +452,14 @@ mod tests {
             NEXT_WORKSPACE.fetch_add(1, Ordering::Relaxed),
         ));
         std::fs::create_dir_all(&workspace).expect("coding fixture workspace creates");
-        std::fs::write(workspace.join("precise.txt"), "before\n")
-            .expect("precise fixture writes");
+        std::fs::write(workspace.join("precise.txt"), "before\n").expect("precise fixture writes");
         std::fs::write(workspace.join("complete.txt"), "before\n")
             .expect("complete fixture writes");
         std::fs::write(workspace.join("mixed-precise.txt"), "before\n")
             .expect("mixed precise fixture writes");
         std::fs::write(workspace.join("mixed-complete.txt"), "before\n")
             .expect("mixed complete fixture writes");
-        std::fs::write(workspace.join("no-op.txt"), "unchanged\n")
-            .expect("no-op fixture writes");
+        std::fs::write(workspace.join("no-op.txt"), "unchanged\n").expect("no-op fixture writes");
 
         let limits = ExtensionLimits {
             max_source_bytes: 64 * 1024,
@@ -563,10 +621,13 @@ mod tests {
                         .and_then(|json| json.get("query"))
                         .and_then(tea_protocol::JsonValue::as_str);
                     if query == Some("rate") {
-                        response(429, tea_protocol::JsonValue::object([(
-                            "error",
-                            tea_protocol::JsonValue::String("quota exhausted".into()),
-                        )]))
+                        response(
+                            429,
+                            tea_protocol::JsonValue::object([(
+                                "error",
+                                tea_protocol::JsonValue::String("quota exhausted".into()),
+                            )]),
+                        )
                     } else if query == Some("large") {
                         response(
                             200,
@@ -576,11 +637,26 @@ mod tests {
                                     "data",
                                     tea_protocol::JsonValue::object([(
                                         "web",
-                                        tea_protocol::JsonValue::Array(vec![tea_protocol::JsonValue::object([
-                                            ("url", tea_protocol::JsonValue::String("https://large.example".into())),
-                                            ("title", tea_protocol::JsonValue::String("Large".into())),
-                                            ("markdown", tea_protocol::JsonValue::String("é".repeat(20_000))),
-                                        ])]),
+                                        tea_protocol::JsonValue::Array(vec![
+                                            tea_protocol::JsonValue::object([
+                                                (
+                                                    "url",
+                                                    tea_protocol::JsonValue::String(
+                                                        "https://large.example".into(),
+                                                    ),
+                                                ),
+                                                (
+                                                    "title",
+                                                    tea_protocol::JsonValue::String("Large".into()),
+                                                ),
+                                                (
+                                                    "markdown",
+                                                    tea_protocol::JsonValue::String(
+                                                        "é".repeat(20_000),
+                                                    ),
+                                                ),
+                                            ]),
+                                        ]),
                                     )]),
                                 ),
                             ]),
@@ -637,9 +713,7 @@ mod tests {
                     });
                 }
             };
-            Box::pin(async move {
-                Ok(ExtensionCapabilityResponse { value: response })
-            })
+            Box::pin(async move { Ok(ExtensionCapabilityResponse { value: response }) })
         }
     }
 
@@ -671,7 +745,12 @@ mod tests {
         assert_eq!(tree.extension_id, "web");
         assert_eq!(
             tree.files.keys().collect::<Vec<_>>(),
-            ["handler_source.luau", "init.luau", "manifest.json", "prompts.luau"]
+            [
+                "handler_source.luau",
+                "init.luau",
+                "manifest.json",
+                "prompts.luau"
+            ]
         );
         assert_eq!(
             tree.expected_capabilities,
@@ -719,21 +798,15 @@ mod tests {
             provenance: RunProvenance::default(),
         };
         let execute = |id: &str, arguments: &str| {
-            block_on(
-                resolved
-                    .tools
-                    .get("web")
-                    .expect("web resolves")
-                    .execute(
-                        ToolCall {
-                            id: ToolCallId::new(id).expect("call ID is valid"),
-                            name: "web".into(),
-                            arguments: SerializedJson::new(arguments),
-                        },
-                        context.clone(),
-                        ToolUpdateSink::disabled(),
-                    ),
-            )
+            block_on(resolved.tools.get("web").expect("web resolves").execute(
+                ToolCall {
+                    id: ToolCallId::new(id).expect("call ID is valid"),
+                    name: "web".into(),
+                    arguments: SerializedJson::new(arguments),
+                },
+                context.clone(),
+                ToolUpdateSink::disabled(),
+            ))
             .expect("web handler executes")
         };
 
@@ -742,7 +815,11 @@ mod tests {
         assert!(search.content.contains("Mode: developer"));
         assert!(search.content.contains("BEGIN UNTRUSTED WEB CONTENT"));
         let calls = fake.calls.lock().expect("fake web call lock");
-        assert_eq!(calls.len(), 1, "search with Markdown needs no follow-up scrape");
+        assert_eq!(
+            calls.len(),
+            1,
+            "search with Markdown needs no follow-up scrape"
+        );
         let search_json = calls[0].1.get("json").expect("search JSON request exists");
         assert_eq!(
             search_json
@@ -787,10 +864,7 @@ mod tests {
         assert!(general_json.get("categories").is_none());
         drop(calls);
 
-        let invalid = execute(
-            "web-invalid",
-            r#"{"query":"foo","action":"search"}"#,
-        );
+        let invalid = execute("web-invalid", r#"{"query":"foo","action":"search"}"#);
         assert!(invalid.is_error);
         assert!(invalid.content.contains("accepts only query"));
 
@@ -799,9 +873,18 @@ mod tests {
             r#"{"urls":["https://one.example","https://fail.example","https://three.example"]}"#,
         );
         assert!(!partial.is_error);
-        let first = partial.content.find("[1] Page 1").expect("first source remains first");
-        let failed = partial.content.find("[2] FAILED").expect("failure is represented in place");
-        let third = partial.content.find("[3] Page 3").expect("later source retains input index");
+        let first = partial
+            .content
+            .find("[1] Page 1")
+            .expect("first source remains first");
+        let failed = partial
+            .content
+            .find("[2] FAILED")
+            .expect("failure is represented in place");
+        let third = partial
+            .content
+            .find("[3] Page 3")
+            .expect("later source retains input index");
         assert!(first < failed && failed < third);
 
         let all_failed = execute(
@@ -829,7 +912,10 @@ mod tests {
         assert!(urls.content.contains("page 1 body"));
         assert!(urls.content.contains("page 2 body"));
         let calls = fake.calls.lock().expect("fake web call lock");
-        assert_eq!(calls.last().map(|call| call.0.as_str()), Some("request_many"));
+        assert_eq!(
+            calls.last().map(|call| call.0.as_str()),
+            Some("request_many")
+        );
         assert_eq!(
             calls
                 .last()
@@ -837,6 +923,89 @@ mod tests {
                 .and_then(tea_protocol::JsonValue::as_array)
                 .map(|requests| requests.len()),
             Some(2)
+        );
+    }
+
+    #[test]
+    fn todo_is_a_closed_deterministic_single_tool_bundle() {
+        let tree = todo(ExtensionLimits {
+            max_source_bytes: 64 * 1024,
+            max_memory_bytes: 4 * 1024 * 1024,
+            max_interrupt_checks: 250_000,
+        });
+        assert_eq!(tree.extension_id, "todo");
+        assert_eq!(
+            tree.files.keys().collect::<Vec<_>>(),
+            [
+                "core.luau",
+                "handler.luau",
+                "init.luau",
+                "manifest.json",
+                "prompts.luau"
+            ]
+        );
+        assert_eq!(
+            tree.expected_capabilities,
+            Some(BTreeSet::from(["extension.state".into()])),
+            "the todo extension requests durable state and nothing else"
+        );
+
+        let descriptor = LuauExtensionEngine
+            .describe(&tree)
+            .expect("bundled todo source resolves");
+        assert_eq!(
+            descriptor.requested_capabilities,
+            BTreeSet::from(["extension.state".into()])
+        );
+        assert_eq!(
+            descriptor
+                .tools
+                .iter()
+                .map(|tool| (tool.name.as_str(), tool.capability.as_str()))
+                .collect::<Vec<_>>(),
+            [("todo", "extension.state")],
+            "the model-facing surface is exactly one tool"
+        );
+        assert_eq!(
+            descriptor
+                .host_commands
+                .iter()
+                .map(|command| (command.name.as_str(), command.allowed_while_active))
+                .collect::<Vec<_>>(),
+            [("/todos", true)],
+            "the host surface is exactly one read-only command"
+        );
+        assert_eq!(descriptor.prompt_sections.len(), 1);
+        assert_eq!(descriptor.prompt_sections[0].id, "todo");
+
+        // The schema has no operation enum and no structural fields.
+        let schema = &descriptor.tools[0].schema;
+        let properties = schema
+            .get("properties")
+            .and_then(tea_protocol::JsonValue::as_object)
+            .expect("todo schema declares properties");
+        assert_eq!(
+            properties.keys().collect::<Vec<_>>(),
+            ["markdown", "updates"]
+        );
+        assert_eq!(
+            schema.get("additionalProperties"),
+            Some(&tea_protocol::JsonValue::Bool(false))
+        );
+        assert!(schema.get("required").is_none(), "empty arguments read");
+        let update = properties
+            .get("updates")
+            .and_then(|updates| updates.get("items"))
+            .expect("updates declares its item schema");
+        assert_eq!(
+            update
+                .get("properties")
+                .and_then(tea_protocol::JsonValue::as_object)
+                .expect("update items declare properties")
+                .keys()
+                .collect::<Vec<_>>(),
+            ["id", "reason", "status"],
+            "the model never sees parent_id, ordering, or pagination"
         );
     }
 

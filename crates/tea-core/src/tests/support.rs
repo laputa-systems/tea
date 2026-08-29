@@ -229,6 +229,7 @@ impl AgentTool for ParallelFixtureTool {
             updates.emit(crate::tool::ToolUpdate {
                 content: update.into(),
                 details: None,
+                activity: None,
             });
         }
         let result = AgentToolResult {

@@ -6,6 +6,7 @@ pub(super) use super::bindings::{CapabilityResponse, LuauCapability};
 use super::specs::{
     validate_limits, validate_spec, HandlerLimits, ToolHandlerInitError, ToolHandlerSpec,
 };
+use crate::bundle_runtime::BundleRuntime;
 use mlua::thread::ThreadStatus;
 use mlua::{Function, Lua, LuaOptions, StdLib, Table, Thread, Value};
 use std::collections::BTreeMap;
@@ -22,16 +23,39 @@ pub(super) use tea_core::scheduler::CancellationToken;
 use tea_core::scheduler::CancellationWait;
 use tea_core::state::{SerializedJson, ToolCallId, Usage};
 use tea_core::tool::{
-    AgentTool, AgentToolResult, ToolCall, ToolContext, ToolExecutionMode, ToolFuture,
+    AgentTool, AgentToolResult, ToolCall, ToolContext, ToolExecutionMode, ToolFuture, ToolUpdate,
     ToolUpdateSink,
 };
 use tea_protocol::{JsonNumber, JsonValue};
 
 const HANDLER_CHUNK_NAME: &str = "tea-tool-handler.luau";
 
+/// Largest presentation payload one handler yield may hand to the host.
+///
+/// Activity text is transient terminal presentation, never durable state or
+/// model context, so it is bounded independently of result/detail limits.
+pub(super) const MAX_ACTIVITY_BYTES: usize = 8 * 1024;
+
+/// Where one handler's executable Luau comes from.
+#[derive(Clone)]
+enum HandlerProgram {
+    /// A self-contained chunk evaluated with no module loader at all.
+    Source(Arc<str>),
+    /// A module inside the extension's own closed bundle.
+    ///
+    /// The invocation VM installs that bundle's `require`, so a checked-in
+    /// extension can factor shared logic into sibling modules instead of
+    /// duplicating it. The loader resolves only bundle-local `./` and `../`
+    /// imports, so this adds no filesystem, package, or host authority.
+    Module {
+        runtime: Arc<BundleRuntime>,
+        path: String,
+    },
+}
+
 /// A sandboxed coroutine-backed implementation of [`AgentTool`].
 pub struct LuaToolHandler {
-    source: Arc<str>,
+    program: HandlerProgram,
     spec: ToolHandlerSpec,
     capabilities: CapabilityBindings,
     limits: HandlerLimits,
@@ -80,12 +104,58 @@ impl LuaToolHandler {
         capabilities: CapabilityBindings,
         limits: HandlerLimits,
     ) -> Result<Self, ToolHandlerInitError> {
+        let source: Arc<str> = source.into().into();
+        Self::load(
+            HandlerProgram::Source(Arc::clone(&source)),
+            source.len(),
+            spec,
+            capabilities,
+            limits,
+        )
+    }
+
+    /// Load a handler from one module of its own closed extension bundle.
+    ///
+    /// The module may `require` sibling modules from the same bundle and
+    /// nothing else. This exists so an extension can share one definition of
+    /// its semantics between an executable handler and its policy VM.
+    pub fn new_bundle_module(
+        runtime: Arc<BundleRuntime>,
+        path: impl Into<String>,
+        spec: ToolHandlerSpec,
+        capabilities: CapabilityBindings,
+        limits: HandlerLimits,
+    ) -> Result<Self, ToolHandlerInitError> {
+        let path = path.into();
+        // The declared entry module must exist before anything else is
+        // validated, so a typo is a load-time contract error.
+        let source_bytes = crate::bundle::ModulePath::new(&path)
+            .ok()
+            .and_then(|module| runtime.bundle().module(&module).map(str::len))
+            .ok_or_else(|| ToolHandlerInitError::Contract {
+                message: format!("handler module {path:?} is not part of the extension bundle"),
+            })?;
+        Self::load(
+            HandlerProgram::Module { runtime, path },
+            source_bytes,
+            spec,
+            capabilities,
+            limits,
+        )
+    }
+
+    fn load(
+        program: HandlerProgram,
+        source_bytes: usize,
+        spec: ToolHandlerSpec,
+        capabilities: CapabilityBindings,
+        limits: HandlerLimits,
+    ) -> Result<Self, ToolHandlerInitError> {
         validate_limits(limits)?;
         validate_spec(&spec)?;
-        let source: Arc<str> = source.into().into();
-        if source.len() > limits.max_source_bytes {
+        if source_bytes > limits.max_source_bytes {
             return Err(ToolHandlerInitError::SourceTooLarge {
-                actual: source.len(),
+                actual: source_bytes,
                 limit: limits.max_source_bytes,
             });
         }
@@ -97,10 +167,10 @@ impl LuaToolHandler {
 
         // Compile once at construction so a malformed handler never reaches
         // the registry. Each actual invocation gets a fresh VM below.
-        build_runtime(&source, limits)?;
+        build_runtime(&program, limits)?;
 
         Ok(Self {
-            source,
+            program,
             spec,
             capabilities,
             limits,
@@ -155,6 +225,7 @@ impl AgentTool for LuaToolHandler {
             resume_value: None,
             cancellation_wait: Some(cancellation_wait),
             capability_calls: 0,
+            observable_yields: 0,
         })
     }
 }
@@ -177,6 +248,10 @@ struct LuaToolExecution<'a> {
     resume_value: Option<JsonValue>,
     cancellation_wait: Option<CancellationWait>,
     capability_calls: usize,
+    /// Every externally observable yield, whether it invoked a host capability
+    /// or only replaced host presentation. One finite budget keeps a handler
+    /// from driving an unbounded host-update loop.
+    observable_yields: usize,
 }
 
 impl Future for LuaToolExecution<'_> {
@@ -221,7 +296,7 @@ impl Future for LuaToolExecution<'_> {
             }
 
             if this.runtime.is_none() {
-                let runtime = match build_runtime(&this.handler.source, this.handler.limits) {
+                let runtime = match build_runtime(&this.handler.program, this.handler.limits) {
                     Ok(runtime) => runtime,
                     Err(error) => {
                         return Poll::Ready(Err(ToolError::Execution {
@@ -285,7 +360,7 @@ impl Future for LuaToolExecution<'_> {
 
             match status {
                 ThreadStatus::Resumable => {
-                    let request = match parse_capability_request(
+                    let yielded = match parse_handler_yield(
                         yielded_or_returned,
                         this.call
                             .as_ref()
@@ -304,13 +379,34 @@ impl Future for LuaToolExecution<'_> {
                             .clone(),
                         this.updates.clone(),
                     ) {
-                        Ok(request) => request,
+                        Ok(yielded) => yielded,
                         Err(message) => {
                             return Poll::Ready(Err(ToolError::Execution {
                                 tool: tool_name,
                                 message,
                             }));
                         }
+                    };
+                    let request = match yielded {
+                        HandlerYield::Update(update) => {
+                            if this.observable_yields == this.handler.limits.max_capability_calls {
+                                return Poll::Ready(Err(ToolError::Execution {
+                                    tool: tool_name,
+                                    message: format!(
+                                        "Luau handler exceeded its {} yield limit",
+                                        this.handler.limits.max_capability_calls
+                                    ),
+                                }));
+                            }
+                            this.observable_yields += 1;
+                            // A presentation update invokes no host capability
+                            // and carries no authority: publish it and resume
+                            // the coroutine immediately.
+                            this.updates.emit(update);
+                            this.resume_value = Some(JsonValue::Null);
+                            continue;
+                        }
+                        HandlerYield::Capability(request) => request,
                     };
                     if request.capability != this.handler.spec.capability {
                         return Poll::Ready(Err(ToolError::Blocked {
@@ -340,7 +436,17 @@ impl Future for LuaToolExecution<'_> {
                             ),
                         }));
                     }
+                    if this.observable_yields == this.handler.limits.max_capability_calls {
+                        return Poll::Ready(Err(ToolError::Execution {
+                            tool: tool_name,
+                            message: format!(
+                                "Luau handler exceeded its {} yield limit",
+                                this.handler.limits.max_capability_calls
+                            ),
+                        }));
+                    }
                     this.capability_calls += 1;
+                    this.observable_yields += 1;
                     this.capability_future = Some(capability.invoke(request, cancellation));
                 }
                 ThreadStatus::Finished => {
@@ -390,7 +496,7 @@ struct LuaToolResult {
 }
 
 fn build_runtime(
-    source: &str,
+    program: &HandlerProgram,
     limits: HandlerLimits,
 ) -> Result<InvocationRuntime, ToolHandlerInitError> {
     let lua = Lua::new_with(
@@ -401,6 +507,15 @@ fn build_runtime(
     lua.set_memory_limit(limits.max_memory_bytes)
         .map_err(runtime_error)?;
     lua.enable_jit(true);
+    if let HandlerProgram::Module { runtime, .. } = program {
+        // The closed bundle loader must be installed before sandboxing makes
+        // globals read-only.
+        runtime
+            .install(&lua)
+            .map_err(|error| ToolHandlerInitError::Runtime {
+                message: error.to_string(),
+            })?;
+    }
     lua.sandbox(true).map_err(runtime_error)?;
 
     let interrupt_budget = Arc::new(AtomicUsize::new(limits.max_interrupt_checks));
@@ -419,11 +534,30 @@ fn build_runtime(
         Ok(mlua::VmState::Continue)
     });
 
-    let function: Function = lua
-        .load(source)
-        .set_name(HANDLER_CHUNK_NAME)
-        .eval()
-        .map_err(runtime_error)?;
+    let function: Function = match program {
+        HandlerProgram::Source(source) => lua
+            .load(&**source)
+            .set_name(HANDLER_CHUNK_NAME)
+            .eval()
+            .map_err(runtime_error)?,
+        HandlerProgram::Module { runtime, path } => {
+            match runtime.eval_module(&lua, path).map_err(|error| {
+                ToolHandlerInitError::Runtime {
+                    message: error.to_string(),
+                }
+            })? {
+                Value::Function(function) => function,
+                other => {
+                    return Err(ToolHandlerInitError::Contract {
+                        message: format!(
+                            "handler module {path:?} returned {}, expected a function",
+                            other.type_name()
+                        ),
+                    });
+                }
+            }
+        }
+    };
     let thread = lua.create_thread(function).map_err(runtime_error)?;
     Ok(InvocationRuntime {
         _lua: lua,
@@ -499,26 +633,86 @@ fn provenance_to_lua(lua: &Lua, provenance: &RunProvenance) -> mlua::Result<Tabl
     Ok(table)
 }
 
-fn parse_capability_request(
+/// What a suspended handler asked the host to do before it resumes.
+enum HandlerYield {
+    /// Invoke the one capability explicitly bound to this tool.
+    Capability(CapabilityRequest),
+    /// Replace transient host presentation. This performs no host operation,
+    /// produces no model-visible result, and never becomes durable state.
+    Update(ToolUpdate),
+}
+
+fn parse_handler_yield(
     value: Value,
     call_id: ToolCallId,
     tool_name: String,
     provenance: RunProvenance,
     updates: ToolUpdateSink,
-) -> Result<CapabilityRequest, String> {
+) -> Result<HandlerYield, String> {
     let table = match value {
         Value::Table(table) => table,
         other => {
             return Err(format!(
-                "handler yielded {}, expected a capability table",
+                "handler yielded {}, expected a capability or update table",
                 other.type_name()
             ));
         }
     };
     let kind = required_string(&table, "kind")?;
-    if kind != "capability" {
-        return Err(format!("handler yielded unsupported request kind {kind:?}"));
+    match kind.as_str() {
+        "capability" => parse_capability_request(table, call_id, tool_name, provenance, updates)
+            .map(HandlerYield::Capability),
+        "update" => parse_update(table).map(HandlerYield::Update),
+        _ => Err(format!("handler yielded unsupported request kind {kind:?}")),
     }
+}
+
+/// Read one presentation-only update yield.
+///
+/// The shape is deliberately closed: an unknown field is a contract error
+/// rather than a silently ignored request for host behavior that does not
+/// exist.
+fn parse_update(table: Table) -> Result<ToolUpdate, String> {
+    for pair in table.clone().pairs::<Value, Value>() {
+        let (key, _) = pair.map_err(|error| format!("update yield table is invalid: {error}"))?;
+        let Value::String(key) = key else {
+            return Err("update yield fields must be named by strings".into());
+        };
+        let key = key
+            .to_str()
+            .map_err(|error| format!("update yield field is not UTF-8: {error}"))?
+            .to_owned();
+        if !matches!(key.as_str(), "kind" | "content" | "activity") {
+            return Err(format!("update yield has unknown field {key:?}"));
+        }
+    }
+    let content = optional_exact_string(&table, "content")?;
+    let activity = optional_exact_string(&table, "activity")?;
+    if content.is_none() && activity.is_none() {
+        return Err("update yield requires content, activity, or both".into());
+    }
+    if activity
+        .as_ref()
+        .is_some_and(|activity| activity.len() > MAX_ACTIVITY_BYTES)
+    {
+        return Err(format!(
+            "update activity exceeds {MAX_ACTIVITY_BYTES} bytes"
+        ));
+    }
+    Ok(ToolUpdate {
+        content: content.unwrap_or_default(),
+        details: None,
+        activity,
+    })
+}
+
+fn parse_capability_request(
+    table: Table,
+    call_id: ToolCallId,
+    tool_name: String,
+    provenance: RunProvenance,
+    updates: ToolUpdateSink,
+) -> Result<CapabilityRequest, String> {
     let capability = required_string(&table, "capability")?;
     let method = required_string(&table, "method")?;
     let has_structured_arguments = table
@@ -662,6 +856,26 @@ fn parse_tool_result(value: Value) -> Result<LuaToolResult, String> {
         terminate,
         is_error,
     })
+}
+
+/// Read an absent-or-string field without Lua's implicit number coercion, so a
+/// handler bug becomes a deterministic contract error instead of presentation
+/// text the extension never wrote.
+fn optional_exact_string(table: &Table, field: &str) -> Result<Option<String>, String> {
+    match table
+        .get::<Value>(field)
+        .map_err(|error| format!("update {field} is invalid: {error}"))?
+    {
+        Value::Nil => Ok(None),
+        Value::String(value) => value
+            .to_str()
+            .map(|value| Some(value.to_owned()))
+            .map_err(|error| format!("update {field} is not UTF-8: {error}")),
+        other => Err(format!(
+            "update {field} must be a string, not {}",
+            other.type_name()
+        )),
+    }
 }
 
 fn required_string(table: &Table, field: &str) -> Result<String, String> {
@@ -1079,6 +1293,297 @@ mod tests {
             })
         );
         assert_eq!(drops.load(Ordering::Relaxed), 1);
+    }
+
+    fn collecting_sink() -> (ToolUpdateSink, Arc<std::sync::Mutex<Vec<ToolUpdate>>>) {
+        let collected = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink_updates = Arc::clone(&collected);
+        (
+            ToolUpdateSink::new(move |update| {
+                sink_updates
+                    .lock()
+                    .expect("update collection is uncontended")
+                    .push(update)
+            }),
+            collected,
+        )
+    }
+
+    fn denied_capability() -> Arc<dyn LuauCapability> {
+        Arc::new(EchoCapability {
+            calls: Arc::new(AtomicUsize::new(0)),
+            response: Ok(CapabilityResponse {
+                value: JsonValue::Null,
+            }),
+        })
+    }
+
+    #[test]
+    fn update_yield_publishes_presentation_without_invoking_a_capability() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let capability = Arc::new(EchoCapability {
+            calls: Arc::clone(&calls),
+            response: Ok(CapabilityResponse {
+                value: JsonValue::Null,
+            }),
+        });
+        let handler = LuaToolHandler::new(
+            r#"
+                return function(_)
+                    local resumed = coroutine.yield({
+                        kind = "update",
+                        activity = "Doing something useful",
+                    })
+                    return { content = "settled:" .. tostring(resumed) }
+                end
+            "#,
+            spec(),
+            bindings(capability),
+        )
+        .expect("handler should load");
+        let (sink, collected) = collecting_sink();
+
+        let result = run_to_completion(handler.execute(
+            tool_call(),
+            ToolContext {
+                cancellation: CancellationToken::new(),
+                provenance: RunProvenance::default(),
+            },
+            sink,
+        ))
+        .expect("handler should complete after publishing an update");
+
+        assert_eq!(result.content, "settled:nil");
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            *collected.lock().expect("collected updates"),
+            vec![ToolUpdate {
+                content: String::new(),
+                details: None,
+                activity: Some("Doing something useful".to_owned()),
+            }]
+        );
+    }
+
+    #[test]
+    fn update_and_capability_yields_compose_in_one_invocation() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let capability = Arc::new(EchoCapability {
+            calls: Arc::clone(&calls),
+            response: Ok(CapabilityResponse {
+                value: JsonValue::from("capability-ok"),
+            }),
+        });
+        let handler = LuaToolHandler::new(
+            r#"
+                return function(call)
+                    coroutine.yield({ kind = "update", content = "progress", activity = "before" })
+                    local response = coroutine.yield({
+                        kind = "capability",
+                        capability = "world",
+                        method = "echo",
+                        arguments_json = call.arguments_json,
+                    })
+                    coroutine.yield({ kind = "update", activity = "after" })
+                    return { content = response }
+                end
+            "#,
+            spec(),
+            bindings(capability),
+        )
+        .expect("handler should load");
+        let (sink, collected) = collecting_sink();
+
+        let result = run_to_completion(handler.execute(
+            tool_call(),
+            ToolContext {
+                cancellation: CancellationToken::new(),
+                provenance: RunProvenance::default(),
+            },
+            sink,
+        ))
+        .expect("handler should complete");
+
+        assert_eq!(result.content, "capability-ok");
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        let collected = collected.lock().expect("collected updates");
+        assert_eq!(
+            collected
+                .iter()
+                .map(|update| (update.content.as_str(), update.activity.as_deref()))
+                .collect::<Vec<_>>(),
+            [("progress", Some("before")), ("", Some("after"))],
+        );
+    }
+
+    #[test]
+    fn presentation_yields_share_one_finite_budget_with_capability_calls() {
+        let handler = LuaToolHandler::new_with_limits(
+            r#"
+                return function(_)
+                    for _ = 1, 4 do
+                        coroutine.yield({ kind = "update", activity = "loop" })
+                    end
+                    return { content = "unreachable" }
+                end
+            "#,
+            spec(),
+            bindings(denied_capability()),
+            HandlerLimits {
+                max_capability_calls: 2,
+                ..HandlerLimits::default()
+            },
+        )
+        .expect("bounded handler should load");
+        let (sink, collected) = collecting_sink();
+
+        let error = run_to_completion(handler.execute(
+            tool_call(),
+            ToolContext {
+                cancellation: CancellationToken::new(),
+                provenance: RunProvenance::default(),
+            },
+            sink,
+        ))
+        .expect_err("an unbounded host-update loop must be refused");
+        assert_eq!(
+            error,
+            ToolError::Execution {
+                tool: "echo_tool".to_owned(),
+                message: "Luau handler exceeded its 2 yield limit".to_owned(),
+            }
+        );
+        assert_eq!(collected.lock().expect("collected updates").len(), 2);
+    }
+
+    #[test]
+    fn oversized_activity_payloads_are_refused() {
+        let handler = LuaToolHandler::new(
+            &format!(
+                "return function(_) coroutine.yield({{ kind = \"update\", activity = string.rep(\"a\", {}) }}) return 'unreachable' end",
+                MAX_ACTIVITY_BYTES + 1
+            ),
+            spec(),
+            bindings(denied_capability()),
+        )
+        .expect("handler should load");
+        let (sink, collected) = collecting_sink();
+
+        let error = run_to_completion(handler.execute(
+            tool_call(),
+            ToolContext {
+                cancellation: CancellationToken::new(),
+                provenance: RunProvenance::default(),
+            },
+            sink,
+        ))
+        .expect_err("an oversized presentation payload must be refused");
+        assert_eq!(
+            error,
+            ToolError::Execution {
+                tool: "echo_tool".to_owned(),
+                message: format!("update activity exceeds {MAX_ACTIVITY_BYTES} bytes"),
+            }
+        );
+        assert!(collected.lock().expect("collected updates").is_empty());
+    }
+
+    #[test]
+    fn malformed_update_yields_are_rejected_deterministically() {
+        for (source, message) in [
+            (
+                r#"coroutine.yield({ kind = "update" })"#,
+                "update yield requires content, activity, or both",
+            ),
+            (
+                r#"coroutine.yield({ kind = "update", activity = 7 })"#,
+                "update activity must be a string",
+            ),
+            (
+                r#"coroutine.yield({ kind = "update", activity = "ok", capability = "world" })"#,
+                "update yield has unknown field \"capability\"",
+            ),
+            (
+                r#"coroutine.yield({ kind = "presentation", activity = "ok" })"#,
+                "handler yielded unsupported request kind \"presentation\"",
+            ),
+        ] {
+            let handler = LuaToolHandler::new(
+                &format!("return function(_) {source} return 'unreachable' end"),
+                spec(),
+                bindings(denied_capability()),
+            )
+            .expect("handler should load");
+            let (sink, collected) = collecting_sink();
+            let error = run_to_completion(handler.execute(
+                tool_call(),
+                ToolContext {
+                    cancellation: CancellationToken::new(),
+                    provenance: RunProvenance::default(),
+                },
+                sink,
+            ))
+            .expect_err("a malformed update yield must not settle successfully");
+            let ToolError::Execution {
+                message: actual, ..
+            } = error
+            else {
+                panic!("a malformed update yield is an execution contract failure");
+            };
+            assert!(
+                actual.starts_with(message),
+                "expected {actual:?} to start with {message:?}"
+            );
+            assert!(collected.lock().expect("collected updates").is_empty());
+        }
+    }
+
+    #[test]
+    fn cancellation_still_settles_a_handler_that_publishes_presentation() {
+        let handler = LuaToolHandler::new(
+            r#"
+                return function(call)
+                    coroutine.yield({ kind = "update", activity = "starting" })
+                    local response = coroutine.yield({
+                        kind = "capability",
+                        capability = "world",
+                        method = "never",
+                        arguments_json = call.arguments_json,
+                    })
+                    return { content = response }
+                end
+            "#,
+            spec(),
+            bindings(Arc::new(PendingCapability {
+                drops: Arc::new(AtomicUsize::new(0)),
+            })),
+        )
+        .expect("handler should load");
+        let cancellation = CancellationToken::new();
+        let (sink, collected) = collecting_sink();
+        let mut future = handler.execute(
+            tool_call(),
+            ToolContext {
+                cancellation: cancellation.clone(),
+                provenance: RunProvenance::default(),
+            },
+            sink,
+        );
+        let waker = noop_waker();
+        let mut context = Context::from_waker(&waker);
+        assert!(Pin::new(&mut future).poll(&mut context).is_pending());
+        assert_eq!(collected.lock().expect("collected updates").len(), 1);
+
+        cancellation.cancel();
+        let Poll::Ready(result) = Pin::new(&mut future).poll(&mut context) else {
+            panic!("cancellation should settle the pending handler");
+        };
+        assert_eq!(
+            result,
+            Err(ToolError::Cancelled {
+                tool: "echo_tool".to_owned()
+            })
+        );
     }
 
     #[test]

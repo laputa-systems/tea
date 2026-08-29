@@ -607,6 +607,7 @@ fn execute_local_command(
         updates.emit(ToolUpdate {
             content: String::from_utf8_lossy(&update).into_owned(),
             details: None,
+            activity: None,
         });
     }
     Ok(CommandOutput {
@@ -784,7 +785,9 @@ mod tests {
         ));
 
         assert_eq!(
-            result.expect_err("cancelled traversal does not read the directory").message(),
+            result
+                .expect_err("cancelled traversal does not read the directory")
+                .message(),
             "cancelled"
         );
         let _ = fs::remove_dir_all(root);

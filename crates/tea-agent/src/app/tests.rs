@@ -1263,6 +1263,7 @@ fn event_projection_groups_a_tool_lifecycle_in_one_readable_row() {
             update: ToolUpdate {
                 content: "compiling".into(),
                 details: None,
+                activity: None,
             },
         },
     ));
@@ -2317,16 +2318,167 @@ fn command_completion_includes_models_resume_and_new_session_commands() {
 fn bundled_extension_commands_feed_completion_and_help() {
     let mut app = App::new(CliOptions::default());
     app.state.set_extension_commands(
-        super::durable::bundled_host_commands().expect("goal bundle resolves"),
+        super::durable::bundled_host_commands().expect("bundled extensions resolve"),
     );
-    app.state.composer_mut().insert_str("/go").expect("prefix");
-    app.complete_command();
-    assert_eq!(app.state.composer().text(), "/goal ");
+    for (prefix, completed) in [("/go", "/goal "), ("/to", "/todos ")] {
+        app.state.composer_mut().clear();
+        app.state.composer_mut().insert_str(prefix).expect("prefix");
+        app.complete_command();
+        assert_eq!(app.state.composer().text(), completed);
+    }
 
     app.dispatch_command("/help")
         .expect("help dispatch succeeds");
-    assert!(app
+    let lines = app
         .state
         .surface_lines()
-        .is_some_and(|lines| { lines.iter().any(|line| line.contains("/goal")) }));
+        .expect("help lists commands")
+        .to_vec();
+    for command in ["/goal", "/todos"] {
+        assert!(
+            lines.iter().any(|line| line.contains(command)),
+            "help should list {command}"
+        );
+    }
+}
+
+fn projection_event(
+    sequence: u64,
+    kind: tea_core::event::AgentEventKind,
+) -> tea_core::event::AgentEvent {
+    tea_core::event::AgentEvent {
+        run_id: tea_core::state::RunId(1),
+        sequence: tea_core::event::EventSequence(sequence),
+        kind,
+    }
+}
+
+fn tool_update(
+    sequence: u64,
+    tool: &str,
+    content: &str,
+    activity: Option<&str>,
+) -> tea_core::event::AgentEvent {
+    projection_event(
+        sequence,
+        tea_core::event::AgentEventKind::ToolExecutionUpdate {
+            tool_call_id: ToolCallId::new(format!("call-{sequence}")).expect("fixture call id"),
+            tool_name: tool.into(),
+            update: ToolUpdate {
+                content: content.into(),
+                details: None,
+                activity: activity.map(str::to_owned),
+            },
+        },
+    )
+}
+
+#[test]
+fn a_published_activity_survives_the_rest_of_its_root_operation() {
+    let mut state = AppState::new();
+    state.apply_event(&projection_event(
+        1,
+        tea_core::event::AgentEventKind::AgentStart,
+    ));
+    state.apply_event(&tool_update(
+        2,
+        "todo",
+        "",
+        Some("Todo · 1 active\n- [>] Work"),
+    ));
+    assert_eq!(state.activity_text(), Some("Todo · 1 active\n- [>] Work"));
+
+    // The publishing tool settles.
+    let call_id = ToolCallId::new("call-2").expect("fixture call id");
+    state.apply_event(&projection_event(
+        3,
+        tea_core::event::AgentEventKind::ToolExecutionEnd {
+            tool_call_id: call_id.clone(),
+            tool_name: "todo".into(),
+            result: AgentToolResult {
+                tool_call_id: call_id,
+                content: "Completed #1.".into(),
+                details: None,
+                usage: None,
+                added_tool_names: Vec::new(),
+                terminate: false,
+                is_error: false,
+                failure: None,
+            },
+        },
+    ));
+    // Later assistant thinking and an unrelated streaming tool must not clear it.
+    state.apply_event(&projection_event(
+        4,
+        tea_core::event::AgentEventKind::MessageUpdate {
+            message: AgentMessage::Assistant {
+                id: MessageId(2),
+                content: "thinking".into(),
+                tool_calls: Vec::new(),
+                stop_reason: None,
+                error_message: None,
+            },
+            text_delta: Some("thinking".into()),
+        },
+    ));
+    state.apply_event(&tool_update(5, "bash", "compiling", None));
+    assert_eq!(
+        state.activity_text(),
+        Some("Todo · 1 active\n- [>] Work"),
+        "an unrelated update without an activity claim must not clear it"
+    );
+
+    // A new independent root operation starts with no stale presentation.
+    state.apply_event(&projection_event(
+        6,
+        tea_core::event::AgentEventKind::AgentStart,
+    ));
+    assert_eq!(state.activity_text(), None);
+}
+
+#[test]
+fn published_activity_cannot_rewrite_the_host_terminal() {
+    let mut state = AppState::new();
+    state.apply_event(&projection_event(
+        1,
+        tea_core::event::AgentEventKind::AgentStart,
+    ));
+    state.apply_event(&tool_update(
+        2,
+        "todo",
+        "",
+        Some("Todo\u{1b}[2J\r · 1 active\n- [>] Work\u{7}"),
+    ));
+    assert_eq!(
+        state.activity_text(),
+        Some("Todo [2J  · 1 active\n- [>] Work ")
+    );
+}
+
+#[test]
+fn a_presentation_only_update_does_not_create_a_tool_progress_row() {
+    let mut state = AppState::new();
+    state.apply_event(&projection_event(
+        1,
+        tea_core::event::AgentEventKind::AgentStart,
+    ));
+    state.apply_event(&tool_update(2, "todo", "", Some("Todo · empty")));
+    assert!(state.transcript().is_empty());
+    state.apply_event(&tool_update(3, "bash", "compiling", None));
+    assert_eq!(state.transcript().len(), 1);
+}
+
+#[test]
+fn a_multi_line_extension_notice_becomes_a_scrollable_transcript_row() {
+    let mut state = AppState::new();
+    state.extension_notice("Goal (active): finish the work".into());
+    assert!(state.transcript().is_empty());
+    assert!(matches!(state.status(), UiStatus::Notice(text) if text.contains("Goal")));
+
+    state.extension_notice("TODO · 1 active\n\n- [>] #1 Work".into());
+    assert_eq!(state.transcript().len(), 1);
+    assert!(matches!(
+        &state.transcript()[0],
+        TranscriptEntry::Notice { text, .. } if text.contains("- [>] #1 Work")
+    ));
 }

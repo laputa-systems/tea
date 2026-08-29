@@ -841,6 +841,7 @@ mod tests {
                 update: ToolUpdate {
                     content: "partial".into(),
                     details: Some(crate::state::SerializedJson::new("null")),
+                    activity: None,
                 },
             },
         );

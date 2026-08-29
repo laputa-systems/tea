@@ -135,16 +135,14 @@ impl App {
                 // the main-screen status frame; the alternate surface is
                 // temporary and is not meaningful shell scrollback.
                 self.state.close_surface();
-                let shutdown_result = self
-                    .redraw(&mut terminal)
-                    .and_then(|()| {
-                        terminal
-                            .renderer_mut()
-                            .map_err(AppError::from)?
-                            .commit_live()
-                            .map_err(TerminalError::Io)
-                            .map_err(AppError::from)
-                    });
+                let shutdown_result = self.redraw(&mut terminal).and_then(|()| {
+                    terminal
+                        .renderer_mut()
+                        .map_err(AppError::from)?
+                        .commit_live()
+                        .map_err(TerminalError::Io)
+                        .map_err(AppError::from)
+                });
                 match shutdown_result {
                     Ok(()) => loop_result,
                     Err(error) => Err(error),
@@ -572,7 +570,7 @@ impl App {
             match harness.dispatch_extension_command(&command, arguments) {
                 Ok(dispatch) => {
                     if let Some(notice) = dispatch.result.notice {
-                        self.state.notice(notice);
+                        self.state.extension_notice(notice);
                     }
                     if let Some(input) = dispatch.result.internal_input {
                         if continuation.is_some() {

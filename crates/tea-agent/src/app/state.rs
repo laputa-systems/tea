@@ -184,6 +184,14 @@ pub struct AppState {
     pub(super) subagent_activity: Option<(u32, u32)>,
     /// Reasoning effort used by future prompts.
     pub(super) thinking_level: ThinkingLevel,
+    /// Transient activity text published by a running tool.
+    ///
+    /// This is presentation only: it is never durable, never model context,
+    /// and never enters scrollback. It replaces the default activity row for
+    /// the rest of the current root operation, survives that tool call and any
+    /// later thinking or unrelated tool calls, and is cleared when a new
+    /// independent operation begins.
+    pub(super) activity_text: Option<String>,
 }
 
 /// State for the literal-prefix slash completion menu.
@@ -267,7 +275,13 @@ impl AppState {
     pub fn apply_event(&mut self, event: &AgentEvent) {
         let sequence = Some(event.sequence.0);
         match &event.kind {
-            AgentEventKind::AgentStart => self.status = UiStatus::Active,
+            AgentEventKind::AgentStart => {
+                self.status = UiStatus::Active;
+                // A new independent operation starts with no activity claim.
+                // Stale presentation from the previous operation would outlive
+                // the work it described.
+                self.activity_text = None;
+            }
             AgentEventKind::MessageStart { message } => {
                 if let AgentMessage::User { content, .. } = message {
                     self.push_entry(
@@ -368,14 +382,21 @@ impl AppState {
                 tool_name,
                 update,
             } => {
-                self.update_tool_line(
-                    tool_call_id,
-                    sequence,
-                    tool_name,
-                    ToolState::Progress,
-                    Some(update.content.clone()),
-                    None,
-                );
+                // An update with no activity claim leaves the current
+                // presentation alone; only an explicit value replaces it.
+                if let Some(activity) = &update.activity {
+                    self.activity_text = Some(sanitize_activity(activity));
+                }
+                if !update.content.is_empty() {
+                    self.update_tool_line(
+                        tool_call_id,
+                        sequence,
+                        tool_name,
+                        ToolState::Progress,
+                        Some(update.content.clone()),
+                        None,
+                    );
+                }
             }
             AgentEventKind::ToolExecutionEnd {
                 tool_call_id,
@@ -854,6 +875,11 @@ impl AppState {
         self.thinking_level
     }
 
+    /// Borrow the transient activity override published by a running tool.
+    pub(crate) fn activity_text(&self) -> Option<&str> {
+        self.activity_text.as_deref()
+    }
+
     /// Return the transient footer notice separately from the stable model line.
     pub(crate) fn footer_notice(&self) -> Option<(&str, bool)> {
         match &self.status {
@@ -976,6 +1002,26 @@ impl AppState {
 
     pub(super) fn notice(&mut self, text: impl Into<String>) {
         self.status = UiStatus::Notice(text.into());
+    }
+
+    /// Present one extension command's notice.
+    ///
+    /// A single-line notice stays in the transient footer, exactly as before.
+    /// A multi-line notice is a small printed document rather than a status
+    /// line, so it becomes a scrollable transcript row instead of text the
+    /// footer cannot show.
+    pub(super) fn extension_notice(&mut self, text: String) {
+        if text.contains('\n') {
+            self.push_entry(
+                None,
+                TranscriptEntry::Notice {
+                    text,
+                    severity: NoticeSeverity::Info,
+                },
+            );
+        } else {
+            self.notice(text);
+        }
     }
 
     pub(crate) fn welcome_line(&mut self) {
@@ -1170,6 +1216,9 @@ impl AppState {
     }
 
     pub(super) fn clear_transcript(&mut self) {
+        // Activity is a projection of the operation that published it, not of
+        // durable state, so a replaced transcript never inherits it.
+        self.activity_text = None;
         self.transcript.clear();
         self.transcript_sequences.clear();
         self.streaming_line = None;
@@ -1197,6 +1246,24 @@ impl AppState {
             .saturating_add(lines)
             .min(self.surface_lines.len().saturating_sub(1));
     }
+}
+
+/// Keep tool-published presentation from rewriting the host terminal.
+///
+/// Line breaks are meaningful because activity may be a small document; every
+/// other control character is replaced rather than rejected, since a running
+/// tool's display text must never be able to move the cursor or change modes.
+fn sanitize_activity(activity: &str) -> String {
+    activity
+        .chars()
+        .map(|character| {
+            if character == '\n' || !character.is_control() {
+                character
+            } else {
+                ' '
+            }
+        })
+        .collect()
 }
 
 fn full_transcript_detail_lines(entries: &[TranscriptEntry]) -> Vec<String> {

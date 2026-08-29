@@ -463,7 +463,7 @@ impl App {
         match harness.dispatch_extension_command(command, arguments) {
             Ok(dispatch) => {
                 if let Some(notice) = dispatch.result.notice {
-                    self.state.notice(notice);
+                    self.state.extension_notice(notice);
                 }
                 if let Some(input) = dispatch.result.internal_input {
                     self.spawn_extension_continuation(harness, dispatch.extension_id, input);

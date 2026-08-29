@@ -68,12 +68,20 @@ pub(super) type HostHarness = SessionSupervisor<JsonlSession>;
 /// same immutable source tree and extension engine later pinned in the
 /// durable harness; it does not create a shadow command implementation.
 pub(super) fn bundled_host_commands() -> Result<Vec<ExtensionHostCommandDescription>, AppError> {
-    LuauExtensionEngine
-        .describe(&tea_luau::builtins::goal(extension_limits(
-            &HarnessResourceLimits::default(),
-        )))
-        .map(|descriptor| descriptor.host_commands)
-        .map_err(|error| AppError::Setup(error.to_string()))
+    let limits = extension_limits(&HarnessResourceLimits::default());
+    let mut commands = Vec::new();
+    for source in [
+        tea_luau::builtins::goal(limits),
+        tea_luau::builtins::todo(limits),
+    ] {
+        commands.extend(
+            LuauExtensionEngine
+                .describe(&source)
+                .map_err(|error| AppError::Setup(error.to_string()))?
+                .host_commands,
+        );
+    }
+    Ok(commands)
 }
 
 /// Bounded metadata shown by the terminal session picker. The complete
@@ -250,26 +258,20 @@ fn create_host_harness_with_operations(
         let artifacts: Arc<dyn tea_session::ArtifactStore> =
             Arc::new(session.artifact_store().map_err(AppError::from)?);
         let resource_limits = HarnessResourceLimits::default();
-        let (state_handle, goal_binding) = goal_state_binding()?;
-        let goal_binding_ref = CapabilityBindingRef {
-            plugin_id: goal_binding.plugin_id().to_owned(),
-            capability: goal_binding.capability().to_owned(),
-            capability_version: goal_binding.capability_version().to_owned(),
-            binding_digest: goal_binding.binding_digest(),
-        };
+        let extension_state = ExtensionStateBindings::build()?;
         // Every terminal harness receives the revisioned default coding
         // bundle. Trusted base tools are an independent surface and must not
         // implicitly determine whether the four model-facing coding tools
         // exist.
-        let coding_bindings = coding_capability_bindings_with_operations(
-            workspace,
-            Arc::clone(&coding_operations),
-        )?;
+        let coding_bindings =
+            coding_capability_bindings_with_operations(workspace, Arc::clone(&coding_operations))?;
         let (web_binding, web_binding_ref) = web_capability_binding()?;
         let mut capability_catalog = PluginCapabilityCatalog::new();
-        capability_catalog
-            .insert(goal_binding)
-            .map_err(|error| AppError::Setup(error.to_string()))?;
+        for binding in extension_state.bindings.iter().cloned() {
+            capability_catalog
+                .insert(binding)
+                .map_err(|error| AppError::Setup(error.to_string()))?;
+        }
         for binding in coding_bindings.bindings.iter().cloned() {
             capability_catalog
                 .insert(binding)
@@ -296,6 +298,13 @@ fn create_host_harness_with_operations(
                 source: tea_luau::builtins::goal(extension_limits(&resource_limits)),
             },
             HarnessSeedExtension {
+                // Todo is root-agent coordination state. Only this harness
+                // seeds it, so independently executing children cannot write
+                // the shared plan from a stale snapshot.
+                scope: HarnessSeedExtensionScope::Global,
+                source: tea_luau::builtins::todo(extension_limits(&resource_limits)),
+            },
+            HarnessSeedExtension {
                 scope: HarnessSeedExtensionScope::Global,
                 source: tea_luau::builtins::web(extension_limits(&resource_limits)),
             },
@@ -306,7 +315,11 @@ fn create_host_harness_with_operations(
                 source: tea_luau::builtins::coding(extension_limits(&resource_limits)),
             },
         ];
-        let mut capability_references = vec![goal_binding_ref.clone(), web_binding_ref.clone()];
+        let mut capability_references = vec![
+            extension_state.goal_reference.clone(),
+            extension_state.todo_reference.clone(),
+            web_binding_ref.clone(),
+        ];
         capability_references.extend(coding_bindings.references.iter().cloned());
         let seeded = HarnessSeedBuilder::new(
             Arc::clone(&artifacts),
@@ -334,7 +347,7 @@ fn create_host_harness_with_operations(
                 configuration,
                 policy,
                 &resource_limits,
-                &goal_binding_ref,
+                &extension_state.goal_reference,
                 &web_binding_ref,
                 Some(coding_bindings.references.as_slice()),
                 created_at_ms,
@@ -430,11 +443,7 @@ fn create_host_harness_with_operations(
             rollover_budget: HOST_HARNESS_ROLLOVER_BUDGET,
             subagents: subagent_services,
         })?;
-        let state_store: Arc<dyn tea_core::harness::extension::ExtensionStateStore> =
-            Arc::clone(&harness) as Arc<dyn tea_core::harness::extension::ExtensionStateStore>;
-        state_handle
-            .attach(state_store)
-            .map_err(|error| AppError::Setup(error.to_string()))?;
+        extension_state.attach(&harness)?;
         if let Err(error) = write_host_session_metadata(&directory, &harness.snapshot()?) {
             eprintln!(
                 "warning: durable session metadata cache was not written for {}: {error}",
@@ -668,19 +677,15 @@ fn reopen_host_harness_with_operations(
         compactor,
         automatic_compaction,
     );
-    let (state_handle, goal_binding) = goal_state_binding()?;
-    let goal_binding_ref = CapabilityBindingRef {
-        plugin_id: goal_binding.plugin_id().to_owned(),
-        capability: goal_binding.capability().to_owned(),
-        capability_version: goal_binding.capability_version().to_owned(),
-        binding_digest: goal_binding.binding_digest(),
-    };
+    let extension_state = ExtensionStateBindings::build()?;
     let coding_bindings = coding_capability_bindings_with_operations(workspace, coding_operations)?;
     let (web_binding, web_binding_ref) = web_capability_binding()?;
     let mut capability_catalog = PluginCapabilityCatalog::new();
-    capability_catalog
-        .insert(goal_binding)
-        .map_err(|error| AppError::Setup(error.to_string()))?;
+    for binding in extension_state.bindings.iter().cloned() {
+        capability_catalog
+            .insert(binding)
+            .map_err(|error| AppError::Setup(error.to_string()))?;
+    }
     for binding in coding_bindings.bindings.iter().cloned() {
         capability_catalog
             .insert(binding)
@@ -719,7 +724,7 @@ fn reopen_host_harness_with_operations(
                 &child_configuration,
                 &policy,
                 &resource_limits,
-                &goal_binding_ref,
+                &extension_state.goal_reference,
                 &web_binding_ref,
                 Some(coding_bindings.references.as_slice()),
                 snapshot.header().created_at_ms,
@@ -764,11 +769,7 @@ fn reopen_host_harness_with_operations(
         rollover_budget: HOST_HARNESS_ROLLOVER_BUDGET,
         subagents: subagent_services,
     })?;
-    let state_store: Arc<dyn tea_core::harness::extension::ExtensionStateStore> =
-        Arc::clone(&harness) as Arc<dyn tea_core::harness::extension::ExtensionStateStore>;
-    state_handle
-        .attach(state_store)
-        .map_err(|error| AppError::Setup(error.to_string()))?;
+    extension_state.attach(&harness)?;
     harness.verify_durable_state()?;
     Ok(harness)
 }
@@ -781,13 +782,21 @@ fn extension_limits(resource_limits: &HarnessResourceLimits) -> ExtensionLimits 
     }
 }
 
-fn goal_state_binding() -> Result<(ExtensionStateHandle, PluginCapabilityBinding), AppError> {
+/// Build one extension's private durable-state binding.
+///
+/// Each extension gets its own late-bound handle and its own namespace, so no
+/// bundled extension can read or write another's state. `limits` is the host's
+/// resource grant for that extension's handlers; it must stay within the
+/// harness resource limits frozen in the snapshot.
+fn extension_state_binding(
+    extension_id: &str,
+    limits: ExtensionToolLimits,
+) -> Result<(ExtensionStateHandle, PluginCapabilityBinding), AppError> {
     let state = ExtensionStateHandle::new();
-    let limits = ExtensionToolLimits::default();
-    let capability = ExtensionStateCapability::new("goal", state.clone())
+    let capability = ExtensionStateCapability::new(extension_id, state.clone())
         .map_err(|error| AppError::Setup(error.to_string()))?;
     let binding = PluginCapabilityBinding::new(
-        "goal",
+        extension_id,
         "extension.state",
         "v1",
         Digest::from_bytes("tea-extension-state-capability-v1"),
@@ -842,13 +851,54 @@ fn web_capability_binding() -> Result<(PluginCapabilityBinding, CapabilityBindin
         Arc::new(capability),
     )
     .map_err(|error| AppError::Setup(error.to_string()))?;
-    let reference = CapabilityBindingRef {
+    let reference = binding_reference(&binding);
+    Ok((binding, reference))
+}
+
+/// The two durable-state bindings every terminal harness installs.
+struct ExtensionStateBindings {
+    goal_state: ExtensionStateHandle,
+    todo_state: ExtensionStateHandle,
+    goal_reference: CapabilityBindingRef,
+    todo_reference: CapabilityBindingRef,
+    bindings: Vec<PluginCapabilityBinding>,
+}
+
+impl ExtensionStateBindings {
+    fn build() -> Result<Self, AppError> {
+        let (goal_state, goal_binding) =
+            extension_state_binding("goal", ExtensionToolLimits::default())?;
+        let (todo_state, todo_binding) =
+            extension_state_binding("todo", tea_luau::builtins::todo_tool_limits())?;
+        Ok(Self {
+            goal_state,
+            todo_state,
+            goal_reference: binding_reference(&goal_binding),
+            todo_reference: binding_reference(&todo_binding),
+            bindings: vec![goal_binding, todo_binding],
+        })
+    }
+
+    /// Connect both namespaces to the one authoritative durable state store.
+    fn attach(&self, harness: &Arc<HostHarness>) -> Result<(), AppError> {
+        let store: Arc<dyn tea_core::harness::extension::ExtensionStateStore> =
+            Arc::clone(harness) as Arc<dyn tea_core::harness::extension::ExtensionStateStore>;
+        for handle in [&self.goal_state, &self.todo_state] {
+            handle
+                .attach(Arc::clone(&store))
+                .map_err(|error| AppError::Setup(error.to_string()))?;
+        }
+        Ok(())
+    }
+}
+
+fn binding_reference(binding: &PluginCapabilityBinding) -> CapabilityBindingRef {
+    CapabilityBindingRef {
         plugin_id: binding.plugin_id().to_owned(),
         capability: binding.capability().to_owned(),
         capability_version: binding.capability_version().to_owned(),
         binding_digest: binding.binding_digest(),
-    };
-    Ok((binding, reference))
+    }
 }
 
 struct CodingCapabilityBindings {
@@ -973,7 +1023,7 @@ fn coding_capability_bindings_with_operations(
     operations: Arc<dyn CodingOperations>,
 ) -> Result<CodingCapabilityBindings, AppError> {
     let host = CodingHost::with_operations(workspace, operations)
-    .map_err(|error| AppError::Setup(format!("invalid coding workspace: {error}")))?;
+        .map_err(|error| AppError::Setup(format!("invalid coding workspace: {error}")))?;
     let router = CodingCapabilityRouter::new(host);
     let limits = ExtensionToolLimits::default();
     let capabilities = [
@@ -1516,13 +1566,16 @@ fn child_harness_seeds(
             .model(model.descriptor.clone())
             .automatic_compaction(automatic_compaction);
             let profile = model_profile(&model.descriptor)?;
-            let mut extensions = vec![HarnessSeedExtension {
-                scope: HarnessSeedExtensionScope::Global,
-                source: tea_luau::builtins::goal(extension_limits(resource_limits)),
-            }, HarnessSeedExtension {
-                scope: HarnessSeedExtensionScope::Global,
-                source: tea_luau::builtins::web(extension_limits(resource_limits)),
-            }];
+            let mut extensions = vec![
+                HarnessSeedExtension {
+                    scope: HarnessSeedExtensionScope::Global,
+                    source: tea_luau::builtins::goal(extension_limits(resource_limits)),
+                },
+                HarnessSeedExtension {
+                    scope: HarnessSeedExtensionScope::Global,
+                    source: tea_luau::builtins::web(extension_limits(resource_limits)),
+                },
+            ];
             let mut capability_bindings = vec![goal_binding_ref.clone(), web_binding_ref.clone()];
             if let Some(coding_binding_refs) = coding_binding_refs {
                 extensions.push(HarnessSeedExtension {
@@ -2138,8 +2191,7 @@ mod tests {
     };
     use tea_core::state::StopReason;
     use tea_core::tool::{
-        AgentTool, AgentToolResult, ToolCall, ToolContext, ToolFuture, ToolRegistry,
-        ToolUpdateSink,
+        AgentTool, AgentToolResult, ToolCall, ToolContext, ToolFuture, ToolRegistry, ToolUpdateSink,
     };
     use tea_session::{MemoryArtifactStore, NormalizedPath, ProviderErrorRecord};
 
@@ -2500,6 +2552,282 @@ mod tests {
                 Ok(Box::new(ModelStream { events }) as _),
             ))
         }
+    }
+
+    /// Issues one scripted `todo` call per turn, then settles with text.
+    #[derive(Debug)]
+    struct TodoScriptProvider {
+        calls: AtomicU64,
+        script: Vec<String>,
+    }
+
+    impl TodoScriptProvider {
+        fn new(script: impl IntoIterator<Item = &'static str>) -> Arc<Self> {
+            Arc::new(Self {
+                calls: AtomicU64::new(0),
+                script: script.into_iter().map(str::to_owned).collect(),
+            })
+        }
+    }
+
+    impl ModelProvider for TodoScriptProvider {
+        fn stream<'a>(
+            &'a self,
+            _request: ModelRequest,
+            _cancellation: CancellationToken,
+        ) -> ModelFuture<'a> {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst) as usize;
+            let events = match self.script.get(call) {
+                Some(arguments) => vec![
+                    ModelStreamEvent::ToolCall(AgentToolCall {
+                        id: ToolCallId::new(format!("todo-call-{call}"))
+                            .expect("fixture tool call ID"),
+                        name: "todo".into(),
+                        arguments: SerializedJson::new(arguments.clone()),
+                    }),
+                    ModelStreamEvent::End(StopReason::ToolUse),
+                ],
+                None => vec![
+                    ModelStreamEvent::TextDelta("plan handled".into()),
+                    ModelStreamEvent::End(StopReason::Stop),
+                ],
+            };
+            Box::pin(std::future::ready(
+                Ok(Box::new(ModelStream { events }) as _),
+            ))
+        }
+    }
+
+    /// Collect the model-facing `todo` results and the activity projections a
+    /// settled operation published, in order, while projecting the same events
+    /// into terminal presentation state exactly as the TUI does.
+    fn drain_todo_events(
+        subscription: &TeaEventSubscription,
+        presentation: &mut crate::app::AppState,
+    ) -> (Vec<String>, Vec<String>) {
+        let mut results = Vec::new();
+        let mut activity = Vec::new();
+        while let Ok(event) = subscription.try_recv() {
+            let TeaEvent::Agent { lane_id, event } = event else {
+                continue;
+            };
+            if lane_id != LaneId::main() {
+                continue;
+            }
+            presentation.apply_event(&event);
+            match event.kind {
+                AgentEventKind::ToolExecutionUpdate { update, .. } => {
+                    if let Some(published) = update.activity {
+                        activity.push(published);
+                    }
+                }
+                AgentEventKind::ToolExecutionEnd {
+                    tool_name, result, ..
+                } if tool_name == "todo" => results.push(result.content),
+                _ => {}
+            }
+        }
+        (results, activity)
+    }
+
+    #[test]
+    fn durable_todo_state_survives_reopen_and_keeps_allocating_new_identities() {
+        let home = temporary_home();
+        let workspace = home.join("workspace");
+        fs::create_dir_all(&workspace).expect("fixture workspace creates");
+        let configuration =
+            host_configuration(&workspace.to_string_lossy()).expect("host configuration builds");
+        let model = ModelDescriptor {
+            provider: "fixture".into(),
+            model: "todo-fixture-model".into(),
+            revision: None,
+        };
+        let provider = TodoScriptProvider::new([
+            r#"{"markdown":"- [ ] Implement todo extension\n  - [ ] Luau core\n    - [ ] State validation\n    - [ ] Markdown synchronization\n  - [ ] Host integration\n  - [ ] Verification"}"#,
+            r#"{"updates":[{"id":3,"status":"done"}]}"#,
+            r#"{"updates":[{"id":4,"status":"blocked","reason":"waiting for upstream fixture"}]}"#,
+        ]);
+        let harness = create_host_harness(HostHarnessConfig {
+            tea_home: &home,
+            workspace: &workspace,
+            configuration: configuration.clone(),
+            model: model.clone(),
+            provider: Arc::clone(&provider) as Arc<dyn ModelProvider>,
+            thinking_level: Some(ThinkingLevel::Off),
+            compactor: None,
+            automatic_compaction: AutomaticCompactionPolicy::disabled(),
+            subagents: None,
+        })
+        .expect("todo fixture host creates");
+        let session_id = harness
+            .snapshot()
+            .expect("fixture snapshot reads")
+            .header()
+            .session_id
+            .to_string();
+        let subscription = harness
+            .subscribe_events()
+            .expect("event subscription opens");
+
+        smol::block_on(harness.run_root_prompt("plan the work")).expect("durable prompt settles");
+        let mut presentation = crate::app::AppState::new();
+        let (results, published) = drain_todo_events(&subscription, &mut presentation);
+        assert_eq!(
+            results.len(),
+            3,
+            "each scripted todo call produced a result"
+        );
+        // Structural synchronization allocates deterministic identities and
+        // automatically activates the first actionable leaf.
+        assert_eq!(
+            results[0],
+            concat!(
+                "TODO · 1 active · 5 pending · 0 blocked · 0 dropped · 0 done\n",
+                "\n",
+                "- [ ] #1 Implement todo extension\n",
+                "  - [ ] #2 Luau core\n",
+                "    - [>] #3 State validation\n",
+                "    - [ ] #4 Markdown synchronization\n",
+                "  - [ ] #5 Host integration\n",
+                "  - [ ] #6 Verification",
+            )
+        );
+        assert_eq!(
+            results[1],
+            concat!(
+                "Completed #3.\n",
+                "Next: #4 Markdown synchronization\n",
+                "TODO · 1 active · 4 pending · 0 blocked · 0 dropped · 1 done",
+            )
+        );
+        assert!(
+            results[2].starts_with("Blocked #4.\nNext: #5 Host integration"),
+            "{}",
+            results[2]
+        );
+        assert_eq!(
+            published.len(),
+            3,
+            "every todo invocation refreshes the live activity presentation"
+        );
+        assert!(
+            published[2].contains("- [!] Markdown synchronization — waiting for upstream fixture"),
+            "{}",
+            published[2]
+        );
+
+        // Close the exact durable session, then reopen it.
+        drop(subscription);
+        drop(harness);
+        let reopened_provider = TodoScriptProvider::new([
+            "{}",
+            r#"{"markdown":"- [ ] #1 Implement todo extension\n  - [ ] #2 Luau core\n    - [x] #3 State validation\n    - [!] #4 Markdown synchronization — waiting for upstream fixture\n  - [ ] #5 Host integration\n  - [ ] #6 Verification\n  - [ ] Durable reopen evidence"}"#,
+        ]);
+        let harness = reopen_host_harness(HostHarnessReopen {
+            tea_home: &home,
+            workspace: &workspace,
+            session_id: &session_id,
+            configuration,
+            model,
+            provider: Arc::clone(&reopened_provider) as Arc<dyn ModelProvider>,
+            compactor: None,
+            automatic_compaction: AutomaticCompactionPolicy::disabled(),
+            subagents: None,
+        })
+        .expect("todo fixture session reopens");
+        let subscription = harness
+            .subscribe_events()
+            .expect("event subscription opens");
+        smol::block_on(harness.run_root_prompt("continue the work"))
+            .expect("reopened prompt settles");
+
+        let (reopened, published) = drain_todo_events(&subscription, &mut presentation);
+        assert_eq!(reopened.len(), 2);
+        // Identities, text, hierarchy, order, status, and blockers all survive.
+        assert_eq!(
+            reopened[0],
+            concat!(
+                "TODO · 1 active · 3 pending · 1 blocked · 0 dropped · 1 done\n",
+                "\n",
+                "- [ ] #1 Implement todo extension\n",
+                "  - [ ] #2 Luau core\n",
+                "    - [x] #3 State validation\n",
+                "    - [!] #4 Markdown synchronization — waiting for upstream fixture\n",
+                "  - [>] #5 Host integration\n",
+                "  - [ ] #6 Verification",
+            )
+        );
+        // Identity allocation stays monotonic across the reopen.
+        assert!(
+            reopened[1].contains("- [ ] #7 Durable reopen evidence"),
+            "{}",
+            reopened[1]
+        );
+        assert!(
+            reopened[1]
+                .contains("- [!] #4 Markdown synchronization — waiting for upstream fixture"),
+            "a round-tripped blocker suffix must not be absorbed into the task text: {}",
+            reopened[1]
+        );
+        // A read republishes current activity into the terminal.
+        assert_eq!(published.len(), 2);
+        assert!(
+            published[0].starts_with("Todo · 1 active · 3 pending · 1 blocked"),
+            "{}",
+            published[0]
+        );
+
+        // The terminal projection built from the same event stream carries the
+        // final activity presentation, which is what the live region renders.
+        assert_eq!(
+            presentation.activity_text(),
+            Some(published.last().expect("activity was published").as_str()),
+            "the TUI projection retains the last published activity"
+        );
+
+        // `/todos` prints the same canonical list for an idle human.
+        let printed = harness
+            .dispatch_extension_command("/todos", String::new())
+            .expect("/todos dispatches")
+            .result
+            .notice
+            .expect("/todos prints the list");
+        assert!(
+            printed.contains("- [ ] #7 Durable reopen evidence"),
+            "{printed}"
+        );
+        assert!(printed.starts_with("TODO · "), "{printed}");
+
+        // Todo durability is independent of model context: one normalized
+        // snapshot per mutating call lives in the extension-state namespace,
+        // and no conversation message carries that document. Compaction, which
+        // only rewrites conversation messages, therefore cannot lose the plan.
+        let snapshot = harness.snapshot().expect("settled snapshot reads");
+        let snapshots = snapshot
+            .entries()
+            .iter()
+            .filter(|entry| match &entry.body {
+                SessionEntry::PluginMemory(memory) => {
+                    memory.plugin_id == "todo" && memory.kind == "todo.state.v1"
+                }
+                _ => false,
+            })
+            .count();
+        assert_eq!(
+            snapshots, 4,
+            "each mutating todo call persists exactly one normalized snapshot"
+        );
+        assert!(
+            snapshot.entries().iter().all(|entry| match &entry.body {
+                SessionEntry::ToolResult(result) => !result
+                    .model_projection
+                    .to_json_string()
+                    .is_ok_and(|projection| projection.contains("next_id")),
+                _ => true,
+            }),
+            "durable todo state is never carried by the conversation"
+        );
+        let _ = fs::remove_dir_all(home);
     }
 
     fn git(directory: &Path, arguments: &[&str]) {
@@ -3023,13 +3351,9 @@ data: [DONE]
         let artifacts: Arc<dyn tea_session::ArtifactStore> =
             Arc::new(tea_session::MemoryArtifactStore::default());
         let provider: Arc<dyn ModelProvider> = Arc::new(StopProvider);
-        let (_, binding) = goal_state_binding().expect("goal binding builds");
-        let binding_ref = CapabilityBindingRef {
-            plugin_id: binding.plugin_id().to_owned(),
-            capability: binding.capability().to_owned(),
-            capability_version: binding.capability_version().to_owned(),
-            binding_digest: binding.binding_digest(),
-        };
+        let (_, binding) = extension_state_binding("goal", ExtensionToolLimits::default())
+            .expect("goal binding builds");
+        let binding_ref = binding_reference(&binding);
         let (_, web_binding_ref) = web_capability_binding().expect("web binding builds");
         let mut seeds = child_harness_seeds(
             Arc::clone(&artifacts),
@@ -3062,6 +3386,27 @@ data: [DONE]
                         | "apply_agent_changes"
                 )
             }));
+            // The todo plan is root-agent coordination state. Children never
+            // receive the extension, so concurrent children cannot write it
+            // from stale snapshots and lose each other's updates.
+            assert!(
+                seeded
+                    .snapshot
+                    .spec
+                    .plugin_tool_presentations
+                    .iter()
+                    .all(|tool| tool.name != "todo"),
+                "a child harness must not inherit the mutable todo extension"
+            );
+            assert!(
+                seeded
+                    .snapshot
+                    .spec
+                    .plugin_tool_presentations
+                    .iter()
+                    .any(|tool| tool.name == "get_goal"),
+                "existing goal inheritance is unchanged"
+            );
         }
         let (_, first) = seeds.remove(0);
         let mut repository = first.repository;
@@ -3208,6 +3553,7 @@ data: [DONE]
                 "edit",
                 "find",
                 "web",
+                "todo",
                 "get_goal",
                 "create_goal",
                 "update_goal",
@@ -3219,7 +3565,10 @@ data: [DONE]
         assert!(request.tools.iter().all(|tool| {
             !tool.description.is_empty()
                 && if tool.name == "web" {
-                    tool.schema.get("oneOf").and_then(tea_protocol::JsonValue::as_array).is_some()
+                    tool.schema
+                        .get("oneOf")
+                        .and_then(tea_protocol::JsonValue::as_array)
+                        .is_some()
                 } else {
                     tool.schema
                         .get("type")
@@ -3298,8 +3647,7 @@ data: [DONE]
         })
         .expect("host harness creates");
 
-        smol::block_on(harness.run_root_prompt("show every tool"))
-            .expect("durable prompt settles");
+        smol::block_on(harness.run_root_prompt("show every tool")).expect("durable prompt settles");
         let requests = provider
             .requests
             .lock()

@@ -2,6 +2,9 @@
 /.runtime/
 .DS_Store
 
+# PTY failure captures are written beside the crate that ran the test.
+target/ptytest-failures/
+
 # Comparative coding-evaluation runs are provider-specific and must remain local.
 /evals/baselines.local.json
 /evals/results/

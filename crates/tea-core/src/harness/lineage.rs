@@ -82,16 +82,18 @@ impl Default for HarnessResourceLimits {
     fn default() -> Self {
         Self {
             source_bytes: 65_536,
-            // The web policy renders a bounded multi-source response and is
-            // still isolated per invocation; this ceiling accommodates its
-            // compiled Luau handler without weakening source or instruction
-            // bounds.
-            memory_bytes: 1536 * 1024,
-            // A web result can carry several bounded UTF-8 source excerpts;
-            // rendering that material is still subject to the heap ceiling,
-            // but needs a larger cooperative instruction allowance than the
-            // tiny control-oriented bundled policies.
-            instruction_checks: 100_000,
+            // A bundled extension that handles documents rather than control
+            // fields needs headroom proportional to the material it renders:
+            // the web policy assembles bounded multi-source excerpts, and the
+            // todo policy parses, transforms, and formats a whole plan. Luau
+            // also charges one cooperative interrupt per position scanned by a
+            // string pattern, so instruction cost tracks document size rather
+            // than statement count. These ceilings admit a bounded document of
+            // some tens of kilobytes per invocation while still failing fast on
+            // a runaway loop; both remain well under a millisecond of Luau work
+            // and neither widens source or capability bounds.
+            memory_bytes: 4 * 1_048_576,
+            instruction_checks: 250_000,
             provider_surface_bytes: 256 * 1024,
         }
     }
