@@ -63,10 +63,11 @@ crates never inspect it.
 
 The terminal binds its application-owned `CodingOperations` adapter to the
 four singleton capability grants of the revisioned Luau coding builtins.
-Filesystem and optimized search calls run on Smol's blocking pool, while `bash` polls
-daemon-safe capture files there and delivers bounded output updates before
-settlement. Cancellation kills and reaps the shell; the core remains
-executor-agnostic.
+Filesystem and optimized search calls run on Smol's blocking pool. For `bash`,
+the adapter schedules Tea core's canonical process runner there; that runner
+tails private capture files for bounded live updates and owns the finite
+timeout, process-group cleanup, and truthful settlement contract. The core
+remains executor-agnostic.
 
 A one-shot prompt uses the same durable harness boundary as an interactive
 prompt:

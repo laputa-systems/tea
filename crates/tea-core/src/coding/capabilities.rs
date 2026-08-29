@@ -6,9 +6,9 @@
 //! changes must never be able to weaken.
 
 use super::host::{
-    CodingOperations, CommandEnvironment, ConditionalFileCreate, ConditionalFileEdit,
-    EditTransaction, EditTransactionOutcome, LocalCodingOperations, OperationError, SearchResult,
-    SearchTruncation, WorkspaceRoot,
+    CodingOperations, CommandEnvironment, CommandTermination, ConditionalFileCreate,
+    ConditionalFileEdit, EditTransaction, EditTransactionOutcome, LocalCodingOperations,
+    OperationError, SearchResult, SearchTruncation, WorkspaceRoot,
 };
 use crate::harness::extension::{
     ExtensionCapability, ExtensionCapabilityError, ExtensionCapabilityFuture,
@@ -17,6 +17,7 @@ use crate::harness::extension::{
 use crate::scheduler::CancellationToken;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
+use std::time::Duration;
 use tea_protocol::{JsonNumber, JsonValue};
 use tea_session::Digest;
 
@@ -28,6 +29,9 @@ pub const WORKSPACE_SEARCH_CAPABILITY_V1: &str = "tea.workspace.search.v1";
 pub const WORKSPACE_MUTATE_CAPABILITY_V1: &str = "tea.workspace.mutate.v1";
 /// Capability granted only to the `bash` builtin's declaration.
 pub const PROCESS_CAPABILITY_V1: &str = "tea.process.v1";
+/// The finite timeout applied at the trusted process-capability boundary when
+/// the model-facing optional `timeout` argument is omitted.
+pub const DEFAULT_PROCESS_TIMEOUT: Duration = Duration::from_secs(300);
 
 const MAX_READ_BYTES: usize = 4 * 1024 * 1024;
 const MAX_TRANSACTION_SNAPSHOT_BYTES: usize = 4 * 1024 * 1024;
@@ -38,6 +42,8 @@ const MAX_TOTAL_EDITS: usize = 256;
 const MAX_PATH_BYTES: usize = 4096;
 const MAX_SEARCH_RESULTS: usize = 1000;
 const MAX_SEARCH_OUTPUT_BYTES: usize = 50 * 1024;
+const MAX_PROCESS_INDETERMINATE_CAUSE_BYTES: usize = 160;
+const MAX_PROCESS_TIMEOUT_SECONDS: f64 = 2_147.483_647;
 
 /// Explicit authority selected by a host for the four coding builtins.
 ///
@@ -301,7 +307,7 @@ impl ExtensionCapability for ProcessCapability {
                     message: "command must contain 1 through 65536 bytes".into(),
                 });
             }
-            let timeout = optional_timeout(arguments)?;
+            let timeout = resolved_timeout(arguments)?;
             if cancellation.is_cancelled() {
                 return Err(ExtensionCapabilityError::Cancelled);
             }
@@ -317,29 +323,58 @@ impl ExtensionCapability for ProcessCapability {
                 )
                 .await
                 .map_err(operation_error)?;
-            if cancellation.is_cancelled() {
+            let super::host::CommandOutput {
+                termination,
+                stdout,
+                stderr,
+            } = output;
+            if matches!(termination, CommandTermination::Cancelled) {
                 return Err(ExtensionCapabilityError::Cancelled);
             }
-            let mut combined = output.stdout;
-            if !output.stderr.is_empty() {
+            let mut combined = stdout;
+            if !stderr.is_empty() {
                 if !combined.is_empty() {
                     combined.push(b'\n');
                 }
-                combined.extend_from_slice(&output.stderr);
+                combined.extend_from_slice(&stderr);
             }
             let (content, truncated) = truncate_output(&combined);
-            Ok(ExtensionCapabilityResponse {
-                value: JsonValue::object([
-                    ("content", JsonValue::String(content)),
-                    ("truncated", JsonValue::Bool(truncated)),
-                    (
+            let mut fields = vec![
+                ("content", JsonValue::String(content)),
+                ("truncated", JsonValue::Bool(truncated)),
+            ];
+            match termination {
+                CommandTermination::Exited { code } => {
+                    fields.push(("termination", JsonValue::String("exited".into())));
+                    fields.push((
                         "exitCode",
-                        output
-                            .exit_code
-                            .map(|code| JsonValue::Number(JsonNumber::Signed(i64::from(code))))
-                            .unwrap_or(JsonValue::Null),
-                    ),
-                ]),
+                        JsonValue::Number(JsonNumber::Signed(i64::from(code))),
+                    ));
+                }
+                CommandTermination::Signaled { signal } => {
+                    fields.push(("termination", JsonValue::String("signaled".into())));
+                    fields.push(("exitCode", JsonValue::Null));
+                    fields.push((
+                        "signal",
+                        JsonValue::Number(JsonNumber::Signed(i64::from(signal))),
+                    ));
+                }
+                CommandTermination::TimedOut => {
+                    fields.push(("termination", JsonValue::String("timed_out".into())));
+                    fields.push(("exitCode", JsonValue::Null));
+                }
+                CommandTermination::Indeterminate { reason } => {
+                    fields.push(("termination", JsonValue::String("indeterminate".into())));
+                    fields.push(("exitCode", JsonValue::Null));
+                    fields.push((
+                        "reason",
+                        JsonValue::String(indeterminate_process_reason(&reason)),
+                    ));
+                }
+                CommandTermination::Cancelled => unreachable!("handled above"),
+            }
+            Ok(ExtensionCapabilityResponse {
+                value: JsonValue::object(fields),
             })
         })
     }
@@ -835,11 +870,11 @@ fn optional_positive_usize(
         .transpose()
 }
 
-fn optional_timeout(
+fn resolved_timeout(
     value: &BTreeMap<String, JsonValue>,
-) -> Result<Option<f64>, ExtensionCapabilityError> {
+) -> Result<Duration, ExtensionCapabilityError> {
     let Some(value) = value.get("timeout") else {
-        return Ok(None);
+        return Ok(DEFAULT_PROCESS_TIMEOUT);
     };
     let timeout = match value {
         JsonValue::Number(JsonNumber::Float(value)) => *value,
@@ -851,13 +886,15 @@ fn optional_timeout(
             });
         }
     };
-    if !timeout.is_finite() || timeout <= 0.0 || timeout > 2_147_483.647 {
+    if !timeout.is_finite() || timeout <= 0.0 || timeout > MAX_PROCESS_TIMEOUT_SECONDS {
         return Err(ExtensionCapabilityError::InvalidArguments {
             message: "timeout must be a finite positive number no greater than 2147.483647 seconds"
                 .into(),
         });
     }
-    Ok(Some(timeout))
+    Duration::try_from_secs_f64(timeout).map_err(|_| ExtensionCapabilityError::InvalidArguments {
+        message: "timeout must be representable as a finite duration".into(),
+    })
 }
 
 fn validate_path(path: &str) -> Result<(), ExtensionCapabilityError> {
@@ -877,6 +914,13 @@ fn operation_error(error: OperationError) -> ExtensionCapabilityError {
             message: error.to_string(),
         }
     }
+}
+
+fn indeterminate_process_reason(reason: &str) -> String {
+    format!(
+        "{}; command termination is indeterminate; side effects may already exist; inspect state before retrying",
+        crate::tool::truncate_middle(reason, MAX_PROCESS_INDETERMINATE_CAUSE_BYTES),
+    )
 }
 
 /// Enforce the model-facing search receipt even when an embedding supplies a

@@ -40,6 +40,38 @@ identity and fixed tool grant. It may reuse an existing host capability only
 when that policy explicitly selects the reuse; a new mutation or process
 capability requires new authority as well.
 
+## Bounded foreground `bash`
+
+`bash` remains one small model-facing tool with exactly `command` and an
+optional `timeout` argument. Omitting `timeout` does not make execution
+unbounded: `tea.process.v1` resolves it to a finite 300-second host timeout.
+An explicit timeout replaces that default and is still limited to
+2147.483647 seconds.
+
+Each invocation is a bounded foreground operation. On macOS and Linux, the
+local host starts the shell in an invocation-owned process group. Timeout,
+cancellation, and successful shell exit all settle that owned group before the
+host reports a clean outcome; this includes ordinary shell children,
+grandchildren, and background jobs that remain in the group. Timeout and
+cancellation use a bounded strong termination path so trailing shell statements
+cannot continue after Tea reports the command stopped. Ordinary `bash` is
+therefore not a way to launch an unmanaged durable worker.
+
+The guarantee is deliberately process-group scoped, not a claim to control
+every Unix descendant. A program that deliberately creates another session or
+process group can escape this containment. Platforms without the same local
+process-group primitive preserve compilation but do not claim clean descendant
+cleanup they cannot establish.
+
+The trusted receipt distinguishes normal exit, signal termination, timeout,
+cancellation, and an indeterminate final state. A clean cancellation returns
+through Tea's ordinary runtime cancellation path. If the host cannot prove the
+state of an already-started command, it reports an indeterminate result rather
+than an ordinary retryable host error: side effects may already exist and the
+workspace or external state must be inspected before retrying. The durable
+harness remains the sole operation-durability mechanism; there is no persistent
+process/session protocol in the default coding surface.
+
 ## Unified mutation
 
 `edit` is the only first-class workspace mutation tool. Its `files[]` entries
