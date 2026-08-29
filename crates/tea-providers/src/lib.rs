@@ -26,7 +26,6 @@ mod tool {
 mod json;
 
 #[cfg(any(
-    feature = "provider-commandcode",
     feature = "provider-openrouter",
     feature = "provider-local",
     feature = "provider-opencode-zen"
@@ -34,14 +33,12 @@ mod json;
 mod transport_runtime;
 mod registry;
 #[cfg(any(
-    feature = "provider-commandcode",
     feature = "provider-openrouter",
     feature = "provider-opencode-zen"
 ))]
 mod retry;
 
 #[cfg(any(
-    feature = "provider-commandcode",
     feature = "provider-openrouter",
     feature = "provider-local",
     feature = "provider-opencode-zen"
@@ -54,14 +51,11 @@ pub use registry::{
     ProviderRegistry, RegistryError,
 };
 #[cfg(any(
-    feature = "provider-commandcode",
     feature = "provider-openrouter",
     feature = "provider-opencode-zen"
 ))]
 pub use retry::RetryPolicy;
 
-#[cfg(feature = "provider-commandcode")]
-pub mod commandcode;
 #[cfg(feature = "provider-local")]
 pub mod local;
 #[cfg(feature = "provider-openrouter")]

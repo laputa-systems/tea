@@ -744,7 +744,6 @@ Do not pass:
 
 ```text
 OPENROUTER_API_KEY
-COMMANDCODE_API_KEY
 AWS_*
 GITHUB_TOKEN
 PI_* session metadata

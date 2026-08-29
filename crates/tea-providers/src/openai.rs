@@ -7,7 +7,8 @@ use crate::state::AgentMessage;
 
 /// Convert the core transcript into an OpenAI Chat Completions message array.
 ///
-/// OpenRouter and Command Code both consume this host-produced context shape. The hook remains
+/// OpenRouter and other OpenAI-compatible adapters consume this host-produced context shape. The
+/// hook remains
 /// explicit because the core's default [`crate::hooks::NoHooks`] representation is diagnostic
 /// Rust text, not a provider wire format.
 #[derive(Clone, Copy, Debug, Default)]

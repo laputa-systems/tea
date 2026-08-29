@@ -335,25 +335,6 @@ impl ProviderFactory {
                         .map_err(|error| AppError::Setup(error.to_string()))?,
                 )
             }
-            "command-code" => {
-                let key = self
-                    .credentials
-                    .load("COMMANDCODE_API_KEY", "Command Code")?;
-                let host = tea_providers::commandcode::CommandCodeHostContext::new(
-                    &self.logical_workspace,
-                    utc_date(),
-                    std::env::consts::OS,
-                )
-                .map_err(|error| AppError::Setup(error.to_string()))?;
-                ProviderConfiguration::CommandCode(
-                    tea_providers::commandcode::CommandCodeConfig::new(
-                        key,
-                        &descriptor.model,
-                        host,
-                    )
-                    .map_err(|error| AppError::Setup(error.to_string()))?,
-                )
-            }
             "local" => {
                 let base_url = self
                     .local_base_url

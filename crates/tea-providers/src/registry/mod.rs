@@ -33,39 +33,10 @@ mod tests {
         );
     }
 
-    #[cfg(not(any(
-        feature = "provider-commandcode",
-        feature = "provider-openrouter",
-        feature = "provider-local"
-    )))]
+    #[cfg(not(any(feature = "provider-openrouter", feature = "provider-local")))]
     #[test]
     fn default_build_remains_provider_free() {
         assert!(ProviderRegistry::new().providers().is_empty());
-    }
-
-    #[cfg(feature = "provider-commandcode")]
-    #[test]
-    fn command_code_feature_contributes_only_command_code() {
-        let registry = ProviderRegistry::new();
-        let provider = registry
-            .provider("command-code")
-            .expect("compiled provider");
-        assert_eq!(provider.display_name, "Command Code");
-        assert_eq!(
-            provider.configuration,
-            ProviderConfigurationKind::CommandCode
-        );
-        assert!(!provider.capabilities.provider_reported_cost);
-        assert!(!provider.capabilities.concrete_compactor);
-        assert_eq!(
-            provider
-                .model("deepseek/deepseek-v4-flash")
-                .expect("checked-in model")
-                .context_window,
-            Some(1_000_000)
-        );
-        #[cfg(not(feature = "provider-openrouter"))]
-        assert!(registry.provider("openrouter").is_none());
     }
 
     #[cfg(feature = "provider-openrouter")]
@@ -115,8 +86,6 @@ mod tests {
                 .context_window,
             Some(262_144)
         );
-        #[cfg(not(feature = "provider-commandcode"))]
-        assert!(registry.provider("command-code").is_none());
     }
 
     #[cfg(feature = "provider-openrouter")]
@@ -151,34 +120,6 @@ mod tests {
             .expect("matching explicit config");
         assert_eq!(configured.descriptor.provider, "openrouter");
         assert_eq!(configured.descriptor.model, "openai/gpt-5.6-luna");
-    }
-
-    #[cfg(feature = "provider-commandcode")]
-    #[test]
-    fn mismatched_explicit_configuration_is_rejected_before_transport() {
-        let registry = ProviderRegistry::new();
-        let selection = registry
-            .resolve_model("command-code", "deepseek/deepseek-v4-flash")
-            .expect("checked-in model");
-        let host = crate::commandcode::CommandCodeHostContext::new(
-            "/sandbox/project",
-            "2026-08-14",
-            "linux",
-        )
-        .expect("explicit host context");
-        let error = registry
-            .build(
-                selection.into_descriptor(),
-                ProviderConfiguration::CommandCode(
-                    crate::commandcode::CommandCodeConfig::new("test-key", "other-model", host)
-                        .expect("valid explicit config"),
-                ),
-            )
-            .expect_err("model mismatch must fail before adapter use");
-        assert!(matches!(
-            error,
-            RegistryError::ConfigurationModelMismatch { .. }
-        ));
     }
 
     #[cfg(feature = "provider-local")]

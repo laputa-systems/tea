@@ -1,7 +1,6 @@
 //! Small Miniserde-backed helpers for private adapter JSON trees.
 
 #[cfg(any(
-    feature = "provider-commandcode",
     feature = "provider-openrouter",
     feature = "provider-opencode-zen"
 ))]
@@ -113,7 +112,6 @@ where
 
 /// Encode a protocol JSON tree for a byte-oriented transport.
 #[cfg(any(
-    feature = "provider-commandcode",
     feature = "provider-openrouter",
     feature = "provider-opencode-zen"
 ))]

@@ -21,7 +21,6 @@ pty-harness = []
 laputa-hi-lite = "0.1"
 tea-core = { path = "../tea-core" }
 tea-providers = { path = "../tea-providers", features = [
-    "provider-commandcode",
     "provider-openrouter",
     "provider-local",
     "provider-opencode-zen",

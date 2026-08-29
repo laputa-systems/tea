@@ -17,7 +17,6 @@ opaque caller providers or replay a stream after it has exposed events.
 | Feature | Module | Wire protocol | Intended use |
 | --- | --- | --- | --- |
 | `provider-openrouter` | `tea_providers::openrouter` | OpenRouter Chat Completions SSE plus inline usage/accounting | Opt-in incremental rustls + Graviola HTTPS transport with packet-bound model validation and response-stall timeouts. |
-| `provider-commandcode` | `tea_providers::commandcode` | Command Code `/alpha/generate` NDJSON | Opt-in rustls + Graviola HTTPS gateway transport; the evaluation runner selects it with `--provider commandcode`. |
 | `provider-local` | `tea_providers::local` | Caller-selected local OpenAI-compatible Chat Completions SSE endpoint | Opt-in incremental HTTP transport for oMLX and similar local servers; no credentials or endpoint discovery. |
 | `provider-opencode-zen` | `tea_providers::opencode_zen` | OpenCode Zen Responses API SSE (`https://opencode.ai/zen/v1/responses`) via `input` array | Opt-in incremental rustls + Graviola HTTPS transport for `opencode-zen`/`muse-spark-1.2-contributor-free` (free). Mirrors the real `opencode` TUI provider (`opencode` → `https://opencode.ai/zen/v1`, `OPENCODE_API_KEY`, `openai-compatible` for most models, `responses` for `muse-spark`). Uses `Authorization: Bearer` + `Accept: text/event-stream`, `User-Agent: tea/1.0 opencode-zen`, `x-opencode-client: tea`. |
 
@@ -87,9 +86,8 @@ as convenience projections and must not be used for budget decisions.
 
 When an adapter drives `Agent`, its normalized `Usage` update is retained in
 `AgentSnapshot.accounting` and emitted as `AgentEventKind::ModelTurnUsage`.
-OpenRouter maps reported cache fields and exact total cost into that update;
-Command Code maps the token fields it reports and leaves cache and cost
-unknown. The core performs no pricing lookup.
+Adapters map reported cache fields and total cost into that update when they
+provide them; unknown values remain unknown. The core performs no pricing lookup.
 
 `OpenRouterProvider::last_error_report` exposes the most recent trusted-host
 diagnostic. It retains the failure boundary, captured HTTP status, retry
@@ -105,7 +103,7 @@ while credentials and an unbounded raw HTTP body are never persisted.
 
 ## Credentials and host authority
 
-Both adapters accept a key directly in their configuration. They never read
+Finite adapters accept keys directly in their configuration where applicable. They never read
 environment variables, a home-directory auth file, the current working
 directory, or the system clock. Applications may obtain credentials and host
 facts using their own secret/capability boundary, then pass those values in.
@@ -119,52 +117,9 @@ model outside that catalog, and unused catalog entries do not trigger credential
 lookup.
 
 Workspace-bearing adapters receive the stable logical repository label, not an
-isolated child's physical session worktree. In particular Command Code
-`workingDir` and project metadata must remain stable across two equivalent child
-leases; private index paths, worktree paths and lease suffixes never cross the
-provider boundary.
-
-Command Code also requires a `CommandCodeHostContext`, which makes the
-gateway's `workingDir`, `date`, and `environment` fields an explicit host
-decision:
-
-```rust,no_run
-use tea_providers::commandcode::{
-    CommandCodeConfig, CommandCodeHostContext, CommandCodeProvider,
-};
-use tea_providers::RetryPolicy;
-use std::time::Duration;
-
-let host = CommandCodeHostContext::new("/sandbox/project", "2026-08-14", "linux")?;
-let config = CommandCodeConfig::new("caller-supplied-api-key", "deepseek/deepseek-v4-flash", host)?;
-let config = config.with_retry_policy(RetryPolicy::new(
-    3,
-    Duration::from_millis(250),
-    Duration::from_secs(8),
-));
-let provider = CommandCodeProvider::new(config);
-# let _ = provider;
-# Ok::<(), Box<dyn std::error::Error>>(())
-```
-
-`CommandCodeConfig` also provides explicit permission mode, a canonical UUID thread ID, mode,
-temperature, output-token limit, and zero-data-retention-header settings. When present, the
-thread ID is also sent as the Command Code session ID, matching the current
-per-thread request shape without having the library generate or discover an identifier.
-The current Command Code client metadata is also preserved: the project slug defaults to the
-final component of the already-explicit `workingDir` (and can be overridden), and taste learning
-defaults to the upstream client's enabled setting but can be disabled with
-`with_taste_learning_enabled(false)`.
-The provider accepts only a request whose `ModelDescriptor` is
-`command-code` with the configured model, avoiding a silent model mismatch.
-
-The `tea-eval` executable is a caller-owned integration boundary. Its
-Command Code mode reads `COMMANDCODE_API_KEY` from its process environment,
-not from the library, and requires explicit `--commandcode-date` and
-`--commandcode-environment` values plus a caller-owned canonical UUID passed as
-`--commandcode-thread-id`, plus `--commandcode-project-slug`. This keeps ambient
-secret and host lookup out of `CommandCodeProvider` while making a deliberate
-command-line harness practical.
+isolated child's physical session worktree. Stable logical repository labeling and
+project metadata should remain stable across equivalent child leases; private index
+paths, worktree paths, and lease suffixes should not cross provider boundaries.
 
 ## Context and stream mapping
 
@@ -179,29 +134,17 @@ a clone of canonical tool results. Raw content/details stay in the transcript
 and lifecycle events; model-facing text is bounded, marks error state and
 recovery guidance, and encodes unsupported details in a marked representation.
 The OpenAI-compatible array carries `is_error` for in-tree native adaptation;
-Command Code maps it to its `isError` field and preserves marked details in the
-text output.
+OpenAI-compatible adapters preserve marked details in the text output.
 
-The Command Code adapter consumes a caller-converted standard Chat
-Completions JSON message array from `ModelRequest.context`. It maps textual
-user/assistant messages and function-style assistant tool calls into the
-gateway's `text`, `tool-call`, and `tool-result` content blocks. A tool result
-must match a preceding assistant tool call, so the adapter can preserve its
-tool name instead of guessing it.
+Those adapters consume a caller-converted standard Chat Completions JSON message
+array from `ModelRequest.context`. They map textual user/assistant messages and
+function-style assistant tool calls into content blocks and keep tool-result names
+paired with prior tool calls.
 
-The gateway's `text-delta`, `tool-call`, `finish`, usage, error, and abort
-events map directly to core model-stream events. HTTP-level JSON error
-envelopes without an NDJSON `type` are accepted as terminal gateway errors and
-retain their bounded structured diagnostics in `last_error_report()`. Gateway
-error payloads stay generic before entering agent state, so a remote service
-cannot inject arbitrary error text into a transcript. A trusted host can instead call
-`CommandCodeProvider::last_error_report()` for the last failure's source,
-message, status, type, code, and retryability classification. The configured
-API key is redacted from this host-only report, but its remote message remains
-untrusted data and belongs only in private host diagnostics. Command Code
-accepts `low`, `medium`, `high`, `xhigh`, and `max` reasoning effort values.
-Generic `Off` omits the provider field, and generic `Minimal` maps to `low`,
-because the gateway rejects `off` and `minimal`.
+Provider event envelopes map directly to core model-stream events. Error payloads
+stay generic before entering agent state, so a remote service cannot inject
+arbitrary transcript text. Hosts can read `last_error_report()` from the concrete
+adapter for the last failure's source, message, status, and retryability classification.
 
 Reasoning deltas
 are intentionally not retained: the current core model-stream contract has no
@@ -212,16 +155,12 @@ fallback. The current gateway may emit a `provider-metadata` envelope after
 second terminal event.
 
 OpenRouter and Local expose network-time assistant deltas through the core
-stream while preserving final usage before their terminal events. Command Code
-still collects its timeout-bounded native response before returning a finite
-core stream. The generic `ModelProvider` port does not retry or replay a stream
-after it has exposed events.
+stream while preserving final usage before their terminal events. The generic
+`ModelProvider` port does not retry or replay a stream after it has exposed events.
 
 All in-tree adapters own their request boundary. On the run
-cancellation token, Local and Command Code check cancellation before and
-between body chunks, while OpenRouter's and Local's body workers yield
-completed chunks to the caller-polled stream. Command Code also checks after
-its timeout-bounded request settles.
+cancellation token, finite adapters check cancellation before and between body
+chunks while body workers yield completed chunks to the caller-polled stream.
 Cancellation does not become a retryable transport error. Immediate mid-read
 interruption remains bounded by the receive timeout.
 

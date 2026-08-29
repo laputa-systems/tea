@@ -92,7 +92,7 @@ pub(super) fn utc_date() -> String {
 }
 
 // Howard Hinnant's public-domain civil-date conversion, expressed locally to
-// keep Command Code host metadata explicit without a time crate.
+// keep provider host metadata explicit without a time crate.
 pub(super) fn civil_from_days(days_since_unix_epoch: i64) -> (i64, u32, u32) {
     let z = days_since_unix_epoch + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;

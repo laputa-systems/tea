@@ -2435,7 +2435,7 @@ impl RunHandle {
 /// The canonical transcript remains raw. In-tree provider adapters currently
 /// have no portable structured tool-details field, so details are encoded into
 /// bounded marked text here while the `is_error` bit stays available to native
-/// adapters such as Command Code.
+/// adapters.
 fn project_model_context(
     mut context: crate::hooks::ContextEnvelope,
     policy: &crate::tool::ToolResultProjectionPolicy,

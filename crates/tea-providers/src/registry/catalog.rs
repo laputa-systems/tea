@@ -1,7 +1,6 @@
 //! Checked-in provider and model catalog entries.
 
 #[cfg(any(
-    feature = "provider-commandcode",
     feature = "provider-openrouter",
     feature = "provider-local",
     feature = "provider-opencode-zen"
@@ -9,7 +8,6 @@
 use super::MODEL_CATALOG_VERSION;
 use super::contracts::ProviderEntry;
 #[cfg(any(
-    feature = "provider-commandcode",
     feature = "provider-openrouter",
     feature = "provider-local",
     feature = "provider-opencode-zen"
@@ -17,16 +15,8 @@ use super::contracts::ProviderEntry;
 use super::contracts::{ModelDescriptor, ProviderCapabilities, ProviderConfigurationKind};
 // Source/update evidence for these lists is intentionally local and reviewable. Model identifiers
 // and context capacities are synchronized from the pinned Pi model registry in
-// `~/d/pi/packages/ai/dist/models.generated.js` and
-// `~/d/pi/packages/ai/dist/providers/command-code.catalog.js`. OpenRouter values use Pi's
+// `~/d/pi/packages/ai/dist/models.generated.js`. OpenRouter values use Pi's
 // provider-specific `contextWindow`, rather than a guessed value from the model name.
-#[cfg(feature = "provider-commandcode")]
-static COMMAND_CODE_MODELS: &[ModelDescriptor] = &[ModelDescriptor {
-    id: "deepseek/deepseek-v4-flash",
-    display_name: "DeepSeek V4 Flash",
-    context_window: Some(1_000_000),
-}];
-
 #[cfg(feature = "provider-openrouter")]
 static OPENROUTER_MODELS: &[ModelDescriptor] = &[
     ModelDescriptor {
@@ -78,19 +68,6 @@ static OPENCODE_ZEN_MODELS: &[ModelDescriptor] = &[
 ];
 
 pub(super) static COMPILED_PROVIDERS: &[ProviderEntry] = &[
-    #[cfg(feature = "provider-commandcode")]
-    ProviderEntry {
-        id: "command-code",
-        display_name: "Command Code",
-        model_catalog_version: MODEL_CATALOG_VERSION,
-        models: COMMAND_CODE_MODELS,
-        allows_custom_models: true,
-        configuration: ProviderConfigurationKind::CommandCode,
-        capabilities: ProviderCapabilities {
-            provider_reported_cost: false,
-            concrete_compactor: false,
-        },
-    },
     #[cfg(feature = "provider-openrouter")]
     ProviderEntry {
         id: "openrouter",

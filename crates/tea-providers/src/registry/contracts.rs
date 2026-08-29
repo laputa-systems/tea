@@ -49,9 +49,6 @@ impl ProviderCapabilities {
 /// The explicit configuration family required by one compiled adapter.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProviderConfigurationKind {
-    /// Command Code's caller-owned API key and host context configuration.
-    #[cfg(feature = "provider-commandcode")]
-    CommandCode,
     /// OpenRouter's caller-owned API key and model configuration.
     #[cfg(feature = "provider-openrouter")]
     OpenRouter,
@@ -121,9 +118,6 @@ impl ModelSelection {
 /// lookup can manufacture credentials or host context.
 #[derive(Clone, Debug)]
 pub enum ProviderConfiguration {
-    /// Fully configured Command Code adapter.
-    #[cfg(feature = "provider-commandcode")]
-    CommandCode(crate::commandcode::CommandCodeConfig),
     /// Fully configured OpenRouter adapter.
     #[cfg(feature = "provider-openrouter")]
     OpenRouter(crate::openrouter::OpenRouterConfig),

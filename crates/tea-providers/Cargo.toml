@@ -10,10 +10,6 @@ path = "src/lib.rs"
 
 [features]
 default = []
-provider-commandcode = [
-    "dep:smol",
-    "dep:tea-http",
-]
 provider-openrouter = [
     "dep:smol",
     "dep:tea-http",
@@ -29,7 +25,7 @@ provider-opencode-zen = [
     "dep:tea-http",
 ]
 provider-opencode-zen-test-support = ["provider-opencode-zen"]
-eval-runner = ["dep:smol", "provider-commandcode", "provider-openrouter"]
+eval-runner = ["dep:smol", "provider-openrouter"]
 
 [dependencies]
 tea-core = { path = "../tea-core" }

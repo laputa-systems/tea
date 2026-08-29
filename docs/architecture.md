@@ -91,12 +91,12 @@ First-party coding tools are resolved from immutable Luau harness source;
 `CodingHost` supplies their trusted operation ports without owning their
 provider-visible semantics.
 
-The optional `tea_providers` crate is a separate adapter layer behind explicit Cargo
-features. `provider-openrouter`, `provider-commandcode`, and `provider-local` are opt-in blocking
-HTTP/1.1 transports backed by Rustls/Graviola, with caller-supplied keys and no ambient configuration
-discovery; the provider-owned worker thread keeps that blocking I/O outside the core executor. The
-evaluation runner selects one only through its explicit provider argument. They do not change the default
-build or the `ModelProvider` contract. See
+The optional `tea_providers` crate is a separate adapter layer behind explicit
+Cargo features. `provider-openrouter`, `provider-local`, and `provider-opencode-zen`
+are opt-in blocking HTTP/1.1 transports backed by Rustls/Graviola, with caller-supplied
+keys and no ambient configuration discovery; the provider-owned worker thread keeps that
+blocking I/O outside the core executor. The evaluation runner selects one only through its
+explicit provider argument. They do not change the default build or the `ModelProvider` contract. See
 [provider adapters](provider-adapters.md) for their wire and context boundaries.
 
 ## Durable harness composition
@@ -286,10 +286,11 @@ The core has no unsafe Rust and no Tokio type in public or private APIs. Depende
 keep cancellation executor-agnostic and isolate the chosen token implementation behind the core
 contract.
 
-Concrete native adapters own their request boundary to settlement. Local and OpenRouter expose
-caller-polled body streams; Command Code uses a finite response. Each checks cancellation before
-and between body chunks (and after a finite request settles); the generic core additionally wakes
-its sequential tool poll on cancellation and records a cancellation result rather than leaving an
+Concrete native adapters own their request boundary to settlement. OpenRouter and
+other adapter implementations expose caller-polled body streams and also perform
+checked cancellation before and between body chunks; finite adapters additionally
+settle after request completion. The generic core additionally wakes its sequential
+tool poll on cancellation and records a cancellation result rather than leaving an
 uncooperative future holding run ownership.
 
 ## Default coding builtins

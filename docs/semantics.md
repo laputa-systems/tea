@@ -275,8 +275,9 @@ context using `ToolResultProjectionPolicy`: it deterministically retains
 prefix/suffix around `… [truncated] …`, marks error status/disposition/guidance,
 encodes unsupported structured details as bounded marked text, and suppresses
 later identical error payloads in the same projected context. This projection
-never mutates transcript/audit state. Command Code preserves `isError`; the
-OpenAI-compatible context carries the bounded marked representation.
+never mutates transcript/audit state. OpenAI-compatible adapters preserve
+`isError`-style failure signaling; the core carries the bounded marked
+representation.
 
 ### Event observer and subscription contract
 

@@ -5,7 +5,6 @@ use super::contracts::{
     ConfiguredProvider, ModelSelection, ProviderConfiguration, ProviderEntry, RegistryError,
 };
 #[cfg(any(
-    feature = "provider-commandcode",
     feature = "provider-openrouter",
     feature = "provider-local",
     feature = "provider-opencode-zen"
@@ -94,25 +93,6 @@ impl ProviderRegistry {
     ) -> Result<ConfiguredProvider, RegistryError> {
         self.resolve_model(&descriptor.provider, descriptor.model.clone())?;
         match configuration {
-            #[cfg(feature = "provider-commandcode")]
-            ProviderConfiguration::CommandCode(configuration) => {
-                if descriptor.provider != "command-code" {
-                    return Err(RegistryError::ConfigurationProviderMismatch {
-                        expected: descriptor.provider.clone(),
-                        actual: "command-code",
-                    });
-                }
-                if configuration.model() != descriptor.model {
-                    return Err(RegistryError::ConfigurationModelMismatch {
-                        expected: descriptor.model,
-                        actual: configuration.model().to_owned(),
-                    });
-                }
-                Ok(ConfiguredProvider {
-                    descriptor,
-                    provider: Arc::new(crate::commandcode::CommandCodeProvider::new(configuration)),
-                })
-            }
             #[cfg(feature = "provider-openrouter")]
             ProviderConfiguration::OpenRouter(configuration) => {
                 if descriptor.provider != "openrouter" {
