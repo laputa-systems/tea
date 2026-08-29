@@ -98,7 +98,13 @@ unknown. The core performs no pricing lookup.
 diagnostic. It retains the failure boundary, captured HTTP status, retry
 classification, attempt number, request/response byte counts, and a bounded
 redacted response prefix. The generic model stream still receives only the
-stable adapter error, so provider text cannot enter agent state unboundedly.
+stable adapter error as its terminal message; a separate typed diagnostic
+event carries the bounded report, so provider text cannot enter agent state
+unboundedly.
+When the terminal host receives that stream, it also writes the same bounded
+report to `ProviderRequestSettledRecord.provider_error` in the durable session.
+The report is therefore available after reopening or with `tea session dump`,
+while credentials and an unbounded raw HTTP body are never persisted.
 
 ## Credentials and host authority
 

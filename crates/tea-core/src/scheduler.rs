@@ -7,6 +7,7 @@
 use crate::error::SchedulerError;
 use crate::state::{AgentToolCall, ModelDescriptor, ThinkingLevel, ToolCallId};
 use crate::tool::{AgentToolResult, ToolCall, ToolDefinition, ToolExecutionMode};
+use tea_session::ProviderErrorRecord;
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
@@ -114,6 +115,11 @@ pub enum ModelStreamEvent {
         /// Redacted provider/model diagnostic.
         message: String,
     },
+    /// Typed bounded provider failure evidence accompanying [`Self::Error`].
+    ///
+    /// Adapters emit this before the terminal error event; it is not itself a
+    /// terminal event and is ignored by compaction-only consumers.
+    ProviderError(ProviderErrorRecord),
     /// The provider explicitly identified the incomplete response as a
     /// context-capacity overflow. This is typed so the generic core never
     /// guesses from an HTTP body or error string.

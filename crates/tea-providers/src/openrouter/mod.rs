@@ -84,6 +84,24 @@ pub struct OpenRouterErrorReport {
     pub response_prefix: Option<String>,
 }
 
+impl OpenRouterErrorReport {
+    /// Convert this bounded diagnostic to the session's persistable provider-error shape.
+    pub fn as_session_error(&self) -> tea_session::ProviderErrorRecord {
+        tea_session::ProviderErrorRecord {
+            source: self.source.as_str().to_owned(),
+            message: Some(self.message.clone()),
+            status_code: self.status_code,
+            attempt: Some(self.attempt),
+            error_type: None,
+            error_code: None,
+            retryable: Some(self.retryable),
+            response_bytes: self.response_bytes.map(|value| value as u64),
+            request_bytes: self.request_bytes.map(|value| value as u64),
+            response_body: self.response_prefix.clone(),
+        }
+    }
+}
+
 impl fmt::Display for OpenRouterErrorReport {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -202,6 +220,12 @@ impl OpenRouterEventStream {
             request_bytes: None,
             response_prefix: None,
         });
+        self.pending.push_back(ModelStreamEvent::ProviderError(
+            self.provider
+                .last_error_report()
+                .expect("recorded OpenRouter adapter error")
+                .as_session_error(),
+        ));
         self.pending.push_back(ModelStreamEvent::Error { message });
     }
 
@@ -220,6 +244,12 @@ impl OpenRouterEventStream {
                 response_body_prefix(&self.error_body, Some(&self.provider.config.api_key))
             }),
         });
+        self.pending.push_back(ModelStreamEvent::ProviderError(
+            self.provider
+                .last_error_report()
+                .expect("recorded OpenRouter transport error")
+                .as_session_error(),
+        ));
         self.pending.push_back(ModelStreamEvent::Error { message });
     }
 
@@ -241,6 +271,12 @@ impl OpenRouterEventStream {
                 Some(&self.provider.config.api_key),
             )),
         });
+        self.pending.push_back(ModelStreamEvent::ProviderError(
+            self.provider
+                .last_error_report()
+                .expect("recorded OpenRouter response error")
+                .as_session_error(),
+        ));
         self.pending.push_back(if context_overflow {
             ModelStreamEvent::ContextOverflow { message }
         } else {
@@ -520,9 +556,14 @@ impl OpenRouterProvider {
             Err(_message) if cancellation.is_cancelled() => ModelStream {
                 events: vec![ModelStreamEvent::End(StopReason::Cancelled)],
             },
-            Err(message) => ModelStream {
-                events: vec![ModelStreamEvent::Error { message }],
-            },
+            Err(message) => {
+                let mut events = Vec::with_capacity(2);
+                if let Some(report) = self.last_error_report() {
+                    events.push(ModelStreamEvent::ProviderError(report.as_session_error()));
+                }
+                events.push(ModelStreamEvent::Error { message });
+                ModelStream { events }
+            }
         }
     }
 
@@ -1213,9 +1254,10 @@ data: [DONE]
             ..ModelRequest::default()
         };
         let stream = provider.response_stream(request, cancellation);
-        assert!(
-            matches!(stream.events.first(), Some(ModelStreamEvent::Error { message }) if message.contains("omitted its exact model"))
-        );
+        assert!(stream.events.iter().any(|event| matches!(
+            event,
+            ModelStreamEvent::Error { message } if message.contains("omitted its exact model")
+        )));
 
         let stream = provider.response_stream(
             ModelRequest {
@@ -1229,9 +1271,10 @@ data: [DONE]
             },
             CancellationToken::new(),
         );
-        assert!(
-            matches!(stream.events.first(), Some(ModelStreamEvent::Error { message }) if message.contains("does not match requested model"))
-        );
+        assert!(stream.events.iter().any(|event| matches!(
+            event,
+            ModelStreamEvent::Error { message } if message.contains("does not match requested model")
+        )));
     }
 
     #[test]
@@ -1289,8 +1332,16 @@ data: [DONE]
         stream.response_failure("OpenRouter rejected the request".into());
         assert!(matches!(
             stream.pending.front(),
-            Some(ModelStreamEvent::ContextOverflow { .. })
+            Some(ModelStreamEvent::ProviderError(error))
+                if error.status_code == Some(400)
+                    && error.response_bytes
+                        == Some(br#"{"error":{"message":"maximum context length exceeded"}}"#.len() as u64)
+                    && error.response_body.as_deref().is_some_and(|body| body.contains("maximum context length exceeded"))
         ));
+        assert!(stream.pending.iter().any(|event| matches!(
+            event,
+            ModelStreamEvent::ContextOverflow { .. }
+        )));
     }
 
     #[test]

@@ -1,12 +1,15 @@
-//! Machine-readable operators' commands for explicit session directories.
+//! Machine-readable operators' commands for durable sessions.
 //!
-//! These commands never discover a session home or select a provider. They
-//! operate only on the paths and transitive immutable roots the caller names.
+//! Mutating and artifact-management commands retain explicit directory
+//! arguments. Read-only `inspect` and `dump` commands resolve a session ID
+//! below the caller's Tea home, then validate the immutable session header
+//! before reading any records.
 
 use super::{AppError, SessionCommand};
 use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::fs;
+use std::io;
 use std::path::Path;
 use std::sync::Arc;
 use tea_luau::LuauExtensionEngine;
@@ -19,7 +22,7 @@ use tea_session::{
 /// Execute one explicit persistence command and return exactly one JSON object.
 pub fn run_session_command(command: SessionCommand) -> Result<String, AppError> {
     let result = match command {
-        SessionCommand::Inspect { directory } => {
+        SessionCommand::InspectPath { directory } => {
             let inspection = JsonlSession::inspect(&directory)?;
             inspection_json(
                 "inspect",
@@ -29,6 +32,22 @@ pub fn run_session_command(command: SessionCommand) -> Result<String, AppError> 
                 None,
                 None,
             )
+        }
+        SessionCommand::Inspect { session_id, tea_home } => {
+            let directory = resolve_session_id(&session_id, tea_home.as_deref())?;
+            let inspection = JsonlSession::inspect(&directory)?;
+            inspection_json(
+                "inspect",
+                &inspection.snapshot,
+                inspection.torn_tail_offset,
+                None,
+                None,
+                None,
+            )
+        }
+        SessionCommand::Dump { session_id, tea_home } => {
+            let directory = resolve_session_id(&session_id, tea_home.as_deref())?;
+            dump_session(&directory)?
         }
         SessionCommand::Repair { directory } => {
             let repair = JsonlSession::repair_torn_tail(&directory, DurabilityMode::Strict)?;
@@ -160,6 +179,157 @@ pub fn run_session_command(command: SessionCommand) -> Result<String, AppError> 
     result.to_json_string().map_err(|error| {
         AppError::Setup(format!("could not encode session command output: {error}"))
     })
+}
+
+fn resolve_session_id(
+    session_id: &std::ffi::OsStr,
+    tea_home: Option<&Path>,
+) -> Result<std::path::PathBuf, AppError> {
+    let id = session_id
+        .to_str()
+        .ok_or_else(|| AppError::Setup("session ID must be UTF-8".into()))?;
+    tea_session::SessionId::new(id.to_owned())
+        .map_err(|error| AppError::Setup(error.to_string()))?;
+    let home = match tea_home {
+        Some(path) if path.as_os_str().is_empty() => {
+            return Err(AppError::Setup("--tea-home must not be empty".into()));
+        }
+        Some(path) => path.to_path_buf(),
+        None => std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .map(std::path::PathBuf::from)
+            .map(|path| path.join(".tea"))
+            .ok_or_else(|| {
+                AppError::Setup("could not resolve the user home directory".into())
+            })?,
+    };
+    let root = home.join("sessions");
+    let root_metadata = match fs::symlink_metadata(&root) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Err(AppError::Setup(format!(
+                "session {id:?} was not found in {}",
+                root.display()
+            )));
+        }
+        Err(error) => {
+            return Err(AppError::Setup(format!(
+                "could not inspect {}: {error}",
+                root.display()
+            )));
+        }
+    };
+    if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
+        return Err(AppError::Setup(format!(
+            "session root {} must be a real directory",
+            root.display()
+        )));
+    }
+    let entries = fs::read_dir(&root)
+        .map_err(|error| AppError::Setup(format!("could not list {}: {error}", root.display())))?;
+    let wanted = format!("{id}.tea");
+    let mut matches = Vec::new();
+    for entry in entries {
+        let workspace_root = entry
+            .map_err(|error| AppError::Setup(error.to_string()))?
+            .path();
+        let metadata = fs::symlink_metadata(&workspace_root)
+            .map_err(|error| AppError::Setup(error.to_string()))?;
+        if metadata.file_type().is_symlink() {
+            return Err(AppError::Setup(format!(
+                "workspace session root {} must be a real directory",
+                workspace_root.display()
+            )));
+        }
+        if !metadata.is_dir() {
+            continue;
+        }
+        let candidate = workspace_root.join(&wanted);
+        let metadata = match fs::symlink_metadata(&candidate) {
+            Ok(value) => value,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(AppError::Setup(error.to_string())),
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(AppError::Setup(format!(
+                "session path {} must be a real directory",
+                candidate.display()
+            )));
+        }
+        let inspection = JsonlSession::inspect(&candidate).map_err(|error| {
+            AppError::Setup(format!("could not inspect session {}: {error}", candidate.display()))
+        })?;
+        if inspection.snapshot.header().session_id.as_str() != id {
+            return Err(AppError::Setup(format!(
+                "session path {} disagrees with its immutable header",
+                candidate.display()
+            )));
+        }
+        matches.push(candidate);
+    }
+    match matches.len() {
+        1 => Ok(matches.remove(0)),
+        0 => Err(AppError::Setup(format!(
+            "session {id:?} was not found in {}",
+            root.display()
+        ))),
+        _ => Err(AppError::Setup(format!(
+            "session ID {id:?} is ambiguous across workspace roots"
+        ))),
+    }
+}
+
+fn dump_session(directory: &Path) -> Result<JsonValue, AppError> {
+    let inspection = JsonlSession::inspect(directory)?;
+    let path = directory.join("session.jsonl");
+    let bytes = fs::read(&path)
+        .map_err(|error| AppError::Setup(format!("could not read {}: {error}", path.display())))?;
+    let end = inspection
+        .torn_tail_offset
+        .map(|offset| {
+            usize::try_from(offset).map_err(|_| {
+                AppError::Setup(format!("session tail offset exceeds addressable memory: {offset}"))
+            })
+        })
+        .transpose()?
+        .unwrap_or(bytes.len());
+    let prefix = bytes.get(..end).ok_or_else(|| {
+        AppError::Setup(format!(
+            "session tail offset {end} exceeds {} bytes",
+            bytes.len()
+        ))
+    })?;
+    let mut records = Vec::new();
+    for line in prefix.split(|byte| *byte == b'\n') {
+        if line.is_empty() {
+            continue;
+        }
+        let line = std::str::from_utf8(line)
+            .map_err(|error| AppError::Setup(format!("session record is not UTF-8: {error}")))?;
+        records.push(JsonValue::parse(line).map_err(|error| {
+            AppError::Setup(format!("could not parse session record: {error}"))
+        })?);
+    }
+    Ok(JsonValue::object([
+        ("operation", JsonValue::String("dump".into())),
+        (
+            "session_id",
+            JsonValue::String(inspection.snapshot.header().session_id.to_string()),
+        ),
+        (
+            "through_digest",
+            JsonValue::String(inspection.snapshot.last_digest().to_hex()),
+        ),
+        ("through_seq", JsonValue::from(inspection.snapshot.last_sequence().0)),
+        (
+            "torn_tail_offset",
+            inspection
+                .torn_tail_offset
+                .map(JsonValue::from)
+                .unwrap_or(JsonValue::Null),
+        ),
+        ("records", JsonValue::Array(records)),
+    ]))
 }
 
 fn inspection_json(

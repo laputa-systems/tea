@@ -143,6 +143,13 @@ reproducible in fixtures. The current schema constant is
 `SESSION_FORMAT_VERSION = 1`; every record is bounded to 1 MiB and a header
 that disagrees is rejected before record decoding or repair.
 
+`provider_request_settled` records may carry a `provider_error` object. Its
+`source`, optional `message`, `status_code`, attempt number, retry
+classification, request and response byte counts, and `response_body` are
+trusted-host diagnostics. The provider adapter must redact credentials and
+bound the response text before writing it; an absent field preserves the
+original v1 wire shape and digest of older settlements.
+
 ## Durable agent graph
 
 The v1 schema is updated in place with first-class subagent facts; there is no
@@ -204,10 +211,15 @@ recovery](artifact-recovery.md) for export and collection rules.
 ## Operator commands
 
 The terminal binary exposes explicit machine-readable operations; each writes
-one JSON object to stdout and never discovers a session implicitly:
+one JSON object to stdout. `inspect` and `dump` take a session ID and resolve
+it below the Tea home (or the path supplied by `--tea-home`), scanning the
+workspace-hash roots and validating the immutable session header. A missing
+or ambiguous ID is an error. The remaining operations continue to take
+explicit session directories and never discover a session implicitly:
 
 ```sh
-tea session inspect <session-dir>
+tea session inspect <session-id> [--tea-home <path>]
+tea session dump <session-id> [--tea-home <path>]
 tea session repair <session-dir>
 tea session rebuild-meta <session-dir>
 tea session verify <session-dir> [--root <artifact-id>]...
@@ -215,6 +227,10 @@ tea session gc <session-dir> [--root <artifact-id>]... [--apply]
 tea session export <session-dir> <destination> [--root <artifact-id>]...
 tea session restore <export-dir> <destination>
 ```
+
+`dump` returns the validated JSONL prefix in a `records` array together with
+the session identity, authenticated prefix digest/sequence, and any
+`torn_tail_offset`; it does not present an uncommitted tail as durable state.
 
 `verify` is read-only. It validates each immutable harness catalog and its
 transitive source roots as well as the prefix and direct objects. Alongside

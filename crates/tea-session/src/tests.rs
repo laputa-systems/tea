@@ -1373,6 +1373,18 @@ fn generated_operation_session_fixture_measures_buffered_append_and_replay() {
                         request_id: request_id.clone(),
                         operation_id: operation_id.clone(),
                         outcome: JsonValue::Null,
+                        provider_error: Some(ProviderErrorRecord {
+                            source: "response".into(),
+                            message: Some("upstream rejected request".into()),
+                            status_code: Some(429),
+                            attempt: Some(1),
+                            error_type: Some("rate_limit".into()),
+                            error_code: Some("too_many_requests".into()),
+                            retryable: Some(true),
+                            response_bytes: Some(128),
+                            request_bytes: Some(512),
+                            response_body: Some("{\"error\":\"redacted\"}".into()),
+                        }),
                         usage: None,
                         response_artifact: None,
                         classification: ProviderSettlementClassification::Completed,
@@ -1422,6 +1434,28 @@ fn generated_operation_session_fixture_measures_buffered_append_and_replay() {
             .last_sequence(),
         Sequence(OPERATION_COUNT * MUTATIONS_PER_OPERATION)
     );
+    let persisted_provider_error = reopened
+        .snapshot()
+        .expect("snapshot succeeds")
+        .mutations()
+        .any(|mutation| {
+            let StoredMutationRef {
+                mutation: SessionMutationRef::Record(record),
+                ..
+            } = mutation
+            else {
+                return false;
+            };
+            matches!(
+                &record.record,
+                LaneRecord::ProviderRequestSettled(settled)
+                    if settled.provider_error.as_ref().is_some_and(|error|
+                        error.status_code == Some(429)
+                            && error.attempt == Some(1)
+                            && error.response_body.as_deref() == Some("{\"error\":\"redacted\"}"))
+            )
+        });
+    assert!(persisted_provider_error, "typed provider error survives JSONL replay");
     let replay_elapsed = replay_started.elapsed();
     eprintln!(
         "generated-operations operations={OPERATION_COUNT} mutations={} jsonl_bytes={jsonl_bytes} append_ms={} replay_ms={}",
@@ -1988,6 +2022,7 @@ fn jsonl_reopen_preserves_tool_intent_and_derives_the_same_recovery_plan() {
                 request_id: first_request,
                 operation_id: operation_id.clone(),
                 outcome: JsonValue::Null,
+                provider_error: None,
                 usage: None,
                 response_artifact: None,
                 classification: ProviderSettlementClassification::Retryable,
@@ -2033,6 +2068,7 @@ fn jsonl_reopen_preserves_tool_intent_and_derives_the_same_recovery_plan() {
                 request_id: second_request.clone(),
                 operation_id: operation_id.clone(),
                 outcome: JsonValue::Null,
+                provider_error: None,
                 usage: None,
                 response_artifact: None,
                 classification: ProviderSettlementClassification::Completed,
@@ -2040,6 +2076,16 @@ fn jsonl_reopen_preserves_tool_intent_and_derives_the_same_recovery_plan() {
         ))
         .expect("completed provider settlement persists");
     session = assert_reopen_fixed_point(session, &directory, &lane);
+    let wire = std::fs::read_to_string(directory.join("session.jsonl"))
+        .expect("session JSONL can be read");
+    let completed_settlement = wire
+        .lines()
+        .find(|line| line.contains("jsonl-provider-request-two"))
+        .expect("completed settlement is present");
+    assert!(
+        !completed_settlement.contains("provider_error"),
+        "absent diagnostics must not alter the v1 authenticated wire shape"
+    );
     session
         .append_record(LaneRecord::Usage(UsageRecord {
             operation_id: operation_id.clone(),

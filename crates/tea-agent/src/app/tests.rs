@@ -23,7 +23,7 @@ use tea_core::tool::AgentToolResult;
 use tea_core::tool::ToolUpdate;
 use tea_core::tool::{ToolDefinition, ToolExecutionMode};
 use tea_session::{
-    ArtifactStore, CustomEntry, DurabilityMode, EntryId, HarnessCatalogFact, JsonValue,
+    ArtifactStore, CustomEntry, Digest, DurabilityMode, EntryId, HarnessCatalogFact, JsonValue,
     JsonlSession, LaneId, Metadata, PayloadRef, ProvisionedEntry, SessionEntry, SessionFact,
     SessionHeader, SessionId, SessionWriter,
 };
@@ -219,10 +219,20 @@ fn new_reaps_a_completed_task_but_never_drops_a_pending_task_receiver() {
 fn cli_parses_explicit_machine_session_commands() {
     assert_eq!(
         CliOptions::parse_command(
-            ["tea", "session", "inspect", "/tmp/session.tea"].map(OsString::from)
+            ["tea", "session", "inspect", "session-id", "--tea-home", "/tmp/tea"].map(OsString::from)
         ),
         Ok(CliCommand::Session(SessionCommand::Inspect {
-            directory: PathBuf::from("/tmp/session.tea"),
+            session_id: OsString::from("session-id"),
+            tea_home: Some(PathBuf::from("/tmp/tea")),
+        }))
+    );
+    assert_eq!(
+        CliOptions::parse_command(
+            ["tea", "session", "dump", "session-id"].map(OsString::from)
+        ),
+        Ok(CliCommand::Session(SessionCommand::Dump {
+            session_id: OsString::from("session-id"),
+            tea_home: None,
         }))
     );
     assert_eq!(
@@ -278,7 +288,7 @@ fn machine_session_inspect_and_verify_emit_authenticated_json() {
     drop(session);
 
     for command in [
-        SessionCommand::Inspect {
+        SessionCommand::InspectPath {
             directory: directory.clone(),
         },
         SessionCommand::Verify {
@@ -305,6 +315,104 @@ fn machine_session_inspect_and_verify_emit_authenticated_json() {
 }
 
 #[test]
+fn machine_session_id_commands_resolve_and_dump_authoritative_prefix() {
+    let home = test_tea_home("machine-session-id");
+    let workspace = PathBuf::from("/workspace/session-id-test");
+    let workspace_root = home
+        .join("sessions")
+        .join(Digest::from_bytes(workspace.to_string_lossy().as_bytes()).to_hex());
+    let directory = workspace_root.join("session-id-test.tea");
+    fs::create_dir_all(&workspace_root).expect("workspace session root creates");
+    let mut session = JsonlSession::create(
+        &directory,
+        SessionHeader::new(
+            SessionId::new("session-id-test").expect("valid session ID"),
+            workspace.to_string_lossy(),
+            Metadata::new(),
+        ),
+        DurabilityMode::Strict,
+    )
+    .expect("session creates");
+    session
+        .append_entry(
+            &LaneId::main(),
+            ProvisionedEntry::user(
+                EntryId::new("session-id-test-entry").expect("valid entry ID"),
+                "dump me",
+            ),
+        )
+        .expect("entry commits");
+    let expected_digest = session.snapshot().expect("snapshot").last_digest().to_hex();
+    drop(session);
+
+    let inspect = run_session_command(SessionCommand::Inspect {
+        session_id: OsString::from("session-id-test"),
+        tea_home: Some(home.clone()),
+    })
+    .expect("ID inspection succeeds");
+    let inspect = JsonValue::parse(&inspect)
+        .expect("inspection is JSON")
+        .as_object()
+        .expect("inspection is an object")
+        .clone();
+    assert_eq!(
+        inspect.get("through_digest").and_then(JsonValue::as_str),
+        Some(expected_digest.as_str())
+    );
+
+    let dump = run_session_command(SessionCommand::Dump {
+        session_id: OsString::from("session-id-test"),
+        tea_home: Some(home.clone()),
+    })
+    .expect("ID dump succeeds");
+    let dump = JsonValue::parse(&dump)
+        .expect("dump is JSON")
+        .as_object()
+        .expect("dump is an object")
+        .clone();
+    assert_eq!(
+        dump.get("session_id").and_then(JsonValue::as_str),
+        Some("session-id-test")
+    );
+    assert_eq!(dump.get("through_seq").and_then(JsonValue::as_u64), Some(1));
+    assert_eq!(
+        dump.get("records")
+            .and_then(JsonValue::as_array)
+            .map(|records| records.len()),
+        Some(2)
+    );
+    assert_eq!(dump.get("torn_tail_offset"), Some(&JsonValue::Null));
+
+    let mut file = fs::OpenOptions::new()
+        .append(true)
+        .open(directory.join("session.jsonl"))
+        .expect("session JSONL opens for the torn-tail fixture");
+    file.write_all(br#"{"#)
+        .expect("torn tail writes");
+    drop(file);
+    let dump = run_session_command(SessionCommand::Dump {
+        session_id: OsString::from("session-id-test"),
+        tea_home: Some(home.clone()),
+    })
+    .expect("dump tolerates an uncommitted tail");
+    let dump = JsonValue::parse(&dump)
+        .expect("torn-tail dump is JSON")
+        .as_object()
+        .expect("torn-tail dump is an object")
+        .clone();
+    assert!(dump
+        .get("torn_tail_offset")
+        .is_some_and(|offset| offset.as_u64().is_some()));
+    assert_eq!(
+        dump.get("records")
+            .and_then(JsonValue::as_array)
+            .map(|records| records.len()),
+        Some(2)
+    );
+    let _ = fs::remove_dir_all(home);
+}
+
+#[test]
 fn session_commands_do_not_load_the_tui_config() {
     let home = test_tea_home("session-command-no-config");
     fs::write(home.join("config.toml"), "[features\n").expect("malformed config writes");
@@ -320,7 +428,7 @@ fn session_commands_do_not_load_the_tui_config() {
     )
     .expect("session creates");
 
-    let output = run_session_command(SessionCommand::Inspect { directory })
+    let output = run_session_command(SessionCommand::InspectPath { directory })
         .expect("session inspection must not read TUI config");
     assert!(output.contains("\"operation\":\"inspect\""), "{output}");
     let _ = fs::remove_dir_all(home);

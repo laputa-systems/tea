@@ -47,8 +47,8 @@ timeout_seconds = 900
 
 `--tea-home` redirects both the session store and this file. The terminal loads
 the file once during application assembly, after resolving Tea home, and never
-for `tea session ...` inspection, verification, export, restore, repair, or
-garbage-collection commands.
+for `tea session ...` inspection, dump, verification, export, restore, repair,
+or garbage-collection commands.
 
 Missing `[features]`, a missing `subagents` key, or a missing file means false.
 When false, the terminal constructs no coordinator or child provider factory,

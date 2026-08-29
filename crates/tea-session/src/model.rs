@@ -827,12 +827,45 @@ pub struct ProviderRequestSettledRecord {
     pub operation_id: OperationId,
     /// Outcome encoded by the host/provider boundary.
     pub outcome: JsonValue,
+    /// Structured provider failure diagnostics, when the request did not complete normally.
+    ///
+    /// This is deliberately separate from `outcome`: the outcome remains a provider-defined
+    /// semantic projection while this record carries bounded, typed transport evidence.
+    pub provider_error: Option<ProviderErrorRecord>,
     /// Usage reported even when the semantic result never materializes.
     pub usage: Option<Usage>,
     /// Redacted raw response object when retained.
     pub response_artifact: Option<ArtifactId>,
     /// Settlement classification.
     pub classification: ProviderSettlementClassification,
+}
+
+/// Bounded, redacted evidence for a provider request failure.
+///
+/// Providers must redact credentials and cap response text before constructing this value.
+/// The session layer does not retain arbitrary remote bodies implicitly.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProviderErrorRecord {
+    /// Failure boundary (`adapter`, `transport`, or `response`).
+    pub source: String,
+    /// Stable local diagnostic, when available.
+    pub message: Option<String>,
+    /// HTTP status observed from the provider, when available.
+    pub status_code: Option<u16>,
+    /// One-based transport attempt, or zero for an adapter-side rejection.
+    pub attempt: Option<u32>,
+    /// Provider error type, when reported.
+    pub error_type: Option<String>,
+    /// Provider error code, when reported.
+    pub error_code: Option<String>,
+    /// Whether retry policy classified this failure as retryable.
+    pub retryable: Option<bool>,
+    /// Number of response bytes captured before parsing.
+    pub response_bytes: Option<u64>,
+    /// Number of request payload bytes sent to the provider.
+    pub request_bytes: Option<u64>,
+    /// Redacted bounded response body prefix.
+    pub response_body: Option<String>,
 }
 
 /// Whether a durable tool intent may be replayed after a crash.

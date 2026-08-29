@@ -2257,24 +2257,36 @@ fn encode_record(record: &LaneRecord) -> JsonValue {
                 optional_string(record.idempotency_key.as_deref()),
             ),
         ]),
-        LaneRecord::ProviderRequestSettled(record) => JsonValue::object([
-            ("type", JsonValue::String("provider_request_settled".into())),
-            ("request_id", string_value(&record.request_id)),
-            ("operation_id", string_value(&record.operation_id)),
-            ("outcome", record.outcome.clone()),
-            (
-                "usage",
-                optional_value(record.usage.as_ref().map(encode_usage)),
-            ),
-            (
-                "response_artifact",
-                optional_artifact(record.response_artifact),
-            ),
-            (
-                "classification",
-                JsonValue::String(provider_classification_name(&record.classification).into()),
-            ),
-        ]),
+        LaneRecord::ProviderRequestSettled(record) => {
+            // Keep the v1 wire representation byte-for-byte compatible for
+            // old settlements that did not have diagnostic evidence. Adding
+            // a JSON null would change their authenticated record digest.
+            let mut fields = BTreeMap::from([
+                (
+                    "type".into(),
+                    JsonValue::String("provider_request_settled".into()),
+                ),
+                ("request_id".into(), string_value(&record.request_id)),
+                ("operation_id".into(), string_value(&record.operation_id)),
+                ("outcome".into(), record.outcome.clone()),
+                (
+                    "usage".into(),
+                    optional_value(record.usage.as_ref().map(encode_usage)),
+                ),
+                (
+                    "response_artifact".into(),
+                    optional_artifact(record.response_artifact),
+                ),
+                (
+                    "classification".into(),
+                    JsonValue::String(provider_classification_name(&record.classification).into()),
+                ),
+            ]);
+            if let Some(error) = &record.provider_error {
+                fields.insert("provider_error".into(), encode_provider_error(error));
+            }
+            JsonValue::Object(fields)
+        }
         LaneRecord::ToolStarted(record) => JsonValue::object([
             ("type", JsonValue::String("tool_started".into())),
             ("record_id", string_value(&record.record_id)),
@@ -2449,6 +2461,9 @@ fn decode_record(value: &JsonValue) -> Result<LaneRecord, String> {
                 request_id: parse_id!(ProviderRequestId, required_string(object, "request_id")?),
                 operation_id: parse_id!(OperationId, required_string(object, "operation_id")?),
                 outcome: required_value(object, "outcome")?.clone(),
+                provider_error: optional_value_of(object, "provider_error")?
+                    .map(decode_provider_error)
+                    .transpose()?,
                 usage: optional_value_of(object, "usage")?
                     .map(decode_usage)
                     .transpose()?,
@@ -3190,6 +3205,74 @@ fn provider_classification_name(value: &ProviderSettlementClassification) -> &'s
     }
 }
 
+fn encode_provider_error(error: &ProviderErrorRecord) -> JsonValue {
+    JsonValue::object([
+        ("source", JsonValue::String(error.source.clone())),
+        ("message", optional_string(error.message.as_deref())),
+        (
+            "status_code",
+            error
+                .status_code
+                .map_or(JsonValue::Null, |value| JsonValue::from(u64::from(value))),
+        ),
+        (
+            "attempt",
+            error
+                .attempt
+                .map_or(JsonValue::Null, |value| JsonValue::from(u64::from(value))),
+        ),
+        ("error_type", optional_string(error.error_type.as_deref())),
+        ("error_code", optional_string(error.error_code.as_deref())),
+        (
+            "retryable",
+            error.retryable.map_or(JsonValue::Null, JsonValue::Bool),
+        ),
+        (
+            "response_bytes",
+            error
+                .response_bytes
+                .map_or(JsonValue::Null, JsonValue::from),
+        ),
+        (
+            "request_bytes",
+            error
+                .request_bytes
+                .map_or(JsonValue::Null, JsonValue::from),
+        ),
+        ("response_body", optional_string(error.response_body.as_deref())),
+    ])
+}
+
+fn decode_provider_error(value: &JsonValue) -> Result<ProviderErrorRecord, String> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| "provider_error must be an object".to_owned())?;
+    let status_code = optional_u64_of(object, "status_code")?
+        .map(|value| {
+            u16::try_from(value).map_err(|_| "provider_error status_code exceeds u16".to_owned())
+        })
+        .transpose()?;
+    let attempt = optional_u64_of(object, "attempt")?
+        .map(|value| {
+            u32::try_from(value).map_err(|_| "provider_error attempt exceeds u32".to_owned())
+        })
+        .transpose()?;
+    let response_bytes = optional_u64_of(object, "response_bytes")?;
+    let request_bytes = optional_u64_of(object, "request_bytes")?;
+    Ok(ProviderErrorRecord {
+        source: required_string(object, "source")?,
+        message: optional_string_of(object, "message")?,
+        status_code,
+        attempt,
+        error_type: optional_string_of(object, "error_type")?,
+        error_code: optional_string_of(object, "error_code")?,
+        retryable: optional_bool_of(object, "retryable")?,
+        response_bytes,
+        request_bytes,
+        response_body: optional_string_of(object, "response_body")?,
+    })
+}
+
 fn parse_provider_classification(value: &str) -> Result<ProviderSettlementClassification, String> {
     match value {
         "completed" => Ok(ProviderSettlementClassification::Completed),
@@ -3285,6 +3368,19 @@ fn required_bool(object: &BTreeMap<String, JsonValue>, field: &str) -> Result<bo
     required_value(object, field)?
         .as_bool()
         .ok_or_else(|| format!("field {field:?} must be a boolean"))
+}
+
+fn optional_bool_of(
+    object: &BTreeMap<String, JsonValue>,
+    field: &str,
+) -> Result<Option<bool>, String> {
+    match object.get(field) {
+        None | Some(JsonValue::Null) => Ok(None),
+        Some(value) => value
+            .as_bool()
+            .map(Some)
+            .ok_or_else(|| format!("field {field:?} must be a boolean or null")),
+    }
 }
 
 fn required_array<'a>(

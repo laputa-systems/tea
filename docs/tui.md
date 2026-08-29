@@ -50,7 +50,8 @@ After resolving Tea home, interactive and one-shot startup load
 strict terminal-only parser rejects symlinks, files over 256 KiB, unknown or
 duplicate keys, wrong types, invalid model arrays and limits, and reports the
 path plus parser source location when available. `tea session ...` commands do
-not load this file, and reusable crates never inspect it.
+not load this file (including ID-based `inspect` and `dump`), and reusable
+crates never inspect it.
 
 The terminal installs an application-owned `CodingOperations` adapter through
 `TeaCodingToolsV2::with_operations`. Filesystem and search calls run on

@@ -3,6 +3,12 @@
 A Tea terminal session reopens through tea-session and `tea_core::runtime`; it never
 reconstructs an in-memory transcript as a source of truth.
 
+The read-only `tea session inspect <session-id>` and `tea session dump
+<session-id>` commands are host-level wrappers around this same replay boundary.
+They search the configured Tea home, validate the session's immutable header,
+and do not load terminal configuration. Other persistence commands retain their
+explicit directory arguments.
+
 1. JsonlSession::inspect can verify the v1 session prefix without mutation.
    JsonlSession::open accepts only a complete validated prefix; an
    unterminated final tail requires the separate explicit

@@ -43,7 +43,7 @@ impl CliOptions {
 
     /// Render the command-line usage text.
     pub const fn help_text() -> &'static str {
-        "Usage: tea [OPTIONS]\n       tea session <inspect|repair|rebuild-meta|verify|gc|export|restore> ...\n\nOptions:\n    -h, --help                  Show this help text\n        --provider <id>         Select a compiled provider\n        --model <id>            Select a compiled model\n        --local-base-url <url>  Set the local provider API root\n        --local-context-window <tokens>\n                                Set explicit local context capacity for automatic compaction\n        --thinking <level>      Set reasoning level (off, minimal, low, medium, high, xhigh, max)\n    -p, --prompt <message>      Stream one response and exit (requires provider/model)\n        --cwd <path>            Use path as the explicit workspace\n        --tea-home <path>      Use path as the explicit Tea extension home (default: ~/.tea)\n\nSession commands emit one JSON object to stdout. `gc` is a dry run unless --apply is supplied.\n"
+        "Usage: tea [OPTIONS]\n       tea session <inspect|dump|repair|rebuild-meta|verify|gc|export|restore> ...\n\nRead-only session commands:\n       tea session inspect <session-id> [--tea-home <path>]\n       tea session dump <session-id> [--tea-home <path>]\n\nOptions:\n    -h, --help                  Show this help text\n        --provider <id>         Select a compiled provider\n        --model <id>            Select a compiled model\n        --local-base-url <url>  Set the local provider API root\n        --local-context-window <tokens>\n                                Set explicit local context capacity for automatic compaction\n        --thinking <level>      Set reasoning level (off, minimal, low, medium, high, xhigh, max)\n    -p, --prompt <message>      Stream one response and exit (requires provider/model)\n        --cwd <path>            Use path as the explicit workspace\n        --tea-home <path>       Use path as the explicit Tea extension home (default: ~/.tea)\n\nSession commands emit one JSON object to stdout. `inspect` and `dump` search all workspace roots below Tea home; other session commands take explicit directories. `gc` is a dry run unless --apply is supplied.\n"
     }
 
     /// Borrow the explicitly selected provider, if supplied.
@@ -142,11 +142,15 @@ pub enum CliCommand {
     Session(SessionCommand),
 }
 
-/// An explicit persistence operation over a caller-supplied session directory.
+/// An explicit persistence operation over a durable session.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SessionCommand {
-    /// Read-only replay and prefix identity inspection.
-    Inspect { directory: PathBuf },
+    /// Read-only inspection addressed by session ID, searching all workspace roots.
+    Inspect { session_id: OsString, tea_home: Option<PathBuf> },
+    /// Legacy path-addressed read-only replay and prefix identity inspection.
+    InspectPath { directory: PathBuf },
+    /// Dump the authoritative JSONL records addressed by session ID.
+    Dump { session_id: OsString, tea_home: Option<PathBuf> },
     /// Explicitly remove only an unterminated final JSONL tail.
     Repair { directory: PathBuf },
     /// Rebuild disposable `HEAD` and terminal-host `meta.json` caches from a
@@ -230,9 +234,16 @@ where
             .ok_or(CliError::MissingValue(label))
     };
     let command = match operation_name.as_ref() {
-        "inspect" => SessionCommand::Inspect {
-            directory: required_path(&mut arguments, "session directory")?,
-        },
+        "inspect" => {
+            let session_id = arguments.next().ok_or(CliError::MissingValue("session ID"))?;
+            let tea_home = parse_session_tea_home(&mut arguments)?;
+            SessionCommand::Inspect { session_id, tea_home }
+        }
+        "dump" => {
+            let session_id = arguments.next().ok_or(CliError::MissingValue("session ID"))?;
+            let tea_home = parse_session_tea_home(&mut arguments)?;
+            SessionCommand::Dump { session_id, tea_home }
+        }
         "repair" => SessionCommand::Repair {
             directory: required_path(&mut arguments, "session directory")?,
         },
@@ -267,6 +278,21 @@ where
         return Err(CliError::UnexpectedArgument(argument));
     }
     Ok(CliCommand::Session(command))
+}
+
+fn parse_session_tea_home<I>(arguments: &mut I) -> Result<Option<PathBuf>, CliError>
+where
+    I: Iterator<Item = OsString>,
+{
+    match arguments.next() {
+        None => Ok(None),
+        Some(flag) if flag == "--tea-home" => arguments
+            .next()
+            .map(PathBuf::from)
+            .ok_or(CliError::MissingValue("--tea-home path"))
+            .map(Some),
+        Some(argument) => Err(CliError::UnexpectedArgument(argument)),
+    }
 }
 
 fn parse_root_flags<I>(arguments: &mut I) -> Result<Vec<OsString>, CliError>

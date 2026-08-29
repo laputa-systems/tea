@@ -309,6 +309,7 @@ async fn summarize(
             | ModelStreamEvent::Aborted { message } => {
                 return Err(CompactionError::failed(message));
             }
+            ModelStreamEvent::ProviderError(_) => {}
             ModelStreamEvent::ToolCall(_) => {
                 return Err(CompactionError::failed(
                     "compaction provider returned a tool call instead of a summary",

@@ -15,6 +15,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
+use tea_session::ProviderErrorRecord;
 
 /// The externally observable category of an injected effect boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -281,6 +282,8 @@ pub struct ProviderResponse {
     pub usage: Option<Usage>,
     /// Whether the adapter explicitly classified the response as context overflow.
     pub context_overflow: bool,
+    /// Typed bounded provider failure evidence, when the response failed.
+    pub provider_error: Option<ProviderErrorRecord>,
 }
 
 /// Provider effect settlement seen by a gate.

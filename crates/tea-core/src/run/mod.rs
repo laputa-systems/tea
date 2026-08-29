@@ -1913,6 +1913,7 @@ impl RunHandle {
         let mut error_message = None;
         let mut usage: Option<Usage> = None;
         let mut context_overflow = false;
+        let mut provider_error = None;
 
         loop {
             let Some(item) =
@@ -2003,6 +2004,7 @@ impl RunHandle {
                     reason = Some(StopReason::Error);
                     error_message = Some(message);
                 }
+                ModelStreamEvent::ProviderError(error) => provider_error = Some(error),
                 ModelStreamEvent::ContextOverflow { message } => {
                     reason = Some(StopReason::Error);
                     error_message = Some(message);
@@ -2026,6 +2028,7 @@ impl RunHandle {
             error_message: error_message.clone(),
             usage: usage.clone(),
             context_overflow,
+            provider_error,
         };
         let assistant = {
             let mut state = agent.state.lock().expect("agent state mutex poisoned");

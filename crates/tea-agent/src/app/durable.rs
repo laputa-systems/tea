@@ -1755,6 +1755,7 @@ mod tests {
     };
     use tea_core::state::StopReason;
     use tea_core::tool::ToolRegistry;
+    use tea_session::ProviderErrorRecord;
 
     #[derive(Debug)]
     struct StopProvider;
@@ -1769,6 +1770,39 @@ mod tests {
                 events: vec![
                     ModelStreamEvent::TextDelta("durable".into()),
                     ModelStreamEvent::End(StopReason::Stop),
+                ],
+            }) as _)))
+        }
+    }
+
+    #[derive(Debug)]
+    struct ProviderErrorFixture;
+
+    impl ModelProvider for ProviderErrorFixture {
+        fn stream<'a>(
+            &'a self,
+            _request: ModelRequest,
+            _cancellation: CancellationToken,
+        ) -> ModelFuture<'a> {
+            Box::pin(std::future::ready(Ok(Box::new(ModelStream {
+                events: vec![
+                    ModelStreamEvent::ProviderError(ProviderErrorRecord {
+                        source: "response".into(),
+                        message: Some("OpenRouter rejected the request".into()),
+                        status_code: Some(400),
+                        attempt: Some(1),
+                        error_type: None,
+                        error_code: None,
+                        retryable: Some(false),
+                        response_bytes: Some(71),
+                        request_bytes: Some(11_341),
+                        response_body: Some(
+                            r#"{"error":{"message":"invalid tool arguments"}}"#.into(),
+                        ),
+                    }),
+                    ModelStreamEvent::Error {
+                        message: "OpenRouter rejected the request".into(),
+                    },
                 ],
             }) as _)))
         }
@@ -2880,6 +2914,51 @@ data: [DONE]
         smol::block_on(harness.run_root_prompt("hello"))
             .expect("durable host request should use compatible context");
 
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn durable_provider_error_is_retained_in_request_settlement() {
+        let home = temporary_home();
+        let workspace = home.join("workspace");
+        fs::create_dir(&workspace).expect("workspace creates");
+        let harness = create_host_harness(HostHarnessConfig {
+            tea_home: &home,
+            workspace: &workspace,
+            configuration: AgentConfiguration::new(
+                "trusted system prompt",
+                ToolRegistry::default(),
+                Arc::new(NoHooks),
+            ),
+            model: ModelDescriptor {
+                provider: "openrouter".into(),
+                model: "fixture-model".into(),
+                revision: None,
+            },
+            provider: Arc::new(ProviderErrorFixture),
+            thinking_level: Some(ThinkingLevel::Off),
+            compactor: None,
+            automatic_compaction: AutomaticCompactionPolicy::disabled(),
+            subagents: None,
+        })
+        .expect("host harness creates");
+
+        let error = smol::block_on(harness.run_root_prompt("trigger a provider error"))
+            .expect_err("provider error must fail the durable operation");
+        assert!(error.to_string().contains("OpenRouter rejected the request"));
+        let snapshot = harness.snapshot().expect("durable snapshot reads");
+        assert!(snapshot.records().iter().any(|stored| {
+            matches!(
+                &stored.record,
+                tea_session::LaneRecord::ProviderRequestSettled(settled)
+                    if settled.provider_error.as_ref().is_some_and(|error|
+                        error.status_code == Some(400)
+                            && error.request_bytes == Some(11_341)
+                            && error.response_body.as_deref()
+                                == Some(r#"{"error":{"message":"invalid tool arguments"}}"#))
+            )
+        }));
+        drop(harness);
         let _ = fs::remove_dir_all(home);
     }
 
