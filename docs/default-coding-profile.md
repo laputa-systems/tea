@@ -20,7 +20,7 @@ Rust retains the trusted host boundary in `tea_core::coding::CodingHost`:
 | Luau tool | Host capability | Trusted responsibility |
 | --- | --- | --- |
 | `read` | `tea.workspace.read.v1` | workspace confinement, regular-file checks, size bound, digest |
-| `find` | `tea.workspace.search.v1` | confined optimized glob traversal and result bound |
+| `find` | `tea.workspace.search.v1` | confined cancellable glob traversal; 1000-result and 50 KiB output bounds |
 | `edit` | `tea.workspace.mutate.v1` | complete validation, revalidation, staged transaction, rollback reporting |
 | `bash` | `tea.process.v1` | fixed cwd/environment, process lifecycle, timeout, cancellation, updates |
 
@@ -54,7 +54,11 @@ must already exist.
 `write` was merged into `edit`. `grep` and `ls` were intentionally removed:
 ordinary text search and directory inspection belong behind `bash`, while
 `find` remains because its bounded workspace traversal is a useful optimized
-primitive.
+primitive. Its glob pattern is limited to 4096 bytes; `*`, `**`, and `?` are
+matched by a finite-state host matcher. The default and maximum result count
+is 1000, and the host stops at a 50 KiB aggregate path-output budget before a
+result can enter Luau. Its receipt identifies a complete result, a count
+truncation, or a byte-budget truncation.
 
 ## Historical Pi capture
 

@@ -60,6 +60,26 @@ pub struct CommandOutput {
     pub stderr: Vec<u8>,
 }
 
+/// The reason a bounded workspace search stopped before visiting every match.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SearchTruncation {
+    /// The traversal completed without exhausting either result budget.
+    Complete,
+    /// Another matching path existed after the configured result count.
+    ResultLimit,
+    /// Another matching path would exceed the configured aggregate byte budget.
+    ByteBudget,
+}
+
+/// Bounded paths returned by one workspace search operation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SearchResult {
+    /// Workspace-relative matching paths.
+    pub matches: Vec<String>,
+    /// Whether the bounded result is complete.
+    pub truncation: SearchTruncation,
+}
+
 /// One complete file snapshot returned by a batch read operation.
 ///
 /// Adapters must inspect file kind before reading. `is_regular_file = false`
@@ -256,8 +276,10 @@ pub trait CodingOperations: Send + Sync {
         &'a self,
         root: &'a Path,
         pattern: &'a str,
-        limit: usize,
-    ) -> OperationFuture<'a, Vec<String>>;
+        max_results: usize,
+        max_output_bytes: usize,
+        cancellation: CancellationToken,
+    ) -> OperationFuture<'a, SearchResult>;
     /// Execute one command in the explicit workspace.
     fn execute_command<'a>(
         &'a self,

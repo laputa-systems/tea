@@ -2211,8 +2211,8 @@ fn mock_provider_uses_a_default_model_without_credentials() {
             .expect("mock configuration")
             .tools
             .names()
-            .collect::<Vec<_>>(),
-        ["edit"]
+            .next(),
+        None
     );
     let _ = fs::remove_dir_all(tea_home);
 }

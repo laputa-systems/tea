@@ -1,23 +1,26 @@
 //! Safe, host-local response fixtures for interactive terminal exploration.
 //!
-//! This is intentionally not a `tea-core` provider adapter: it has no transport,
-//! credentials, workspace authority, or provider registry entry. Its only tool is
-//! a no-op `edit` capability, so every mock operation is consequence-free.
+//! This is intentionally not a `tea-core` provider adapter: it has no
+//! transport, credentials, workspace authority, or provider registry entry.
+//! It uses the normal Luau coding bundle with no-effect operation adapters, so
+//! every mock operation is consequence-free without a model-facing Rust tool.
 
+use std::fs;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tea_core::agent::AgentConfiguration;
+use tea_core::coding::{
+    CodingOperations, CommandEnvironment, CommandOutput, EditTransaction, EditTransactionOutcome,
+    EntryMetadata, OperationError, OperationFuture, SearchResult, SearchTruncation,
+};
 use tea_core::scheduler::{
     CancellationToken, ModelEventFuture, ModelEventStream, ModelFuture, ModelProvider,
     ModelRequest, ModelStreamEvent,
 };
 use tea_core::state::{AgentToolCall, ModelDescriptor, SerializedJson, StopReason, ToolCallId};
-use tea_core::tool::{
-    AgentTool, AgentToolResult, ToolCall, ToolContext, ToolFuture, ToolRegistry, ToolUpdate,
-    ToolUpdateSink,
-};
-use tea_protocol::JsonValue;
+use tea_core::tool::{ToolRegistry, ToolUpdateSink};
 use tea_providers::{openai::OpenAiContextHook, ConfiguredProvider};
 
 pub(super) const PROVIDER_ID: &str = "mock";
@@ -28,7 +31,7 @@ const COMPACTION_SUMMARY: &str = r#"## Goal
 Continue exploring the safe mock terminal session.
 
 ## Constraints & Preferences
-- The mock provider and its edit preview must have no workspace side effects.
+- The mock provider's coding operations have no workspace or process side effects.
 
 ## Progress
 ### Done
@@ -47,17 +50,20 @@ Continue exploring the safe mock terminal session.
 1. Continue with the next submitted prompt.
 
 ## Critical Context
-- The mock `edit` capability reports a preview and never changes files."#;
+- The mock coding capabilities report safe fixture results and never change files."#;
 
 /// Build the isolated configuration used only by the mock provider.
 pub(super) fn configuration() -> AgentConfiguration {
-    let mut tools = ToolRegistry::default();
-    tools.insert(Arc::new(MockEditTool));
     AgentConfiguration::new(
-        "You are a safe terminal mock. Produce concise Markdown, code samples, or an edit preview. The edit tool never changes files.",
-        tools,
+        "You are a safe terminal mock. Produce concise Markdown or code samples. Coding tools use safe mock capabilities and never change workspace files or start processes.",
+        ToolRegistry::default(),
         Arc::new(OpenAiContextHook),
     )
+}
+
+/// Return the no-effect host port used only by the mock terminal profile.
+pub(super) fn coding_operations() -> Arc<dyn CodingOperations> {
+    Arc::new(MockCodingOperations)
 }
 
 /// Resolve one host-local mock provider without involving the core registry.
@@ -75,7 +81,7 @@ pub(super) fn configured_provider(model: &str) -> ConfiguredProvider {
 #[derive(Debug, Default)]
 struct MockProvider {
     sequence: AtomicUsize,
-    awaiting_edit_follow_up: AtomicBool,
+    awaiting_tool_follow_up: AtomicBool,
 }
 
 impl ModelProvider for MockProvider {
@@ -91,10 +97,10 @@ impl ModelProvider for MockProvider {
                 ModelStreamEvent::TextDelta(COMPACTION_SUMMARY.into()),
                 ModelStreamEvent::End(StopReason::Stop),
             ]
-        } else if self.awaiting_edit_follow_up.swap(false, Ordering::AcqRel) {
+        } else if self.awaiting_tool_follow_up.swap(false, Ordering::AcqRel) {
             vec![
                 ModelStreamEvent::TextDelta(
-                    "The mock edit completed successfully. No files were changed.".into(),
+                    "The mock tool completed successfully. No files were changed.".into(),
                 ),
                 ModelStreamEvent::End(StopReason::Stop),
             ]
@@ -113,16 +119,14 @@ impl ModelProvider for MockProvider {
                     ModelStreamEvent::End(StopReason::Stop),
                 ],
                 _ => {
-                    self.awaiting_edit_follow_up.store(true, Ordering::Release);
+                    self.awaiting_tool_follow_up.store(true, Ordering::Release);
                     let call_id = self.sequence.fetch_add(1, Ordering::Relaxed);
                     vec![
                         ModelStreamEvent::ToolCall(AgentToolCall {
-                            id: ToolCallId::new(format!("mock-edit-{call_id}"))
+                            id: ToolCallId::new(format!("mock-find-{call_id}"))
                                 .expect("mock tool call ID is non-empty"),
-                            name: "edit".into(),
-                            arguments: SerializedJson::new(
-                                r#"{"path":"demo.md","edits":[{"oldText":"before","newText":"after"}]}"#,
-                            ),
+                            name: "find".into(),
+                            arguments: SerializedJson::new(r#"{"pattern":"*.rs","limit":1}"#),
                         }),
                         ModelStreamEvent::End(StopReason::ToolUse),
                     ]
@@ -169,7 +173,6 @@ impl ModelEventStream for MockStream {
             if let Some(delay) = delay {
                 let cancellation_wait = cancellation.clone();
                 smol::future::or(
-                    // The race result is intentionally ignored; keep both branches `()`.
                     async move {
                         smol::Timer::after(delay).await;
                     },
@@ -185,48 +188,86 @@ impl ModelEventStream for MockStream {
     }
 }
 
-#[derive(Debug)]
-struct MockEditTool;
+/// Test-only operation port behind the production coding capability contract.
+/// It permits read-only fixture inspection, but mutation commits and process
+/// calls report deterministic success without publishing or spawning anything.
+#[derive(Clone, Debug, Default)]
+struct MockCodingOperations;
 
-impl AgentTool for MockEditTool {
-    fn name(&self) -> &str {
-        "edit"
+impl CodingOperations for MockCodingOperations {
+    fn read_file<'a>(&'a self, path: &'a Path) -> OperationFuture<'a, Vec<u8>> {
+        let path = path.to_path_buf();
+        Box::pin(async move {
+            fs::read(path).map_err(|error| OperationError::new(error.to_string()))
+        })
     }
 
-    fn description(&self) -> &str {
-        "Preview an edit without reading or changing any workspace file."
+    fn metadata<'a>(&'a self, path: &'a Path) -> OperationFuture<'a, EntryMetadata> {
+        let path = path.to_path_buf();
+        Box::pin(async move {
+            let metadata = fs::metadata(path).map_err(|error| OperationError::new(error.to_string()))?;
+            Ok(EntryMetadata {
+                is_directory: metadata.is_dir(),
+                is_regular_file: metadata.is_file(),
+            })
+        })
     }
 
-    fn schema(&self) -> &JsonValue {
-        static_schema()
-    }
-
-    fn execute<'a>(
+    fn commit_edit_transaction<'a>(
         &'a self,
-        call: ToolCall,
-        _context: ToolContext,
-        updates: ToolUpdateSink,
-    ) -> ToolFuture<'a> {
-        updates.emit(ToolUpdate {
-            content: "Mock edit preview: no files changed.".into(),
-            details: None,
-        });
-        Box::pin(std::future::ready(Ok(AgentToolResult {
-            tool_call_id: call.id,
-            content: "Mock edit completed. No files were changed.".into(),
-            details: None,
-            usage: None,
-            added_tool_names: Vec::new(),
-            terminate: false,
-            is_error: false,
-            failure: None,
-        })))
+        _transaction: &'a EditTransaction,
+        cancellation: CancellationToken,
+    ) -> OperationFuture<'a, EditTransactionOutcome> {
+        Box::pin(async move {
+            if cancellation.is_cancelled() {
+                Err(OperationError::new("cancelled"))
+            } else {
+                Ok(EditTransactionOutcome::Committed)
+            }
+        })
     }
-}
 
-fn static_schema() -> &'static JsonValue {
-    static SCHEMA: OnceLock<JsonValue> = OnceLock::new();
-    SCHEMA.get_or_init(|| JsonValue::object([("type", JsonValue::String("object".into()))]))
+    fn find_files<'a>(
+        &'a self,
+        _root: &'a Path,
+        _pattern: &'a str,
+        _max_results: usize,
+        _max_output_bytes: usize,
+        cancellation: CancellationToken,
+    ) -> OperationFuture<'a, SearchResult> {
+        Box::pin(async move {
+            if cancellation.is_cancelled() {
+                Err(OperationError::new("cancelled"))
+            } else {
+                Ok(SearchResult {
+                    matches: Vec::new(),
+                    truncation: SearchTruncation::Complete,
+                })
+            }
+        })
+    }
+
+    fn execute_command<'a>(
+        &'a self,
+        _command: &'a str,
+        _cwd: &'a Path,
+        _timeout_seconds: Option<f64>,
+        _environment: &'a CommandEnvironment,
+        cancellation: CancellationToken,
+        _updates: ToolUpdateSink,
+    ) -> OperationFuture<'a, CommandOutput> {
+        Box::pin(async move {
+            if cancellation.is_cancelled() {
+                Err(OperationError::new("cancelled"))
+            } else {
+                Ok(CommandOutput {
+                    exit_code: Some(0),
+                    stdout: b"Mock command preview: no process started.".to_vec(),
+                    stderr: Vec::new(),
+                })
+            }
+        })
+    }
 }
 
 #[cfg(test)]
@@ -234,8 +275,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn mock_configuration_exposes_only_the_no_op_edit_capability() {
+    fn mock_configuration_leaves_model_facing_tools_to_the_luau_coding_bundle() {
         let configuration = configuration();
-        assert_eq!(configuration.tools.names().collect::<Vec<_>>(), ["edit"]);
+        assert_eq!(configuration.tools.names().next(), None);
     }
 }

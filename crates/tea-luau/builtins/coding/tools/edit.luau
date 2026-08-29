@@ -5,15 +5,22 @@ return function(call)
         method = "commit",
         arguments = { files = call.arguments.files },
     })
+    local function count(value, singular)
+        return tostring(value) .. " " .. singular .. (value == 1 and "" or "s")
+    end
+    local changed = response.modifiedExistingFiles
+    local precise = response.preciseReplacements
+    local created = response.createdFiles
     local parts = {}
-    if response.replacements > 0 then
-        table.insert(parts, "Applied " .. tostring(response.replacements) .. " precise replacements")
+    if changed > 0 then
+        local message = "Changed " .. count(changed, "existing file")
+        if precise > 0 then
+            message = message .. " with " .. count(precise, "precise replacement")
+        end
+        table.insert(parts, message)
     end
-    if response.replaced > 0 then
-        table.insert(parts, "replaced " .. tostring(response.replaced) .. " complete files")
-    end
-    if response.created > 0 then
-        table.insert(parts, "created " .. tostring(response.created) .. " files")
+    if created > 0 then
+        table.insert(parts, (changed > 0 and "created " or "Created ") .. count(created, "file"))
     end
     if #parts == 0 then return { content = "No files changed." } end
     return { content = table.concat(parts, "; ") .. "." }

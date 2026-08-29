@@ -12,7 +12,7 @@ pub(crate) mod workspace;
 pub use contract::{
     CodingOperations, CommandEnvironment, CommandOutput, ConditionalFileCreate,
     ConditionalFileEdit, EditTransaction, EditTransactionOutcome, EntryMetadata, FileSnapshot,
-    OperationError, OperationFuture,
+    OperationError, OperationFuture, SearchResult, SearchTruncation,
 };
 pub use local_operations::LocalCodingOperations;
 pub use workspace::WorkspaceRoot;

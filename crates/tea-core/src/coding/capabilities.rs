@@ -5,9 +5,10 @@
 //! retain the filesystem, process, and transaction invariants that source
 //! changes must never be able to weaken.
 
-use super::tools::{
+use super::host::{
     CodingOperations, CommandEnvironment, ConditionalFileCreate, ConditionalFileEdit,
-    EditTransaction, EditTransactionOutcome, LocalCodingOperations, OperationError, WorkspaceRoot,
+    EditTransaction, EditTransactionOutcome, LocalCodingOperations, OperationError, SearchResult,
+    SearchTruncation, WorkspaceRoot,
 };
 use crate::harness::extension::{
     ExtensionCapability, ExtensionCapabilityError, ExtensionCapabilityFuture,
@@ -35,6 +36,8 @@ const MAX_FILES: usize = 32;
 const MAX_EDITS_PER_FILE: usize = 64;
 const MAX_TOTAL_EDITS: usize = 256;
 const MAX_PATH_BYTES: usize = 4096;
+const MAX_SEARCH_RESULTS: usize = 1000;
+const MAX_SEARCH_OUTPUT_BYTES: usize = 50 * 1024;
 
 /// Explicit authority selected by a host for one coding bundle instance.
 ///
@@ -202,14 +205,21 @@ impl ExtensionCapability for WorkspaceSearchCapability {
             let arguments = object(&request.arguments, "workspace search arguments")?;
             reject_unknown_fields(arguments, &["pattern", "path", "limit"])?;
             let pattern = required_string(arguments, "pattern")?;
-            if super::tools::search::GlobMatcher::new(&pattern).is_err() {
+            if super::host::search::GlobMatcher::new(&pattern).is_err() {
                 return Err(ExtensionCapabilityError::InvalidArguments {
                     message: "pattern is not a supported glob".into(),
                 });
             }
             let path_input = optional_string(arguments, "path")?.unwrap_or_else(|| ".".into());
             validate_path(&path_input)?;
-            let limit = optional_positive_usize(arguments, "limit")?.unwrap_or(1000);
+            let limit = optional_positive_usize(arguments, "limit")?.unwrap_or(MAX_SEARCH_RESULTS);
+            if limit > MAX_SEARCH_RESULTS {
+                return Err(ExtensionCapabilityError::InvalidArguments {
+                    message: format!(
+                        "limit must be no greater than {MAX_SEARCH_RESULTS} for this bounded search"
+                    ),
+                });
+            }
             let path = host
                 .workspace
                 .resolve_existing(&path_input)
@@ -227,23 +237,43 @@ impl ExtensionCapability for WorkspaceSearchCapability {
                     message: "path is not a directory".into(),
                 });
             }
-            let matches = host
+            let result = host
                 .operations
-                .find_files(&path, &pattern, limit)
+                .find_files(
+                    &path,
+                    &pattern,
+                    limit,
+                    MAX_SEARCH_OUTPUT_BYTES,
+                    cancellation.clone(),
+                )
                 .await
                 .map_err(operation_error)?;
             if cancellation.is_cancelled() {
                 return Err(ExtensionCapabilityError::Cancelled);
             }
+            let result = constrain_search_result(result, limit, MAX_SEARCH_OUTPUT_BYTES);
             Ok(ExtensionCapabilityResponse {
                 value: JsonValue::object([
                     (
                         "matches",
-                        JsonValue::Array(matches.into_iter().map(JsonValue::String).collect()),
+                        JsonValue::Array(
+                            result.matches.into_iter().map(JsonValue::String).collect(),
+                        ),
                     ),
                     (
                         "limit",
                         JsonValue::Number(JsonNumber::Unsigned(limit as u64)),
+                    ),
+                    (
+                        "truncation",
+                        JsonValue::String(
+                            match result.truncation {
+                                SearchTruncation::Complete => "complete",
+                                SearchTruncation::ResultLimit => "result_limit",
+                                SearchTruncation::ByteBudget => "byte_budget",
+                            }
+                            .into(),
+                        ),
                     ),
                 ]),
             })
@@ -372,8 +402,8 @@ impl ExtensionCapability for WorkspaceMutationCapability {
                 .collect::<BTreeMap<_, _>>();
             let mut edits = Vec::new();
             let mut creates = Vec::new();
-            let mut replacement_count = 0_usize;
-            let mut replacement_files = 0_usize;
+            let mut precise_replacements = 0_usize;
+            let mut modified_existing_files = 0_usize;
             let mut created_files = 0_usize;
             for (path, file) in resolved {
                 if cancellation.is_cancelled() {
@@ -400,13 +430,20 @@ impl ExtensionCapability for WorkspaceMutationCapability {
                             snapshot.content.clone(),
                             &replacements,
                         )?;
-                        replacement_count = replacement_count.saturating_add(replacements.len());
-                        replacement_files = replacement_files.saturating_add(1);
-                        edits.push(ConditionalFileEdit {
-                            path,
-                            expected_content: snapshot.content.clone(),
-                            replacement_content: replacement,
-                        });
+                        if replacement != snapshot.content {
+                            precise_replacements = precise_replacements.saturating_add(
+                                replacements
+                                    .iter()
+                                    .filter(|replacement| replacement.old != replacement.new)
+                                    .count(),
+                            );
+                            modified_existing_files = modified_existing_files.saturating_add(1);
+                            edits.push(ConditionalFileEdit {
+                                path,
+                                expected_content: snapshot.content.clone(),
+                                replacement_content: replacement,
+                            });
+                        }
                     }
                     MutationKind::Content(content) => {
                         if let Some(snapshot) = snapshot_by_path.get(&path) {
@@ -419,12 +456,15 @@ impl ExtensionCapability for WorkspaceMutationCapability {
                                 });
                             }
                             verify_digest(&file.path, file.expected_digest, &snapshot.content)?;
-                            replacement_files = replacement_files.saturating_add(1);
-                            edits.push(ConditionalFileEdit {
-                                path,
-                                expected_content: snapshot.content.clone(),
-                                replacement_content: content.into_bytes(),
-                            });
+                            let replacement_content = content.into_bytes();
+                            if replacement_content != snapshot.content {
+                                modified_existing_files = modified_existing_files.saturating_add(1);
+                                edits.push(ConditionalFileEdit {
+                                    path,
+                                    expected_content: snapshot.content.clone(),
+                                    replacement_content,
+                                });
+                            }
                         } else {
                             if file.expected_digest.is_some() {
                                 return Err(ExtensionCapabilityError::InvalidArguments {
@@ -447,34 +487,24 @@ impl ExtensionCapability for WorkspaceMutationCapability {
                 files: edits,
                 creates,
             };
+            if transaction.files.is_empty() && transaction.creates.is_empty() {
+                return Ok(mutation_receipt(
+                    precise_replacements,
+                    modified_existing_files,
+                    created_files,
+                ));
+            }
             match host
                 .operations
                 .commit_edit_transaction(&transaction, cancellation.clone())
                 .await
                 .map_err(operation_error)?
             {
-                EditTransactionOutcome::Committed => Ok(ExtensionCapabilityResponse {
-                    value: JsonValue::object([
-                        (
-                            "files",
-                            JsonValue::Number(JsonNumber::Unsigned(
-                                (replacement_files + created_files) as u64,
-                            )),
-                        ),
-                        (
-                            "replacements",
-                            JsonValue::Number(JsonNumber::Unsigned(replacement_count as u64)),
-                        ),
-                        (
-                            "created",
-                            JsonValue::Number(JsonNumber::Unsigned(created_files as u64)),
-                        ),
-                        (
-                            "replaced",
-                            JsonValue::Number(JsonNumber::Unsigned(replacement_files as u64)),
-                        ),
-                    ]),
-                }),
+                EditTransactionOutcome::Committed => Ok(mutation_receipt(
+                    precise_replacements,
+                    modified_existing_files,
+                    created_files,
+                )),
                 EditTransactionOutcome::RolledBack { reason } => {
                     Err(ExtensionCapabilityError::Execution {
                         message: format!("edit transaction rolled back: {reason}"),
@@ -489,6 +519,29 @@ impl ExtensionCapability for WorkspaceMutationCapability {
                 }
             }
         })
+    }
+}
+
+fn mutation_receipt(
+    precise_replacements: usize,
+    modified_existing_files: usize,
+    created_files: usize,
+) -> ExtensionCapabilityResponse {
+    ExtensionCapabilityResponse {
+        value: JsonValue::object([
+            (
+                "preciseReplacements",
+                JsonValue::Number(JsonNumber::Unsigned(precise_replacements as u64)),
+            ),
+            (
+                "modifiedExistingFiles",
+                JsonValue::Number(JsonNumber::Unsigned(modified_existing_files as u64)),
+            ),
+            (
+                "createdFiles",
+                JsonValue::Number(JsonNumber::Unsigned(created_files as u64)),
+            ),
+        ]),
     }
 }
 
@@ -823,6 +876,39 @@ fn operation_error(error: OperationError) -> ExtensionCapabilityError {
         ExtensionCapabilityError::Execution {
             message: error.to_string(),
         }
+    }
+}
+
+/// Enforce the model-facing search receipt even when an embedding supplies a
+/// remote operation adapter. Local traversal applies the same limits before
+/// allocating the response, while this final guard prevents an adapter from
+/// widening the fixed capability contract.
+fn constrain_search_result(
+    result: SearchResult,
+    max_results: usize,
+    max_output_bytes: usize,
+) -> SearchResult {
+    let mut matches = Vec::with_capacity(result.matches.len().min(max_results));
+    let mut output_bytes = 0_usize;
+    let mut truncation = result.truncation;
+    for path in result.matches {
+        if matches.len() >= max_results {
+            truncation = SearchTruncation::ResultLimit;
+            break;
+        }
+        let next_output_bytes = output_bytes
+            .saturating_add(path.len())
+            .saturating_add(usize::from(!matches.is_empty()));
+        if next_output_bytes > max_output_bytes {
+            truncation = SearchTruncation::ByteBudget;
+            break;
+        }
+        output_bytes = next_output_bytes;
+        matches.push(path);
+    }
+    SearchResult {
+        matches,
+        truncation,
     }
 }
 

@@ -3,7 +3,7 @@
 use super::contract::{
     CodingOperations, CommandEnvironment, CommandOutput, ConditionalFileCreate,
     ConditionalFileEdit, EditTransaction, EditTransactionOutcome, EntryMetadata, FileSnapshot,
-    OperationError, OperationFuture,
+    OperationError, OperationFuture, SearchResult,
 };
 use super::search::{GlobMatcher, walk_files};
 use crate::scheduler::CancellationToken;
@@ -190,16 +190,21 @@ impl CodingOperations for LocalCodingOperations {
         &'a self,
         root: &'a Path,
         pattern: &'a str,
-        limit: usize,
-    ) -> OperationFuture<'a, Vec<String>> {
+        max_results: usize,
+        max_output_bytes: usize,
+        cancellation: CancellationToken,
+    ) -> OperationFuture<'a, SearchResult> {
         let root = root.to_path_buf();
         let pattern = pattern.to_owned();
         Box::pin(blocking_operation(move || {
             let matcher = GlobMatcher::new(&pattern)?;
-            let mut output = Vec::new();
-            walk_files(&root, &root, &matcher, limit, &mut output)?;
-            output.sort();
-            Ok(output)
+            walk_files(
+                &root,
+                &matcher,
+                max_results,
+                max_output_bytes,
+                &cancellation,
+            )
         }))
     }
 
@@ -761,6 +766,27 @@ mod tests {
         assert_eq!(first.expect("first command").stdout, b"first-done");
         assert_eq!(second.expect("second command").stdout, b"second-done");
         drop(release_guard);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn local_find_passes_cancellation_into_the_blocking_traversal() {
+        let root = workspace();
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+
+        let result = smol::block_on(LocalCodingOperations.find_files(
+            &root,
+            "*.rs",
+            1000,
+            50 * 1024,
+            cancellation,
+        ));
+
+        assert_eq!(
+            result.expect_err("cancelled traversal does not read the directory").message(),
+            "cancelled"
+        );
         let _ = fs::remove_dir_all(root);
     }
 }

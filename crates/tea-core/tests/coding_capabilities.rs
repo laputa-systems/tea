@@ -178,6 +178,98 @@ fn read_and_find_are_confined_and_reject_foreign_methods() {
 }
 
 #[test]
+fn find_enforces_result_and_output_budgets_with_a_structured_receipt() {
+    let workspace = TempWorkspace::new();
+    fs::write(workspace.path().join("a.rs"), "a").expect("first fixture writes");
+    fs::write(workspace.path().join("b.rs"), "b").expect("second fixture writes");
+    for index in 0..250 {
+        fs::write(
+            workspace
+                .path()
+                .join(format!("{index:04}-{}.txt", "x".repeat(235))),
+            "fixture",
+        )
+        .expect("byte-budget fixture writes");
+    }
+    let host = CodingHost::new(workspace.path()).expect("host configures");
+
+    let result_limited = invoke(
+        host.search_capability().as_ref(),
+        request(
+            WORKSPACE_SEARCH_CAPABILITY_V1,
+            "find",
+            r#"{"pattern":"*.rs","limit":1}"#,
+        ),
+    )
+    .expect("result-limited search succeeds");
+    assert_eq!(
+        result_limited
+            .get("matches")
+            .and_then(JsonValue::as_array)
+            .map(|matches| matches.len()),
+        Some(1)
+    );
+    assert_eq!(
+        result_limited.get("truncation").and_then(JsonValue::as_str),
+        Some("result_limit")
+    );
+
+    let byte_limited = invoke(
+        host.search_capability().as_ref(),
+        request(
+            WORKSPACE_SEARCH_CAPABILITY_V1,
+            "find",
+            r#"{"pattern":"*.txt"}"#,
+        ),
+    )
+    .expect("byte-limited search succeeds");
+    let matches = byte_limited
+        .get("matches")
+        .and_then(JsonValue::as_array)
+        .expect("search response has matches");
+    let rendered_bytes = matches
+        .iter()
+        .filter_map(JsonValue::as_str)
+        .collect::<Vec<_>>()
+        .join("\n")
+        .len();
+    assert!(rendered_bytes <= 50 * 1024);
+    assert_eq!(
+        byte_limited.get("truncation").and_then(JsonValue::as_str),
+        Some("byte_budget")
+    );
+
+    let over_limit = invoke(
+        host.search_capability().as_ref(),
+        request(
+            WORKSPACE_SEARCH_CAPABILITY_V1,
+            "find",
+            r#"{"pattern":"*.rs","limit":1001}"#,
+        ),
+    )
+    .expect_err("the host independently rejects a result limit above 1000");
+    assert!(matches!(
+        over_limit,
+        ExtensionCapabilityError::InvalidArguments { .. }
+    ));
+
+    let oversized_pattern = format!(r#"{{"pattern":"{}"}}"#, "*".repeat(4097));
+    let overlong_pattern = invoke(
+        host.search_capability().as_ref(),
+        request(
+            WORKSPACE_SEARCH_CAPABILITY_V1,
+            "find",
+            &oversized_pattern,
+        ),
+    )
+    .expect_err("the host independently rejects overlong glob patterns");
+    assert!(matches!(
+        overlong_pattern,
+        ExtensionCapabilityError::InvalidArguments { .. }
+    ));
+}
+
+#[test]
 fn unified_mutation_commits_creates_replacements_and_exact_edits_together() {
     let workspace = TempWorkspace::new();
     fs::write(workspace.path().join("existing.txt"), "alpha\n").expect("fixture writes");
@@ -194,14 +286,21 @@ fn unified_mutation_commits_creates_replacements_and_exact_edits_together() {
     )
     .expect("one transaction commits");
     assert_eq!(
-        response.get("replacements").and_then(JsonValue::as_u64),
+        response
+            .get("preciseReplacements")
+            .and_then(JsonValue::as_u64),
         Some(1)
     );
     assert_eq!(
-        response.get("replaced").and_then(JsonValue::as_u64),
+        response
+            .get("modifiedExistingFiles")
+            .and_then(JsonValue::as_u64),
         Some(2)
     );
-    assert_eq!(response.get("created").and_then(JsonValue::as_u64), Some(1));
+    assert_eq!(
+        response.get("createdFiles").and_then(JsonValue::as_u64),
+        Some(1)
+    );
     assert_eq!(
         fs::read_to_string(workspace.path().join("existing.txt")).unwrap(),
         "beta\n"

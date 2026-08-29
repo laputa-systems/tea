@@ -13,8 +13,10 @@ return function(call)
         return { content = "No files found matching pattern" }
     end
     local content = table.concat(response.matches, "\n")
-    if #response.matches >= response.limit then
+    if response.truncation == "result_limit" then
         content = content .. "\n\n[" .. tostring(response.limit) .. " results limit reached]"
+    elseif response.truncation == "byte_budget" then
+        content = content .. "\n\n[search output byte limit reached]"
     end
     return { content = content }
 end

@@ -763,7 +763,8 @@ impl App {
             .clone();
         let automatic_compaction = self.automatic_compaction.clone();
         let subagents = self.subagent_host_config()?;
-        let harness = super::durable::create_host_harness(super::durable::HostHarnessConfig {
+        let mock_coding_operations = model.provider == mock::PROVIDER_ID;
+        let config = super::durable::HostHarnessConfig {
             tea_home: &home,
             workspace: &workspace,
             configuration,
@@ -773,7 +774,12 @@ impl App {
             compactor: self.compactor.clone(),
             automatic_compaction,
             subagents,
-        })?;
+        };
+        let harness = if mock_coding_operations {
+            super::durable::create_mock_host_harness(config)?
+        } else {
+            super::durable::create_host_harness(config)?
+        };
         let session_id = harness.snapshot()?.header().session_id.to_string();
         self.durable_subscription = Some(harness.subscribe_events()?);
         self.state
@@ -825,7 +831,8 @@ impl App {
         // without fighting its own advisory writer lock.
         self.durable_subscription = None;
         self.durable_harness = None;
-        let harness = super::durable::reopen_host_harness(super::durable::HostHarnessReopen {
+        let mock_coding_operations = model.provider == mock::PROVIDER_ID;
+        let input = super::durable::HostHarnessReopen {
             tea_home: &home,
             workspace: &workspace,
             session_id: id,
@@ -835,7 +842,12 @@ impl App {
             compactor: self.compactor.clone(),
             automatic_compaction,
             subagents,
-        })?;
+        };
+        let harness = if mock_coding_operations {
+            super::durable::reopen_mock_host_harness(input)?
+        } else {
+            super::durable::reopen_host_harness(input)?
+        };
         self.state.set_thinking_level(harness.thinking_level()?);
         let snapshot = harness.snapshot()?;
         self.state

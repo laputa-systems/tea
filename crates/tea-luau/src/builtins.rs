@@ -195,12 +195,13 @@ mod tests {
         assert_eq!(descriptor.prompt_sections[0].id, "coding");
         assert!(descriptor.prompt_sections[0]
             .content
-            .contains("There are no separate `write`, `grep`, or `ls`"));
+            .contains("separate `write`, `grep`, or `ls` tools"));
         let edit = descriptor
             .tools
             .iter()
             .find(|tool| tool.name == "edit")
             .expect("edit declaration exists");
+        assert!(edit.description.contains("parent directory must already exist"));
         assert!(edit.requires_exclusive_batch);
         assert_eq!(
             edit.cancellation_settlement_mode,
@@ -211,6 +212,30 @@ mod tests {
                 || (!tool.requires_exclusive_batch
                     && tool.cancellation_settlement_mode == CancellationSettlementMode::DropFuture)
         }));
+        let find = descriptor
+            .tools
+            .iter()
+            .find(|tool| tool.name == "find")
+            .expect("find declaration exists");
+        let find_properties = find
+            .schema
+            .get("properties")
+            .and_then(tea_protocol::JsonValue::as_object)
+            .expect("find schema has properties");
+        assert_eq!(
+            find_properties
+                .get("pattern")
+                .and_then(|property| property.get("maxLength"))
+                .and_then(tea_protocol::JsonValue::as_u64),
+            Some(4096)
+        );
+        assert_eq!(
+            find_properties
+                .get("limit")
+                .and_then(|property| property.get("maximum"))
+                .and_then(tea_protocol::JsonValue::as_u64),
+            Some(1000)
+        );
 
         let host = CodingHost::new(&workspace).expect("coding authority configures");
         let mut bindings = ExtensionCapabilityBindings::new();
@@ -275,7 +300,7 @@ mod tests {
                 ),
         )
         .expect("checked-in edit handler executes");
-        assert!(edit.content.contains("created 1 files"));
+        assert_eq!(edit.content, "Created 1 file.");
         assert_eq!(
             std::fs::read_to_string(workspace.join("created.txt")).unwrap(),
             "created\n"
@@ -293,6 +318,19 @@ mod tests {
         )
         .expect("checked-in find handler executes");
         assert!(find.content.contains("fixture.txt"));
+        let bounded_find = block_on(
+            resolved
+                .tools
+                .get("find")
+                .expect("find is resolved")
+                .execute(
+                    call("find-bounded", r#"{"pattern":"*.txt","limit":1}"#),
+                    context.clone(),
+                    ToolUpdateSink::disabled(),
+                ),
+        )
+        .expect("checked-in bounded find handler executes");
+        assert!(bounded_find.content.ends_with("[1 results limit reached]"));
         let bash = block_on(
             resolved
                 .tools
@@ -309,6 +347,121 @@ mod tests {
         )
         .expect("checked-in bash handler executes");
         assert_eq!(bash.content, "luau-bash");
+        let _ = std::fs::remove_dir_all(workspace);
+    }
+
+    #[test]
+    fn coding_edit_receipt_distinguishes_precise_edits_existing_files_and_creations() {
+        static NEXT_WORKSPACE: AtomicUsize = AtomicUsize::new(0);
+        let workspace = std::env::temp_dir().join(format!(
+            "tea-luau-coding-edit-receipt-{}-{}",
+            std::process::id(),
+            NEXT_WORKSPACE.fetch_add(1, Ordering::Relaxed),
+        ));
+        std::fs::create_dir_all(&workspace).expect("coding fixture workspace creates");
+        std::fs::write(workspace.join("precise.txt"), "before\n")
+            .expect("precise fixture writes");
+        std::fs::write(workspace.join("complete.txt"), "before\n")
+            .expect("complete fixture writes");
+        std::fs::write(workspace.join("mixed-precise.txt"), "before\n")
+            .expect("mixed precise fixture writes");
+        std::fs::write(workspace.join("mixed-complete.txt"), "before\n")
+            .expect("mixed complete fixture writes");
+        std::fs::write(workspace.join("no-op.txt"), "unchanged\n")
+            .expect("no-op fixture writes");
+
+        let limits = ExtensionLimits {
+            max_source_bytes: 64 * 1024,
+            max_memory_bytes: 1024 * 1024,
+            max_interrupt_checks: 10_000,
+        };
+        let tree = coding(limits);
+        let host = CodingHost::new(&workspace).expect("coding authority configures");
+        let mut bindings = ExtensionCapabilityBindings::new();
+        let limits = ExtensionToolLimits::default();
+        for (name, capability) in [
+            (WORKSPACE_READ_CAPABILITY_V1, host.read_capability()),
+            (WORKSPACE_SEARCH_CAPABILITY_V1, host.search_capability()),
+            (WORKSPACE_MUTATE_CAPABILITY_V1, host.mutate_capability()),
+            (PROCESS_CAPABILITY_V1, host.process_capability()),
+        ] {
+            bindings
+                .insert(name, capability, limits)
+                .expect("capability grant is unique");
+        }
+        let resolved = LuauExtensionEngine
+            .resolve(
+                &tree,
+                bindings,
+                Arc::new(NoHooks),
+                0,
+                Arc::new(ExtensionMemoryCollector::default()),
+            )
+            .expect("coding edit handler resolves");
+        let context = ToolContext {
+            cancellation: tea_core::scheduler::CancellationToken::new(),
+            provenance: RunProvenance::default(),
+        };
+        let execute = |id: &str, arguments: &str| {
+            block_on(
+                resolved
+                    .tools
+                    .get("edit")
+                    .expect("edit is resolved")
+                    .execute(
+                        ToolCall {
+                            id: ToolCallId::new(id).expect("test call ID is valid"),
+                            name: "edit".into(),
+                            arguments: SerializedJson::new(arguments),
+                        },
+                        context.clone(),
+                        ToolUpdateSink::disabled(),
+                    ),
+            )
+            .expect("checked-in edit handler executes")
+        };
+
+        assert_eq!(
+            execute(
+                "coding-edit-precise",
+                r#"{"files":[{"path":"precise.txt","edits":[{"oldText":"before","newText":"after"}]}]}"#,
+            )
+            .content,
+            "Changed 1 existing file with 1 precise replacement."
+        );
+        assert_eq!(
+            execute(
+                "coding-edit-complete",
+                r#"{"files":[{"path":"complete.txt","content":"after\n"}]}"#,
+            )
+            .content,
+            "Changed 1 existing file."
+        );
+        assert_eq!(
+            execute(
+                "coding-edit-create",
+                r#"{"files":[{"path":"created.txt","content":"created\n"}]}"#,
+            )
+            .content,
+            "Created 1 file."
+        );
+        assert_eq!(
+            execute(
+                "coding-edit-mixed",
+                r#"{"files":[{"path":"mixed-precise.txt","edits":[{"oldText":"before","newText":"after"}]},{"path":"mixed-complete.txt","content":"after\n"},{"path":"mixed-created.txt","content":"created\n"}]}"#,
+            )
+            .content,
+            "Changed 2 existing files with 1 precise replacement; created 1 file."
+        );
+        assert_eq!(
+            execute(
+                "coding-edit-no-op",
+                r#"{"files":[{"path":"no-op.txt","content":"unchanged\n"}]}"#,
+            )
+            .content,
+            "No files changed."
+        );
+
         let _ = std::fs::remove_dir_all(workspace);
     }
 

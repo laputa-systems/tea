@@ -18,6 +18,7 @@ use std::time::{Duration, Instant};
 use tea_core::coding::{
     CodingOperations, CommandEnvironment, CommandOutput, EditTransaction, EditTransactionOutcome,
     EntryMetadata, FileSnapshot, LocalCodingOperations, OperationError, OperationFuture,
+    SearchResult,
 };
 use tea_core::scheduler::CancellationToken;
 use tea_core::tool::{ToolUpdate, ToolUpdateSink};
@@ -79,15 +80,24 @@ impl CodingOperations for NonblockingCodingOperations {
         &'a self,
         root: &'a Path,
         pattern: &'a str,
-        limit: usize,
-    ) -> OperationFuture<'a, Vec<String>> {
+        max_results: usize,
+        max_output_bytes: usize,
+        cancellation: CancellationToken,
+    ) -> OperationFuture<'a, SearchResult> {
         let root = root.to_path_buf();
         let pattern = pattern.to_owned();
+        let cancellation = cancellation.clone();
         // Search semantics remain the core adapter's canonical implementation;
         // only its synchronous execution is moved off the terminal executor.
         Box::pin(smol::unblock(move || {
             let local = LocalCodingOperations;
-            smol::block_on(local.find_files(&root, &pattern, limit))
+            smol::block_on(local.find_files(
+                &root,
+                &pattern,
+                max_results,
+                max_output_bytes,
+                cancellation,
+            ))
         }))
     }
 

@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tea_core::agent::AgentConfiguration;
 use tea_core::coding::{
-    CodingHost, PROCESS_CAPABILITY_V1, WORKSPACE_MUTATE_CAPABILITY_V1,
+    CodingHost, CodingOperations, PROCESS_CAPABILITY_V1, WORKSPACE_MUTATE_CAPABILITY_V1,
     WORKSPACE_READ_CAPABILITY_V1, WORKSPACE_SEARCH_CAPABILITY_V1,
 };
 use tea_core::compaction::AutomaticCompactionPolicy;
@@ -132,6 +132,24 @@ pub(super) struct HostSubagentConfig {
 pub(super) fn create_host_harness(
     config: HostHarnessConfig<'_>,
 ) -> Result<Arc<HostHarness>, AppError> {
+    create_host_harness_with_operations(
+        config,
+        Arc::new(super::nonblocking_operations::NonblockingCodingOperations),
+    )
+}
+
+/// Construct the terminal's mock session with the normal revisioned Luau
+/// coding bundle, backed by explicitly no-effect test capability operations.
+pub(super) fn create_mock_host_harness(
+    config: HostHarnessConfig<'_>,
+) -> Result<Arc<HostHarness>, AppError> {
+    create_host_harness_with_operations(config, super::mock::coding_operations())
+}
+
+fn create_host_harness_with_operations(
+    config: HostHarnessConfig<'_>,
+    coding_operations: Arc<dyn CodingOperations>,
+) -> Result<Arc<HostHarness>, AppError> {
     let HostHarnessConfig {
         tea_home,
         workspace,
@@ -239,50 +257,46 @@ pub(super) fn create_host_harness(
             capability_version: goal_binding.capability_version().to_owned(),
             binding_digest: goal_binding.binding_digest(),
         };
-        // The local mock intentionally owns a separate no-effect `edit`
-        // fixture. Every ordinary terminal configuration has no trusted
-        // coding tools and receives this revisioned Luau bundle instead.
-        let coding_bindings = configuration
-            .tools
-            .names()
-            .next()
-            .is_none()
-            .then(|| coding_capability_bindings(workspace))
-            .transpose()?;
+        // Every terminal harness receives the revisioned default coding
+        // bundle. Trusted base tools are an independent surface and must not
+        // implicitly determine whether the four model-facing coding tools
+        // exist.
+        let coding_bindings = coding_capability_bindings_with_operations(
+            workspace,
+            Arc::clone(&coding_operations),
+        )?;
         let mut capability_catalog = PluginCapabilityCatalog::new();
         capability_catalog
             .insert(goal_binding)
             .map_err(|error| AppError::Setup(error.to_string()))?;
-        if let Some(coding_bindings) = &coding_bindings {
-            for binding in coding_bindings.bindings.iter().cloned() {
-                capability_catalog
-                    .insert(binding)
-                    .map_err(|error| AppError::Setup(error.to_string()))?;
-            }
+        for binding in coding_bindings.bindings.iter().cloned() {
             capability_catalog
-                .fix_tool_capabilities(
-                    "coding",
-                    coding_tool_capability_grants(),
-                    coding_additional_read_only_capabilities(),
-                )
+                .insert(binding)
                 .map_err(|error| AppError::Setup(error.to_string()))?;
         }
+        capability_catalog
+            .fix_tool_capabilities(
+                "coding",
+                coding_tool_capability_grants(),
+                coding_additional_read_only_capabilities(),
+            )
+            .map_err(|error| AppError::Setup(error.to_string()))?;
         let (root_prompt, root_presentations) =
             root_harness_surface(&configuration, subagent_policy.as_ref())?;
-        let mut extensions = vec![HarnessSeedExtension {
-            scope: HarnessSeedExtensionScope::Global,
-            source: tea_luau::builtins::goal(extension_limits(&resource_limits)),
-        }];
-        let mut capability_references = vec![goal_binding_ref.clone()];
-        if let Some(coding_bindings) = &coding_bindings {
-            extensions.push(HarnessSeedExtension {
+        let extensions = vec![
+            HarnessSeedExtension {
+                scope: HarnessSeedExtensionScope::Global,
+                source: tea_luau::builtins::goal(extension_limits(&resource_limits)),
+            },
+            HarnessSeedExtension {
                 // Coding behavior is session-local revisioned source. Its
                 // capability grants remain fixed separately in the catalog.
                 scope: HarnessSeedExtensionScope::Session,
                 source: tea_luau::builtins::coding(extension_limits(&resource_limits)),
-            });
-            capability_references.extend(coding_bindings.references.iter().cloned());
-        }
+            },
+        ];
+        let mut capability_references = vec![goal_binding_ref.clone()];
+        capability_references.extend(coding_bindings.references.iter().cloned());
         let seeded = HarnessSeedBuilder::new(
             Arc::clone(&artifacts),
             Arc::new(LuauExtensionEngine),
@@ -310,9 +324,7 @@ pub(super) fn create_host_harness(
                 policy,
                 &resource_limits,
                 &goal_binding_ref,
-                coding_bindings
-                    .as_ref()
-                    .map(|bindings| bindings.references.as_slice()),
+                Some(coding_bindings.references.as_slice()),
                 created_at_ms,
             )?,
             (None, None, None) => Vec::new(),
@@ -380,9 +392,7 @@ pub(super) fn create_host_harness(
                         Arc::clone(&subagents.factory),
                         Arc::clone(&artifacts),
                         child_harnesses,
-                        coding_bindings
-                            .as_ref()
-                            .map(|bindings| bindings.router.clone()),
+                        Some(coding_bindings.router.clone()),
                     ));
                 let tasks: Arc<dyn tea_core::runtime::TaskRuntime> =
                     Arc::new(SmolTaskRuntime::new());
@@ -555,6 +565,23 @@ pub(super) fn rebuild_host_session_metadata(
 pub(super) fn reopen_host_harness(
     input: HostHarnessReopen<'_>,
 ) -> Result<Arc<HostHarness>, AppError> {
+    reopen_host_harness_with_operations(
+        input,
+        Arc::new(super::nonblocking_operations::NonblockingCodingOperations),
+    )
+}
+
+/// Reopen a mock session with its explicit no-effect coding operation port.
+pub(super) fn reopen_mock_host_harness(
+    input: HostHarnessReopen<'_>,
+) -> Result<Arc<HostHarness>, AppError> {
+    reopen_host_harness_with_operations(input, super::mock::coding_operations())
+}
+
+fn reopen_host_harness_with_operations(
+    input: HostHarnessReopen<'_>,
+    coding_operations: Arc<dyn CodingOperations>,
+) -> Result<Arc<HostHarness>, AppError> {
     let HostHarnessReopen {
         tea_home,
         workspace,
@@ -636,7 +663,7 @@ pub(super) fn reopen_host_harness(
         capability_version: goal_binding.capability_version().to_owned(),
         binding_digest: goal_binding.binding_digest(),
     };
-    let coding_bindings = coding_capability_bindings(workspace)?;
+    let coding_bindings = coding_capability_bindings_with_operations(workspace, coding_operations)?;
     let mut capability_catalog = PluginCapabilityCatalog::new();
     capability_catalog
         .insert(goal_binding)
@@ -860,11 +887,19 @@ impl ExtensionCapability for RoutedCodingCapability {
 /// workspace. The bundle may change its model-facing behavior through a
 /// revision, but neither source nor candidates can add another capability to
 /// this catalog.
+#[cfg(test)]
 fn coding_capability_bindings(workspace: &Path) -> Result<CodingCapabilityBindings, AppError> {
-    let host = CodingHost::with_operations(
+    coding_capability_bindings_with_operations(
         workspace,
         Arc::new(super::nonblocking_operations::NonblockingCodingOperations),
     )
+}
+
+fn coding_capability_bindings_with_operations(
+    workspace: &Path,
+    operations: Arc<dyn CodingOperations>,
+) -> Result<CodingCapabilityBindings, AppError> {
+    let host = CodingHost::with_operations(workspace, operations)
     .map_err(|error| AppError::Setup(format!("invalid coding workspace: {error}")))?;
     let router = CodingCapabilityRouter::new(host);
     let limits = ExtensionToolLimits::default();
@@ -2003,7 +2038,7 @@ mod tests {
     use std::net::{TcpListener, TcpStream};
     use std::process::Command;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-    use std::sync::Mutex;
+    use std::sync::{Mutex, OnceLock};
     use std::thread;
     use std::time::{Duration, Instant};
     use tea_core::effect::{NoopEffectGate, RunProvenance};
@@ -2015,7 +2050,10 @@ mod tests {
         ModelStream, ModelStreamEvent,
     };
     use tea_core::state::StopReason;
-    use tea_core::tool::ToolRegistry;
+    use tea_core::tool::{
+        AgentTool, AgentToolResult, ToolCall, ToolContext, ToolFuture, ToolRegistry,
+        ToolUpdateSink,
+    };
     use tea_session::{MemoryArtifactStore, NormalizedPath, ProviderErrorRecord};
 
     #[derive(Debug)]
@@ -2057,6 +2095,49 @@ mod tests {
                     ModelStreamEvent::End(StopReason::Stop),
                 ],
             }) as _)))
+        }
+    }
+
+    #[derive(Debug)]
+    struct UnrelatedTrustedTool;
+
+    impl AgentTool for UnrelatedTrustedTool {
+        fn name(&self) -> &str {
+            "base_probe"
+        }
+
+        fn description(&self) -> &str {
+            "A trusted test-only base tool unrelated to coding."
+        }
+
+        fn schema(&self) -> &tea_protocol::JsonValue {
+            static SCHEMA: OnceLock<tea_protocol::JsonValue> = OnceLock::new();
+            SCHEMA.get_or_init(|| {
+                tea_protocol::JsonValue::object([(
+                    "type",
+                    tea_protocol::JsonValue::String("object".into()),
+                )])
+            })
+        }
+
+        fn execute<'a>(
+            &'a self,
+            call: ToolCall,
+            _context: ToolContext,
+            _updates: ToolUpdateSink,
+        ) -> ToolFuture<'a> {
+            Box::pin(async move {
+                Ok(AgentToolResult {
+                    tool_call_id: call.id,
+                    content: "base probe".into(),
+                    details: None,
+                    usage: None,
+                    added_tool_names: Vec::new(),
+                    terminate: false,
+                    is_error: false,
+                    failure: None,
+                })
+            })
         }
     }
 
@@ -2518,7 +2599,7 @@ mod tests {
         };
         let subagents = durable_test_subagent_config(SubagentTuiConfig::default());
         let provider: Arc<dyn ModelProvider> = Arc::new(StopProvider);
-        let harness = create_host_harness(HostHarnessConfig {
+        let harness = create_mock_host_harness(HostHarnessConfig {
             tea_home: &home,
             workspace: &workspace,
             configuration: super::super::mock::configuration(),
@@ -2566,7 +2647,7 @@ mod tests {
         let session_id = snapshot.header().session_id.to_string();
         drop(harness);
 
-        let reopened = reopen_host_harness(HostHarnessReopen {
+        let reopened = reopen_mock_host_harness(HostHarnessReopen {
             tea_home: &home,
             workspace: &workspace,
             session_id: &session_id,
@@ -3089,7 +3170,58 @@ data: [DONE]
         );
         assert!(request
             .system_prompt
-            .contains("There are no separate `write`, `grep`, or `ls`"));
+            .contains("separate `write`, `grep`, or `ls` tools"));
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn unrelated_trusted_tool_does_not_suppress_the_default_coding_bundle() {
+        let home = temporary_home();
+        let workspace = home.join("workspace");
+        fs::create_dir(&workspace).expect("workspace creates");
+        let provider = Arc::new(CapturingProvider::default());
+        let mut tools = ToolRegistry::default();
+        tools.insert(Arc::new(UnrelatedTrustedTool));
+        let harness = create_host_harness(HostHarnessConfig {
+            tea_home: &home,
+            workspace: &workspace,
+            configuration: AgentConfiguration::new(
+                "trusted system prompt",
+                tools,
+                Arc::new(NoHooks),
+            ),
+            model: ModelDescriptor {
+                provider: "fixture".into(),
+                model: "fixture-model".into(),
+                revision: Some("fixture-revision".into()),
+            },
+            provider: Arc::clone(&provider) as Arc<dyn ModelProvider>,
+            thinking_level: Some(ThinkingLevel::Off),
+            compactor: None,
+            automatic_compaction: AutomaticCompactionPolicy::disabled(),
+            subagents: None,
+        })
+        .expect("host harness creates");
+
+        smol::block_on(harness.run_root_prompt("show every tool"))
+            .expect("durable prompt settles");
+        let requests = provider
+            .requests
+            .lock()
+            .expect("capturing provider request lock");
+        let names = requests
+            .first()
+            .expect("provider receives one request")
+            .tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>();
+        for expected in ["read", "bash", "edit", "find", "base_probe"] {
+            assert!(
+                names.contains(&expected),
+                "{expected} must remain present when a trusted base tool is installed"
+            );
+        }
         let _ = fs::remove_dir_all(home);
     }
 
