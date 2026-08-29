@@ -1043,6 +1043,135 @@ mod tests {
         server.join().expect("fixture server settles");
     }
 
+    /// Exercise the two TinyFish endpoint shapes through Tea's route-bound
+    /// transport. This is opt-in because it requires a caller-provided key
+    /// and may consume the account's external service allowance.
+    #[test]
+    #[ignore = "requires a live TINYFISH_API_KEY"]
+    fn tinyfish_live_search_and_fetch() {
+        let api_key = std::env::var("TINYFISH_API_KEY")
+            .expect("TINYFISH_API_KEY must be injected for the live smoke test");
+        let search = Route::new(
+            "tinyfish-search",
+            Origin::https("api.search.tinyfish.ai").expect("TinyFish Search origin is valid"),
+            Duration::from_secs(60),
+            8 * 1024,
+            256 * 1024,
+            RetryPolicy::new(1, Duration::from_millis(250), Duration::from_secs(2)),
+            RatePolicy::new(
+                NonZeroUsize::new(4).expect("fixed network concurrency is non-zero"),
+                Some(Duration::from_secs(2)),
+            ),
+        )
+        .expect("TinyFish Search route is valid")
+        .allow(HttpMethod::Get, "/")
+        .expect("TinyFish Search path is valid")
+        .with_fixed_header("X-API-Key", &api_key)
+        .expect("TinyFish API key header is valid");
+        let fetch = Route::new(
+            "tinyfish-fetch",
+            Origin::https("api.fetch.tinyfish.ai").expect("TinyFish Fetch origin is valid"),
+            Duration::from_secs(60),
+            128 * 1024,
+            4 * 1024 * 1024,
+            RetryPolicy::new(1, Duration::from_millis(250), Duration::from_secs(2)),
+            RatePolicy::new(
+                NonZeroUsize::new(4).expect("fixed network concurrency is non-zero"),
+                None,
+            ),
+        )
+        .expect("TinyFish Fetch route is valid")
+        .allow(HttpMethod::Post, "/")
+        .expect("TinyFish Fetch path is valid")
+        .with_fixed_header("X-API-Key", &api_key)
+        .expect("TinyFish API key header is valid");
+        let client = Client::new(
+            background_executor(|future| {
+                smol::spawn(future).detach();
+            }),
+            [search, fetch],
+        )
+        .expect("TinyFish client configures");
+
+        let search = smol::block_on(client.request(
+            HttpRequest {
+                route: "tinyfish-search".into(),
+                method: HttpMethod::Get,
+                path: "/".into(),
+                query: BTreeMap::from([
+                    ("query".into(), "Rust programming language documentation".into()),
+                    (
+                        "purpose".into(),
+                        "Tea HTTP transport integration smoke test".into(),
+                    ),
+                ]),
+                json: None,
+            },
+            CancellationToken::new(),
+        ))
+        .expect("TinyFish Search request is authorized");
+        let HttpOutcome::Response {
+            status: search_status,
+            json: search_body,
+            ..
+        } = search
+        else {
+            panic!("TinyFish Search must complete with an HTTP response");
+        };
+        assert_eq!(search_status, 200, "TinyFish Search must authorize the key");
+        assert!(
+            search_body
+                .get("results")
+                .and_then(JsonValue::as_array)
+                .is_some_and(|results| !results.is_empty()),
+            "TinyFish Search must return at least one result"
+        );
+
+        let fetch = smol::block_on(client.request(
+            HttpRequest {
+                route: "tinyfish-fetch".into(),
+                method: HttpMethod::Post,
+                path: "/".into(),
+                query: BTreeMap::new(),
+                json: Some(JsonValue::object([
+                    (
+                        "urls",
+                        JsonValue::Array(vec![JsonValue::String("https://example.com".into())]),
+                    ),
+                    ("format", JsonValue::String("markdown".into())),
+                    ("links", JsonValue::Bool(false)),
+                    ("image_links", JsonValue::Bool(false)),
+                    ("ttl", JsonValue::from(3600_u64)),
+                    ("per_url_timeout_ms", JsonValue::from(45_000_u64)),
+                ])),
+            },
+            CancellationToken::new(),
+        ))
+        .expect("TinyFish Fetch request is authorized");
+        let HttpOutcome::Response {
+            status: fetch_status,
+            json: fetch_body,
+            ..
+        } = fetch
+        else {
+            panic!("TinyFish Fetch must complete with an HTTP response");
+        };
+        assert_eq!(fetch_status, 200, "TinyFish Fetch must authorize the key");
+        assert!(
+            fetch_body
+                .get("results")
+                .and_then(JsonValue::as_array)
+                .is_some_and(|results| {
+                    results.iter().any(|page| {
+                        page.get("text")
+                            .and_then(JsonValue::as_str)
+                            .is_some_and(|text| !text.trim().is_empty())
+                    })
+                }),
+            "TinyFish Fetch must return Markdown text for example.com"
+        );
+    }
+
     #[test]
     fn unavailable_route_returns_a_typed_outcome_without_network_io() {
         let route = Route::new(
