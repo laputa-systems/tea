@@ -329,7 +329,10 @@ pub(crate) fn surface_presentation(
             ]
         }),
         UiSurface::ToolDetail => payload.unwrap_or_else(|| vec!["No transcript yet.".into()]),
-        UiSurface::ModelPicker | UiSurface::CustomModel | UiSurface::SessionPicker => state
+        UiSurface::ModelPicker
+        | UiSurface::CustomModel
+        | UiSurface::ThinkingPicker
+        | UiSurface::SessionPicker => state
             .picker_lines_visible(registry, usize::MAX)
             .unwrap_or_default(),
         UiSurface::None => Vec::new(),
@@ -359,7 +362,10 @@ pub(crate) fn surface_presentation(
         let hint = match state.surface() {
             UiSurface::Help => "↑↓ Navigate · Enter Open · Esc Close",
             UiSurface::ToolDetail => "↑↓ Scroll · Ctrl+O Close · Esc Close",
-            UiSurface::ModelPicker | UiSurface::CustomModel | UiSurface::SessionPicker => {
+            UiSurface::ModelPicker
+            | UiSurface::CustomModel
+            | UiSurface::ThinkingPicker
+            | UiSurface::SessionPicker => {
                 "↑↓ Navigate · Enter Select · Esc Close"
             }
             UiSurface::None => "Esc Close",
@@ -659,6 +665,8 @@ fn markdown_lines(text: &str, width: u16, style_diffs: bool) -> Vec<RenderLine> 
     let mut code_scratch = Vec::new();
     let mut code_is_diff = false;
     let mut code_is_complete = false;
+    let mut code_line_number = 0;
+    let mut code_line_number_width = 1;
     let mut in_code = false;
     while index < raw_lines.len() {
         let raw = raw_lines[index];
@@ -669,13 +677,10 @@ fn markdown_lines(text: &str, width: u16, style_diffs: bool) -> Vec<RenderLine> 
                 code_highlighter = None;
                 code_is_diff = false;
                 code_is_complete = false;
+                code_line_number = 0;
+                code_line_number_width = 1;
                 code_scratch.clear();
                 markdown.reset();
-                output.push(RenderLine::plain("└", {
-                    let mut style = Theme::default().style(Role::Muted);
-                    style.bold = true;
-                    style
-                }));
             } else {
                 let _ = markdown.highlight_into(raw.as_bytes(), &mut markdown_scratch);
                 markdown.reset();
@@ -694,27 +699,37 @@ fn markdown_lines(text: &str, width: u16, style_diffs: bool) -> Vec<RenderLine> 
                         .iter()
                         .any(|line| line.trim_start().starts_with("```"));
                 code_highlighter = Language::from_name(language_name).map(Highlighter::new);
+                code_line_number = 0;
+                code_line_number_width = raw_lines[index + 1..]
+                    .iter()
+                    .take_while(|line| !line.trim_start().starts_with("```"))
+                    .count()
+                    .max(1)
+                    .to_string()
+                    .len();
                 in_code = true;
-                // Fenced code is already visually separated from prose by the rail. The
-                // info string is still used to select syntax highlighting, but rendering it
-                // here adds noisy, implementation-facing text to every code block.
-                output.push(RenderLine::plain("┌", {
-                    let mut style = Theme::default().style(Role::Muted);
-                    style.bold = true;
-                    style
-                }));
+                // The info string selects syntax highlighting but is not rendered: the
+                // numbered gutter supplies code structure without extra fence rows.
             }
             index += 1;
             continue;
         }
         if in_code {
+            code_line_number += 1;
             if code_is_diff {
                 if code_is_complete {
-                    output.extend(diff_code_lines(raw, width));
+                    output.extend(diff_code_lines(
+                        raw,
+                        width,
+                        code_line_number,
+                        code_line_number_width,
+                    ));
                 } else {
                     output.extend(code_lines(
                         &RenderLine::plain(raw, Theme::default().style(Role::Muted)),
                         width,
+                        code_line_number,
+                        code_line_number_width,
                     ));
                 }
             } else if let Some(highlighter) = code_highlighter.as_mut() {
@@ -724,11 +739,18 @@ fn markdown_lines(text: &str, width: u16, style_diffs: bool) -> Vec<RenderLine> 
                     &mut code_scratch,
                     Theme::default().style(Role::Muted),
                 );
-                output.extend(code_lines(&highlighted, width));
+                output.extend(code_lines(
+                    &highlighted,
+                    width,
+                    code_line_number,
+                    code_line_number_width,
+                ));
             } else {
                 output.extend(code_lines(
                     &RenderLine::plain(raw, Theme::default().style(Role::Muted)),
                     width,
+                    code_line_number,
+                    code_line_number_width,
                 ));
             }
             index += 1;
@@ -899,20 +921,52 @@ fn wrap_styled_line(line: &RenderLine, width: u16, preserve_indentation: bool) -
     output
 }
 
-fn code_lines(line: &RenderLine, width: u16) -> Vec<RenderLine> {
-    let available = width.saturating_sub(2);
+fn code_lines(
+    line: &RenderLine,
+    width: u16,
+    line_number: usize,
+    line_number_width: usize,
+) -> Vec<RenderLine> {
+    let prefix_width = line_number_width.saturating_add(3);
+    let available = width.saturating_sub(u16::try_from(prefix_width).unwrap_or(u16::MAX));
     let chunks = wrap_styled_line(line, available, true);
     if chunks.is_empty() {
-        return vec![RenderLine::plain("│ ", Theme::default().style(Role::Muted))];
+        return vec![prepend_code_gutter(
+            RenderLine::plain(String::new(), line.style),
+            line_number,
+            line_number_width,
+            true,
+        )];
     }
-    chunks.into_iter().map(prepend_code_rail).collect()
+    chunks
+        .into_iter()
+        .enumerate()
+        .map(|(index, line)| {
+            prepend_code_gutter(
+                line,
+                line_number,
+                line_number_width,
+                index == 0,
+            )
+        })
+        .collect()
 }
 
-fn prepend_code_rail(line: RenderLine) -> RenderLine {
+fn prepend_code_gutter(
+    line: RenderLine,
+    line_number: usize,
+    line_number_width: usize,
+    first_row: bool,
+) -> RenderLine {
     let rail_style = Theme::default().style(Role::Muted);
-    let mut text = String::from("│ ");
+    let gutter = if first_row {
+        format!("{line_number:>line_number_width$} │ ")
+    } else {
+        format!("{:>line_number_width$} │ ", "")
+    };
+    let mut text = gutter;
     text.push_str(&line.text);
-    let mut styles = vec![rail_style; 2];
+    let mut styles = vec![rail_style; line_number_width + 3];
     styles.extend(
         line.character_styles
             .unwrap_or_else(|| vec![line.style; line.text.chars().count()]),
@@ -920,7 +974,12 @@ fn prepend_code_rail(line: RenderLine) -> RenderLine {
     RenderLine::styled(text, line.style, styles)
 }
 
-fn diff_code_lines(raw: &str, width: u16) -> Vec<RenderLine> {
+fn diff_code_lines(
+    raw: &str,
+    width: u16,
+    line_number: usize,
+    line_number_width: usize,
+) -> Vec<RenderLine> {
     let style = if raw.starts_with('+') && !raw.starts_with("+++") {
         Theme::default().style(Role::Success)
     } else if raw.starts_with('-') && !raw.starts_with("---") {
@@ -932,7 +991,12 @@ fn diff_code_lines(raw: &str, width: u16) -> Vec<RenderLine> {
     } else {
         Theme::default().style(Role::Muted)
     };
-    code_lines(&RenderLine::plain(raw, style), width)
+    code_lines(
+        &RenderLine::plain(raw, style),
+        width,
+        line_number,
+        line_number_width,
+    )
 }
 
 fn is_table_header(header: Option<&str>, separator: Option<&str>) -> bool {
@@ -1227,17 +1291,33 @@ mod tests {
     }
 
     #[test]
-    fn fenced_code_uses_the_declared_language_and_preserves_the_rail() {
+    fn fenced_code_uses_the_declared_language_and_renders_a_line_number_gutter() {
         let lines = markdown_lines("```rust\nfn main() { return 1; }\n```", 40, true);
-        assert_eq!(lines[0].text, "┌");
-        assert_eq!(lines[1].text, "│ fn main() { return 1; }");
-        let styles = lines[1]
+        assert_eq!(lines[0].text, "1 │ fn main() { return 1; }");
+        let styles = lines[0]
             .character_styles
             .as_ref()
             .expect("highlighted code line");
         assert_eq!(styles[0].foreground, Some(Color::DarkGrey));
-        assert_eq!(styles[2].foreground, Some(Color::Blue));
-        assert_eq!(lines[2].text, "└");
+        assert_eq!(styles[4].foreground, Some(Color::Blue));
+    }
+
+    #[test]
+    fn fenced_code_gutter_aligns_numbers_and_wrapped_continuations() {
+        let lines = markdown_lines("```text\na\nb\nlong line that wraps\n```", 18, true);
+        let text = lines.iter().map(|line| line.text.as_str()).collect::<Vec<_>>();
+        assert_eq!(text, ["1 │ a", "2 │ b", "3 │ long line", "  │ that wraps"]);
+    }
+
+    #[test]
+    fn fenced_code_gutter_aligns_multi_digit_line_numbers() {
+        let body = (1..=10)
+            .map(|line| format!("line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let lines = markdown_lines(&format!("```text\n{body}\n```"), 40, true);
+        assert!(lines[0].text.starts_with(" 1 │"));
+        assert!(lines[9].text.starts_with("10 │"));
     }
 
     #[test]
@@ -1284,20 +1364,18 @@ mod tests {
             0,
         );
         assert_eq!(presentation.live[0].text(), "┃ user message");
-        assert_eq!(presentation.live[2].text(), "┌");
-        assert_eq!(presentation.live[3].text(), "│ fn main() {}");
-        assert_eq!(presentation.live[4].text(), "└");
+        assert_eq!(presentation.live[2].text(), "1 │ fn main() {}");
     }
 
     #[test]
     fn unknown_fenced_languages_remain_visible_without_syntax_rules() {
         let lines = markdown_lines("```made-up\ncontent\n```", 40, true);
-        assert_eq!(lines[1].text, "│ content");
+        assert_eq!(lines[0].text, "1 │ content");
         assert_eq!(
-            lines[1]
+            lines[0]
                 .character_styles
                 .as_ref()
-                .expect("neutral code styles")[2]
+                .expect("neutral code styles")[4]
                 .foreground,
             Some(Color::DarkGrey)
         );
@@ -1311,23 +1389,23 @@ mod tests {
             streaming[1]
                 .character_styles
                 .as_ref()
-                .expect("streaming diff styles")[2]
+                .expect("streaming diff styles")[4]
                 .foreground,
             Some(Color::DarkGrey)
+        );
+        assert_eq!(
+            finished[0]
+                .character_styles
+                .as_ref()
+                .expect("finished diff styles")[4]
+                .foreground,
+            Some(Color::Green)
         );
         assert_eq!(
             finished[1]
                 .character_styles
                 .as_ref()
-                .expect("finished diff styles")[2]
-                .foreground,
-            Some(Color::Green)
-        );
-        assert_eq!(
-            finished[2]
-                .character_styles
-                .as_ref()
-                .expect("finished diff styles")[2]
+                .expect("finished diff styles")[4]
                 .foreground,
             Some(Color::Red)
         );
@@ -1470,11 +1548,8 @@ mod tests {
         state.composer_mut().insert('/').expect("insert slash");
         state.update_slash_completion(vec![
             "/help".into(),
-            "/model".into(),
-            "/thinking".into(),
-            "/session".into(),
+            "/models".into(),
             "/new".into(),
-            "/quit".into(),
         ]);
         let presentation = main_presentation(
             &state,
@@ -1488,7 +1563,10 @@ mod tests {
         assert_eq!(presentation.live[1].text().chars().next(), Some('┃'));
         assert_eq!(presentation.live[2].text().chars().next(), Some('─'));
         assert!(presentation.live[3].text().starts_with("  /he"));
-        assert_eq!(presentation.live[10].text().chars().next(), Some('↑'));
+        assert!(presentation
+            .live
+            .last()
+            .is_some_and(|line| line.text().starts_with("↑↓ Navigate")));
         assert_eq!(
             presentation.cursor,
             Some(Cursor {

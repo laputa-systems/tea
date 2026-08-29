@@ -7,7 +7,6 @@ use super::commands;
 use super::error::AppError;
 use super::runtime::App;
 use super::state::UiSurface;
-use super::support::{parse_thinking_level, thinking_level_name};
 
 impl App {
     pub(super) fn handle_terminal_event(
@@ -265,7 +264,7 @@ impl App {
             // A saved model can remain visible when its provider cannot be configured (for
             // example, because a required API key is missing). Keep a fresh submission untouched
             // in that error state so Enter does not discard the draft or open an unrelated picker;
-            // slash commands, including `/model`, remain the explicit recovery path.
+            // slash commands, including `/models`, remain the explicit recovery path.
             if self.configured_provider.is_none() && self.state.selected_model.is_some() {
                 self.state.composer_mut().replace_from_editor(input);
                 return Ok(());
@@ -378,15 +377,15 @@ impl App {
                     help_surface_lines(&self.state.extension_commands),
                 );
             }
-            "/model" => {
+            "/models" => {
                 if let (Some(provider), Some(model)) = (words.next(), words.next()) {
                     self.select_model(provider.to_owned(), model.to_owned())?;
+                    self.open_thinking_picker();
                 } else {
                     self.open_model_picker();
                 }
             }
-            "/thinking" => self.dispatch_thinking(words.next(), words.next())?,
-            "/session" | "/resume" => {
+            "/resume" => {
                 if let Err(error) = self.open_session_picker() {
                     self.state.notice(error.to_string());
                 }
@@ -395,14 +394,6 @@ impl App {
                 if let Err(error) = self.new_session() {
                     self.state.notice(error.to_string());
                 }
-            }
-            "/quit" => {
-                self.quitting = true;
-                // A detached root receiver may exist before its first epoch
-                // installs a core agent. `abort_root` owns a sticky request
-                // for that gap; the event loop retries it until this receiver
-                // settles, then exits only after durable child cleanup joins.
-                self.request_root_abort(true);
             }
             command if self.state.extension_command(command).is_some() => {
                 self.dispatch_extension_command(command, arguments)?;
@@ -483,44 +474,15 @@ impl App {
         Ok(())
     }
 
-    fn dispatch_thinking(
-        &mut self,
-        value: Option<&str>,
-        extra: Option<&str>,
-    ) -> Result<(), AppError> {
-        let Some(value) = value else {
-            self.state.notice(format!(
-                "usage: /thinking <off|minimal|low|medium|high|xhigh|max> (current {})",
-                thinking_level_name(self.state.thinking_level())
-            ));
-            return Ok(());
-        };
-        if extra.is_some() {
-            self.state.notice("usage: /thinking <level>");
-            return Ok(());
-        }
-        let Some(level) = parse_thinking_level(value) else {
-            self.state.notice(format!(
-                "unknown thinking level {value}; expected off, minimal, low, medium, high, xhigh, or max"
-            ));
-            return Ok(());
-        };
-        self.set_thinking_level(level)?;
-        self.state.notice(format!(
-            "reasoning effort set to {}",
-            thinking_level_name(level)
-        ));
-        Ok(())
-    }
 }
 
 fn help_surface_lines(
     extensions: &[tea_core::harness::extension::ExtensionHostCommandDescription],
 ) -> Vec<String> {
     const GROUPS: &[(&str, &[&str])] = &[
-        ("General", &["/help", "/quit"]),
-        ("Session", &["/new", "/session", "/resume"]),
-        ("Runtime", &["/model", "/thinking"]),
+        ("General", &["/help"]),
+        ("Session", &["/new", "/resume"]),
+        ("Runtime", &["/models"]),
     ];
 
     let mut lines = Vec::new();

@@ -861,7 +861,7 @@ fn real_binary_renders_streamed_text_before_the_fixture_settles() {
         )
         .expect("new session should reset the idle transcript");
     terminal
-        .send_text(terminal.deadline(Duration::from_secs(3)), "/session")
+        .send_text(terminal.deadline(Duration::from_secs(3)), "/resume")
         .expect("open the saved-session picker");
     terminal
         .send_key(terminal.deadline(Duration::from_secs(3)), Key::Enter)
@@ -961,7 +961,7 @@ fn real_binary_keeps_native_multiline_editing_and_history_inside_a_pty() {
         .expect("clear multiline composer");
 
     terminal
-        .send_text(terminal.deadline(Duration::from_secs(3)), "/model")
+        .send_text(terminal.deadline(Duration::from_secs(3)), "/models")
         .expect("send model command");
     terminal
         .send_key(terminal.deadline(Duration::from_secs(3)), Key::Enter)
@@ -1007,7 +1007,7 @@ fn real_binary_keeps_native_multiline_editing_and_history_inside_a_pty() {
                 screen.row(3).is_some_and(|row| row.starts_with('─'))
                     && screen.row(4).is_some_and(|row| row.starts_with("  /help"))
                     && screen
-                        .row(11)
+                        .row(10)
                         .is_some_and(|row| row.starts_with("↑↓ Navigate"))
             },
         )

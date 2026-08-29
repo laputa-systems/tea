@@ -64,6 +64,7 @@ pub enum UiSurface {
     Help,
     ModelPicker,
     CustomModel,
+    ThinkingPicker,
     SessionPicker,
     /// Full-transcript/detail inspection surface.
     ToolDetail,
@@ -105,6 +106,9 @@ pub(super) enum Picker {
     CustomModel {
         provider: String,
         input: String,
+    },
+    Thinking {
+        selected: usize,
     },
     Session {
         filter: String,
@@ -864,6 +868,13 @@ impl AppState {
                 format!("> {input}"),
                 "Enter selects; Esc cancels".into(),
             ],
+            Picker::Thinking { selected } => {
+                let levels = super::support::thinking_levels()
+                    .iter()
+                    .map(|level| super::support::thinking_level_name(*level).to_owned())
+                    .collect::<Vec<_>>();
+                overlay_lines("Thinking", "", &levels, *selected, max_rows)
+            }
             Picker::Session {
                 filter,
                 selected,

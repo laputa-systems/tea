@@ -55,6 +55,18 @@ pub(super) const fn thinking_level_name(level: ThinkingLevel) -> &'static str {
     }
 }
 
+pub(super) const fn thinking_levels() -> [ThinkingLevel; 7] {
+    [
+        ThinkingLevel::Off,
+        ThinkingLevel::Minimal,
+        ThinkingLevel::Low,
+        ThinkingLevel::Medium,
+        ThinkingLevel::High,
+        ThinkingLevel::XHigh,
+        ThinkingLevel::Max,
+    ]
+}
+
 pub(super) fn parse_thinking_level(value: &str) -> Option<ThinkingLevel> {
     Some(match value {
         "off" => ThinkingLevel::Off,

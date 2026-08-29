@@ -32,7 +32,7 @@ navigation is native. `/new` replaces the semantic session projection but does
 not erase rows already written to terminal scrollback. Reopening a session
 starts a fresh projection and prints its restored stable prefix again.
 
-Help, model/custom-model/session pickers, and tool detail are true temporary
+Help, model/custom-model/thinking/session pickers, and tool detail are true temporary
 full-screen surfaces. They borrow the alternate screen only while open; closing
 one restores the untouched main screen and its current live tail. Slash
 completion remains inline rather than becoming a modal surface.
@@ -88,12 +88,9 @@ cache-friendly compaction requests.
 Sessions live below the explicit Tea home, scoped by a normalized workspace
 identity. Each is a v1 session directory with its colocated object store.
 
-- /session opens the durable session picker.
-- /resume reopens a selected durable session.
+- /resume opens the durable session picker and reopens a selected durable session.
 - /new creates a new durable session.
-- /model selects the provider/model; the footer continuously shows context, cost, and token accounting.
-- /thinking selects the reasoning effort for future prompts.
-- /quit exits the terminal.
+- /models selects the provider/model and then opens the reasoning-effort picker; the footer continuously shows context, cost, and token accounting.
 
 The selected provider/model is sealed in each session's durable header. Opening
 Tea without an explicit model starts unselected; `/resume` restores and
@@ -101,7 +98,8 @@ configures the model required by the selected session rather than consulting a
 global preference.
 
 The `/resume` picker omits the durable session currently attached to the host;
-it only offers other saved sessions.
+it only offers other saved sessions. Selecting a model through `/models` is a
+two-step flow: choose the provider/model, then choose its reasoning effort.
 
 Normal composer input always starts or continues the managed harness. During an
 active operation, the terminal projects durable session and live harness events
@@ -190,4 +188,4 @@ A saved provider/model identity remains visible even when
 the provider cannot currently be configured (for example, when its API key is
 missing), while prompting still requires a configured provider.
 In that configuration-error state, a normal text submission is left untouched;
-use `/model` to choose or repair the provider explicitly.
+use `/models` to choose or repair the provider explicitly.

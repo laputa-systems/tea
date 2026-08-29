@@ -26,6 +26,17 @@ impl App {
         self.state.set_surface(UiSurface::ModelPicker);
     }
 
+    /// Open the reasoning-effort menu that follows a provider/model choice.
+    pub(super) fn open_thinking_picker(&mut self) {
+        let levels = super::support::thinking_levels();
+        let selected = levels
+            .iter()
+            .position(|level| *level == self.state.thinking_level())
+            .unwrap_or(0);
+        self.state.picker = Some(Picker::Thinking { selected });
+        self.state.set_surface(UiSurface::ThinkingPicker);
+    }
+
     pub(super) fn open_session_picker(&mut self) -> Result<(), AppError> {
         if self.agent_is_active() {
             self.state.notice("session changes require an idle agent");
@@ -138,6 +149,7 @@ impl App {
                 *selected = 0;
             }
             Picker::CustomModel { input, .. } => input.push_str(text),
+            Picker::Thinking { .. } => {}
             Picker::Session {
                 filter, selected, ..
             } => {
@@ -160,6 +172,7 @@ impl App {
             Picker::CustomModel { input, .. } => {
                 input.pop();
             }
+            Picker::Thinking { .. } => {}
             Picker::Session {
                 filter, selected, ..
             } => {
@@ -176,6 +189,7 @@ impl App {
         let length = match picker {
             Picker::Model { filter, .. } => model_candidates(&self.registry, filter).len(),
             Picker::CustomModel { .. } => return,
+            Picker::Thinking { .. } => super::support::thinking_levels().len(),
             Picker::Session {
                 filter, entries, ..
             } => entries
@@ -195,6 +209,7 @@ impl App {
         let selected = match picker {
             Picker::Model { selected, .. } => selected,
             Picker::CustomModel { .. } => return,
+            Picker::Thinking { selected } => selected,
             Picker::Session { selected, .. } => selected,
         };
         if length != 0 {
@@ -217,6 +232,8 @@ impl App {
                             self.state.notice(error.to_string());
                             self.state.picker = Some(Picker::Model { filter, selected });
                             self.state.set_surface(UiSurface::ModelPicker);
+                        } else {
+                            self.open_thinking_picker();
                         }
                     } else {
                         self.state.picker = Some(Picker::CustomModel {
@@ -235,7 +252,19 @@ impl App {
                         self.state.notice(error.to_string());
                         self.state.picker = Some(Picker::CustomModel { provider, input });
                         self.state.set_surface(UiSurface::CustomModel);
+                    } else {
+                        self.open_thinking_picker();
                     }
+                }
+            }
+            Picker::Thinking { selected } => {
+                if let Some(level) = super::support::thinking_levels().get(selected).copied() {
+                    self.set_thinking_level(level)?;
+                    self.state.close_surface();
+                    self.state.notice(format!(
+                        "reasoning effort set to {}",
+                        super::support::thinking_level_name(level)
+                    ));
                 }
             }
             Picker::Session {

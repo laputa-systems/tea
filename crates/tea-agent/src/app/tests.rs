@@ -1,6 +1,7 @@
 use super::compaction::ProviderCompactor;
 use super::state::ContextEstimate;
 use super::*;
+use crate::terminal::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use std::ffi::OsString;
 use std::fs;
 use std::io::{Read, Write};
@@ -1543,25 +1544,72 @@ fn accepted_root_prompt_enters_the_live_transcript() {
 }
 
 #[test]
-fn thinking_command_changes_the_footer_effort_setting() {
+fn thinking_command_is_not_a_terminal_command() {
     let mut app = App::new(CliOptions::parse(["tea"].map(OsString::from)).expect("options"));
 
     app.dispatch_command("/thinking high")
-        .expect("thinking command should dispatch");
+        .expect("unknown command should dispatch as a notice");
 
-    assert!(app.state().footer_lines(&app.registry)[0].contains("effort high"));
+    assert!(matches!(app.state().status(), UiStatus::Notice(text) if text == "unknown command /thinking"));
+
+    app.dispatch_command("/quit")
+        .expect("removed command should dispatch as a notice");
+    assert!(matches!(app.state().status(), UiStatus::Notice(text) if text == "unknown command /quit"));
+
+    app.dispatch_command("/session")
+        .expect("removed alias should dispatch as a notice");
+    assert!(matches!(app.state().status(), UiStatus::Notice(text) if text == "unknown command /session"));
 }
 
 #[test]
-fn thinking_command_without_a_value_reports_usage() {
-    let mut app = App::new(CliOptions::parse(["tea"].map(OsString::from)).expect("options"));
+fn model_selection_opens_the_thinking_picker() {
+    let tea_home = test_tea_home("thinking-picker");
+    let options = CliOptions::parse(
+        [
+            "tea",
+            "--tea-home",
+            tea_home.to_str().expect("UTF-8 test path"),
+        ]
+        .map(OsString::from),
+    )
+    .expect("options parse");
+    let mut app = App::new(options);
+    app.assemble_host().expect("host should assemble");
+    app.dispatch_command("/models")
+        .expect("model picker should open");
+    assert_eq!(app.state().surface(), UiSurface::ModelPicker);
+    app.picker_insert("mock")
+        .expect("model picker filter should accept input");
+    app.handle_picker_key(KeyEvent {
+        code: KeyCode::Enter,
+        modifiers: KeyModifiers::default(),
+        kind: KeyEventKind::Press,
+    })
+    .expect("model selection should dispatch");
 
-    app.dispatch_command("/thinking")
-        .expect("thinking command should dispatch");
+    assert_eq!(app.state().surface(), UiSurface::ThinkingPicker);
+    assert!(app
+        .state()
+        .picker_lines(&app.registry)
+        .is_some_and(|lines| lines.iter().any(|line| line.contains("medium"))));
 
-    assert!(
-        matches!(app.state().status(), UiStatus::Notice(text) if text.contains("/thinking <off|minimal"))
-    );
+    for _ in 0..4 {
+        app.handle_picker_key(KeyEvent {
+            code: KeyCode::Down,
+            modifiers: KeyModifiers::default(),
+            kind: KeyEventKind::Press,
+        })
+        .expect("thinking picker navigation should succeed");
+    }
+    app.handle_picker_key(KeyEvent {
+        code: KeyCode::Enter,
+        modifiers: KeyModifiers::default(),
+        kind: KeyEventKind::Press,
+    })
+    .expect("thinking choice should commit");
+    assert_eq!(app.state().surface(), UiSurface::None);
+    assert_eq!(app.state().thinking_level(), ThinkingLevel::High);
+    let _ = fs::remove_dir_all(tea_home);
 }
 
 #[test]
@@ -2223,19 +2271,24 @@ fn command_completion_expands_a_slash_prefix_without_submitting_it() {
 }
 
 #[test]
-fn command_completion_includes_durable_session_commands() {
+fn command_completion_includes_models_resume_and_new_session_commands() {
     let mut app = App::new(CliOptions::default());
     app.state
         .composer_mut()
-        .insert_str("/sess")
+        .insert_str("/res")
         .expect("prefix");
     app.complete_command();
-    assert_eq!(app.state.composer().text(), "/session ");
+    assert_eq!(app.state.composer().text(), "/resume ");
 
     app.state.composer_mut().clear();
     app.state.composer_mut().insert_str("/new").expect("prefix");
     app.complete_command();
     assert_eq!(app.state.composer().text(), "/new ");
+
+    app.state.composer_mut().clear();
+    app.state.composer_mut().insert_str("/mod").expect("prefix");
+    app.complete_command();
+    assert_eq!(app.state.composer().text(), "/models ");
 }
 
 #[test]

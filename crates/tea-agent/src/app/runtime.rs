@@ -235,7 +235,7 @@ impl App {
             (Some(provider), None) if provider == OsStr::new(mock::PROVIDER_ID) => {
                 self.select_model(mock::PROVIDER_ID.into(), mock::DEFAULT_MODEL_ID.into())?
             }
-            (Some(_), None) => self.state.notice("select a model with /model"),
+            (Some(_), None) => self.state.notice("select a model with /models"),
             (Some(provider), Some(model)) => {
                 self.select_model(os_text(provider, "--provider")?, os_text(model, "--model")?)?
             }

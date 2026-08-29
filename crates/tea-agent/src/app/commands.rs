@@ -15,34 +15,19 @@ const COMMANDS: &[CommandSpec] = &[
         allowed_while_active: true,
     },
     CommandSpec {
-        name: "/model",
+        name: "/models",
         help: "select a provider/model",
         allowed_while_active: false,
     },
     CommandSpec {
-        name: "/thinking",
-        help: "select reasoning effort",
-        allowed_while_active: false,
-    },
-    CommandSpec {
-        name: "/session",
-        help: "pick a durable session",
-        allowed_while_active: false,
-    },
-    CommandSpec {
         name: "/resume",
-        help: "resume a durable session",
+        help: "pick and resume a durable session",
         allowed_while_active: false,
     },
     CommandSpec {
         name: "/new",
         help: "start a fresh durable session",
         allowed_while_active: false,
-    },
-    CommandSpec {
-        name: "/quit",
-        help: "exit after cancellation and settlement",
-        allowed_while_active: true,
     },
 ];
 
@@ -81,9 +66,12 @@ mod tests {
                 .iter()
                 .all(|other| other.name != command.name));
         }
-        assert_eq!(COMMANDS.len(), 7);
-        assert!(find("/model").is_some_and(|command| !command.allowed_while_active));
-        assert!(find("/thinking").is_some_and(|command| !command.allowed_while_active));
+        assert_eq!(COMMANDS.len(), 4);
+        assert!(find("/models").is_some_and(|command| !command.allowed_while_active));
+        assert!(find("/model").is_none());
+        assert!(find("/thinking").is_none());
+        assert!(find("/session").is_none());
+        assert!(find("/quit").is_none());
         assert!(find("/steer").is_none());
         assert!(find("/followup").is_none());
     }
