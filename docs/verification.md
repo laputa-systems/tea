@@ -17,14 +17,14 @@ python3 scripts/check-crate-graph.py
 git diff --check
 ~~~
 
-For the default coding bundle, begin with the narrow checks:
+For the default coding builtins, begin with the narrow checks:
 
 ~~~sh
 cargo +nightly-2026-07-24 test -p tea-core --test coding_capabilities --locked
-cargo +nightly-2026-07-24 test -p tea-luau builtins::tests::coding_is_a_closed_four_tool_bundle_with_fixed_grants --lib --locked
+cargo +nightly-2026-07-24 test -p tea-luau builtins::tests::coding_builtins_are_closed_single_tool_extensions_with_fixed_grants --lib --locked
 ~~~
 
-They prove the four-tool Luau surface and the independent trusted workspace,
+They prove the four independent Luau builtins and the trusted workspace,
 transaction, search, and process capability boundary before broader harness or
 terminal checks.
 

@@ -2,7 +2,7 @@
 //!
 //! This is intentionally not a `tea-core` provider adapter: it has no
 //! transport, credentials, workspace authority, or provider registry entry.
-//! It uses the normal Luau coding bundle with no-effect operation adapters, so
+//! It uses the normal Luau coding builtins with no-effect operation adapters, so
 //! every mock operation is consequence-free without a model-facing Rust tool.
 
 use std::fs;
@@ -275,7 +275,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn mock_configuration_leaves_model_facing_tools_to_the_luau_coding_bundle() {
+    fn mock_configuration_leaves_model_facing_tools_to_the_luau_coding_builtins() {
         let configuration = configuration();
         assert_eq!(configuration.tools.names().next(), None);
     }

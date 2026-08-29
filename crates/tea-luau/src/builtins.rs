@@ -88,50 +88,81 @@ pub fn todo(limits: ExtensionLimits) -> ExtensionSourceTree {
     }
 }
 
-/// Return the immutable default coding-tool source tree.
+/// Return the immutable default `read` builtin source tree.
+pub fn read(limits: ExtensionLimits) -> ExtensionSourceTree {
+    builtin(
+        limits,
+        "read",
+        include_str!("../builtins/read/manifest.json"),
+        include_str!("../builtins/read/init.luau"),
+        include_str!("../builtins/read/prompts.luau"),
+        include_str!("../builtins/read/handler.luau"),
+        "tea.workspace.read.v1",
+    )
+}
+
+/// Return the immutable default `bash` builtin source tree.
+pub fn bash(limits: ExtensionLimits) -> ExtensionSourceTree {
+    builtin(
+        limits,
+        "bash",
+        include_str!("../builtins/bash/manifest.json"),
+        include_str!("../builtins/bash/init.luau"),
+        include_str!("../builtins/bash/prompts.luau"),
+        include_str!("../builtins/bash/handler.luau"),
+        "tea.process.v1",
+    )
+}
+
+/// Return the immutable default `edit` builtin source tree.
+pub fn edit(limits: ExtensionLimits) -> ExtensionSourceTree {
+    builtin(
+        limits,
+        "edit",
+        include_str!("../builtins/edit/manifest.json"),
+        include_str!("../builtins/edit/init.luau"),
+        include_str!("../builtins/edit/prompts.luau"),
+        include_str!("../builtins/edit/handler.luau"),
+        "tea.workspace.mutate.v1",
+    )
+}
+
+/// Return the immutable default `find` builtin source tree.
+pub fn find(limits: ExtensionLimits) -> ExtensionSourceTree {
+    builtin(
+        limits,
+        "find",
+        include_str!("../builtins/find/manifest.json"),
+        include_str!("../builtins/find/init.luau"),
+        include_str!("../builtins/find/prompts.luau"),
+        include_str!("../builtins/find/handler.luau"),
+        "tea.workspace.search.v1",
+    )
+}
+
+/// Build one closed builtin from compile-time assets.
 ///
-/// Provider-facing metadata and ordinary tool semantics live in these Luau
-/// files. The host independently supplies the four fixed capability grants;
-/// changing this source therefore cannot widen workspace or process authority.
-pub fn coding(limits: ExtensionLimits) -> ExtensionSourceTree {
+/// Each source tree exposes exactly one model-facing tool and requests only
+/// that tool's capability. The host still independently fixes the
+/// tool-to-capability mapping before it resolves the tree.
+fn builtin(
+    limits: ExtensionLimits,
+    extension_id: &str,
+    manifest: &str,
+    init: &str,
+    prompts: &str,
+    handler: &str,
+    capability: &str,
+) -> ExtensionSourceTree {
     ExtensionSourceTree {
-        extension_id: "coding".into(),
+        extension_id: extension_id.into(),
         files: BTreeMap::from([
-            (
-                "manifest.json".into(),
-                include_str!("../builtins/coding/manifest.json").into(),
-            ),
-            (
-                "init.luau".into(),
-                include_str!("../builtins/coding/init.luau").into(),
-            ),
-            (
-                "prompts.luau".into(),
-                include_str!("../builtins/coding/prompts.luau").into(),
-            ),
-            (
-                "tools/read.luau".into(),
-                include_str!("../builtins/coding/tools/read.luau").into(),
-            ),
-            (
-                "tools/bash.luau".into(),
-                include_str!("../builtins/coding/tools/bash.luau").into(),
-            ),
-            (
-                "tools/edit.luau".into(),
-                include_str!("../builtins/coding/tools/edit.luau").into(),
-            ),
-            (
-                "tools/find.luau".into(),
-                include_str!("../builtins/coding/tools/find.luau").into(),
-            ),
+            ("manifest.json".into(), manifest.into()),
+            ("init.luau".into(), init.into()),
+            ("prompts.luau".into(), prompts.into()),
+            ("handler.luau".into(), handler.into()),
         ]),
-        expected_capabilities: Some(BTreeSet::from([
-            "tea.process.v1".into(),
-            "tea.workspace.mutate.v1".into(),
-            "tea.workspace.read.v1".into(),
-            "tea.workspace.search.v1".into(),
-        ])),
+        expected_capabilities: Some(BTreeSet::from([capability.into()])),
         limits,
     }
 }
@@ -231,7 +262,7 @@ mod tests {
     }
 
     #[test]
-    fn coding_is_a_closed_four_tool_bundle_with_fixed_grants() {
+    fn coding_builtins_are_closed_single_tool_extensions_with_fixed_grants() {
         static NEXT_WORKSPACE: AtomicUsize = AtomicUsize::new(0);
         let workspace = std::env::temp_dir().join(format!(
             "tea-luau-coding-builtin-{}-{}",
@@ -246,116 +277,7 @@ mod tests {
             max_memory_bytes: 1024 * 1024,
             max_interrupt_checks: 10_000,
         };
-        let tree = coding(limits);
-        let descriptor = LuauExtensionEngine
-            .describe(&tree)
-            .expect("coding descriptor resolves");
-        assert_eq!(
-            descriptor
-                .tools
-                .iter()
-                .map(|tool| tool.name.as_str())
-                .collect::<Vec<_>>(),
-            ["read", "bash", "edit", "find"],
-        );
-        assert!(descriptor.tools.iter().all(|tool| {
-            !matches!(tool.name.as_str(), "write" | "grep" | "ls")
-                && !tool.description.is_empty()
-                && tool.schema.as_object().is_some()
-                && tool
-                    .schema
-                    .get("type")
-                    .and_then(tea_protocol::JsonValue::as_str)
-                    == Some("object")
-                && tool.execution_mode == ToolExecutionMode::Parallel
-        }));
-        assert_eq!(
-            descriptor
-                .tools
-                .iter()
-                .map(|tool| (tool.name.as_str(), tool.capability.as_str()))
-                .collect::<Vec<_>>(),
-            [
-                ("read", WORKSPACE_READ_CAPABILITY_V1),
-                ("bash", PROCESS_CAPABILITY_V1),
-                ("edit", WORKSPACE_MUTATE_CAPABILITY_V1),
-                ("find", WORKSPACE_SEARCH_CAPABILITY_V1),
-            ],
-        );
-        assert_eq!(descriptor.prompt_sections.len(), 1);
-        assert_eq!(descriptor.prompt_sections[0].id, "coding");
-        assert!(descriptor.prompt_sections[0]
-            .content
-            .contains("separate `write`, `grep`, or `ls` tools"));
-        let edit = descriptor
-            .tools
-            .iter()
-            .find(|tool| tool.name == "edit")
-            .expect("edit declaration exists");
-        assert!(edit
-            .description
-            .contains("parent directory must already exist"));
-        assert!(edit.requires_exclusive_batch);
-        assert_eq!(
-            edit.cancellation_settlement_mode,
-            CancellationSettlementMode::AwaitFuture
-        );
-        assert!(descriptor.tools.iter().all(|tool| {
-            tool.name == "edit"
-                || (!tool.requires_exclusive_batch
-                    && tool.cancellation_settlement_mode == CancellationSettlementMode::DropFuture)
-        }));
-        let find = descriptor
-            .tools
-            .iter()
-            .find(|tool| tool.name == "find")
-            .expect("find declaration exists");
-        let find_properties = find
-            .schema
-            .get("properties")
-            .and_then(tea_protocol::JsonValue::as_object)
-            .expect("find schema has properties");
-        assert_eq!(
-            find_properties
-                .get("pattern")
-                .and_then(|property| property.get("maxLength"))
-                .and_then(tea_protocol::JsonValue::as_u64),
-            Some(4096)
-        );
-        assert_eq!(
-            find_properties
-                .get("limit")
-                .and_then(|property| property.get("maximum"))
-                .and_then(tea_protocol::JsonValue::as_u64),
-            Some(1000)
-        );
-
         let host = CodingHost::new(&workspace).expect("coding authority configures");
-        let mut bindings = ExtensionCapabilityBindings::new();
-        let limits = ExtensionToolLimits::default();
-        for (name, capability) in [
-            (WORKSPACE_READ_CAPABILITY_V1, host.read_capability()),
-            (WORKSPACE_SEARCH_CAPABILITY_V1, host.search_capability()),
-            (WORKSPACE_MUTATE_CAPABILITY_V1, host.mutate_capability()),
-            (PROCESS_CAPABILITY_V1, host.process_capability()),
-        ] {
-            bindings
-                .insert(name, capability, limits)
-                .expect("capability grant is unique");
-        }
-        let resolved = LuauExtensionEngine
-            .resolve(
-                &tree,
-                bindings,
-                Arc::new(NoHooks),
-                0,
-                Arc::new(ExtensionMemoryCollector::default()),
-            )
-            .expect("each checked-in coding handler loads");
-        assert_eq!(
-            resolved.tools.names().collect::<Vec<_>>(),
-            ["read", "bash", "edit", "find"],
-        );
         let context = ToolContext {
             cancellation: tea_core::scheduler::CancellationToken::new(),
             provenance: RunProvenance::default(),
@@ -365,81 +287,193 @@ mod tests {
             name: name.into(),
             arguments: SerializedJson::new(arguments),
         };
-        let read = block_on(
-            resolved
-                .tools
-                .get("read")
-                .expect("read is resolved")
-                .execute(
-                    call("read", r#"{"path":"fixture.txt","limit":1}"#),
-                    context.clone(),
-                    ToolUpdateSink::disabled(),
-                ),
-        )
-        .expect("checked-in read handler executes");
-        assert_eq!(read.content, "first");
-        let edit = block_on(
-            resolved
-                .tools
-                .get("edit")
-                .expect("edit is resolved")
-                .execute(
-                    call(
-                        "edit",
-                        r#"{"files":[{"path":"created.txt","content":"created\n"}]}"#,
-                    ),
-                    context.clone(),
-                    ToolUpdateSink::disabled(),
-                ),
-        )
-        .expect("checked-in edit handler executes");
-        assert_eq!(edit.content, "Created 1 file.");
-        assert_eq!(
-            std::fs::read_to_string(workspace.join("created.txt")).unwrap(),
-            "created\n"
-        );
-        let find = block_on(
-            resolved
-                .tools
-                .get("find")
-                .expect("find is resolved")
-                .execute(
-                    call("find", r#"{"pattern":"*.txt"}"#),
-                    context.clone(),
-                    ToolUpdateSink::disabled(),
-                ),
-        )
-        .expect("checked-in find handler executes");
-        assert!(find.content.contains("fixture.txt"));
-        let bounded_find = block_on(
-            resolved
-                .tools
-                .get("find")
-                .expect("find is resolved")
-                .execute(
-                    call("find-bounded", r#"{"pattern":"*.txt","limit":1}"#),
-                    context.clone(),
-                    ToolUpdateSink::disabled(),
-                ),
-        )
-        .expect("checked-in bounded find handler executes");
-        assert!(bounded_find.content.ends_with("[1 results limit reached]"));
-        let bash = block_on(
-            resolved
-                .tools
-                .get("bash")
-                .expect("bash is resolved")
-                .execute(
-                    call(
-                        "bash",
-                        r#"{"command":"ls fixture.txt >/dev/null && grep -q second fixture.txt && printf luau-bash"}"#,
-                    ),
-                    context,
-                    ToolUpdateSink::disabled(),
-                ),
-        )
-        .expect("checked-in bash handler executes");
-        assert_eq!(bash.content, "luau-bash");
+        for (name, source, capability) in [
+            (
+                "read",
+                read as fn(ExtensionLimits) -> ExtensionSourceTree,
+                WORKSPACE_READ_CAPABILITY_V1,
+            ),
+            ("bash", bash, PROCESS_CAPABILITY_V1),
+            ("edit", edit, WORKSPACE_MUTATE_CAPABILITY_V1),
+            ("find", find, WORKSPACE_SEARCH_CAPABILITY_V1),
+        ] {
+            let tree = source(limits);
+            assert_eq!(tree.extension_id, name);
+            assert_eq!(
+                tree.files.keys().collect::<Vec<_>>(),
+                ["handler.luau", "init.luau", "manifest.json", "prompts.luau"],
+            );
+            assert_eq!(
+                tree.expected_capabilities,
+                Some(BTreeSet::from([capability.into()])),
+            );
+            let descriptor = LuauExtensionEngine
+                .describe(&tree)
+                .expect("builtin descriptor resolves");
+            assert_eq!(descriptor.requested_capabilities, BTreeSet::from([capability.into()]));
+            assert_eq!(descriptor.prompt_sections.len(), 1);
+            assert_eq!(descriptor.prompt_sections[0].id, name);
+            assert!(!descriptor.prompt_sections[0].content.is_empty());
+            assert_eq!(descriptor.tools.len(), 1);
+            let tool = &descriptor.tools[0];
+            assert_eq!(tool.name, name);
+            assert_eq!(tool.capability, capability);
+            assert!(!tool.description.is_empty());
+            assert_eq!(
+                tool.schema
+                    .get("type")
+                    .and_then(tea_protocol::JsonValue::as_str),
+                Some("object")
+            );
+            assert_eq!(tool.execution_mode, ToolExecutionMode::Parallel);
+            if name == "edit" {
+                assert!(tool.description.contains("parent directory must already exist"));
+                assert!(tool.requires_exclusive_batch);
+                assert_eq!(
+                    tool.cancellation_settlement_mode,
+                    CancellationSettlementMode::AwaitFuture
+                );
+            } else {
+                assert!(!tool.requires_exclusive_batch);
+                assert_eq!(
+                    tool.cancellation_settlement_mode,
+                    CancellationSettlementMode::DropFuture
+                );
+            }
+            if name == "find" {
+                let find_properties = tool
+                    .schema
+                    .get("properties")
+                    .and_then(tea_protocol::JsonValue::as_object)
+                    .expect("find schema has properties");
+                assert_eq!(
+                    find_properties
+                        .get("pattern")
+                        .and_then(|property| property.get("maxLength"))
+                        .and_then(tea_protocol::JsonValue::as_u64),
+                    Some(4096)
+                );
+                assert_eq!(
+                    find_properties
+                        .get("limit")
+                        .and_then(|property| property.get("maximum"))
+                        .and_then(tea_protocol::JsonValue::as_u64),
+                    Some(1000)
+                );
+            }
+
+            let implementation = match name {
+                "read" => host.read_capability(),
+                "bash" => host.process_capability(),
+                "edit" => host.mutate_capability(),
+                "find" => host.search_capability(),
+                _ => unreachable!("closed builtin catalog"),
+            };
+            let mut bindings = ExtensionCapabilityBindings::new();
+            bindings
+                .insert(capability, implementation, ExtensionToolLimits::default())
+                .expect("capability grant is unique");
+            bindings
+                .fix_tool_capabilities(BTreeMap::from([(name.into(), capability.into())]), BTreeSet::new())
+                .expect("tool authority is fixed");
+            let resolved = LuauExtensionEngine
+                .resolve(
+                    &tree,
+                    bindings,
+                    Arc::new(NoHooks),
+                    0,
+                    Arc::new(ExtensionMemoryCollector::default()),
+                )
+                .expect("checked-in builtin handler loads");
+            assert_eq!(resolved.tools.names().collect::<Vec<_>>(), [name]);
+
+            match name {
+                "read" => {
+                    let output = block_on(
+                        resolved
+                            .tools
+                            .get(name)
+                            .expect("read is resolved")
+                            .execute(
+                                call(name, r#"{"path":"fixture.txt","limit":1}"#),
+                                context.clone(),
+                                ToolUpdateSink::disabled(),
+                            ),
+                    )
+                    .expect("checked-in read handler executes");
+                    assert_eq!(output.content, "first");
+                }
+                "bash" => {
+                    let output = block_on(
+                        resolved
+                            .tools
+                            .get(name)
+                            .expect("bash is resolved")
+                            .execute(
+                                call(
+                                    name,
+                                    r#"{"command":"ls fixture.txt >/dev/null && grep -q second fixture.txt && printf luau-bash"}"#,
+                                ),
+                                context.clone(),
+                                ToolUpdateSink::disabled(),
+                            ),
+                    )
+                    .expect("checked-in bash handler executes");
+                    assert_eq!(output.content, "luau-bash");
+                }
+                "edit" => {
+                    let output = block_on(
+                        resolved
+                            .tools
+                            .get(name)
+                            .expect("edit is resolved")
+                            .execute(
+                                call(
+                                    name,
+                                    r#"{"files":[{"path":"created.txt","content":"created\n"}]}"#,
+                                ),
+                                context.clone(),
+                                ToolUpdateSink::disabled(),
+                            ),
+                    )
+                    .expect("checked-in edit handler executes");
+                    assert_eq!(output.content, "Created 1 file.");
+                    assert_eq!(
+                        std::fs::read_to_string(workspace.join("created.txt")).unwrap(),
+                        "created\n"
+                    );
+                }
+                "find" => {
+                    let output = block_on(
+                        resolved
+                            .tools
+                            .get(name)
+                            .expect("find is resolved")
+                            .execute(
+                                call(name, r#"{"pattern":"*.txt"}"#),
+                                context.clone(),
+                                ToolUpdateSink::disabled(),
+                            ),
+                    )
+                    .expect("checked-in find handler executes");
+                    assert!(output.content.contains("fixture.txt"));
+                    let bounded = block_on(
+                        resolved
+                            .tools
+                            .get(name)
+                            .expect("find is resolved")
+                            .execute(
+                                call("find-bounded", r#"{"pattern":"*.txt","limit":1}"#),
+                                context.clone(),
+                                ToolUpdateSink::disabled(),
+                            ),
+                    )
+                    .expect("checked-in bounded find handler executes");
+                    assert!(bounded.content.ends_with("[1 results limit reached]"));
+                }
+                _ => unreachable!("closed builtin catalog"),
+            }
+        }
         let _ = std::fs::remove_dir_all(workspace);
     }
 
@@ -466,20 +500,26 @@ mod tests {
             max_memory_bytes: 1024 * 1024,
             max_interrupt_checks: 10_000,
         };
-        let tree = coding(limits);
+        let tree = edit(limits);
         let host = CodingHost::new(&workspace).expect("coding authority configures");
         let mut bindings = ExtensionCapabilityBindings::new();
         let limits = ExtensionToolLimits::default();
-        for (name, capability) in [
-            (WORKSPACE_READ_CAPABILITY_V1, host.read_capability()),
-            (WORKSPACE_SEARCH_CAPABILITY_V1, host.search_capability()),
-            (WORKSPACE_MUTATE_CAPABILITY_V1, host.mutate_capability()),
-            (PROCESS_CAPABILITY_V1, host.process_capability()),
-        ] {
-            bindings
-                .insert(name, capability, limits)
-                .expect("capability grant is unique");
-        }
+        bindings
+            .insert(
+                WORKSPACE_MUTATE_CAPABILITY_V1,
+                host.mutate_capability(),
+                limits,
+            )
+            .expect("capability grant is unique");
+        bindings
+            .fix_tool_capabilities(
+                BTreeMap::from([(
+                    "edit".into(),
+                    WORKSPACE_MUTATE_CAPABILITY_V1.into(),
+                )]),
+                BTreeSet::new(),
+            )
+            .expect("edit authority is fixed");
         let resolved = LuauExtensionEngine
             .resolve(
                 &tree,

@@ -1,4 +1,4 @@
-//! Regression coverage for the trusted host side of the Luau coding bundle.
+//! Regression coverage for the trusted host side of the Luau coding builtins.
 //!
 //! These tests exercise `CodingHost` directly so model-facing schema and
 //! formatting changes cannot accidentally weaken path, process, or transaction

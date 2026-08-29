@@ -292,19 +292,16 @@ and between body chunks (and after a finite request settles); the generic core a
 its sequential tool poll on cancellation and records a cancellation result rather than leaving an
 uncooperative future holding run ownership.
 
-## Default coding bundle
+## Default coding builtins
 
-The default coding surface is a revisioned Luau bundle over trusted host
+The default coding surface is four revisioned Luau builtins over trusted host
 capabilities:
 
 ```text
-checked-in Luau source + host-selected capability grants
-                    |
-                    v
-read / bash / edit / find declarations
-                    |
-                    v
-immutable harness revision + executable tool registry
+read / bash / edit / find source trees + singleton host grants
+                              |
+                              v
+          immutable harness revision + executable tool registry
 ```
 
 The host never discovers cwd, `$HOME`, `.pi`, settings, skills, or sessions.

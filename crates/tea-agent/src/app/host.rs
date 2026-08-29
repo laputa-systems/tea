@@ -13,8 +13,8 @@ use super::error::AppError;
 pub(super) fn host_configuration(
     logical_workspace_label: &str,
 ) -> Result<AgentConfiguration, AppError> {
-    // The durable coding bundle is resolved as a Luau extension. Leaving the
-    // trusted base registry empty makes a missing or invalid bundle fail
+    // The durable coding builtins are resolved as Luau extensions. Leaving the
+    // trusted base registry empty makes a missing or invalid builtin fail
     // closed instead of restoring a compiled Rust tool implementation.
     Ok(AgentConfiguration::new(
         format!("Current working directory: {logical_workspace_label}"),

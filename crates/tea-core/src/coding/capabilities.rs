@@ -1,4 +1,4 @@
-//! Trusted workspace and process authority for the revisioned coding bundle.
+//! Trusted workspace and process authority for the revisioned coding builtins.
 //!
 //! This module intentionally has no `AgentTool` implementations.  Luau owns
 //! the model-facing tools; these host capabilities validate requests again and
@@ -20,13 +20,13 @@ use std::sync::Arc;
 use tea_protocol::{JsonNumber, JsonValue};
 use tea_session::Digest;
 
-/// Capability granted only to the coding builtin's `read` declaration.
+/// Capability granted only to the `read` builtin's declaration.
 pub const WORKSPACE_READ_CAPABILITY_V1: &str = "tea.workspace.read.v1";
-/// Capability granted only to the coding builtin's optimized `find` declaration.
+/// Capability granted only to the `find` builtin's optimized declaration.
 pub const WORKSPACE_SEARCH_CAPABILITY_V1: &str = "tea.workspace.search.v1";
-/// Capability granted only to the coding builtin's transactional `edit` declaration.
+/// Capability granted only to the `edit` builtin's transactional declaration.
 pub const WORKSPACE_MUTATE_CAPABILITY_V1: &str = "tea.workspace.mutate.v1";
-/// Capability granted only to the coding builtin's `bash` declaration.
+/// Capability granted only to the `bash` builtin's declaration.
 pub const PROCESS_CAPABILITY_V1: &str = "tea.process.v1";
 
 const MAX_READ_BYTES: usize = 4 * 1024 * 1024;
@@ -39,7 +39,7 @@ const MAX_PATH_BYTES: usize = 4096;
 const MAX_SEARCH_RESULTS: usize = 1000;
 const MAX_SEARCH_OUTPUT_BYTES: usize = 50 * 1024;
 
-/// Explicit authority selected by a host for one coding bundle instance.
+/// Explicit authority selected by a host for the four coding builtins.
 ///
 /// The host captures the canonical workspace and optional process environment
 /// once. Individual methods expose only the smallest authority required by a

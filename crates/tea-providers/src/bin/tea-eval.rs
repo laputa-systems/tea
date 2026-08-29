@@ -4,7 +4,7 @@
 //! process boundary. Coding-tool children receive the separate `--shell-env`
 //! allowlist and never inherit that credential.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -32,7 +32,7 @@ use tea_core::runtime::{
     SessionSupervisorInput, TeaEvent,
 };
 use tea_core::state::{ModelDescriptor, ThinkingLevel};
-use tea_core::tool::ToolExecutionMode;
+use tea_core::tool::{ToolExecutionMode, ToolRegistry};
 use tea_luau::{LuauExtensionEngine, builtins};
 use tea_protocol::{JsonNumber, JsonValue};
 use tea_providers::openai::OpenAiContextHook;
@@ -536,7 +536,7 @@ struct ResultJsonInput<'a> {
 
 /// The resolved, provider-visible coding surface used by one evaluation run.
 ///
-/// This is derived from the checked-in Luau bundle rather than a Rust tool
+/// This is derived from the checked-in Luau builtins rather than a Rust tool
 /// factory or profile copy. It is retained only to record the exact surface in
 /// evaluation evidence after the run has settled.
 struct CodingSurface {
@@ -548,46 +548,78 @@ fn coding_configuration(
     workspace: &Path,
     environment: CommandEnvironment,
 ) -> Result<(AgentConfiguration, CodingSurface), String> {
-    let source = builtins::coding(ExtensionLimits {
+    let limits = ExtensionLimits {
         max_source_bytes: 64 * 1024,
         max_memory_bytes: 1024 * 1024,
         max_interrupt_checks: 10_000,
-    });
+    };
     let engine = LuauExtensionEngine;
-    let descriptor = engine
-        .describe(&source)
-        .map_err(|error| error.to_string())?;
     let host = CodingHost::new(workspace)
         .map_err(|error| error.to_string())?
         .with_environment(environment);
-    let mut bindings = ExtensionCapabilityBindings::new();
-    for (name, capability) in [
-        (WORKSPACE_READ_CAPABILITY_V1, host.read_capability()),
-        (WORKSPACE_SEARCH_CAPABILITY_V1, host.search_capability()),
-        (WORKSPACE_MUTATE_CAPABILITY_V1, host.mutate_capability()),
-        (PROCESS_CAPABILITY_V1, host.process_capability()),
+    let mut prompt_sections = Vec::new();
+    let mut tools = ToolRegistry::default();
+    for source in [
+        builtins::read(limits),
+        builtins::bash(limits),
+        builtins::edit(limits),
+        builtins::find(limits),
     ] {
-        bindings
-            .insert(name, capability, ExtensionToolLimits::default())
+        let descriptor = engine
+            .describe(&source)
             .map_err(|error| error.to_string())?;
+        let tool = descriptor
+            .tools
+            .first()
+            .ok_or_else(|| format!("builtin {} declares no tool", source.extension_id))?;
+        let implementation = match tool.capability.as_str() {
+            WORKSPACE_READ_CAPABILITY_V1 => host.read_capability(),
+            WORKSPACE_SEARCH_CAPABILITY_V1 => host.search_capability(),
+            WORKSPACE_MUTATE_CAPABILITY_V1 => host.mutate_capability(),
+            PROCESS_CAPABILITY_V1 => host.process_capability(),
+            capability => return Err(format!("unsupported builtin capability {capability}")),
+        };
+        let mut bindings = ExtensionCapabilityBindings::new();
+        bindings
+            .insert(
+                tool.capability.clone(),
+                implementation,
+                ExtensionToolLimits::default(),
+            )
+            .map_err(|error| error.to_string())?;
+        bindings
+            .fix_tool_capabilities(
+                BTreeMap::from([(tool.name.clone(), tool.capability.clone())]),
+                BTreeSet::new(),
+            )
+            .map_err(|error| error.to_string())?;
+        let resolved = engine
+            .resolve(
+                &source,
+                bindings,
+                Arc::new(OpenAiContextHook) as Arc<dyn HookSet>,
+                0,
+                Arc::new(ExtensionMemoryCollector::default()),
+            )
+            .map_err(|error| error.to_string())?;
+        prompt_sections.extend(descriptor.prompt_sections);
+        for name in resolved.tools.names().map(str::to_owned).collect::<Vec<_>>() {
+            tools.insert(
+                resolved
+                    .tools
+                    .get(&name)
+                    .expect("resolved builtin tool remains registered")
+                    .clone(),
+            );
+        }
     }
-    let resolved = engine
-        .resolve(
-            &source,
-            bindings,
-            Arc::new(OpenAiContextHook) as Arc<dyn HookSet>,
-            0,
-            Arc::new(ExtensionMemoryCollector::default()),
-        )
-        .map_err(|error| error.to_string())?;
     let system_prompt = format!(
         "{}\nCurrent working directory: {}",
-        descriptor
-            .prompt_sections
+        prompt_sections
             .iter()
             .map(|section| section.content.as_str())
             .collect::<Vec<_>>()
-            .join("\n"),
+            .join("\n\n"),
         host.workspace()
             .as_path()
             .to_string_lossy()
@@ -595,10 +627,10 @@ fn coding_configuration(
     );
     let surface = CodingSurface {
         system_prompt: system_prompt.clone(),
-        tools: resolved.tools.definitions(),
+        tools: tools.definitions(),
     };
     Ok((
-        AgentConfiguration::new(system_prompt, resolved.tools, resolved.hooks),
+        AgentConfiguration::new(system_prompt, tools, Arc::new(OpenAiContextHook)),
         surface,
     ))
 }

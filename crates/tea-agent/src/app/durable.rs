@@ -147,7 +147,7 @@ pub(super) fn create_host_harness(
 }
 
 /// Construct the terminal's mock session with the normal revisioned Luau
-/// coding bundle, backed by explicitly no-effect test capability operations.
+/// coding builtins, backed by explicitly no-effect test capability operations.
 pub(super) fn create_mock_host_harness(
     config: HostHarnessConfig<'_>,
 ) -> Result<Arc<HostHarness>, AppError> {
@@ -259,10 +259,9 @@ fn create_host_harness_with_operations(
             Arc::new(session.artifact_store().map_err(AppError::from)?);
         let resource_limits = HarnessResourceLimits::default();
         let extension_state = ExtensionStateBindings::build()?;
-        // Every terminal harness receives the revisioned default coding
-        // bundle. Trusted base tools are an independent surface and must not
-        // implicitly determine whether the four model-facing coding tools
-        // exist.
+        // Every terminal harness receives the four revisioned default coding
+        // builtins. Trusted base tools are an independent surface and must not
+        // implicitly determine whether any model-facing coding tool exists.
         let coding_bindings =
             coding_capability_bindings_with_operations(workspace, Arc::clone(&coding_operations))?;
         let (web_binding, web_binding_ref) = web_capability_binding()?;
@@ -280,13 +279,7 @@ fn create_host_harness_with_operations(
         capability_catalog
             .insert(web_binding)
             .map_err(|error| AppError::Setup(error.to_string()))?;
-        capability_catalog
-            .fix_tool_capabilities(
-                "coding",
-                coding_tool_capability_grants(),
-                coding_additional_read_only_capabilities(),
-            )
-            .map_err(|error| AppError::Setup(error.to_string()))?;
+        fix_coding_builtin_tool_capabilities(&mut capability_catalog)?;
         capability_catalog
             .fix_tool_capabilities("web", web_tool_capability_grants(), BTreeSet::new())
             .map_err(|error| AppError::Setup(error.to_string()))?;
@@ -308,11 +301,26 @@ fn create_host_harness_with_operations(
                 scope: HarnessSeedExtensionScope::Global,
                 source: tea_luau::builtins::web(extension_limits(&resource_limits)),
             },
+            // Resolution walks extensions in reverse registry order. Seed the
+            // builtins in reverse so their model-visible order remains
+            // read -> bash -> edit -> find.
             HarnessSeedExtension {
-                // Coding behavior is session-local revisioned source. Its
-                // capability grants remain fixed separately in the catalog.
+                // Each coding builtin is session-local revisioned source. Its
+                // singleton capability grant remains fixed in the catalog.
                 scope: HarnessSeedExtensionScope::Session,
-                source: tea_luau::builtins::coding(extension_limits(&resource_limits)),
+                source: tea_luau::builtins::find(extension_limits(&resource_limits)),
+            },
+            HarnessSeedExtension {
+                scope: HarnessSeedExtensionScope::Session,
+                source: tea_luau::builtins::edit(extension_limits(&resource_limits)),
+            },
+            HarnessSeedExtension {
+                scope: HarnessSeedExtensionScope::Session,
+                source: tea_luau::builtins::bash(extension_limits(&resource_limits)),
+            },
+            HarnessSeedExtension {
+                scope: HarnessSeedExtensionScope::Session,
+                source: tea_luau::builtins::read(extension_limits(&resource_limits)),
             },
         ];
         let mut capability_references = vec![
@@ -694,13 +702,7 @@ fn reopen_host_harness_with_operations(
     capability_catalog
         .insert(web_binding)
         .map_err(|error| AppError::Setup(error.to_string()))?;
-    capability_catalog
-        .fix_tool_capabilities(
-            "coding",
-            coding_tool_capability_grants(),
-            coding_additional_read_only_capabilities(),
-        )
-        .map_err(|error| AppError::Setup(error.to_string()))?;
+    fix_coding_builtin_tool_capabilities(&mut capability_catalog)?;
     capability_catalog
         .fix_tool_capabilities("web", web_tool_capability_grants(), BTreeSet::new())
         .map_err(|error| AppError::Setup(error.to_string()))?;
@@ -1061,10 +1063,10 @@ impl ExtensionCapability for RoutedCodingCapability {
     }
 }
 
-/// Bind the four immutable coding-bundle grants for one host-selected
-/// workspace. The bundle may change its model-facing behavior through a
+/// Bind the four immutable coding-builtin grants for one host-selected
+/// workspace. A builtin may change its model-facing behavior through a
 /// revision, but neither source nor candidates can add another capability to
-/// this catalog.
+/// its singleton catalog entry.
 #[cfg(test)]
 fn coding_capability_bindings(workspace: &Path) -> Result<CodingCapabilityBindings, AppError> {
     coding_capability_bindings_with_operations(
@@ -1083,30 +1085,34 @@ fn coding_capability_bindings_with_operations(
     let limits = ExtensionToolLimits::default();
     let capabilities = [
         (
+            "read",
             WORKSPACE_READ_CAPABILITY_V1,
             router.capability(WORKSPACE_READ_CAPABILITY_V1),
         ),
         (
+            "find",
             WORKSPACE_SEARCH_CAPABILITY_V1,
             router.capability(WORKSPACE_SEARCH_CAPABILITY_V1),
         ),
         (
+            "edit",
             WORKSPACE_MUTATE_CAPABILITY_V1,
             router.capability(WORKSPACE_MUTATE_CAPABILITY_V1),
         ),
         (
+            "bash",
             PROCESS_CAPABILITY_V1,
             router.capability(PROCESS_CAPABILITY_V1),
         ),
     ];
     let bindings = capabilities
         .into_iter()
-        .map(|(capability, implementation)| {
+        .map(|(builtin_id, capability, implementation)| {
             PluginCapabilityBinding::new(
-                "coding",
+                builtin_id,
                 capability,
                 "v1",
-                Digest::from_bytes(format!("tea-coding-capability:{capability}")),
+                Digest::from_bytes(format!("tea-{builtin_id}-capability:{capability}")),
                 limits,
                 implementation,
             )
@@ -1129,17 +1135,27 @@ fn coding_capability_bindings_with_operations(
     })
 }
 
-/// Rust fixes this model-tool authority map before any Luau source resolves.
-/// A harness revision may alter coding behavior but cannot remap `read` to a
-/// process grant or introduce another model-facing tool with mutation or
-/// process authority.
-fn coding_tool_capability_grants() -> BTreeMap<String, String> {
-    BTreeMap::from([
-        ("read".into(), WORKSPACE_READ_CAPABILITY_V1.into()),
-        ("bash".into(), PROCESS_CAPABILITY_V1.into()),
-        ("edit".into(), WORKSPACE_MUTATE_CAPABILITY_V1.into()),
-        ("find".into(), WORKSPACE_SEARCH_CAPABILITY_V1.into()),
-    ])
+/// Rust fixes each builtin's sole model-tool authority before its Luau source
+/// resolves. A harness revision cannot remap `read` to process authority or
+/// introduce another model-facing tool with mutation or process authority.
+fn fix_coding_builtin_tool_capabilities(
+    capability_catalog: &mut PluginCapabilityCatalog,
+) -> Result<(), AppError> {
+    for (builtin_id, capability) in [
+        ("read", WORKSPACE_READ_CAPABILITY_V1),
+        ("bash", PROCESS_CAPABILITY_V1),
+        ("edit", WORKSPACE_MUTATE_CAPABILITY_V1),
+        ("find", WORKSPACE_SEARCH_CAPABILITY_V1),
+    ] {
+        capability_catalog
+            .fix_tool_capabilities(
+                builtin_id,
+                BTreeMap::from([(builtin_id.into(), capability.into())]),
+                BTreeSet::new(),
+            )
+            .map_err(|error| AppError::Setup(error.to_string()))?;
+    }
+    Ok(())
 }
 
 /// The host pins the one model-visible web tool to its read-only network
@@ -1148,15 +1164,6 @@ fn web_tool_capability_grants() -> BTreeMap<String, String> {
     BTreeMap::from([("web".into(), "network.http".into())])
 }
 
-/// A future coding builtin that needs only these effects requires Luau source,
-/// not a new Rust authority. Mutation and process grants remain pinned to the
-/// named `edit` and `bash` tools above.
-fn coding_additional_read_only_capabilities() -> BTreeSet<String> {
-    BTreeSet::from([
-        WORKSPACE_READ_CAPABILITY_V1.into(),
-        WORKSPACE_SEARCH_CAPABILITY_V1.into(),
-    ])
-}
 
 /// Convert the active semantic branch to a presentation-only core-message
 /// projection. It is intentionally not used to restore a core agent: the
@@ -1633,10 +1640,26 @@ fn child_harness_seeds(
             ];
             let mut capability_bindings = vec![goal_binding_ref.clone(), web_binding_ref.clone()];
             if let Some(coding_binding_refs) = coding_binding_refs {
-                extensions.push(HarnessSeedExtension {
-                    scope: HarnessSeedExtensionScope::Session,
-                    source: tea_luau::builtins::coding(extension_limits(resource_limits)),
-                });
+                // Match the root registry's reverse source order so the
+                // resolved child tool order remains read -> bash -> edit -> find.
+                extensions.extend([
+                    HarnessSeedExtension {
+                        scope: HarnessSeedExtensionScope::Session,
+                        source: tea_luau::builtins::find(extension_limits(resource_limits)),
+                    },
+                    HarnessSeedExtension {
+                        scope: HarnessSeedExtensionScope::Session,
+                        source: tea_luau::builtins::edit(extension_limits(resource_limits)),
+                    },
+                    HarnessSeedExtension {
+                        scope: HarnessSeedExtensionScope::Session,
+                        source: tea_luau::builtins::bash(extension_limits(resource_limits)),
+                    },
+                    HarnessSeedExtension {
+                        scope: HarnessSeedExtensionScope::Session,
+                        source: tea_luau::builtins::read(extension_limits(resource_limits)),
+                    },
+                ]);
                 capability_bindings.extend_from_slice(coding_binding_refs);
             }
             let seeded = HarnessSeedBuilder::new(
@@ -3694,7 +3717,7 @@ data: [DONE]
     }
 
     #[test]
-    fn unrelated_trusted_tool_does_not_suppress_the_default_coding_bundle() {
+    fn unrelated_trusted_tool_does_not_suppress_the_default_coding_builtins() {
         let home = temporary_home();
         let workspace = home.join("workspace");
         fs::create_dir(&workspace).expect("workspace creates");
@@ -3777,23 +3800,18 @@ data: [DONE]
                 .insert(binding)
                 .expect("coding capability grant is unique");
         }
-        capability_catalog
-            .fix_tool_capabilities(
-                "coding",
-                coding_tool_capability_grants(),
-                coding_additional_read_only_capabilities(),
-            )
-            .expect("coding tool authority map fixes once");
-        let coding_source = tea_luau::builtins::coding(extension_limits(&resource_limits));
-        let initial_init = coding_source
+        fix_coding_builtin_tool_capabilities(&mut capability_catalog)
+            .expect("coding builtin authority maps fix once");
+        let read_source = tea_luau::builtins::read(extension_limits(&resource_limits));
+        let initial_init = read_source
             .files
             .get("init.luau")
-            .expect("coding init source exists")
+            .expect("read init source exists")
             .clone();
-        let initial_read = coding_source
+        let initial_read = read_source
             .files
-            .get("tools/read.luau")
-            .expect("coding read source exists")
+            .get("handler.luau")
+            .expect("read handler source exists")
             .clone();
         let artifacts: Arc<dyn tea_session::ArtifactStore> =
             Arc::new(MemoryArtifactStore::default());
@@ -3807,10 +3825,24 @@ data: [DONE]
             resource_limits.clone(),
             services.runtime_policy_identities(),
         )
-        .extensions(vec![HarnessSeedExtension {
-            scope: HarnessSeedExtensionScope::Session,
-            source: coding_source,
-        }])
+        .extensions(vec![
+            HarnessSeedExtension {
+                scope: HarnessSeedExtensionScope::Session,
+                source: tea_luau::builtins::find(extension_limits(&resource_limits)),
+            },
+            HarnessSeedExtension {
+                scope: HarnessSeedExtensionScope::Session,
+                source: tea_luau::builtins::edit(extension_limits(&resource_limits)),
+            },
+            HarnessSeedExtension {
+                scope: HarnessSeedExtensionScope::Session,
+                source: tea_luau::builtins::bash(extension_limits(&resource_limits)),
+            },
+            HarnessSeedExtension {
+                scope: HarnessSeedExtensionScope::Session,
+                source: read_source,
+            },
+        ])
         .capability_bindings(coding_bindings.references.clone())
         .seed(HarnessActor::Host, 1)
         .expect("coding harness seeds");
@@ -3876,8 +3908,8 @@ data: [DONE]
                         regression_risk: "read authority could change with presentation".into(),
                     },
                     files: vec![HarnessFilePatch::Upsert {
-                        path: NormalizedPath::new("plugins/coding/init.luau")
-                            .expect("coding init path is normalized"),
+                        path: NormalizedPath::new("plugins/read/init.luau")
+                            .expect("read init path is normalized"),
                         content: revised_init.clone(),
                     }],
                     registry_operations: Vec::new(),
@@ -3927,8 +3959,8 @@ data: [DONE]
                         regression_risk: "read could invoke a process".into(),
                     },
                     files: vec![HarnessFilePatch::Upsert {
-                        path: NormalizedPath::new("plugins/coding/tools/read.luau")
-                            .expect("coding read path is normalized"),
+                        path: NormalizedPath::new("plugins/read/handler.luau")
+                            .expect("read handler path is normalized"),
                         content: process_attempt,
                     }],
                     registry_operations: Vec::new(),
@@ -4018,8 +4050,8 @@ data: [DONE]
                         regression_risk: "read could be rebound to process authority".into(),
                     },
                     files: vec![HarnessFilePatch::Upsert {
-                        path: NormalizedPath::new("plugins/coding/init.luau")
-                            .expect("coding init path is normalized"),
+                        path: NormalizedPath::new("plugins/read/init.luau")
+                            .expect("read init path is normalized"),
                         content: remapped_init,
                     }],
                     registry_operations: Vec::new(),
@@ -4031,7 +4063,8 @@ data: [DONE]
             .expect_err("a candidate cannot remap read to the process capability");
         assert!(error
             .to_string()
-            .contains("differ from the host-fixed authority map"));
+            .contains("plugin read tool read names undeclared capability tea.process.v1"),
+            "{error}");
         let _ = fs::remove_dir_all(home);
     }
 

@@ -143,16 +143,16 @@ let policy = AutomaticCompactionPolicy {
 # let _ = policy;
 ```
 
-## Add Tea's default coding bundle
+## Add Tea's default coding builtins
 
-The repository-owned terminal resolves the checked-in Luau coding bundle through
-its durable harness. Its model-facing surface is exactly `read`, `bash`,
-transactional `edit`, and optimized `find`; Rust binds the narrow workspace and
-process capabilities beneath it. A library embedding that wants this bundle
-should use the same `HarnessSeedBuilder`/capability-catalog path rather than
-constructing Rust coding tools directly. See the
-[default coding bundle guide](default-coding-profile.md) before granting a real
-filesystem or process capability.
+The repository-owned terminal resolves four checked-in Luau coding builtins
+through its durable harness. Its model-facing surface is exactly `read`,
+`bash`, transactional `edit`, and optimized `find`; Rust binds the narrow
+workspace and process capabilities beneath them. A library embedding that wants
+these builtins should use the same `HarnessSeedBuilder`/capability-catalog path
+rather than constructing Rust coding tools directly. See the
+[default coding builtins guide](default-coding-profile.md) before granting a
+real filesystem or process capability.
 
 ## Enable durable subagents explicitly
 

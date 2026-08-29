@@ -56,6 +56,6 @@ the checked-in fixture tree. Fixture outcomes that represent model/tool errors o
 are valid data; malformed fixtures and runner failures are verification failures.
 
 The historical Pi capture under `crates/tea-core/profile/` is not a runtime
-profile. See [`../profile/README.md`](../profile/README.md) and
-[`../../tea-luau/builtins/coding/`](../../tea-luau/builtins/coding/) for the
+profile. See [`../profile/README.md`](../profile/README.md) and the four
+directories under [`../../tea-luau/builtins/`](../../tea-luau/builtins/) for the
 production coding boundary.

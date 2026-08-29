@@ -1,7 +1,7 @@
 //! Trusted coding host-operation substrate.
 //!
 //! This module contains no model-facing tool definitions. The revisioned Luau
-//! coding bundle owns that surface; Rust retains only operations, transactions,
+//! coding builtins own that surface; Rust retains only operations, transactions,
 //! workspace authority, and optimized workspace search.
 
 pub(crate) mod contract;

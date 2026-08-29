@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "abi_version": 2,
+  "id": "read",
+  "entrypoint": "init.luau",
+  "modules": [
+    "init.luau",
+    "prompts.luau",
+    "handler.luau"
+  ],
+  "requested_capabilities": [
+    "tea.workspace.read.v1"
+  ]
+}

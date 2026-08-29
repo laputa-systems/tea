@@ -85,13 +85,12 @@ is the normal completion value.
 to a concrete executable authority. A plugin cannot obtain an undeclared
 binding.
 
-**Coding bundle** — The checked-in revisioned Luau extension that declares the
-four default model-facing coding tools: `read`, `bash`, `edit`, and `find`.
-It owns their provider-visible behavior but not filesystem or process
-authority.
+**Coding builtins** — The four checked-in revisioned Luau extensions `read`,
+`bash`, `edit`, and `find`. Each owns one tool's provider-visible behavior but
+not filesystem or process authority.
 
 **Coding host** — `tea_core::coding::CodingHost`, the host-selected workspace,
-operation adapter, and process environment behind the coding bundle's separate
+operation adapter, and process environment behind the coding builtins' separate
 read, search, mutation, and process capability grants.
 
 **Candidate** — A staged immutable harness proposal. A candidate is not active
