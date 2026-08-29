@@ -1687,7 +1687,7 @@ fn new_session_id(workspace: &Path, created_at_ms: u64, nonce: u64) -> Result<Se
     writer.u64("created_at_ms", created_at_ms);
     writer.u64("process_id", u64::from(std::process::id()));
     writer.u64("nonce", nonce);
-    SessionId::new(format!("session-{}", writer.finish().to_hex()))
+    SessionId::new(writer.finish().to_hex())
         .map_err(|error| AppError::Setup(error.to_string()))
 }
 
@@ -2154,6 +2154,16 @@ mod tests {
             .expect("durable policy remains enabled");
 
         assert_eq!(reopened, policy);
+    }
+
+    #[test]
+    fn newly_allocated_session_ids_are_unprefixed_digests() {
+        let session_id = new_session_id(Path::new("/workspace"), 123, 7)
+            .expect("session ID allocation should produce a valid ID");
+
+        assert!(!session_id.as_str().starts_with("session-"));
+        assert_eq!(session_id.as_str().len(), 64);
+        assert!(session_id.as_str().bytes().all(|byte| byte.is_ascii_hexdigit()));
     }
 
     #[test]

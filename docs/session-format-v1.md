@@ -42,6 +42,11 @@ foreign, and future-schema inputs; none can alter authoritative replay.
 The object store holds immutable content-addressed bytes referenced by semantic
 facts.
 
+The terminal host allocates new session IDs as 64 lowercase hexadecimal characters
+derived from its allocation digest; newly created IDs have no `session-` prefix.
+Older sessions whose IDs include that prefix remain valid opaque IDs and are not
+renamed during inspection or reopen.
+
 ## Wire, integrity, and commit contract
 
 The header is one object with exactly these fields: kind, version, session_id,
