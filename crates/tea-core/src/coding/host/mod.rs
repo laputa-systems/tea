@@ -6,13 +6,15 @@
 
 pub(crate) mod contract;
 pub(crate) mod local_operations;
+mod process;
 pub(crate) mod search;
 pub(crate) mod workspace;
 
 pub use contract::{
-    CodingOperations, CommandEnvironment, CommandOutput, ConditionalFileCreate,
-    ConditionalFileEdit, EditTransaction, EditTransactionOutcome, EntryMetadata, FileSnapshot,
-    OperationError, OperationFuture, SearchResult, SearchTruncation,
+    CodingOperations, CommandEnvironment, CommandOutput, CommandTermination,
+    ConditionalFileCreate, ConditionalFileEdit, EditTransaction, EditTransactionOutcome,
+    EntryMetadata, FileSnapshot, OperationError, OperationFuture, SearchResult, SearchTruncation,
 };
 pub use local_operations::LocalCodingOperations;
+pub use process::run_local_command;
 pub use workspace::WorkspaceRoot;

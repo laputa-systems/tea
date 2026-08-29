@@ -7,6 +7,7 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::Command;
+use std::time::Duration;
 
 /// A future returned by a host operation adapter.
 pub type OperationFuture<'a, T> =
@@ -49,11 +50,40 @@ pub struct EntryMetadata {
     pub is_regular_file: bool,
 }
 
+/// The established lifecycle outcome of one explicit shell operation.
+///
+/// `TimedOut` and `Cancelled` are returned only after the local host has
+/// established that the process scope it owns has settled. `Indeterminate`
+/// means the command started but the host cannot prove its final state; callers
+/// must inspect state before retrying because side effects may already exist.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CommandTermination {
+    /// The command exited normally with this status code.
+    Exited {
+        /// The process's normal exit status.
+        code: i32,
+    },
+    /// The command terminated because it received this Unix signal.
+    Signaled {
+        /// The signal reported by the operating system.
+        signal: i32,
+    },
+    /// The resolved command timeout elapsed and owned-scope cleanup settled.
+    TimedOut,
+    /// Runtime cancellation won and owned-scope cleanup settled.
+    Cancelled,
+    /// The command started, but its final lifecycle state cannot be proven.
+    Indeterminate {
+        /// Concise recovery guidance suitable for a model-visible receipt.
+        reason: String,
+    },
+}
+
 /// Output from an explicit shell operation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CommandOutput {
-    /// Process exit code, if the process exited normally.
-    pub exit_code: Option<i32>,
+    /// The command's established lifecycle outcome.
+    pub termination: CommandTermination,
     /// Captured standard output.
     pub stdout: Vec<u8>,
     /// Captured standard error.
@@ -285,7 +315,7 @@ pub trait CodingOperations: Send + Sync {
         &'a self,
         command: &'a str,
         cwd: &'a Path,
-        timeout_seconds: Option<f64>,
+        timeout: Duration,
         environment: &'a CommandEnvironment,
         cancellation: CancellationToken,
         updates: ToolUpdateSink,

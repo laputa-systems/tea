@@ -8,6 +8,7 @@ FROM alpine:3.24.1
 ARG TARGETARCH
 ARG LLVM_VERSION=23.1.0-rc2
 ARG LLVM_RELEASE_SHA=6eb5fb9
+ARG TEA_RELEASE_GIT_SHA
 
 RUN apk add --no-cache \
       bash \
@@ -117,7 +118,7 @@ COPY . .
 # remove them (including Python's libgcc/libstdc++ dependencies) from the
 # resulting verification image.
 RUN apk add --no-cache python3 git \
-    && make test \
+    && TEA_RELEASE_GIT_SHA="$TEA_RELEASE_GIT_SHA" make test \
     && apk del --no-network python3 python3-pyc pyc python3-pycache-pyc0 git \
     && test ! -e /usr/bin/python3 \
     && test ! -e /usr/bin/git \

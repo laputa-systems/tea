@@ -1,32 +1,20 @@
-//! Smol-backed coding operations owned by the terminal host.
+//! Smol-backed scheduling for the terminal's coding operations.
 //!
-//! `tea-core` deliberately leaves filesystem and process scheduling to its
-//! caller.  The terminal therefore moves synchronous local operations onto
-//! Smol's blocking pool.  Bash retains the capture-file boundary used by the
-//! core local adapter: descendants may inherit the files, but never hold the
-//! terminal's executor or a pipe open.
+//! Process lifecycle belongs to Tea core's canonical local runner. The terminal
+//! only chooses Smol's blocking pool for that runner and keeps no independent
+//! timeout, cancellation, capture, or cleanup algorithm.
 
-use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom};
-#[cfg(unix)]
-use std::os::unix::fs::OpenOptionsExt;
+use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use tea_core::coding::{
     CodingOperations, CommandEnvironment, CommandOutput, EditTransaction, EditTransactionOutcome,
     EntryMetadata, FileSnapshot, LocalCodingOperations, OperationError, OperationFuture,
-    SearchResult,
+    SearchResult, run_local_command,
 };
 use tea_core::scheduler::CancellationToken;
-use tea_core::tool::{ToolUpdate, ToolUpdateSink};
-
-static COMMAND_CAPTURE_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
-
-const STREAM_CHUNK_BYTES: usize = 8 * 1024;
-const POLL_INTERVAL: Duration = Duration::from_millis(10);
+use tea_core::tool::ToolUpdateSink;
 
 /// Application-owned nonblocking implementation of the standard coding port.
 #[derive(Clone, Debug, Default)]
@@ -105,7 +93,7 @@ impl CodingOperations for NonblockingCodingOperations {
         &'a self,
         command: &'a str,
         cwd: &'a Path,
-        timeout_seconds: Option<f64>,
+        timeout: Duration,
         environment: &'a CommandEnvironment,
         cancellation: CancellationToken,
         updates: ToolUpdateSink,
@@ -114,10 +102,10 @@ impl CodingOperations for NonblockingCodingOperations {
         let cwd = cwd.to_path_buf();
         let environment = environment.clone();
         Box::pin(smol::unblock(move || {
-            execute_command_blocking(
+            run_local_command(
                 &command,
                 &cwd,
-                timeout_seconds,
+                timeout,
                 &environment,
                 &cancellation,
                 updates,
@@ -126,207 +114,11 @@ impl CodingOperations for NonblockingCodingOperations {
     }
 }
 
-fn execute_command_blocking(
-    command: &str,
-    cwd: &Path,
-    timeout_seconds: Option<f64>,
-    environment: &CommandEnvironment,
-    cancellation: &CancellationToken,
-    updates: ToolUpdateSink,
-) -> Result<CommandOutput, OperationError> {
-    if cancellation.is_cancelled() {
-        return Err(OperationError::new("cancelled"));
-    }
-    let timeout = match timeout_seconds {
-        Some(value) if value.is_finite() && value > 0.0 => Some(
-            Duration::try_from_secs_f64(value)
-                .map_err(|_| OperationError::new("invalid timeout"))?,
-        ),
-        Some(_) => return Err(OperationError::new("invalid timeout")),
-        None => None,
-    };
-    let (stdout_path, stdout) = command_capture_file("stdout")?;
-    let (stderr_path, stderr) = match command_capture_file("stderr") {
-        Ok(capture) => capture,
-        Err(error) => {
-            let _ = fs::remove_file(&stdout_path);
-            return Err(error);
-        }
-    };
-
-    let mut process = Command::new("bash");
-    process.arg("-c").arg(command).current_dir(cwd);
-    environment.apply(&mut process);
-    process
-        .stdin(Stdio::null())
-        .stdout(Stdio::from(stdout))
-        .stderr(Stdio::from(stderr));
-    let mut child = match process.spawn() {
-        Ok(child) => child,
-        Err(error) => {
-            remove_captures(&stdout_path, &stderr_path);
-            return Err(OperationError::new(error.to_string()));
-        }
-    };
-
-    let started = Instant::now();
-    let mut stdout_offset = 0;
-    let mut stderr_offset = 0;
-    loop {
-        if cancellation.is_cancelled() {
-            let result = terminate_and_reap(&mut child);
-            remove_captures(&stdout_path, &stderr_path);
-            return result
-                .map(|_| ())
-                .and_then(|_| Err(OperationError::new("cancelled")));
-        }
-        if timeout.is_some_and(|limit| started.elapsed() >= limit) {
-            let result = terminate_and_reap(&mut child);
-            remove_captures(&stdout_path, &stderr_path);
-            return result
-                .map(|_| ())
-                .and_then(|_| Err(OperationError::new("command timed out")));
-        }
-
-        if let Err(error) = emit_capture_updates(
-            &stdout_path,
-            &mut stdout_offset,
-            &updates,
-            STREAM_CHUNK_BYTES,
-        ) {
-            let _ = terminate_and_reap(&mut child);
-            remove_captures(&stdout_path, &stderr_path);
-            return Err(error);
-        }
-        if let Err(error) = emit_capture_updates(
-            &stderr_path,
-            &mut stderr_offset,
-            &updates,
-            STREAM_CHUNK_BYTES,
-        ) {
-            let _ = terminate_and_reap(&mut child);
-            remove_captures(&stdout_path, &stderr_path);
-            return Err(error);
-        }
-        let status = match child.try_wait() {
-            Ok(status) => status,
-            Err(error) => {
-                let _ = terminate_and_reap(&mut child);
-                remove_captures(&stdout_path, &stderr_path);
-                return Err(OperationError::new(error.to_string()));
-            }
-        };
-        if let Some(status) = status {
-            let stdout = read_command_capture(&stdout_path);
-            let stderr = read_command_capture(&stderr_path);
-            remove_captures(&stdout_path, &stderr_path);
-            if cancellation.is_cancelled() {
-                return Err(OperationError::new("cancelled"));
-            }
-            return Ok(CommandOutput {
-                exit_code: status.code(),
-                stdout: stdout?,
-                stderr: stderr?,
-            });
-        }
-        // This sleep is on Smol's blocking pool, never in the future's poll;
-        // the operation future remains available to drive other terminal work.
-        std::thread::sleep(POLL_INTERVAL);
-    }
-}
-
-fn emit_capture_updates(
-    path: &Path,
-    offset: &mut u64,
-    updates: &ToolUpdateSink,
-    chunk_limit: usize,
-) -> Result<(), OperationError> {
-    // Updates are intentionally bounded lossy UTF-8 windows.  A multibyte
-    // codepoint split across windows may be rendered with replacement text;
-    // the complete, lossless command output remains authoritative in the
-    // settled `CommandOutput` returned below.
-    let length = match fs::metadata(path) {
-        Ok(metadata) => metadata.len(),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(OperationError::new(error.to_string())),
-    };
-    while *offset < length {
-        let mut file = File::open(path).map_err(|error| OperationError::new(error.to_string()))?;
-        file.seek(SeekFrom::Start(*offset))
-            .map_err(|error| OperationError::new(error.to_string()))?;
-        let remaining = (length - *offset) as usize;
-        let mut bytes = vec![0; remaining.min(chunk_limit)];
-        let read = file
-            .read(&mut bytes)
-            .map_err(|error| OperationError::new(error.to_string()))?;
-        if read == 0 {
-            break;
-        }
-        *offset += read as u64;
-        updates.emit(ToolUpdate {
-            content: String::from_utf8_lossy(&bytes[..read]).into_owned(),
-            details: None,
-            activity: None,
-        });
-    }
-    Ok(())
-}
-
-fn terminate_and_reap(child: &mut Child) -> Result<ExitStatus, OperationError> {
-    if let Err(error) = child.kill() {
-        if error.kind() != std::io::ErrorKind::InvalidInput {
-            return Err(OperationError::new(error.to_string()));
-        }
-    }
-    child
-        .wait()
-        .map_err(|error| OperationError::new(error.to_string()))
-}
-
-fn command_capture_file(stream: &str) -> Result<(PathBuf, File), OperationError> {
-    for _ in 0..16 {
-        let sequence = COMMAND_CAPTURE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!(
-            "tea-agent-command-{}-{}-{stream}",
-            std::process::id(),
-            sequence,
-        ));
-        let mut options = OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        options.mode(0o600);
-        match options.open(&path) {
-            Ok(file) => return Ok((path, file)),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(error) => {
-                return Err(OperationError::new(format!(
-                    "cannot create command capture: {error}"
-                )));
-            }
-        }
-    }
-    Err(OperationError::new(
-        "cannot allocate a unique command capture after 16 attempts",
-    ))
-}
-
-fn read_command_capture(path: &Path) -> Result<Vec<u8>, OperationError> {
-    let mut file = File::open(path)
-        .map_err(|error| OperationError::new(format!("cannot read command capture: {error}")))?;
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)
-        .map_err(|error| OperationError::new(format!("cannot read command capture: {error}")))?;
-    Ok(bytes)
-}
-
-fn remove_captures(stdout: &Path, stderr: &Path) {
-    let _ = fs::remove_file(stdout);
-    let _ = fs::remove_file(stderr);
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Instant;
     use tea_core::coding::{CodingHost, PROCESS_CAPABILITY_V1};
     use tea_core::effect::RunProvenance;
     use tea_core::harness::extension::ExtensionCapabilityRequest;
@@ -334,10 +126,12 @@ mod tests {
     use tea_core::tool::ToolUpdateSink;
     use tea_protocol::JsonValue;
 
+    static NEXT_WORKSPACE: AtomicUsize = AtomicUsize::new(0);
+
     fn workspace() -> PathBuf {
         let path = std::env::temp_dir().join(format!(
             "tea-agent-nonblocking-{}",
-            COMMAND_CAPTURE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+            NEXT_WORKSPACE.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir_all(&path).expect("workspace creates");
         path
@@ -367,7 +161,7 @@ mod tests {
                 .execute_command(
                     "touch first.started; while [ ! -e first.release ]; do sleep 0.01; done; printf first-done",
                     &first_root,
-                    None,
+                    Duration::from_secs(300),
                     &environment,
                     CancellationToken::new(),
                     ToolUpdateSink::disabled(),
@@ -381,7 +175,7 @@ mod tests {
                 .execute_command(
                     "touch second.started; while [ ! -e second.release ]; do sleep 0.01; done; printf second-done",
                     &second_root,
-                    None,
+                    Duration::from_secs(300),
                     &environment,
                     CancellationToken::new(),
                     ToolUpdateSink::disabled(),
@@ -459,7 +253,7 @@ mod tests {
     }
 
     #[test]
-    fn cancellation_kills_and_reaps_the_shell_promptly() {
+    fn cancellation_settles_the_owned_process_scope_promptly() {
         let root = workspace();
         let cancellation = CancellationToken::new();
         let task_cancellation = cancellation.clone();
@@ -471,7 +265,7 @@ mod tests {
                 .execute_command(
                     "sleep 30",
                     &task_root,
-                    None,
+                    Duration::from_secs(300),
                     &environment,
                     task_cancellation,
                     ToolUpdateSink::disabled(),
@@ -483,10 +277,10 @@ mod tests {
         cancellation.cancel();
         let result = smol::block_on(task);
         assert!(started.elapsed() < Duration::from_millis(500));
-        assert_eq!(
-            result.expect_err("cancellation should fail"),
-            OperationError::new("cancelled")
-        );
+        assert!(matches!(
+            result.expect("process cancellation settles a receipt").termination,
+            tea_core::coding::CommandTermination::Cancelled
+        ));
         let _ = fs::remove_dir_all(root);
     }
 }

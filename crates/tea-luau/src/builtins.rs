@@ -211,10 +211,10 @@ mod tests {
     use tea_core::effect::RunProvenance;
     use tea_core::harness::extension::ExtensionToolLimits;
     use tea_core::harness::extension::{
-        ExtensionCapabilityBindings, ExtensionCapabilityError, ExtensionCapabilityFuture,
-        ExtensionCapabilityRequest, ExtensionCapabilityResponse, ExtensionCommandInput,
-        ExtensionEngine, ExtensionIdleInput, ExtensionMemoryCollector, ExtensionOperationOutcome,
-        ExtensionStateView,
+        ExtensionCapability, ExtensionCapabilityBindings, ExtensionCapabilityError,
+        ExtensionCapabilityFuture, ExtensionCapabilityRequest, ExtensionCapabilityResponse,
+        ExtensionCommandInput, ExtensionEngine, ExtensionIdleInput, ExtensionMemoryCollector,
+        ExtensionOperationOutcome, ExtensionStateView,
     };
     use tea_core::hooks::NoHooks;
     use tea_core::state::{SerializedJson, ToolCallId};
@@ -259,6 +259,161 @@ mod tests {
                 Poll::Pending => std::thread::sleep(Duration::from_millis(1)),
             }
         }
+    }
+
+    #[derive(Clone)]
+    struct FixedProcessCapability {
+        response: tea_protocol::JsonValue,
+    }
+
+    impl ExtensionCapability for FixedProcessCapability {
+        fn invoke(
+            &self,
+            _request: ExtensionCapabilityRequest,
+            _cancellation: tea_core::scheduler::CancellationToken,
+        ) -> ExtensionCapabilityFuture {
+            let response = self.response.clone();
+            Box::pin(async move { Ok(ExtensionCapabilityResponse { value: response }) })
+        }
+    }
+
+    fn execute_bash_handler(response: tea_protocol::JsonValue) -> tea_core::tool::AgentToolResult {
+        let limits = ExtensionLimits {
+            max_source_bytes: 64 * 1024,
+            max_memory_bytes: 1024 * 1024,
+            max_interrupt_checks: 10_000,
+        };
+        let tree = bash(limits);
+        let mut bindings = ExtensionCapabilityBindings::new();
+        bindings
+            .insert(
+                PROCESS_CAPABILITY_V1,
+                Arc::new(FixedProcessCapability { response }),
+                ExtensionToolLimits::default(),
+            )
+            .expect("process capability is granted once");
+        bindings
+            .fix_tool_capabilities(
+                BTreeMap::from([("bash".into(), PROCESS_CAPABILITY_V1.into())]),
+                BTreeSet::new(),
+            )
+            .expect("bash capability is fixed");
+        let resolved = LuauExtensionEngine
+            .resolve(
+                &tree,
+                bindings,
+                Arc::new(NoHooks),
+                0,
+                Arc::new(ExtensionMemoryCollector::default()),
+            )
+            .expect("checked-in bash handler loads");
+        block_on(
+            resolved
+                .tools
+                .get("bash")
+                .expect("bash is resolved")
+                .execute(
+                    ToolCall {
+                        id: ToolCallId::new("bash-settlement").expect("test call ID is valid"),
+                        name: "bash".into(),
+                        arguments: SerializedJson::new(r#"{"command":"ignored"}"#),
+                    },
+                    ToolContext {
+                        cancellation: tea_core::scheduler::CancellationToken::new(),
+                        provenance: RunProvenance::default(),
+                    },
+                    ToolUpdateSink::disabled(),
+                ),
+        )
+        .expect("bash handler settles")
+    }
+
+    #[test]
+    fn bash_handler_formats_typed_process_settlements_without_new_arguments() {
+        let limits = ExtensionLimits {
+            max_source_bytes: 64 * 1024,
+            max_memory_bytes: 1024 * 1024,
+            max_interrupt_checks: 10_000,
+        };
+        let descriptor = LuauExtensionEngine
+            .describe(&bash(limits))
+            .expect("bash descriptor resolves");
+        let properties = descriptor.tools[0]
+            .schema
+            .get("properties")
+            .and_then(tea_protocol::JsonValue::as_object)
+            .expect("bash schema has properties");
+        assert_eq!(
+            properties.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["command", "timeout"]
+        );
+
+        let success = execute_bash_handler(tea_protocol::JsonValue::object([
+            ("content", tea_protocol::JsonValue::String(String::new())),
+            ("truncated", tea_protocol::JsonValue::Bool(false)),
+            ("termination", tea_protocol::JsonValue::String("exited".into())),
+            (
+                "exitCode",
+                tea_protocol::JsonValue::Number(tea_protocol::JsonNumber::Signed(0)),
+            ),
+        ]));
+        assert!(!success.is_error);
+        assert_eq!(success.content, "(no output)");
+
+        let nonzero = execute_bash_handler(tea_protocol::JsonValue::object([
+            ("content", tea_protocol::JsonValue::String(String::new())),
+            ("truncated", tea_protocol::JsonValue::Bool(false)),
+            ("termination", tea_protocol::JsonValue::String("exited".into())),
+            (
+                "exitCode",
+                tea_protocol::JsonValue::Number(tea_protocol::JsonNumber::Signed(7)),
+            ),
+        ]));
+        assert!(nonzero.is_error);
+        assert_eq!(nonzero.content, "command exited with status 7");
+
+        let signaled = execute_bash_handler(tea_protocol::JsonValue::object([
+            ("content", tea_protocol::JsonValue::String("partial".into())),
+            ("truncated", tea_protocol::JsonValue::Bool(false)),
+            ("termination", tea_protocol::JsonValue::String("signaled".into())),
+            ("exitCode", tea_protocol::JsonValue::Null),
+            (
+                "signal",
+                tea_protocol::JsonValue::Number(tea_protocol::JsonNumber::Signed(15)),
+            ),
+        ]));
+        assert!(signaled.is_error);
+        assert!(signaled.content.contains("partial"));
+        assert!(signaled.content.contains("signal 15"));
+
+        let timed_out = execute_bash_handler(tea_protocol::JsonValue::object([
+            ("content", tea_protocol::JsonValue::String("partial".into())),
+            ("truncated", tea_protocol::JsonValue::Bool(false)),
+            ("termination", tea_protocol::JsonValue::String("timed_out".into())),
+            ("exitCode", tea_protocol::JsonValue::Null),
+        ]));
+        assert!(timed_out.is_error);
+        assert!(timed_out.content.contains("partial"));
+        assert!(timed_out.content.contains("command timed out"));
+
+        let indeterminate = execute_bash_handler(tea_protocol::JsonValue::object([
+            ("content", tea_protocol::JsonValue::String("partial".into())),
+            ("truncated", tea_protocol::JsonValue::Bool(false)),
+            (
+                "termination",
+                tea_protocol::JsonValue::String("indeterminate".into()),
+            ),
+            ("exitCode", tea_protocol::JsonValue::Null),
+            ("reason", tea_protocol::JsonValue::String("ignored here".into())),
+        ]));
+        assert!(indeterminate.is_error);
+        assert!(
+            indeterminate
+                .content
+                .contains("side effects may already exist")
+        );
+        assert!(indeterminate.content.contains("inspect state before retrying"));
+        assert!(indeterminate.content.contains("ignored here"));
     }
 
     #[test]

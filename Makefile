@@ -15,9 +15,10 @@ test:
 # platform selection also makes this usable from an x86_64 or Apple host.
 DOCKER ?= docker
 TEST_LINUX_IMAGE ?= tea-test-linux-aarch64
+TEA_RELEASE_GIT_SHA ?= $(shell git rev-parse --short=7 HEAD 2>/dev/null)
 
 test-linux:
-	$(DOCKER) build --platform linux/arm64 --progress=plain --tag $(TEST_LINUX_IMAGE) -f Dockerfile .
+	$(DOCKER) build --platform linux/arm64 --progress=plain --build-arg TEA_RELEASE_GIT_SHA="$(TEA_RELEASE_GIT_SHA)" --tag $(TEST_LINUX_IMAGE) -f Dockerfile .
 
 tui:
 	cargo build --release --package tea-agent --bin tea

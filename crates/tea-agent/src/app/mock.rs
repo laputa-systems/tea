@@ -12,8 +12,9 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tea_core::agent::AgentConfiguration;
 use tea_core::coding::{
-    CodingOperations, CommandEnvironment, CommandOutput, EditTransaction, EditTransactionOutcome,
-    EntryMetadata, OperationError, OperationFuture, SearchResult, SearchTruncation,
+    CodingOperations, CommandEnvironment, CommandOutput, CommandTermination, EditTransaction,
+    EditTransactionOutcome, EntryMetadata, OperationError, OperationFuture, SearchResult,
+    SearchTruncation,
 };
 use tea_core::scheduler::{
     CancellationToken, ModelEventFuture, ModelEventStream, ModelFuture, ModelProvider,
@@ -251,7 +252,7 @@ impl CodingOperations for MockCodingOperations {
         &'a self,
         _command: &'a str,
         _cwd: &'a Path,
-        _timeout_seconds: Option<f64>,
+        _timeout: Duration,
         _environment: &'a CommandEnvironment,
         cancellation: CancellationToken,
         _updates: ToolUpdateSink,
@@ -261,7 +262,7 @@ impl CodingOperations for MockCodingOperations {
                 Err(OperationError::new("cancelled"))
             } else {
                 Ok(CommandOutput {
-                    exit_code: Some(0),
+                    termination: CommandTermination::Exited { code: 0 },
                     stdout: b"Mock command preview: no process started.".to_vec(),
                     stderr: Vec::new(),
                 })
