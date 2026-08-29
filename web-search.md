@@ -33,8 +33,7 @@ There is:
 * no `search` vs `fetch` operation exposed to the model;
 * no provider selector;
 * no browser;
-* no TinyFish in this version;
-* no API key requirement;
+* no TinyFish API key requirement for the default Firecrawl path;
 * no separate second inference turn merely to retrieve the pages that a search just discovered.
 
 The core UX principle is:
@@ -329,21 +328,22 @@ Do not rely on the model inferring the preferred behavior from the array schema.
 
 ---
 
-# 6. Firecrawl is the only provider in v1
+# 6. Optional TinyFish fallback
 
-Do not implement TinyFish yet.
+Firecrawl remains the default backend. When the terminal process has a
+non-empty `TINYFISH_API_KEY`, the host enables TinyFish only as a fallback:
 
-Do not create:
+* a failed Firecrawl query uses TinyFish Search followed by TinyFish Fetch;
+* failed members of a Firecrawl URL batch use TinyFish Fetch together while
+  successful Firecrawl members remain intact;
+* neither the model nor Luau source can select a backend, origin, or header.
 
-```text
-TINYFISH_API_KEY
-```
+The key is read by terminal host composition and supplied only as a fixed
+`X-API-Key` route header. It is unavailable to the model, Luau, session facts,
+traces, tool arguments, and diagnostics. A missing key disables the fixed
+TinyFish routes before I/O; it does not make the keyless default unavailable.
 
-handling.
-
-Do not create a provider interface solely because a hypothetical second provider may exist later.
-
-The abstraction boundary already exists naturally:
+The abstraction boundary remains:
 
 ```text
 Luau web policy
@@ -351,13 +351,13 @@ Luau web policy
 network.http capability
 ```
 
-That is sufficient future-proofing.
-
-If another web provider is added later, its protocol/fallback policy can be implemented in Lua without redesigning the Rust HTTP substrate.
+TinyFish request shape and fallback policy belong in Luau. Generic `GET` query
+encoding, fixed host-only headers, pooling, deadlines, retry, cancellation, and
+route authorization belong in `tea-http`.
 
 ---
 
-# 7. Firecrawl Keyless
+# 7. Firecrawl Keyless remains the default
 
 The feature must work without any configuration.
 
@@ -393,26 +393,24 @@ In particular:
 
 is a normal upstream quota/rate-limit condition.
 
-If Firecrawl becomes unavailable, return a useful tool error rather than implementing alternate scraping/search providers in v1.
+If Firecrawl and the optional TinyFish fallback are both unavailable, return a
+useful tool error.
 
 ---
 
-# 8. Firecrawl API origin
+# 8. Fixed web API origins
 
-The only production HTTP route needed for this feature is HTTPS to:
-
-```text
-api.firecrawl.dev
-```
-
-Allowed Firecrawl paths:
+The host authorizes only these fixed HTTPS routes:
 
 ```text
-POST /v2/search
-POST /v2/scrape
+api.firecrawl.dev      POST /v2/search
+api.firecrawl.dev      POST /v2/scrape
+api.search.tinyfish.ai GET  /
+api.fetch.tinyfish.ai  POST /
 ```
 
-That is enough.
+TinyFish routes are disabled without `TINYFISH_API_KEY` and carry only the
+host-owned `X-API-Key` header when enabled.
 
 Do not grant arbitrary outbound Internet access to Luau.
 
@@ -2275,7 +2273,7 @@ More precisely:
 * `tea-luau` does not depend on h12tiny;
 * `tea-http` may depend on the narrow Tea protocol/core contracts required for capability/cancellation integration;
 * `tea-agent` constructs network authority;
-* Firecrawl semantics remain in the bundled Lua source.
+* Firecrawl/TinyFish semantics and fallback order remain in the bundled Lua source.
 
 No Tokio.
 
@@ -2290,7 +2288,6 @@ No Firecrawl SDK.
 Do not add:
 
 ```text
-TinyFish
 Exa
 Brave
 Google scraping

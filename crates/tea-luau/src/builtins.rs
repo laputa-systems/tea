@@ -138,9 +138,9 @@ pub fn coding(limits: ExtensionLimits) -> ExtensionSourceTree {
 
 /// Return the exact bundled web-retrieval extension source tree.
 ///
-/// Firecrawl protocol and output policy remain in the checked-in Luau source;
-/// the host independently decides whether to grant its route-scoped generic
-/// `network.http` capability.
+/// Web-provider protocol, fallback policy, and output policy remain in the
+/// checked-in Luau source; the host independently grants only its route-scoped
+/// generic `network.http` capability and any fixed host-only credentials.
 pub fn web(limits: ExtensionLimits) -> ExtensionSourceTree {
     ExtensionSourceTree {
         extension_id: "web".into(),
@@ -615,19 +615,88 @@ mod tests {
                 .push((request.method.clone(), request.arguments.clone()));
             let response = match request.method.as_str() {
                 "request" => {
+                    let route = request
+                        .arguments
+                        .get("route")
+                        .and_then(tea_protocol::JsonValue::as_str);
+                    if route == Some("tinyfish-search") {
+                        let query = request
+                            .arguments
+                            .get("query")
+                            .and_then(|query| query.get("query"))
+                            .and_then(tea_protocol::JsonValue::as_str);
+                        if query == Some("rate") {
+                            response(429, tea_protocol::JsonValue::object([(
+                                "error",
+                                tea_protocol::JsonValue::String("TinyFish rate limited".into()),
+                            )]))
+                        } else {
+                            response_json(
+                                r#"{"results":[{"url":"https://tinyfish.example","title":"TinyFish result","snippet":"fallback snippet","site_name":"tinyfish.example"}]}"#,
+                            )
+                        }
+                    } else if route == Some("tinyfish-fetch") {
+                        let urls = request
+                            .arguments
+                            .get("json")
+                            .and_then(|json| json.get("urls"))
+                            .and_then(tea_protocol::JsonValue::as_array)
+                            .expect("TinyFish fetch has URLs");
+                        response(200, tea_protocol::JsonValue::object([
+                            (
+                                "results",
+                                tea_protocol::JsonValue::Array(
+                                    urls.iter()
+                                        .filter_map(tea_protocol::JsonValue::as_str)
+                                        .filter(|url| {
+                                            *url == "https://tinyfish.example"
+                                                || url.contains("fallback")
+                                        })
+                                        .map(|url| {
+                                            tea_protocol::JsonValue::object([
+                                                ("url", tea_protocol::JsonValue::String(url.into())),
+                                                ("title", tea_protocol::JsonValue::String("TinyFish page".into())),
+                                                ("text", tea_protocol::JsonValue::String("TinyFish fallback body".into())),
+                                            ])
+                                        })
+                                        .collect(),
+                                ),
+                            ),
+                            (
+                                "errors",
+                                tea_protocol::JsonValue::Array(
+                                    urls.iter()
+                                        .filter_map(tea_protocol::JsonValue::as_str)
+                                        .filter(|url| {
+                                            *url != "https://tinyfish.example"
+                                                && !url.contains("fallback")
+                                        })
+                                        .map(|url| {
+                                            tea_protocol::JsonValue::object([
+                                                ("url", tea_protocol::JsonValue::String(url.into())),
+                                                ("message", tea_protocol::JsonValue::String("TinyFish fixture fetch failed".into())),
+                                            ])
+                                        })
+                                        .collect(),
+                                ),
+                            ),
+                        ]))
+                    } else {
                     let query = request
                         .arguments
                         .get("json")
                         .and_then(|json| json.get("query"))
                         .and_then(tea_protocol::JsonValue::as_str);
-                    if query == Some("rate") {
-                        response(
-                            429,
-                            tea_protocol::JsonValue::object([(
-                                "error",
-                                tea_protocol::JsonValue::String("quota exhausted".into()),
-                            )]),
-                        )
+                    if query == Some("tinyfish-query") {
+                        response(503, tea_protocol::JsonValue::object([(
+                            "error",
+                            tea_protocol::JsonValue::String("Firecrawl unavailable".into()),
+                        )]))
+                    } else if query == Some("rate") {
+                        response(429, tea_protocol::JsonValue::object([(
+                            "error",
+                            tea_protocol::JsonValue::String("quota exhausted".into()),
+                        )]))
                     } else if query == Some("large") {
                         response(
                             200,
@@ -665,10 +734,15 @@ mod tests {
                         response_json(
                             r#"{"success":true,"data":{"web":[{"url":"https://one.example","title":"One","markdown":"first"},{"url":"https://two.example","title":"Two"},{"url":"https://three.example","title":"Three"}]}}"#,
                         )
+                    } else if query == Some("repair-fallback") {
+                        response_json(
+                            r#"{"success":true,"data":{"web":[{"url":"https://fallback.example","title":"Fallback repair"}]}}"#,
+                        )
                     } else {
                         response_json(
                             r##"{"success":true,"data":{"web":[{"url":"https://docs.example","title":"Documentation","markdown":"# Evidence\nactual source"}]}}"##,
                         )
+                    }
                     }
                 }
                 "request_many" => {
@@ -687,7 +761,7 @@ mod tests {
                                     .and_then(|json| json.get("url"))
                                     .and_then(tea_protocol::JsonValue::as_str)
                                     .unwrap_or_default();
-                                if url.contains("fail") {
+                                if url.contains("fail") || url.contains("fallback") {
                                     response(429, tea_protocol::JsonValue::object([(
                                         "error",
                                         tea_protocol::JsonValue::String("rate limited".into()),
@@ -854,6 +928,24 @@ mod tests {
         );
         drop(calls);
 
+        let before_repair_fallback = fake.calls.lock().expect("fake web call lock").len();
+        let repaired_by_tinyfish = execute("web-repair-fallback", r#"{"query":"repair-fallback"}"#);
+        assert!(!repaired_by_tinyfish.is_error);
+        assert!(repaired_by_tinyfish.content.contains("TinyFish fallback body"));
+        let calls = fake.calls.lock().expect("fake web call lock");
+        let repair_fallback_calls = &calls[before_repair_fallback..];
+        assert_eq!(repair_fallback_calls.len(), 3);
+        assert_eq!(repair_fallback_calls[0].0, "request");
+        assert_eq!(repair_fallback_calls[1].0, "request_many");
+        assert_eq!(
+            repair_fallback_calls[2]
+                .1
+                .get("route")
+                .and_then(tea_protocol::JsonValue::as_str),
+            Some("tinyfish-fetch")
+        );
+        drop(calls);
+
         let general = execute("web-general", r#"{"query":"general","kind":"web"}"#);
         assert!(!general.is_error);
         let calls = fake.calls.lock().expect("fake web call lock");
@@ -898,6 +990,39 @@ mod tests {
         assert!(limited.is_error);
         assert!(limited.content.contains("HTTP 429"));
         assert!(limited.content.contains("curl"));
+
+        let before_fallback = fake.calls.lock().expect("fake web call lock").len();
+        let fallback = execute("web-tinyfish-query", r#"{"query":"tinyfish-query"}"#);
+        assert!(!fallback.is_error, "{}", fallback.content);
+        assert!(fallback.content.contains("TinyFish fallback body"));
+        let calls = fake.calls.lock().expect("fake web call lock");
+        let fallback_calls = &calls[before_fallback..];
+        assert_eq!(fallback_calls.len(), 3, "fallback searches then fetches its results");
+        assert_eq!(
+            fallback_calls[0].1.get("route").and_then(tea_protocol::JsonValue::as_str),
+            Some("firecrawl")
+        );
+        assert_eq!(
+            fallback_calls[1].1.get("route").and_then(tea_protocol::JsonValue::as_str),
+            Some("tinyfish-search")
+        );
+        assert_eq!(
+            fallback_calls[1].1.get("method").and_then(tea_protocol::JsonValue::as_str),
+            Some("GET")
+        );
+        assert_eq!(
+            fallback_calls[2].1.get("route").and_then(tea_protocol::JsonValue::as_str),
+            Some("tinyfish-fetch")
+        );
+        drop(calls);
+
+        let url_fallback = execute(
+            "web-tinyfish-urls",
+            r#"{"urls":["https://one.example","https://fallback.example"]}"#,
+        );
+        assert!(!url_fallback.is_error);
+        assert!(url_fallback.content.contains("TinyFish fallback body"));
+        assert!(!url_fallback.content.contains("[2] FAILED"));
 
         let truncated = execute("web-large", r#"{"query":"large"}"#);
         assert!(!truncated.is_error);

@@ -92,7 +92,7 @@ fn parse_many(arguments: &JsonValue) -> Result<Vec<HttpRequest>, ExtensionCapabi
 
 fn parse_request(arguments: &JsonValue) -> Result<HttpRequest, ExtensionCapabilityError> {
     let object = object(arguments, "network.http request arguments")?;
-    exact_fields(object, &["route", "method", "path", "json", "response"])?;
+    exact_fields(object, &["route", "method", "path", "query", "json", "response"])?;
     response_is_json(object)?;
     let route = required_string(object, "route")?;
     let method = required_string(object, "method")?;
@@ -102,13 +102,38 @@ fn parse_request(arguments: &JsonValue) -> Result<HttpRequest, ExtensionCapabili
     if path.is_empty() {
         return Err(invalid("path must not be empty"));
     }
-    let json = required(object, "json")?.clone();
+    let query = match object.get("query") {
+        None => BTreeMap::new(),
+        Some(value) => parse_query(value)?,
+    };
+    let json = object.get("json").cloned();
+    match (method, json.is_some()) {
+        (HttpMethod::Post, false) => return Err(invalid("POST requests require a JSON body")),
+        (HttpMethod::Get, true) => return Err(invalid("GET requests must not include a JSON body")),
+        _ => {}
+    }
     Ok(HttpRequest {
         route,
         method,
         path,
+        query,
         json,
     })
+}
+
+fn parse_query(value: &JsonValue) -> Result<BTreeMap<String, String>, ExtensionCapabilityError> {
+    let query = value
+        .as_object()
+        .ok_or_else(|| invalid("query must be an object with string values"))?;
+    query
+        .iter()
+        .map(|(key, value)| {
+            value
+                .as_str()
+                .map(|value| (key.clone(), value.to_owned()))
+                .ok_or_else(|| invalid("query values must be strings"))
+        })
+        .collect()
 }
 
 fn response_is_json(
@@ -255,5 +280,52 @@ mod tests {
         });
         assert_eq!(json.get("kind").and_then(JsonValue::as_str), Some("response"));
         assert_eq!(json.get("status").and_then(JsonValue::as_u64), Some(429));
+    }
+
+    #[test]
+    fn get_request_accepts_only_string_query_parameters_without_a_json_body() {
+        let request = parse_request(&JsonValue::object([
+            ("route", JsonValue::String("tinyfish-search".into())),
+            ("method", JsonValue::String("GET".into())),
+            ("path", JsonValue::String("/".into())),
+            (
+                "query",
+                JsonValue::object([("query", JsonValue::String("Rust & HTTP/2".into()))]),
+            ),
+            ("response", JsonValue::String("json".into())),
+        ]))
+        .expect("a fixed GET query is valid");
+        assert_eq!(request.method, HttpMethod::Get);
+        assert_eq!(request.query.get("query").map(String::as_str), Some("Rust & HTTP/2"));
+        assert!(request.json.is_none());
+
+        let invalid = parse_request(&JsonValue::object([
+            ("route", JsonValue::String("tinyfish-search".into())),
+            ("method", JsonValue::String("GET".into())),
+            ("path", JsonValue::String("/".into())),
+            ("json", JsonValue::Object(BTreeMap::new())),
+            ("response", JsonValue::String("json".into())),
+        ]));
+        assert!(matches!(invalid, Err(ExtensionCapabilityError::InvalidArguments { .. })));
+    }
+
+    #[test]
+    fn batch_requests_retain_each_request_response_contract() {
+        let requests = parse_many(&JsonValue::object([
+            (
+                "requests",
+                JsonValue::Array(vec![JsonValue::object([
+                    ("route", JsonValue::String("firecrawl".into())),
+                    ("method", JsonValue::String("POST".into())),
+                    ("path", JsonValue::String("/v2/scrape".into())),
+                    ("json", JsonValue::Object(BTreeMap::new())),
+                    ("response", JsonValue::String("json".into())),
+                ])]),
+            ),
+            ("response", JsonValue::String("json".into())),
+        ]))
+        .expect("each batched request carries its JSON response contract");
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].json, Some(JsonValue::Object(BTreeMap::new())));
     }
 }

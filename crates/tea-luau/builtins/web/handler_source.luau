@@ -79,16 +79,31 @@ local function json_encode(value)
     return "{" .. table.concat(encoded, ",") .. "}"
 end
 
-local function http_request(request)
+local function http_post(route, path, json)
     return coroutine.yield({
         kind = "capability",
         capability = "network.http",
         method = "request",
         arguments_json = json_encode({
-            route = "firecrawl",
+            route = route,
             method = "POST",
-            path = request.path,
-            json = request.json,
+            path = path,
+            json = json,
+            response = "json",
+        }),
+    })
+end
+
+local function http_get(route, path, query)
+    return coroutine.yield({
+        kind = "capability",
+        capability = "network.http",
+        method = "request",
+        arguments_json = json_encode({
+            route = route,
+            method = "GET",
+            path = path,
+            query = query,
             response = "json",
         }),
     })
@@ -168,6 +183,7 @@ local function scrape_request(url)
             proxy = "basic",
             storeInCache = true,
         },
+        response = "json",
     }
 end
 
@@ -238,6 +254,93 @@ local function parse_search_results(body)
     return results
 end
 
+local function tinyfish_fetch_sources(sources)
+    if #sources == 0 then return 0, "no source URLs to retrieve" end
+    local urls = {}
+    for _, result in ipairs(sources) do table.insert(urls, result.url) end
+    local outcome = http_post("tinyfish-fetch", "/", {
+        urls = urls,
+        format = "markdown",
+        links = false,
+        image_links = false,
+        ttl = 3600,
+        per_url_timeout_ms = 45000,
+    })
+    local body = response_json(outcome)
+    if body == nil then return 0, diagnostic(outcome) end
+    if type(body.results) ~= "table" then
+        return 0, provider_diagnostic(body) or "invalid fetch response"
+    end
+    local pages = {}
+    for _, page in ipairs(body.results) do
+        if type(page) == "table" and trim(page.url) ~= "" then pages[page.url] = page end
+    end
+    local failures = {}
+    if type(body.errors) == "table" then
+        for _, failure in ipairs(body.errors) do
+            if type(failure) == "table" and trim(failure.url) ~= "" then
+                failures[failure.url] = provider_diagnostic(failure) or "full page content unavailable"
+            end
+        end
+    end
+    local success_count = 0
+    for _, result in ipairs(sources) do
+        local page = pages[result.url]
+        if type(page) == "table" and has_content(page.text) then
+            if trim(page.title) ~= "" then result.title = page.title end
+            if trim(page.description) ~= "" then result.description = page.description end
+            if trim(page.final_url) ~= "" then result.url = page.final_url end
+            result.markdown = page.text
+            result.unavailable = nil
+            success_count = success_count + 1
+        else
+            result.unavailable = failures[result.url] or "full page content unavailable"
+        end
+    end
+    return success_count, provider_diagnostic(body) or "full page content unavailable"
+end
+
+local function tinyfish_sources_for_urls(urls)
+    local sources = {}
+    for _, url in ipairs(urls) do table.insert(sources, source("", url, nil, "", "")) end
+    local success_count, failure = tinyfish_fetch_sources(sources)
+    for _, result in ipairs(sources) do
+        if not has_content(result.markdown) then
+            result.failed = true
+            result.reason = result.unavailable or failure
+        end
+    end
+    return sources, success_count, failure
+end
+
+local function parse_tinyfish_search_results(body, limit)
+    if type(body) ~= "table" or type(body.results) ~= "table" then return nil end
+    local results = {}
+    for _, result in ipairs(body.results) do
+        if type(result) == "table" and trim(result.url) ~= "" then
+            table.insert(results, source(result.title, result.url, nil, result.snippet, result.site_name))
+            if #results == limit then break end
+        end
+    end
+    return results
+end
+
+local function tinyfish_query(query, kind, limit)
+    local purpose = "Retrieve useful " .. (kind == "developer" and "technical documentation, source code, issues, and API references" or "web evidence") .. " for: " .. text(query, MAX_QUERY_BYTES)
+    local outcome = http_get("tinyfish-search", "/", {
+        query = query,
+        purpose = purpose,
+    })
+    local body = response_json(outcome)
+    if body == nil then return nil, diagnostic(outcome) end
+    local results = parse_tinyfish_search_results(body, limit)
+    if results == nil then return nil, provider_diagnostic(body) or "invalid search response" end
+    if #results == 0 then return {}, nil end
+    local success_count, failure = tinyfish_fetch_sources(results)
+    if success_count == 0 then return nil, failure end
+    return results, nil
+end
+
 local function repair_missing_search_pages(results)
     local requests = {}
     local indices = {}
@@ -257,6 +360,11 @@ local function repair_missing_search_pages(results)
             results[index].unavailable = failure
         end
     end
+    local missing = {}
+    for _, result in ipairs(results) do
+        if not has_content(result.markdown) then table.insert(missing, result) end
+    end
+    if #missing > 0 then tinyfish_fetch_sources(missing) end
 end
 
 local function render_sources(prefix, sources)
@@ -291,6 +399,20 @@ local function render_sources(prefix, sources)
     return table.concat(lines)
 end
 
+local function tinyfish_query_fallback(query, kind, limit, firecrawl_failure)
+    local results, failure = tinyfish_query(query, kind, limit)
+    if results ~= nil then
+        if #results == 0 then return { content = "No web results found for: " .. text(query, 500) } end
+        return {
+            content = render_sources("Web results for: " .. text(query, 500) .. "\nMode: " .. kind, results),
+        }
+    end
+    return {
+        content = "Web search failed through Firecrawl: " .. text(firecrawl_failure, 240) .. ".\nTinyFish fallback failed: " .. text(failure or "unavailable", 240) .. ".\n\nIf you already know likely public documentation, GitHub, or API URLs, use the bash tool with curl for direct retrieval where practical.",
+        is_error = true,
+    }
+end
+
 local function handle_query(arguments)
     local query = arguments.query
     if type(query) ~= "string" or trim(query) == "" or #query > MAX_QUERY_BYTES then
@@ -313,17 +435,14 @@ local function handle_query(arguments)
         },
     }
     if kind == "developer" then request.json.categories = { "developer" } end
-    local outcome = http_request(request)
+    local outcome = http_post("firecrawl", request.path, request.json)
     local body = response_json(outcome)
     if body == nil then
-        return {
-            content = "Web search failed through Firecrawl: " .. diagnostic(outcome) .. ".\n\nIf you already know likely public documentation, GitHub, or API URLs, use the bash tool with curl for direct retrieval where practical.",
-            is_error = true,
-        }
+        return tinyfish_query_fallback(query, kind, limit, diagnostic(outcome))
     end
     local results = parse_search_results(body)
     if results == nil then
-        return { content = "Web search failed through Firecrawl: " .. (provider_diagnostic(body) or "invalid response") .. ".\n\nIf you already know likely public documentation, GitHub, or API URLs, use the bash tool with curl for direct retrieval where practical.", is_error = true }
+        return tinyfish_query_fallback(query, kind, limit, provider_diagnostic(body) or "invalid response")
     end
     if #results == 0 then return { content = "No web results found for: " .. text(query, 500) } end
     repair_missing_search_pages(results)
@@ -358,9 +477,29 @@ local function handle_urls(arguments)
             table.insert(sources, { failed = true, url = url, reason = failure or diagnostic(outcomes[index]) })
         end
     end
+    local fallback_urls = {}
+    local fallback_indices = {}
+    for index, result in ipairs(sources) do
+        if result.failed then
+            table.insert(fallback_urls, result.url)
+            table.insert(fallback_indices, index)
+        end
+    end
+    if #fallback_urls > 0 then
+        local replacements, fallback_success = tinyfish_sources_for_urls(fallback_urls)
+        for position, index in ipairs(fallback_indices) do
+            local replacement = replacements[position]
+            if not replacement.failed then
+                sources[index] = replacement
+                success_count = success_count + 1
+            else
+                sources[index].reason = text(sources[index].reason, 160) .. "; TinyFish fallback: " .. text(replacement.reason, 160)
+            end
+        end
+    end
     if success_count == 0 then
         return {
-            content = "Web retrieval failed through Firecrawl.\n\n" .. text(sources[1].reason, 240) .. "\n\nFor known public URLs or APIs, fall back to the bash tool with curl where practical.",
+            content = "Web retrieval failed through Firecrawl and TinyFish.\n\n" .. text(sources[1].reason, 240) .. "\n\nFor known public URLs or APIs, fall back to the bash tool with curl where practical.",
             is_error = true,
         }
     end

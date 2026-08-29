@@ -807,11 +807,23 @@ fn extension_state_binding(
     Ok((state, binding))
 }
 
-/// Construct the single shared route-scoped network authority granted to the
-/// bundled web policy. Firecrawl protocol remains in Luau; this host layer
-/// fixes only transport bounds and the two allowed direct-origin paths.
+/// Construct the shared route-scoped network authority granted to the bundled
+/// web policy. Provider protocols and fallback order remain in Luau; this host
+/// layer fixes only direct origins, paths, bounds, and host-owned credentials.
 fn web_capability_binding() -> Result<(PluginCapabilityBinding, CapabilityBindingRef), AppError> {
-    let route = tea_http::Route::new(
+    let tinyfish_api_key = std::env::var_os("TINYFISH_API_KEY")
+        .and_then(|value| value.into_string().ok())
+        .filter(|value| !value.trim().is_empty());
+    web_capability_binding_with_tinyfish_api_key(tinyfish_api_key.as_deref())
+}
+
+/// Build the web binding from an optional caller-provided TinyFish credential.
+/// The production wrapper reads its terminal environment once; this seam keeps
+/// tests hermetic and ensures the secret cannot enter a durable binding digest.
+fn web_capability_binding_with_tinyfish_api_key(
+    tinyfish_api_key: Option<&str>,
+) -> Result<(PluginCapabilityBinding, CapabilityBindingRef), AppError> {
+    let firecrawl = tea_http::Route::new(
         "firecrawl",
         tea_http::Origin::https("api.firecrawl.dev")
             .map_err(|error| AppError::Setup(error.to_string()))?,
@@ -829,11 +841,54 @@ fn web_capability_binding() -> Result<(PluginCapabilityBinding, CapabilityBindin
     .map_err(|error| AppError::Setup(error.to_string()))?
     .allow(tea_http::HttpMethod::Post, "/v2/scrape")
     .map_err(|error| AppError::Setup(error.to_string()))?;
+    // Keep these routes structurally present even when the optional credential
+    // is absent so a session's durable capability identity does not depend on
+    // ambient process state. `tea-http` rejects a disabled route before I/O.
+    let tinyfish_api_key = tinyfish_api_key.unwrap_or_default();
+    let tinyfish_available = !tinyfish_api_key.is_empty();
+    let tinyfish_search = tea_http::Route::new(
+        "tinyfish-search",
+        tea_http::Origin::https("api.search.tinyfish.ai")
+            .map_err(|error| AppError::Setup(error.to_string()))?,
+        Duration::from_secs(60),
+        8 * 1024,
+        256 * 1024,
+        tea_http::RetryPolicy::new(1, Duration::from_millis(250), Duration::from_secs(2)),
+        tea_http::RatePolicy::new(
+            NonZeroUsize::new(4).expect("fixed network concurrency is non-zero"),
+            Some(Duration::from_secs(2)),
+        ),
+    )
+    .map_err(|error| AppError::Setup(error.to_string()))?
+    .allow(tea_http::HttpMethod::Get, "/")
+    .map_err(|error| AppError::Setup(error.to_string()))?
+    .with_fixed_header("X-API-Key", tinyfish_api_key)
+    .map_err(|error| AppError::Setup(error.to_string()))?
+    .with_availability(tinyfish_available);
+    let tinyfish_fetch = tea_http::Route::new(
+        "tinyfish-fetch",
+        tea_http::Origin::https("api.fetch.tinyfish.ai")
+            .map_err(|error| AppError::Setup(error.to_string()))?,
+        Duration::from_secs(60),
+        128 * 1024,
+        4 * 1024 * 1024,
+        tea_http::RetryPolicy::new(1, Duration::from_millis(250), Duration::from_secs(2)),
+        tea_http::RatePolicy::new(
+            NonZeroUsize::new(4).expect("fixed network concurrency is non-zero"),
+            None,
+        ),
+    )
+    .map_err(|error| AppError::Setup(error.to_string()))?
+    .allow(tea_http::HttpMethod::Post, "/")
+    .map_err(|error| AppError::Setup(error.to_string()))?
+    .with_fixed_header("X-API-Key", tinyfish_api_key)
+    .map_err(|error| AppError::Setup(error.to_string()))?
+    .with_availability(tinyfish_available);
     let client = tea_http::Client::new(
         tea_http::background_executor(|future| {
             smol::spawn(future).detach();
         }),
-        [route],
+        [firecrawl, tinyfish_search, tinyfish_fetch],
     )
     .map_err(|error| AppError::Setup(error.to_string()))?;
     let capability = tea_http::NetworkHttpCapability::new(client);
@@ -3616,6 +3671,26 @@ data: [DONE]
             .system_prompt
             .contains("separate `write`, `grep`, or `ls` tools"));
         let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn tinyfish_credential_changes_runtime_availability_not_durable_web_authority() {
+        let (without_credential, without_reference) =
+            web_capability_binding_with_tinyfish_api_key(None).expect("keyless web binding builds");
+        let (with_credential, with_reference) = web_capability_binding_with_tinyfish_api_key(
+            Some("tinyfish-test-secret"),
+        )
+        .expect("credentialed web binding builds");
+        assert_eq!(without_reference, with_reference);
+        assert_eq!(
+            without_credential.binding_digest(),
+            with_credential.binding_digest(),
+        );
+        assert!(
+            !format!("{without_credential:?}").contains("tinyfish-test-secret")
+                && !format!("{with_credential:?}").contains("tinyfish-test-secret"),
+            "host capability diagnostics must not disclose the credential"
+        );
     }
 
     #[test]

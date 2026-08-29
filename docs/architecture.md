@@ -35,7 +35,7 @@ The workspace crates are:
 | `tea-trace` | Immutable event-to-linear-episode recorder, redaction and caller-selected JSONL/CBOR sinks | Agent state, session tree, replay mutations, sink-driven behavior |
 | `tea-providers` | Concrete provider wire adapters and evaluation runner | Core state, durable session writes, UI ownership, direct HTTP clients |
 | `tea-luau` (optional policy) | Hermetic VM, capability manifest/modules, policy hooks/tools, script error/limit translation | Core lifecycle/state/scheduling, ambient OS authority, event-loop ownership |
-| `tea-http` | Repository-wide pooled HTTP: generic byte streams plus route-scoped JSON, retries, rate/cooldown policy, cancellation, and ordered concurrent batches | Provider request/response models, search policy, arbitrary network authority, an async runtime |
+| `tea-http` | Repository-wide pooled HTTP: generic byte streams plus route-scoped JSON, host-only fixed headers, retries, rate/cooldown policy, cancellation, and ordered concurrent batches | Provider request/response models, search policy, arbitrary network authority, an async runtime |
 | `tea-agent` | Application composition of provider adapter, Luau extension engine, core runtime, and terminal host | Reusable core/domain contracts |
 
 `tea-core` owns the capability-scoped coding host and never imports Luau. The
@@ -46,9 +46,11 @@ workspace/process capability implementations and grants.
 `tea-http` is the repository-wide HTTP boundary. It depends on the
 asynchronous pooled `h12tiny-client` transport and the narrow core
 cancellation/capability contracts. `tea-agent` creates its route-scoped JSON
-client for the bundled Luau web policy; provider adapters share its generic
-byte-stream client through a caller-owned executor. `tea-http` has no
-Firecrawl or provider models.
+client for the bundled Luau web policy; its host binding fixes Firecrawl and
+optional TinyFish routes and keeps the TinyFish API key in a redacted fixed
+header. Provider adapters share its generic byte-stream client through a
+caller-owned executor. `tea-http` has no Firecrawl, TinyFish, or provider
+models.
 
 ## Ports and adapters
 
@@ -305,10 +307,12 @@ read / bash / edit / find declarations
 immutable harness revision + executable tool registry
 ```
 
-The host never discovers cwd, `$HOME`, `.pi`, settings, skills, sessions, or
-provider credentials. Luau owns prompt bytes, schemas, descriptions, and
-ordinary behavior; Rust independently enforces workspace confinement, process
-authority, and transaction settlement. See `docs/default-coding-profile.md`.
+The host never discovers cwd, `$HOME`, `.pi`, settings, skills, or sessions.
+Luau owns prompt bytes, schemas, descriptions, and ordinary behavior; Rust
+independently enforces workspace confinement, process authority, and
+transaction settlement. The terminal's documented optional TinyFish fallback
+reads only `TINYFISH_API_KEY` from its already-provisioned process environment,
+then retains it only as a redacted route header. See `docs/default-coding-profile.md`.
 
 ## Tracing boundary
 

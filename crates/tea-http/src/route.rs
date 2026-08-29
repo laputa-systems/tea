@@ -6,10 +6,13 @@ use std::num::NonZeroUsize;
 use std::time::Duration;
 
 use crate::client::RetryPolicy;
+use http::header::{HeaderName, HeaderValue};
 
 /// The HTTP methods understood by the small extension-facing transport.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum HttpMethod {
+    /// HTTP GET.
+    Get,
     /// HTTP POST.
     Post,
 }
@@ -18,6 +21,7 @@ impl HttpMethod {
     /// Parse the stable extension-facing method spelling.
     pub fn parse(value: &str) -> Option<Self> {
         match value {
+            "GET" => Some(Self::Get),
             "POST" => Some(Self::Post),
             _ => None,
         }
@@ -26,6 +30,7 @@ impl HttpMethod {
     /// Return the wire method spelling.
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::Get => "GET",
             Self::Post => "POST",
         }
     }
@@ -96,7 +101,7 @@ impl RatePolicy {
 
 /// Trusted policy for one named route. The name is an extension-visible route
 /// selector, not a host or URL supplied by the extension.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct Route {
     name: String,
     origin: Origin,
@@ -106,6 +111,8 @@ pub struct Route {
     max_response_bytes: usize,
     retry: RetryPolicy,
     rate: RatePolicy,
+    fixed_headers: Vec<(HeaderName, HeaderValue)>,
+    available: bool,
 }
 
 impl Route {
@@ -139,6 +146,8 @@ impl Route {
             max_response_bytes,
             retry,
             rate,
+            fixed_headers: Vec::new(),
+            available: true,
         })
     }
 
@@ -150,6 +159,33 @@ impl Route {
         }
         self.allowed.insert((method, path));
         Ok(self)
+    }
+
+    /// Attach one host-owned header to every request on this route. Extension
+    /// source cannot see, select, or override fixed header values.
+    pub fn with_fixed_header(
+        mut self,
+        name: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Result<Self, RouteError> {
+        let raw_name = name.into();
+        let name = HeaderName::try_from(raw_name.clone())
+            .map_err(|_| RouteError::InvalidHeaderName(raw_name))?;
+        let value = HeaderValue::try_from(value.into())
+            .map_err(|_| RouteError::InvalidHeaderValue(name.as_str().into()))?;
+        self.fixed_headers.retain(|(existing, _)| existing != &name);
+        self.fixed_headers.push((name, value));
+        self.fixed_headers
+            .sort_by(|(left, _), (right, _)| left.as_str().cmp(right.as_str()));
+        Ok(self)
+    }
+
+    /// Mark a fixed route as currently usable or unavailable. Availability is
+    /// runtime host state, such as whether an optional credential was supplied;
+    /// it deliberately does not alter the durable authority identity.
+    pub fn with_availability(mut self, available: bool) -> Self {
+        self.available = available;
+        self
     }
 
     /// Route name available to the extension capability.
@@ -194,6 +230,14 @@ impl Route {
         self.rate
     }
 
+    pub(crate) fn fixed_headers(&self) -> &[(HeaderName, HeaderValue)] {
+        &self.fixed_headers
+    }
+
+    pub(crate) const fn available(&self) -> bool {
+        self.available
+    }
+
     /// Return the stable host-selected route semantics named by a durable
     /// capability binding. It excludes mutable runtime handles and secrets.
     pub fn semantic_identity(&self) -> String {
@@ -203,8 +247,14 @@ impl Route {
             .map(|(method, path)| format!("{} {}", method.as_str(), path))
             .collect::<Vec<_>>()
             .join(",");
+        let fixed_header_names = self
+            .fixed_headers
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>()
+            .join(",");
         format!(
-            "network.http/v1;route={};origin={};allowed={allowed};request_bytes={};response_bytes={};timeout_ms={};retries={};backoff_initial_ms={};backoff_max_ms={};in_flight={};minimum_interval_ms={}",
+            "network.http/v1;route={};origin={};allowed={allowed};fixed_headers={fixed_header_names};request_bytes={};response_bytes={};timeout_ms={};retries={};backoff_initial_ms={};backoff_max_ms={};in_flight={};minimum_interval_ms={}",
             self.name,
             self.origin.as_str(),
             self.max_request_bytes,
@@ -216,6 +266,29 @@ impl Route {
             self.rate.max_in_flight,
             self.rate.minimum_interval.map_or(0, |interval| interval.as_millis()),
         )
+    }
+}
+
+impl fmt::Debug for Route {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let fixed_header_names = self
+            .fixed_headers
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>();
+        formatter
+            .debug_struct("Route")
+            .field("name", &self.name)
+            .field("origin", &self.origin)
+            .field("allowed", &self.allowed)
+            .field("timeout", &self.timeout)
+            .field("max_request_bytes", &self.max_request_bytes)
+            .field("max_response_bytes", &self.max_response_bytes)
+            .field("retry", &self.retry)
+            .field("rate", &self.rate)
+            .field("fixed_header_names", &fixed_header_names)
+            .field("available", &self.available)
+            .finish()
     }
 }
 
@@ -236,6 +309,11 @@ pub enum RouteError {
     InvalidPath(String),
     /// Request/response bounds or deadline are invalid.
     InvalidBounds,
+    /// A host-owned request header name is syntactically invalid.
+    InvalidHeaderName(String),
+    /// A host-owned request header value is syntactically invalid. The value
+    /// itself is intentionally not retained because it may be a credential.
+    InvalidHeaderValue(String),
     /// The route does not authorize this extension-visible method/path pair.
     ForbiddenRequest { method: String, path: String },
 }
@@ -247,6 +325,8 @@ impl fmt::Display for RouteError {
             Self::InvalidOrigin(message) => write!(formatter, "invalid origin: {message}"),
             Self::InvalidPath(path) => write!(formatter, "invalid route path {path:?}"),
             Self::InvalidBounds => formatter.write_str("route bounds and timeout must be non-zero"),
+            Self::InvalidHeaderName(name) => write!(formatter, "invalid fixed header name {name:?}"),
+            Self::InvalidHeaderValue(name) => write!(formatter, "invalid fixed header value for {name:?}"),
             Self::ForbiddenRequest { method, path } => {
                 write!(formatter, "route does not allow {method} {path}")
             }

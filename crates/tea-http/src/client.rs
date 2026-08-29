@@ -8,6 +8,7 @@ use h12tiny_core::runtime::{BoxExecutor, BoxSendFuture, FnExecutor};
 use http::header::{CONTENT_TYPE, RETRY_AFTER};
 use http::{Request, StatusCode};
 use http_body::{Body, Frame, SizeHint};
+use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::future::Future;
@@ -20,6 +21,32 @@ use tea_protocol::JsonValue;
 
 const MAX_BATCH_REQUESTS: usize = 16;
 const MAX_DIAGNOSTIC_BYTES: usize = 240;
+const QUERY_ENCODED: &AsciiSet = &CONTROLS
+    .add(b' ')
+    .add(b'"')
+    .add(b'#')
+    .add(b'$')
+    .add(b'%')
+    .add(b'&')
+    .add(b'\'')
+    .add(b'+')
+    .add(b',')
+    .add(b'/')
+    .add(b':')
+    .add(b';')
+    .add(b'<')
+    .add(b'=')
+    .add(b'>')
+    .add(b'?')
+    .add(b'@')
+    .add(b'[')
+    .add(b'\\')
+    .add(b']')
+    .add(b'^')
+    .add(b'`')
+    .add(b'{')
+    .add(b'|')
+    .add(b'}');
 
 /// A host-selected bounded retry policy. `max_retries` is in addition to the
 /// first attempt.
@@ -86,8 +113,12 @@ pub struct HttpRequest {
     pub method: HttpMethod,
     /// Route-allowed path.
     pub path: String,
-    /// JSON request body.
-    pub json: JsonValue,
+    /// Query parameters for a fixed GET path. Keys and values are encoded by
+    /// the transport rather than interpolated by extension policy.
+    pub query: BTreeMap<String, String>,
+    /// Optional JSON request body. POST requests supplied through
+    /// `network.http` always carry one; GET requests do not.
+    pub json: Option<JsonValue>,
 }
 
 /// Structured completion presented to the extension policy.
@@ -124,6 +155,8 @@ pub enum TransportErrorCode {
     Cancelled,
     /// A route-wide deadline elapsed.
     Timeout,
+    /// The host selected a route whose required runtime authority is absent.
+    Unavailable,
     /// DNS failed or exceeded its deadline.
     Dns,
     /// TCP connection establishment failed.
@@ -146,6 +179,7 @@ impl TransportErrorCode {
         match self {
             Self::Cancelled => "cancelled",
             Self::Timeout => "timeout",
+            Self::Unavailable => "unavailable",
             Self::Dns => "dns",
             Self::Connect => "connect",
             Self::Tls => "tls",
@@ -260,14 +294,17 @@ impl Client {
             .route
             .authorize(request.method, &request.path)
             .map_err(ClientError::Route)?;
-        let encoded = request
-            .json
-            .to_json_string()
-            .map_err(|error| ClientError::InvalidJson(error.to_string()))?;
-        if encoded.len() > route.route.max_request_bytes() {
+        let mut request_bytes = append_query(String::new(), &request.query).len();
+        if let Some(json) = &request.json {
+            let encoded = json
+                .to_json_string()
+                .map_err(|error| ClientError::InvalidJson(error.to_string()))?;
+            request_bytes = request_bytes.saturating_add(encoded.len());
+        }
+        if request_bytes > route.route.max_request_bytes() {
             return Err(ClientError::RequestTooLarge {
                 maximum: route.route.max_request_bytes(),
-                actual: encoded.len(),
+                actual: request_bytes,
             });
         }
         Ok(route)
@@ -279,6 +316,13 @@ impl Client {
         request: HttpRequest,
         cancellation: CancellationToken,
     ) -> HttpOutcome {
+        if !route.route.available() {
+            return transport(
+                TransportErrorCode::Unavailable,
+                0,
+                "route is unavailable",
+            );
+        }
         let deadline = Instant::now() + route.route.timeout();
         let mut attempts = 0;
         let mut retry_index = 0;
@@ -343,13 +387,29 @@ impl Client {
     ) -> Result<AttemptResponse, AttemptError> {
         let body = request
             .json
-            .to_json_string()
-            .map_err(|_| AttemptError::new(TransportErrorCode::InvalidResponse, "cannot encode JSON request"))?
-            .into_bytes();
-        let http_request = Request::builder()
+            .as_ref()
+            .map(|json| {
+                json.to_json_string()
+                    .map(|encoded| encoded.into_bytes())
+                    .map_err(|_| {
+                        AttemptError::new(
+                            TransportErrorCode::InvalidResponse,
+                            "cannot encode JSON request",
+                        )
+                    })
+            })
+            .transpose()?
+            .unwrap_or_default();
+        let mut builder = Request::builder()
             .method(request.method.as_str())
-            .uri(route.route.origin().uri(&request.path))
-            .header(CONTENT_TYPE, "application/json")
+            .uri(append_query(route.route.origin().uri(&request.path), &request.query));
+        if request.json.is_some() {
+            builder = builder.header(CONTENT_TYPE, "application/json");
+        }
+        for (name, value) in route.route.fixed_headers() {
+            builder = builder.header(name, value);
+        }
+        let http_request = builder
             .body(RequestBody::new(body))
             .map_err(|error| AttemptError::new(TransportErrorCode::Write, &format!("cannot build request: {error}")))?;
         let options = RequestOptions::new()
@@ -377,6 +437,22 @@ impl Client {
             json,
         })
     }
+}
+
+fn append_query(mut uri: String, query: &BTreeMap<String, String>) -> String {
+    if query.is_empty() {
+        return uri;
+    }
+    uri.push('?');
+    for (index, (key, value)) in query.iter().enumerate() {
+        if index != 0 {
+            uri.push('&');
+        }
+        uri.push_str(&utf8_percent_encode(key, QUERY_ENCODED).to_string());
+        uri.push('=');
+        uri.push_str(&utf8_percent_encode(value, QUERY_ENCODED).to_string());
+    }
+    uri
 }
 
 #[derive(Debug)]
@@ -682,6 +758,7 @@ fn code_message(code: TransportErrorCode) -> &'static str {
     match code {
         TransportErrorCode::Cancelled => "request cancelled",
         TransportErrorCode::Timeout => "request timed out",
+        TransportErrorCode::Unavailable => "route is unavailable",
         TransportErrorCode::Dns => "DNS resolution failed",
         TransportErrorCode::Connect => "connection establishment failed",
         TransportErrorCode::Tls => "TLS negotiation failed",
@@ -783,7 +860,8 @@ mod tests {
                 route: "other".into(),
                 method: HttpMethod::Post,
                 path: "/ok".into(),
-                json: JsonValue::Null,
+                query: BTreeMap::new(),
+                json: Some(JsonValue::Null),
             },
             cancellation.clone(),
         ));
@@ -793,7 +871,8 @@ mod tests {
                 route: "fixture".into(),
                 method: HttpMethod::Post,
                 path: "/other".into(),
-                json: JsonValue::Null,
+                query: BTreeMap::new(),
+                json: Some(JsonValue::Null),
             },
             cancellation,
         ));
@@ -849,7 +928,8 @@ mod tests {
             route: "fixture".into(),
             method: HttpMethod::Post,
             path: "/ok".into(),
-            json: JsonValue::object([("request", JsonValue::String("value".into()))]),
+            query: BTreeMap::new(),
+            json: Some(JsonValue::object([("request", JsonValue::String("value".into()))])),
         }
     }
 
@@ -898,6 +978,142 @@ mod tests {
         )
         .expect("fixture response writes");
         stream.flush().expect("fixture response flushes");
+    }
+
+    fn read_headers(stream: &mut TcpStream) -> String {
+        let mut bytes = Vec::new();
+        let mut buffer = [0_u8; 1024];
+        while !bytes.windows(4).any(|window| window == b"\r\n\r\n") {
+            let count = stream.read(&mut buffer).expect("fixture request reads");
+            assert_ne!(count, 0, "client must not close before a request");
+            bytes.extend_from_slice(&buffer[..count]);
+        }
+        String::from_utf8(bytes).expect("fixture headers are UTF-8")
+    }
+
+    #[test]
+    fn get_queries_are_encoded_and_host_headers_are_secret_and_fixed() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("fixture binds");
+        let address = listener.local_addr().expect("fixture has address");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("fixture accepts connection");
+            let headers = read_headers(&mut stream);
+            assert!(headers.starts_with("GET /?purpose=web%20evidence&query=Rust%20%26%20HTTP%2F2 HTTP/1.1\r\n"));
+            assert!(headers.to_ascii_lowercase().contains("x-api-key: tinyfish-secret\r\n"));
+            write_response(&mut stream, 200, r#"{"results":[]}"#);
+        });
+        let route = Route::new(
+            "tinyfish-search",
+            Origin::new("http", address.to_string()).expect("origin is valid"),
+            Duration::from_secs(2),
+            1024,
+            1024,
+            RetryPolicy::new(0, Duration::ZERO, Duration::ZERO),
+            RatePolicy::new(NonZeroUsize::new(1).expect("nonzero"), None),
+        )
+        .expect("route is valid")
+        .allow(HttpMethod::Get, "/")
+        .expect("path is valid")
+        .with_fixed_header("X-API-Key", "tinyfish-secret")
+        .expect("header is valid");
+        assert!(!route.semantic_identity().contains("tinyfish-secret"));
+        assert!(!format!("{route:?}").contains("tinyfish-secret"));
+        let client = Client::new(
+            background_executor(|future| {
+                smol::spawn(future).detach();
+            }),
+            [route],
+        )
+        .expect("client configures");
+        let outcome = smol::block_on(client.request(
+            HttpRequest {
+                route: "tinyfish-search".into(),
+                method: HttpMethod::Get,
+                path: "/".into(),
+                query: BTreeMap::from([
+                    ("query".into(), "Rust & HTTP/2".into()),
+                    ("purpose".into(), "web evidence".into()),
+                ]),
+                json: None,
+            },
+            CancellationToken::new(),
+        ))
+        .expect("request is authorized");
+        assert!(matches!(outcome, HttpOutcome::Response { status: 200, .. }));
+        server.join().expect("fixture server settles");
+    }
+
+    #[test]
+    fn unavailable_route_returns_a_typed_outcome_without_network_io() {
+        let route = Route::new(
+            "optional",
+            Origin::new("http", "127.0.0.1:9").expect("origin is valid"),
+            Duration::from_secs(1),
+            128,
+            128,
+            RetryPolicy::new(0, Duration::ZERO, Duration::ZERO),
+            RatePolicy::new(NonZeroUsize::new(1).expect("nonzero"), None),
+        )
+        .expect("route is valid")
+        .allow(HttpMethod::Get, "/")
+        .expect("path is valid")
+        .with_availability(false);
+        let client = Client::new(background_executor(|future| drop(future)), [route])
+            .expect("client configures");
+        let outcome = smol_block(client.request(
+            HttpRequest {
+                route: "optional".into(),
+                method: HttpMethod::Get,
+                path: "/".into(),
+                query: BTreeMap::new(),
+                json: None,
+            },
+            CancellationToken::new(),
+        ))
+        .expect("request is authorized");
+        assert!(matches!(
+            outcome,
+            HttpOutcome::TransportError {
+                code: TransportErrorCode::Unavailable,
+                attempts: 0,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn encoded_query_counts_against_the_route_request_limit() {
+        let route = Route::new(
+            "bounded-query",
+            Origin::new("http", "127.0.0.1:9").expect("origin is valid"),
+            Duration::from_secs(1),
+            4,
+            128,
+            RetryPolicy::new(0, Duration::ZERO, Duration::ZERO),
+            RatePolicy::new(NonZeroUsize::new(1).expect("nonzero"), None),
+        )
+        .expect("route is valid")
+        .allow(HttpMethod::Get, "/")
+        .expect("path is valid");
+        let client = Client::new(background_executor(|future| drop(future)), [route])
+            .expect("client configures");
+        let result = smol_block(client.request(
+            HttpRequest {
+                route: "bounded-query".into(),
+                method: HttpMethod::Get,
+                path: "/".into(),
+                query: BTreeMap::from([("q".into(), "long".into())]),
+                json: None,
+            },
+            CancellationToken::new(),
+        ));
+        assert!(matches!(
+            result,
+            Err(ClientError::RequestTooLarge {
+                maximum: 4,
+                actual: 7,
+            })
+        ));
     }
 
     #[test]

@@ -22,4 +22,8 @@ storage, run settlement, or host authority.
 
 Features outside these explicit boundaries require a new contract, focused
 tests, and documentation. No ambient discovery, silent provider selection,
-format interpretation, or fallback for a retired contract belongs in the v1 surface.
+format interpretation, or fallback for a retired contract belongs in the v1
+surface. The terminal's documented TinyFish web fallback is an explicit
+host-owned exception: it uses only a caller-provisioned `TINYFISH_API_KEY`,
+never exposes that key to policy or durable state, and leaves Firecrawl Keyless
+as the default backend.
