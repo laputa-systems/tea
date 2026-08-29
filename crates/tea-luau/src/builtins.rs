@@ -78,6 +78,37 @@ pub fn coding(limits: ExtensionLimits) -> ExtensionSourceTree {
     }
 }
 
+/// Return the exact bundled web-retrieval extension source tree.
+///
+/// Firecrawl protocol and output policy remain in the checked-in Luau source;
+/// the host independently decides whether to grant its route-scoped generic
+/// `network.http` capability.
+pub fn web(limits: ExtensionLimits) -> ExtensionSourceTree {
+    ExtensionSourceTree {
+        extension_id: "web".into(),
+        files: BTreeMap::from([
+            (
+                "manifest.json".into(),
+                include_str!("../builtins/web/manifest.json").into(),
+            ),
+            (
+                "init.luau".into(),
+                include_str!("../builtins/web/init.luau").into(),
+            ),
+            (
+                "handler_source.luau".into(),
+                include_str!("../builtins/web/handler_source.luau").into(),
+            ),
+            (
+                "prompts.luau".into(),
+                include_str!("../builtins/web/prompts.luau").into(),
+            ),
+        ]),
+        expected_capabilities: Some(BTreeSet::from(["network.http".into()])),
+        limits,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -85,14 +116,16 @@ mod tests {
     use crate::{LuaPolicy, LuauExtensionEngine, PolicyError};
     use std::future::Future;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
     use std::task::{Context, Poll, Waker};
     use std::time::Duration;
     use tea_core::effect::RunProvenance;
     use tea_core::harness::extension::ExtensionToolLimits;
     use tea_core::harness::extension::{
-        ExtensionCapabilityBindings, ExtensionCommandInput, ExtensionEngine, ExtensionIdleInput,
-        ExtensionMemoryCollector, ExtensionOperationOutcome, ExtensionStateView,
+        ExtensionCapabilityBindings, ExtensionCapabilityError, ExtensionCapabilityFuture,
+        ExtensionCapabilityRequest, ExtensionCapabilityResponse, ExtensionCommandInput,
+        ExtensionEngine, ExtensionIdleInput, ExtensionMemoryCollector, ExtensionOperationOutcome,
+        ExtensionStateView,
     };
     use tea_core::hooks::NoHooks;
     use tea_core::state::{SerializedJson, ToolCallId};
@@ -504,6 +537,306 @@ mod tests {
                 .map(|tool| tool.name.as_str())
                 .collect::<Vec<_>>(),
             ["get_goal", "create_goal", "update_goal"],
+        );
+    }
+
+    #[derive(Clone, Default)]
+    struct FakeWebCapability {
+        calls: Arc<Mutex<Vec<(String, tea_protocol::JsonValue)>>>,
+    }
+
+    impl tea_core::harness::extension::ExtensionCapability for FakeWebCapability {
+        fn invoke(
+            &self,
+            request: ExtensionCapabilityRequest,
+            _cancellation: tea_core::scheduler::CancellationToken,
+        ) -> ExtensionCapabilityFuture {
+            self.calls
+                .lock()
+                .expect("fake web call lock")
+                .push((request.method.clone(), request.arguments.clone()));
+            let response = match request.method.as_str() {
+                "request" => {
+                    let query = request
+                        .arguments
+                        .get("json")
+                        .and_then(|json| json.get("query"))
+                        .and_then(tea_protocol::JsonValue::as_str);
+                    if query == Some("rate") {
+                        response(429, tea_protocol::JsonValue::object([(
+                            "error",
+                            tea_protocol::JsonValue::String("quota exhausted".into()),
+                        )]))
+                    } else if query == Some("large") {
+                        response(
+                            200,
+                            tea_protocol::JsonValue::object([
+                                ("success", tea_protocol::JsonValue::Bool(true)),
+                                (
+                                    "data",
+                                    tea_protocol::JsonValue::object([(
+                                        "web",
+                                        tea_protocol::JsonValue::Array(vec![tea_protocol::JsonValue::object([
+                                            ("url", tea_protocol::JsonValue::String("https://large.example".into())),
+                                            ("title", tea_protocol::JsonValue::String("Large".into())),
+                                            ("markdown", tea_protocol::JsonValue::String("é".repeat(20_000))),
+                                        ])]),
+                                    )]),
+                                ),
+                            ]),
+                        )
+                    } else if query == Some("repair") {
+                        response_json(
+                            r#"{"success":true,"data":{"web":[{"url":"https://one.example","title":"One","markdown":"first"},{"url":"https://two.example","title":"Two"},{"url":"https://three.example","title":"Three"}]}}"#,
+                        )
+                    } else {
+                        response_json(
+                            r##"{"success":true,"data":{"web":[{"url":"https://docs.example","title":"Documentation","markdown":"# Evidence\nactual source"}]}}"##,
+                        )
+                    }
+                }
+                "request_many" => {
+                    let requests = request
+                        .arguments
+                        .get("requests")
+                        .and_then(tea_protocol::JsonValue::as_array)
+                        .expect("batch requests are an array");
+                    tea_protocol::JsonValue::Array(
+                        requests
+                            .iter()
+                            .enumerate()
+                            .map(|(index, request)| {
+                                let url = request
+                                    .get("json")
+                                    .and_then(|json| json.get("url"))
+                                    .and_then(tea_protocol::JsonValue::as_str)
+                                    .unwrap_or_default();
+                                if url.contains("fail") {
+                                    response(429, tea_protocol::JsonValue::object([(
+                                        "error",
+                                        tea_protocol::JsonValue::String("rate limited".into()),
+                                    )]))
+                                } else {
+                                    response_json(&format!(
+                                        r#"{{"success":true,"data":{{"title":"Page {}","markdown":"page {} body"}}}}"#,
+                                        index + 1,
+                                        index + 1,
+                                    ))
+                                }
+                            })
+                            .collect(),
+                    )
+                }
+                method => {
+                    let method = method.to_owned();
+                    return Box::pin(async move {
+                        Err(ExtensionCapabilityError::MethodDenied {
+                            capability: "network.http".into(),
+                            method,
+                        })
+                    });
+                }
+            };
+            Box::pin(async move {
+                Ok(ExtensionCapabilityResponse { value: response })
+            })
+        }
+    }
+
+    fn response_json(body: &str) -> tea_protocol::JsonValue {
+        response(
+            200,
+            tea_protocol::JsonValue::parse(body).expect("fixture JSON is valid"),
+        )
+    }
+
+    fn response(status: u64, body: tea_protocol::JsonValue) -> tea_protocol::JsonValue {
+        tea_protocol::JsonValue::object([
+            ("kind", tea_protocol::JsonValue::String("response".into())),
+            ("status", tea_protocol::JsonValue::from(status)),
+            ("attempts", tea_protocol::JsonValue::from(1_u64)),
+            ("headers", tea_protocol::JsonValue::Object(BTreeMap::new())),
+            ("json", body),
+        ])
+    }
+
+    #[test]
+    fn web_bundle_is_closed_and_executes_search_repair_and_url_batches() {
+        let limits = ExtensionLimits {
+            max_source_bytes: 64 * 1024,
+            max_memory_bytes: 1024 * 1024,
+            max_interrupt_checks: 10_000,
+        };
+        let tree = web(limits);
+        assert_eq!(tree.extension_id, "web");
+        assert_eq!(
+            tree.files.keys().collect::<Vec<_>>(),
+            ["handler_source.luau", "init.luau", "manifest.json", "prompts.luau"]
+        );
+        assert_eq!(
+            tree.expected_capabilities,
+            Some(BTreeSet::from(["network.http".into()]))
+        );
+        let descriptor = LuauExtensionEngine
+            .describe(&tree)
+            .expect("bundled web source resolves");
+        assert_eq!(descriptor.tools.len(), 1);
+        let tool = &descriptor.tools[0];
+        assert_eq!(tool.name, "web");
+        assert_eq!(tool.capability, "network.http");
+        assert!(tool.description.contains("batch independent known URLs"));
+        let branches = tool
+            .schema
+            .get("oneOf")
+            .and_then(tea_protocol::JsonValue::as_array)
+            .expect("web schema is a strict oneOf");
+        assert_eq!(branches.len(), 2);
+
+        let fake = FakeWebCapability::default();
+        let mut bindings = ExtensionCapabilityBindings::new();
+        bindings
+            .insert(
+                "network.http",
+                Arc::new(fake.clone()),
+                ExtensionToolLimits {
+                    max_memory_bytes: 1536 * 1024,
+                    max_interrupt_checks: 100_000,
+                    ..ExtensionToolLimits::default()
+                },
+            )
+            .expect("network HTTP is granted once");
+        let resolved = LuauExtensionEngine
+            .resolve(
+                &tree,
+                bindings,
+                Arc::new(NoHooks),
+                0,
+                Arc::new(ExtensionMemoryCollector::default()),
+            )
+            .expect("web handler resolves through the real extension engine");
+        let context = ToolContext {
+            cancellation: tea_core::scheduler::CancellationToken::new(),
+            provenance: RunProvenance::default(),
+        };
+        let execute = |id: &str, arguments: &str| {
+            block_on(
+                resolved
+                    .tools
+                    .get("web")
+                    .expect("web resolves")
+                    .execute(
+                        ToolCall {
+                            id: ToolCallId::new(id).expect("call ID is valid"),
+                            name: "web".into(),
+                            arguments: SerializedJson::new(arguments),
+                        },
+                        context.clone(),
+                        ToolUpdateSink::disabled(),
+                    ),
+            )
+            .expect("web handler executes")
+        };
+
+        let search = execute("web-search", r#"{"query":"rustls defaults"}"#);
+        assert!(!search.is_error);
+        assert!(search.content.contains("Mode: developer"));
+        assert!(search.content.contains("BEGIN UNTRUSTED WEB CONTENT"));
+        let calls = fake.calls.lock().expect("fake web call lock");
+        assert_eq!(calls.len(), 1, "search with Markdown needs no follow-up scrape");
+        let search_json = calls[0].1.get("json").expect("search JSON request exists");
+        assert_eq!(
+            search_json
+                .get("categories")
+                .and_then(tea_protocol::JsonValue::as_array)
+                .and_then(|categories| categories.first())
+                .and_then(tea_protocol::JsonValue::as_str),
+            Some("developer")
+        );
+        assert_eq!(
+            search_json
+                .get("scrapeOptions")
+                .and_then(|options| options.get("onlyMainContent"))
+                .and_then(tea_protocol::JsonValue::as_bool),
+            Some(true)
+        );
+        drop(calls);
+
+        let repair = execute("web-repair", r#"{"query":"repair","kind":"web","limit":3}"#);
+        assert!(!repair.is_error);
+        let calls = fake.calls.lock().expect("fake web call lock");
+        assert_eq!(calls.len(), 3);
+        assert_eq!(calls[1].0, "request");
+        assert_eq!(calls[2].0, "request_many");
+        assert_eq!(
+            calls[2]
+                .1
+                .get("requests")
+                .and_then(tea_protocol::JsonValue::as_array)
+                .map(|requests| requests.len()),
+            Some(2)
+        );
+        drop(calls);
+
+        let general = execute("web-general", r#"{"query":"general","kind":"web"}"#);
+        assert!(!general.is_error);
+        let calls = fake.calls.lock().expect("fake web call lock");
+        let general_json = calls
+            .last()
+            .and_then(|call| call.1.get("json"))
+            .expect("general search JSON exists");
+        assert!(general_json.get("categories").is_none());
+        drop(calls);
+
+        let invalid = execute(
+            "web-invalid",
+            r#"{"query":"foo","action":"search"}"#,
+        );
+        assert!(invalid.is_error);
+        assert!(invalid.content.contains("accepts only query"));
+
+        let partial = execute(
+            "web-partial",
+            r#"{"urls":["https://one.example","https://fail.example","https://three.example"]}"#,
+        );
+        assert!(!partial.is_error);
+        let first = partial.content.find("[1] Page 1").expect("first source remains first");
+        let failed = partial.content.find("[2] FAILED").expect("failure is represented in place");
+        let third = partial.content.find("[3] Page 3").expect("later source retains input index");
+        assert!(first < failed && failed < third);
+
+        let all_failed = execute(
+            "web-all-failed",
+            r#"{"urls":["https://fail-one.example","https://fail-two.example"]}"#,
+        );
+        assert!(all_failed.is_error);
+        assert!(all_failed.content.contains("bash tool with curl"));
+
+        let limited = execute("web-rate", r#"{"query":"rate"}"#);
+        assert!(limited.is_error);
+        assert!(limited.content.contains("HTTP 429"));
+        assert!(limited.content.contains("curl"));
+
+        let truncated = execute("web-large", r#"{"query":"large"}"#);
+        assert!(!truncated.is_error);
+        assert!(truncated.content.contains("[content truncated;"));
+        assert!(truncated.content.len() <= 96 * 1024 + 8 * 1024);
+
+        let urls = execute(
+            "web-urls",
+            r#"{"urls":["https://a.example","https://b.example"]}"#,
+        );
+        assert!(!urls.is_error);
+        assert!(urls.content.contains("page 1 body"));
+        assert!(urls.content.contains("page 2 body"));
+        let calls = fake.calls.lock().expect("fake web call lock");
+        assert_eq!(calls.last().map(|call| call.0.as_str()), Some("request_many"));
+        assert_eq!(
+            calls
+                .last()
+                .and_then(|call| call.1.get("requests"))
+                .and_then(tea_protocol::JsonValue::as_array)
+                .map(|requests| requests.len()),
+            Some(2)
         );
     }
 

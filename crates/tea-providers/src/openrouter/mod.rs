@@ -11,7 +11,7 @@ mod payload;
 mod response;
 mod transport;
 
-use super::http::{HttpStream, Request, StreamEvent, stream};
+use crate::transport_runtime::client as http_client;
 use super::retry::{RetryableError, retry_with_backoff};
 use crate::scheduler::{
     AdapterRequestObservation, CancellationToken, ModelEventFuture, ModelEventStream, ModelFuture,
@@ -27,6 +27,10 @@ use std::fmt;
 use std::io::Read;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
+use tea_http::{
+    TransportRequest as Request, TransportStream as HttpStream,
+    TransportStreamEvent as StreamEvent,
+};
 
 use payload::build_payload;
 #[cfg(test)]
@@ -191,7 +195,7 @@ impl OpenRouterEventStream {
                     payload.len(),
                 ),
             ));
-        event_stream.response = Some(stream(
+        event_stream.response = Some(http_client().stream(
             Request::post(
                 event_stream.provider.config.completion_url(),
                 payload,
@@ -203,7 +207,7 @@ impl OpenRouterEventStream {
             )
             .header("Content-Type", "application/json")
             .with_stall_timeout(event_stream.provider.config.stall_timeout),
-            &cancellation,
+            cancellation.clone(),
         ));
         event_stream.decoder = Some(StreamingSseDecoder::new());
         event_stream

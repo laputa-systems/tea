@@ -297,6 +297,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d45db016d36b838f563236e9193d0ee6ce38f3f68b6c94e914b4929c96bbb890"
 
 [[package]]
+name = "fnv"
+version = "1.0.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f9eec918d3f24069decb9af1554cad7c880e2da24a9afd88aca000531ab82c1"
+
+[[package]]
+name = "futures-channel"
+version = "0.3.34"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b1f9e3d69d39e4862ffed03ed071a76f9a13ba1d9109d355b0f0aa6b15e393c4"
+dependencies = [
+ "futures-core",
+]
+
+[[package]]
 name = "futures-core"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -319,6 +334,41 @@ dependencies = [
  "futures-io",
  "parking",
  "pin-project-lite",
+]
+
+[[package]]
+name = "futures-rustls"
+version = "0.26.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a8f2f12607f92c69b12ed746fabf9ca4f5c482cba46679c1a75b874ed7c26adb"
+dependencies = [
+ "futures-io",
+ "rustls",
+ "rustls-pki-types",
+]
+
+[[package]]
+name = "futures-sink"
+version = "0.3.34"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1944426bf7d03f1d14f708785e4b33efd750b36d48a157b836b3efc15ede8e1d"
+
+[[package]]
+name = "futures-task"
+version = "0.3.34"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cd417de3d1d015fc3bfd2b1ea46dfc7bab72ef86f1cc7cc9c78e728b34a6d1fd"
+
+[[package]]
+name = "futures-util"
+version = "0.3.34"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0d50a92467f8ba5dd6e3ee5d4bd04d73ab2e4e1c44474a0674821dfce14b79bc"
+dependencies = [
+ "futures-core",
+ "futures-task",
+ "pin-project-lite",
+ "slab",
 ]
 
 [[package]]
@@ -366,6 +416,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "h12tiny-client"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c8a8538043b17a2754598e461773f5d1322f1798399aa398492455ffc5e606e1"
+dependencies = [
+ "async-io",
+ "async-net",
+ "futures-channel",
+ "futures-io",
+ "futures-rustls",
+ "futures-util",
+ "h12tiny-client-normalize",
+ "h12tiny-core",
+ "http",
+ "http-body",
+ "laputa-hyper-futures-lite",
+ "rustls",
+ "rustls-graviola",
+ "webpki-roots",
+]
+
+[[package]]
 name = "h12tiny-client-normalize"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -375,16 +447,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "h12tiny-client-sync"
+name = "h12tiny-core"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b9776601813dd0079f234fcaf9cce423f0f004bc649456762e268e27b346cc30"
+checksum = "8161e4576861dc463275d69c16e0da70af2d3f25ae21a86a16e35f4f50301285"
 dependencies = [
- "h12tiny-client-normalize",
- "http",
- "rustls",
- "rustls-graviola",
- "webpki-roots",
+ "async-io",
+ "futures-io",
+ "laputa-hyper-futures-lite",
 ]
 
 [[package]]
@@ -408,6 +478,22 @@ dependencies = [
  "bytes",
  "itoa",
 ]
+
+[[package]]
+name = "http-body"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ca2a8f2913ee65f60facd6a5905613afaa448497a0230cc41ce022d93290bc2c"
+dependencies = [
+ "bytes",
+ "http",
+]
+
+[[package]]
+name = "httparse"
+version = "1.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6dbf3de79e51f3d586ab4cb9d5c3e2c14aa28ed23d180cf89b4df0454a69cc87"
 
 [[package]]
 name = "indexmap"
@@ -436,10 +522,52 @@ dependencies = [
 ]
 
 [[package]]
+name = "laputa-h2-futures"
+version = "0.4.16-beta.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7c7dc39bf4eac6ebb135f71c4e7f7b2560dc5a65284b38a6dd14a5d70151ebf5"
+dependencies = [
+ "atomic-waker",
+ "bytes",
+ "fnv",
+ "futures-core",
+ "futures-io",
+ "futures-lite",
+ "futures-sink",
+ "http",
+ "indexmap",
+ "log",
+ "pin-project-lite",
+ "slab",
+]
+
+[[package]]
 name = "laputa-hi-lite"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cfb0c7dc2a6271b5a4eddecbbef679ef3f0a19d32c57bdba6bba696d6fa3360e"
+
+[[package]]
+name = "laputa-hyper-futures-lite"
+version = "1.11.0-beta.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "38df59f5dc3db79b0659359a02596f61afdc9857d5b8d7897d679fccafcdcd45"
+dependencies = [
+ "atomic-waker",
+ "bytes",
+ "futures-channel",
+ "futures-core",
+ "futures-io",
+ "futures-lite",
+ "http",
+ "http-body",
+ "httparse",
+ "itoa",
+ "laputa-h2-futures",
+ "pin-project-lite",
+ "smallvec",
+ "want",
+]
 
 [[package]]
 name = "laputa-ptytest"
@@ -477,6 +605,12 @@ checksum = "224399e74b87b5f3557511d98dff8b14089b3dadafcab6bb93eab67d3aace965"
 dependencies = [
  "scopeguard",
 ]
+
+[[package]]
+name = "log"
+version = "0.4.34"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 
 [[package]]
 name = "luau0-src"
@@ -867,6 +1001,7 @@ dependencies = [
  "rustix",
  "smol",
  "tea-core",
+ "tea-http",
  "tea-luau",
  "tea-protocol",
  "tea-providers",
@@ -884,6 +1019,23 @@ dependencies = [
  "tea-protocol",
  "tea-session",
  "tea-trace",
+]
+
+[[package]]
+name = "tea-http"
+version = "1.0.0"
+dependencies = [
+ "async-io",
+ "bytes",
+ "futures-util",
+ "h12tiny-client",
+ "h12tiny-core",
+ "http",
+ "http-body",
+ "percent-encoding",
+ "smol",
+ "tea-core",
+ "tea-protocol",
 ]
 
 [[package]]
@@ -906,11 +1058,9 @@ dependencies = [
 name = "tea-providers"
 version = "1.0.0"
 dependencies = [
- "h12tiny-client-sync",
- "http",
- "percent-encoding",
  "smol",
  "tea-core",
+ "tea-http",
  "tea-luau",
  "tea-protocol",
  "tea-session",
@@ -974,6 +1124,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d56353a2a665ad0f41a421187180aab746c8c325620617ad883a99a1cbe66d2"
 
 [[package]]
+name = "try-lock"
+version = "0.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
+
+[[package]]
 name = "unicode-ident"
 version = "1.0.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1010,6 +1166,15 @@ checksum = "a5924018406ce0063cd67f8e008104968b74b563ee1b85dde3ed1f7cb87d3dbd"
 dependencies = [
  "arrayvec",
  "memchr",
+]
+
+[[package]]
+name = "want"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bfa7760aed19e106de2c7c0b581b509f2f25d3dacaf737cb82ac61bc6d760b0e"
+dependencies = [
+ "try-lock",
 ]
 
 [[package]]

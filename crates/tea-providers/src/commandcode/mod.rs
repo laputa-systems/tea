@@ -9,7 +9,7 @@ mod config;
 mod payload;
 mod response;
 
-use super::http::{Request, send};
+use crate::transport_runtime::client as http_client;
 use super::retry::{RetryableError, retry_with_backoff, wait_with_cancellation};
 use crate::json::{JsonValue, json_value, to_bytes};
 use crate::scheduler::{
@@ -23,6 +23,7 @@ pub use config::{
 };
 use std::fmt;
 use std::sync::Mutex;
+use tea_http::TransportRequest as Request;
 
 // Command Code's installed 1.24.0 client sends this exact gateway version. Keep this wire
 // value here, rather than inheriting a host-process version, so embeddings remain reproducible.
@@ -287,7 +288,8 @@ impl CommandCodeProvider {
                     .expect("Command Code headers use `name: value` spelling");
                 request = request.header(name, value);
             }
-            send(request, cancellation)
+            http_client()
+                .send_blocking(request, cancellation)
                 .map(|response| response.body)
                 .map_err(|failure| RetryableError {
                     retryable: !cancellation.is_cancelled(),

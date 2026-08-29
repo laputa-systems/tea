@@ -20,17 +20,13 @@ opaque caller providers or replay a stream after it has exposed events.
 | `provider-commandcode` | `tea_providers::commandcode` | Command Code `/alpha/generate` NDJSON | Opt-in rustls + Graviola HTTPS gateway transport; the evaluation runner selects it with `--provider commandcode`. |
 | `provider-local` | `tea_providers::local` | Caller-selected local OpenAI-compatible Chat Completions SSE endpoint | Opt-in incremental HTTP transport for oMLX and similar local servers; no credentials or endpoint discovery. |
 
-The optional transports currently use the sibling `h12tiny-client-sync` source
-at `../h12tiny` because that client is not published on crates.io. The release
-workflow checks out a pinned revision before building. Advance that pin to the
-h12tiny revision containing `h12tiny-client-sync` before a release so local
-and release builds use the same blocking HTTP/1.1-only implementation. Its TLS
-client uses an explicit Rustls `CryptoProvider` from Graviola and advertises
-only `http/1.1` through ALPN. h12tiny's standard-library resolver is
-synchronous; its connection timeout covers TCP and TLS after resolution, while
-the existing request and response-body deadlines continue to bound provider
-work after the connection is established. It has no futures runtime, Hyper,
-HTTP/2, pool, proxy, redirect, or ambient configuration dependency.
+All repository HTTP I/O goes through `tea-http`. Provider adapters share one
+pooled `tea_http::TransportClient` through their `transport_runtime` executor
+bridge; the adapter itself owns only its payload, headers, status
+classification, and SSE/NDJSON parsing. `tea-http` owns the asynchronous
+h12tiny client, direct-origin DNS/TCP/TLS, HTTP/1.1 and HTTP/2 negotiation,
+connection pooling, cancellation, request deadlines, response-stall limits,
+and byte-stream delivery. It has no provider protocol or credential knowledge.
 
 Enable only the provider an application owns:
 

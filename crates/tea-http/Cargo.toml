@@ -1,0 +1,21 @@
+[package]
+name = "tea-http"
+version = "1.0.0"
+edition = "2024"
+description = "Route-scoped, caller-polled HTTP capabilities for Tea extensions"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+async-io = "=2.6.0"
+bytes = "=1.12.1"
+futures-util = { version = "=0.3.34", default-features = false, features = ["async-await", "std"] }
+h12tiny-client = { version = "=0.1.1", default-features = false, features = ["http1", "http2", "tls"] }
+h12tiny-core = "=0.1.0"
+http = "=1.5.0"
+http-body = "=1.1.0"
+percent-encoding = "=2.3.2"
+tea-core = { path = "../tea-core" }
+tea-protocol = { path = "../tea-protocol" }
+
+[dev-dependencies]
+smol.workspace = true

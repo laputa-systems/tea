@@ -10,7 +10,7 @@ mod config;
 mod payload;
 mod response;
 
-use super::http::{HttpStream, Request, StreamEvent, stream};
+use crate::transport_runtime::client as http_client;
 pub use config::{LocalConfig, LocalConfigError};
 use payload::local_payload;
 use response::{LocalSseComplete, LocalSseDecoder, parse_local_response};
@@ -22,6 +22,10 @@ use crate::scheduler::{
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
 use std::task::{Context, Poll};
+use tea_http::{
+    TransportRequest as Request, TransportStream as HttpStream,
+    TransportStreamEvent as StreamEvent,
+};
 
 /// The model ID exposed by the documented 5-bit Laguna checkpoint.
 pub const LAGUNA_XS_2_1_MODEL: &str = "Laguna-XS-2.1-5bit";
@@ -101,7 +105,7 @@ impl LocalEventStream {
             "{}/chat/completions",
             event_stream.config.base_url.trim_end_matches('/')
         );
-        event_stream.response = Some(stream(
+        event_stream.response = Some(http_client().stream(
             Request::post(
                 endpoint,
                 payload.into_bytes(),
@@ -109,7 +113,7 @@ impl LocalEventStream {
             )
             .header("Content-Type", "application/json")
             .header("Accept", "text/event-stream"),
-            &cancellation,
+            cancellation.clone(),
         ));
         event_stream.decoder = Some(LocalSseDecoder::new());
         event_stream

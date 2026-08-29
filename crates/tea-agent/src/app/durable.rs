@@ -9,7 +9,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
-use std::num::{NonZeroU32, NonZeroU64};
+use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -265,6 +265,7 @@ fn create_host_harness_with_operations(
             workspace,
             Arc::clone(&coding_operations),
         )?;
+        let (web_binding, web_binding_ref) = web_capability_binding()?;
         let mut capability_catalog = PluginCapabilityCatalog::new();
         capability_catalog
             .insert(goal_binding)
@@ -275,11 +276,17 @@ fn create_host_harness_with_operations(
                 .map_err(|error| AppError::Setup(error.to_string()))?;
         }
         capability_catalog
+            .insert(web_binding)
+            .map_err(|error| AppError::Setup(error.to_string()))?;
+        capability_catalog
             .fix_tool_capabilities(
                 "coding",
                 coding_tool_capability_grants(),
                 coding_additional_read_only_capabilities(),
             )
+            .map_err(|error| AppError::Setup(error.to_string()))?;
+        capability_catalog
+            .fix_tool_capabilities("web", web_tool_capability_grants(), BTreeSet::new())
             .map_err(|error| AppError::Setup(error.to_string()))?;
         let (root_prompt, root_presentations) =
             root_harness_surface(&configuration, subagent_policy.as_ref())?;
@@ -289,13 +296,17 @@ fn create_host_harness_with_operations(
                 source: tea_luau::builtins::goal(extension_limits(&resource_limits)),
             },
             HarnessSeedExtension {
+                scope: HarnessSeedExtensionScope::Global,
+                source: tea_luau::builtins::web(extension_limits(&resource_limits)),
+            },
+            HarnessSeedExtension {
                 // Coding behavior is session-local revisioned source. Its
                 // capability grants remain fixed separately in the catalog.
                 scope: HarnessSeedExtensionScope::Session,
                 source: tea_luau::builtins::coding(extension_limits(&resource_limits)),
             },
         ];
-        let mut capability_references = vec![goal_binding_ref.clone()];
+        let mut capability_references = vec![goal_binding_ref.clone(), web_binding_ref.clone()];
         capability_references.extend(coding_bindings.references.iter().cloned());
         let seeded = HarnessSeedBuilder::new(
             Arc::clone(&artifacts),
@@ -324,6 +335,7 @@ fn create_host_harness_with_operations(
                 policy,
                 &resource_limits,
                 &goal_binding_ref,
+                &web_binding_ref,
                 Some(coding_bindings.references.as_slice()),
                 created_at_ms,
             )?,
@@ -664,6 +676,7 @@ fn reopen_host_harness_with_operations(
         binding_digest: goal_binding.binding_digest(),
     };
     let coding_bindings = coding_capability_bindings_with_operations(workspace, coding_operations)?;
+    let (web_binding, web_binding_ref) = web_capability_binding()?;
     let mut capability_catalog = PluginCapabilityCatalog::new();
     capability_catalog
         .insert(goal_binding)
@@ -674,11 +687,17 @@ fn reopen_host_harness_with_operations(
             .map_err(|error| AppError::Setup(error.to_string()))?;
     }
     capability_catalog
+        .insert(web_binding)
+        .map_err(|error| AppError::Setup(error.to_string()))?;
+    capability_catalog
         .fix_tool_capabilities(
             "coding",
             coding_tool_capability_grants(),
             coding_additional_read_only_capabilities(),
         )
+        .map_err(|error| AppError::Setup(error.to_string()))?;
+    capability_catalog
+        .fix_tool_capabilities("web", web_tool_capability_grants(), BTreeSet::new())
         .map_err(|error| AppError::Setup(error.to_string()))?;
     let persisted_subagent_policy = reopen_subagent_policy(
         agent_graph.policy.as_ref(),
@@ -701,6 +720,7 @@ fn reopen_host_harness_with_operations(
                 &policy,
                 &resource_limits,
                 &goal_binding_ref,
+                &web_binding_ref,
                 Some(coding_bindings.references.as_slice()),
                 snapshot.header().created_at_ms,
             )?;
@@ -776,6 +796,59 @@ fn goal_state_binding() -> Result<(ExtensionStateHandle, PluginCapabilityBinding
     )
     .map_err(|error| AppError::Setup(error.to_string()))?;
     Ok((state, binding))
+}
+
+/// Construct the single shared route-scoped network authority granted to the
+/// bundled web policy. Firecrawl protocol remains in Luau; this host layer
+/// fixes only transport bounds and the two allowed direct-origin paths.
+fn web_capability_binding() -> Result<(PluginCapabilityBinding, CapabilityBindingRef), AppError> {
+    let route = tea_http::Route::new(
+        "firecrawl",
+        tea_http::Origin::https("api.firecrawl.dev")
+            .map_err(|error| AppError::Setup(error.to_string()))?,
+        Duration::from_secs(60),
+        256 * 1024,
+        4 * 1024 * 1024,
+        tea_http::RetryPolicy::firecrawl(),
+        tea_http::RatePolicy::new(
+            NonZeroUsize::new(4).expect("fixed network concurrency is non-zero"),
+            None,
+        ),
+    )
+    .map_err(|error| AppError::Setup(error.to_string()))?
+    .allow(tea_http::HttpMethod::Post, "/v2/search")
+    .map_err(|error| AppError::Setup(error.to_string()))?
+    .allow(tea_http::HttpMethod::Post, "/v2/scrape")
+    .map_err(|error| AppError::Setup(error.to_string()))?;
+    let client = tea_http::Client::new(
+        tea_http::background_executor(|future| {
+            smol::spawn(future).detach();
+        }),
+        [route],
+    )
+    .map_err(|error| AppError::Setup(error.to_string()))?;
+    let capability = tea_http::NetworkHttpCapability::new(client);
+    let identity = Digest::from_bytes(capability.route_identities().join("\n"));
+    let binding = PluginCapabilityBinding::new(
+        "web",
+        "network.http",
+        "v1",
+        identity,
+        ExtensionToolLimits {
+            max_memory_bytes: 1536 * 1024,
+            max_interrupt_checks: 100_000,
+            ..ExtensionToolLimits::default()
+        },
+        Arc::new(capability),
+    )
+    .map_err(|error| AppError::Setup(error.to_string()))?;
+    let reference = CapabilityBindingRef {
+        plugin_id: binding.plugin_id().to_owned(),
+        capability: binding.capability().to_owned(),
+        capability_version: binding.capability_version().to_owned(),
+        binding_digest: binding.binding_digest(),
+    };
+    Ok((binding, reference))
 }
 
 struct CodingCapabilityBindings {
@@ -962,6 +1035,12 @@ fn coding_tool_capability_grants() -> BTreeMap<String, String> {
         ("edit".into(), WORKSPACE_MUTATE_CAPABILITY_V1.into()),
         ("find".into(), WORKSPACE_SEARCH_CAPABILITY_V1.into()),
     ])
+}
+
+/// The host pins the one model-visible web tool to its read-only network
+/// authority before Luau source is resolved.
+fn web_tool_capability_grants() -> BTreeMap<String, String> {
+    BTreeMap::from([("web".into(), "network.http".into())])
 }
 
 /// A future coding builtin that needs only these effects requires Luau source,
@@ -1414,6 +1493,7 @@ fn child_harness_seeds(
     policy: &SubagentPolicy,
     resource_limits: &HarnessResourceLimits,
     goal_binding_ref: &CapabilityBindingRef,
+    web_binding_ref: &CapabilityBindingRef,
     coding_binding_refs: Option<&[CapabilityBindingRef]>,
     created_at_ms: u64,
 ) -> Result<Vec<(ModelDescriptor, tea_core::harness::SeededHarness)>, AppError> {
@@ -1439,8 +1519,11 @@ fn child_harness_seeds(
             let mut extensions = vec![HarnessSeedExtension {
                 scope: HarnessSeedExtensionScope::Global,
                 source: tea_luau::builtins::goal(extension_limits(resource_limits)),
+            }, HarnessSeedExtension {
+                scope: HarnessSeedExtensionScope::Global,
+                source: tea_luau::builtins::web(extension_limits(resource_limits)),
             }];
-            let mut capability_bindings = vec![goal_binding_ref.clone()];
+            let mut capability_bindings = vec![goal_binding_ref.clone(), web_binding_ref.clone()];
             if let Some(coding_binding_refs) = coding_binding_refs {
                 extensions.push(HarnessSeedExtension {
                     scope: HarnessSeedExtensionScope::Session,
@@ -1479,6 +1562,7 @@ fn seed_child_harnesses(
     policy: &SubagentPolicy,
     resource_limits: &HarnessResourceLimits,
     goal_binding_ref: &CapabilityBindingRef,
+    web_binding_ref: &CapabilityBindingRef,
     coding_binding_refs: Option<&[CapabilityBindingRef]>,
     created_at_ms: u64,
 ) -> Result<Vec<(ModelDescriptor, HarnessIdentity)>, AppError> {
@@ -1489,6 +1573,7 @@ fn seed_child_harnesses(
         policy,
         resource_limits,
         goal_binding_ref,
+        web_binding_ref,
         coding_binding_refs,
         created_at_ms,
     )?
@@ -1524,6 +1609,7 @@ fn derive_child_harnesses(
     policy: &SubagentPolicy,
     resource_limits: &HarnessResourceLimits,
     goal_binding_ref: &CapabilityBindingRef,
+    web_binding_ref: &CapabilityBindingRef,
     coding_binding_refs: Option<&[CapabilityBindingRef]>,
     created_at_ms: u64,
 ) -> Result<Vec<(ModelDescriptor, HarnessIdentity)>, AppError> {
@@ -1534,6 +1620,7 @@ fn derive_child_harnesses(
         policy,
         resource_limits,
         goal_binding_ref,
+        web_binding_ref,
         coding_binding_refs,
         created_at_ms,
     )?
@@ -2943,6 +3030,7 @@ data: [DONE]
             capability_version: binding.capability_version().to_owned(),
             binding_digest: binding.binding_digest(),
         };
+        let (_, web_binding_ref) = web_capability_binding().expect("web binding builds");
         let mut seeds = child_harness_seeds(
             Arc::clone(&artifacts),
             Arc::clone(&provider),
@@ -2950,6 +3038,7 @@ data: [DONE]
             &policy,
             &HarnessResourceLimits::default(),
             &binding_ref,
+            &web_binding_ref,
             None,
             1,
         )
@@ -2984,6 +3073,7 @@ data: [DONE]
             &policy,
             &HarnessResourceLimits::default(),
             &binding_ref,
+            &web_binding_ref,
             None,
             1,
         )
@@ -2995,6 +3085,7 @@ data: [DONE]
             &policy,
             &HarnessResourceLimits::default(),
             &binding_ref,
+            &web_binding_ref,
             None,
             99,
         )
@@ -3071,7 +3162,7 @@ data: [DONE]
     }
 
     #[test]
-    fn default_host_resolves_the_revisioned_luau_four_tool_surface() {
+    fn default_host_resolves_the_revisioned_luau_tool_surface() {
         let home = temporary_home();
         let workspace = home.join("workspace");
         fs::create_dir(&workspace).expect("workspace creates");
@@ -3116,6 +3207,7 @@ data: [DONE]
                 "bash",
                 "edit",
                 "find",
+                "web",
                 "get_goal",
                 "create_goal",
                 "update_goal",
@@ -3126,11 +3218,14 @@ data: [DONE]
         );
         assert!(request.tools.iter().all(|tool| {
             !tool.description.is_empty()
-                && tool
-                    .schema
-                    .get("type")
-                    .and_then(tea_protocol::JsonValue::as_str)
-                    == Some("object")
+                && if tool.name == "web" {
+                    tool.schema.get("oneOf").and_then(tea_protocol::JsonValue::as_array).is_some()
+                } else {
+                    tool.schema
+                        .get("type")
+                        .and_then(tea_protocol::JsonValue::as_str)
+                        == Some("object")
+                }
         }));
         assert_eq!(
             request

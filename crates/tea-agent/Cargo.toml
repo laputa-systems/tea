@@ -26,6 +26,7 @@ tea-providers = { path = "../tea-providers", features = [
     "provider-local",
 ] }
 tea-luau = { path = "../tea-luau" }
+tea-http = { path = "../tea-http" }
 tea-protocol = { path = "../tea-protocol" }
 tea-session = { path = "../tea-session" }
 tea-tui = { path = "../tea-tui" }

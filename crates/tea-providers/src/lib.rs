@@ -30,7 +30,7 @@ mod json;
     feature = "provider-openrouter",
     feature = "provider-local"
 ))]
-mod http;
+mod transport_runtime;
 mod registry;
 #[cfg(any(feature = "provider-commandcode", feature = "provider-openrouter"))]
 mod retry;

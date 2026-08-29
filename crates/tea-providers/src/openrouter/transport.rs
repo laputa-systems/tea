@@ -1,12 +1,13 @@
 //! OpenRouter HTTP transport and response-boundary classification.
 //!
 //! The finite transport helpers remain regression-fixture coverage for the retired buffering
-//! path; the live adapter consumes the incremental shared HTTP stream.
+//! path; the live adapter consumes the incremental `tea-http` stream.
 
 #![allow(dead_code)]
 
-use super::super::http::{Request, send};
+use crate::transport_runtime::client as http_client;
 use crate::scheduler::CancellationToken;
+use tea_http::TransportRequest as Request;
 
 pub(super) const COMPLETIONS_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
 pub(super) const GENERATION_URL: &str = "https://openrouter.ai/api/v1/generation";
@@ -28,7 +29,7 @@ pub(super) fn run_http(
     request: Request,
     cancellation: &CancellationToken,
 ) -> Result<TransportResponse, String> {
-    match send(request, cancellation) {
+    match http_client().send_blocking(request, cancellation) {
         Ok(response) => Ok(TransportResponse {
             body: response.body,
             status_code: Some(response.status_code),

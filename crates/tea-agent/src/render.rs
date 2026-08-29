@@ -12,7 +12,7 @@ use crate::ui::theme::{Role, Theme};
 use crate::ui::visual_layout::VisualLayout;
 use hi_lite::{Highlighter, Kind, Language};
 use std::sync::OnceLock;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tea_providers::ProviderRegistry;
 #[cfg(test)]
 use tea_tui::Color;
@@ -526,8 +526,16 @@ fn activity_lines(state: &AppState) -> Vec<RenderLine> {
 
 fn thinking_spinner() -> &'static str {
     const FRAMES: [&str; 4] = ["|", "/", "-", "\\"];
+    // The mutable terminal tail is intentionally scrollback-native. Keep an
+    // active indicator animated without making slow terminal peers spend all
+    // of their time replaying redraws instead of observing user-visible state.
+    const FRAME_INTERVAL: Duration = Duration::from_millis(500);
     static STARTED: OnceLock<Instant> = OnceLock::new();
-    let frame = STARTED.get_or_init(Instant::now).elapsed().as_millis() / 120;
+    let frame = STARTED
+        .get_or_init(Instant::now)
+        .elapsed()
+        .as_millis()
+        / FRAME_INTERVAL.as_millis();
     FRAMES[frame as usize % FRAMES.len()]
 }
 

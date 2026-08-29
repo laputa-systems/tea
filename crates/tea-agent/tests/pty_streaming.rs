@@ -251,6 +251,13 @@ data: [DONE]
                     }
                     Err(error) => panic!("subagent fixture accept fails: {error}"),
                 };
+                // The listener stays nonblocking so fixture teardown can poll its
+                // channel, but accepted provider connections are request/response
+                // streams.  Read their complete HTTP request in blocking mode:
+                // a client is allowed to split headers and body across writes.
+                socket
+                    .set_nonblocking(false)
+                    .expect("accepted provider connection becomes blocking");
                 let request = read_complete_http_request(&mut socket);
                 match request_model(&request).as_deref() {
                     Some(LIFECYCLE_ROOT_MODEL) => {
@@ -1262,7 +1269,13 @@ fn mock_keeps_submitted_user_message_visible_after_acceptance() {
         .wait_for_screen(
             terminal.deadline(Duration::from_secs(3)),
             "submitted message",
-            |screen| screen.to_string().matches("submitted user message").count() == 1,
+            |screen| {
+                (0..screen.row_count())
+                    .filter_map(|row| screen.row(row))
+                    .map(|row| row.matches("submitted user message").count())
+                    .sum::<usize>()
+                    == 1
+            },
         )
         .expect("submitted message should remain visible");
 

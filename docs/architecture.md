@@ -19,8 +19,10 @@ tea-core      -> Agent, durable runtime, harness lineage, coding authority, evol
         ^                         ^
         |                         |
 tea-providers -> concrete provider adapters   tea-luau -> optional policy adapter
-        |
-tea-agent     -> explicit terminal/application composition root
+                                           tea-http -> generic route-scoped HTTP
+        \                         |                         /
+         +-------------------- tea-agent --------------------+
+                         explicit terminal/application composition root
 ```
 
 The workspace crates are:
@@ -31,14 +33,22 @@ The workspace crates are:
 | `tea-session` | Versioned session format, reducers, immutable artifact storage, export/reopen verification | Agent/provider execution, provider SDKs, policy VMs, UI state |
 | `tea-core` | Agent FSM, durable `runtime::SessionSupervisor`, immutable `harness` lineage, coding host authority, evolution control, context conversion, tool scheduling, hooks/queues, cancellation and settlement | HTTP/provider implementations, cwd/home/config discovery, TUI, Luau VM/runtime, Tokio executor |
 | `tea-trace` | Immutable event-to-linear-episode recorder, redaction and caller-selected JSONL/CBOR sinks | Agent state, session tree, replay mutations, sink-driven behavior |
-| `tea-providers` | Concrete provider wire adapters and evaluation runner | Core state, durable session writes, UI ownership |
+| `tea-providers` | Concrete provider wire adapters and evaluation runner | Core state, durable session writes, UI ownership, direct HTTP clients |
 | `tea-luau` (optional policy) | Hermetic VM, capability manifest/modules, policy hooks/tools, script error/limit translation | Core lifecycle/state/scheduling, ambient OS authority, event-loop ownership |
+| `tea-http` | Repository-wide pooled HTTP: generic byte streams plus route-scoped JSON, retries, rate/cooldown policy, cancellation, and ordered concurrent batches | Provider request/response models, search policy, arbitrary network authority, an async runtime |
 | `tea-agent` | Application composition of provider adapter, Luau extension engine, core runtime, and terminal host | Reusable core/domain contracts |
 
 `tea-core` owns the capability-scoped coding host and never imports Luau. The
 checked-in Pi capture remains historical evidence only. `tea-luau` owns the
 first-party coding-tool declarations, while application hosts select explicit
 workspace/process capability implementations and grants.
+
+`tea-http` is the repository-wide HTTP boundary. It depends on the
+asynchronous pooled `h12tiny-client` transport and the narrow core
+cancellation/capability contracts. `tea-agent` creates its route-scoped JSON
+client for the bundled Luau web policy; provider adapters share its generic
+byte-stream client through a caller-owned executor. `tea-http` has no
+Firecrawl or provider models.
 
 ## Ports and adapters
 

@@ -9,6 +9,7 @@ members = [
     "crates/tea-trace",
     "crates/tea-session",
     "crates/tea-providers",
+    "crates/tea-http",
 ]
 
 # Crate manifests own their dependencies. The runtime policy is executor-

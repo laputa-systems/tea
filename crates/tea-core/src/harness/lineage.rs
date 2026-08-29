@@ -82,8 +82,16 @@ impl Default for HarnessResourceLimits {
     fn default() -> Self {
         Self {
             source_bytes: 65_536,
-            memory_bytes: 1_048_576,
-            instruction_checks: 10_000,
+            // The web policy renders a bounded multi-source response and is
+            // still isolated per invocation; this ceiling accommodates its
+            // compiled Luau handler without weakening source or instruction
+            // bounds.
+            memory_bytes: 1536 * 1024,
+            // A web result can carry several bounded UTF-8 source excerpts;
+            // rendering that material is still subject to the heap ceiling,
+            // but needs a larger cooperative instruction allowance than the
+            // tiny control-oriented bundled policies.
+            instruction_checks: 100_000,
             provider_surface_bytes: 256 * 1024,
         }
     }
