@@ -213,3 +213,56 @@ def write_static_report(summary: dict[str, Any], reports: Path) -> tuple[Path, P
             differences.append(f"- `{name}` differs: Pi `{pi_surface[name]}`, Tea `{tea_surface[name]}`")
     surface.write_text("# Static surface difference\n\n" + ("\n".join(differences) if differences else "The exported normalized surfaces are equal.") + "\n", encoding="utf-8")
     return static, surface
+
+
+def baseline_report(summary: dict[str, Any], baseline: str = "tea-static") -> str:
+    """Render one baseline without fabricating a paired comparison."""
+    record = _attempt(summary, baseline)
+    result = _result(record)
+    run = summary["run"]
+    fields = [
+        ("Validator pass", record["validator"]["passed"]),
+        ("Terminal status", result["terminal"]["status"]),
+        ("Terminal code", result["terminal"]["code"]),
+        ("Agent wall time", result["timings"]["agent_ms"]),
+        ("Total attempt wall time", record["timings"]["total_attempt_ms"]),
+        ("Generation tokens", result["usage"]["generation"]),
+        ("Provider requests", result["counts"]["provider_requests"]),
+        ("Tool calls", result["counts"]["tool_calls"]),
+        ("Retries", result["counts"]["retries"]),
+        ("Patch SHA-256", record["patch_sha256"]),
+    ]
+    lines = [
+        f"# {baseline} baseline — {run['task_id']}",
+        "",
+        "This is a single-baseline run. It establishes Tea evidence for this pinned task; it is not a paired Pi comparison.",
+        "",
+        "## Reproducibility",
+        "",
+        f"- Run ID: `{run['run_id']}`",
+        f"- Task manifest: `{run['task_manifest_sha256']}`",
+        f"- Baseline commit: `{run['baseline_commit']}`",
+        f"- Validator: `{run['validator_sha256']}`",
+        f"- Model/provider: `{run['model']}` / `{run['provider']}`",
+        f"- Thinking/output ceiling: `{run['thinking_level']}` / `{run['max_output_tokens']}`",
+        f"- Attempt timeout: `{run['timeout_seconds']}` seconds",
+        f"- Validator dependency lock: `{run.get('validator_dependency_lockfile_sha256', 'unrecorded')}`",
+        "",
+        "## Result",
+        "",
+        "| Metric | Value |",
+        "| --- | ---: |",
+        *[f"| {label} | {_value(value)} |" for label, value in fields],
+        "",
+        "The complete normalized result is retained in the attempt `record.json`; direct provider request evidence is under the attempt `surface/` directory.",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def write_baseline_report(summary: dict[str, Any], reports: Path, *, baseline: str = "tea-static") -> Path:
+    """Write the single-baseline report without requiring Pi or JIT attempts."""
+    reports.mkdir(parents=True, exist_ok=True)
+    path = reports / f"{baseline}.md"
+    path.write_text(baseline_report(summary, baseline), encoding="utf-8")
+    return path

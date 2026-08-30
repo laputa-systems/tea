@@ -34,14 +34,21 @@ from evals.quality.coding_cases import (
 from evals.quality.coding_runner import CodingRunError, coding_bundle_capabilities, prepare_cache
 
 from .contract import BASELINES, STATIC_BASELINES, ContractError, RESULT_SCHEMA, canonical, digest, file_digest, validate_result
-from .report import write_reports, write_static_report
+from .report import write_baseline_report, write_reports, write_static_report
 
 
 ROOT = Path(__file__).resolve().parents[2]
 SDK = ROOT / "evals" / "pi_shootout" / "sdk"
 DEFAULT_MODEL = "deepseek/deepseek-v4-flash-0731"
 DEFAULT_THINKING = "high"
+DEFAULT_TIMEOUT_SECONDS = 900
+HARD_TIMEOUT_SECONDS = 1800
+TASK_TIMEOUT_SECONDS = {
+    "express-3936-medium": DEFAULT_TIMEOUT_SECONDS,
+    "express-4205-hard": HARD_TIMEOUT_SECONDS,
+}
 MAX_LOG_BYTES = 256 * 1024
+SUPPORTED_TASKS = ("express-3936-medium", "express-4205-hard")
 # This is intentionally an explicit shared policy rather than a Tea production
 # default. It keeps both native harnesses eligible for the same OpenRouter
 # parameter-capable routes without pretending that OpenRouter defaults are a
@@ -70,18 +77,28 @@ class Config:
     out: Path
     # High-thinking, uncapped completions need enough time to finish an actual
     # coding task. This remains one identical per-attempt budget for every
-    # condition and is excluded from agent-token accounting.
-    timeout_seconds: int = 900
+    # condition and is excluded from agent-token accounting. Zero is an
+    # explicit diagnostic mode: the runner does not impose an outer wall clock.
+    timeout_seconds: int | None = None
     keep_worktrees: bool = False
     static_only: bool = False
+    # A Tea-only run is a single-baseline diagnostic that persists the same
+    # attempt evidence without pretending a paired Pi comparison exists.
+    tea_only: bool = False
     # Repeats are independent experimental lanes. The default intentionally
     # starts every requested lane at once; condition order stays sequential
     # within each lane so counterbalancing is still meaningful.
     parallel_repeats: int | None = None
 
+    def __post_init__(self) -> None:
+        if self.timeout_seconds is None:
+            object.__setattr__(self, "timeout_seconds", TASK_TIMEOUT_SECONDS.get(self.task, DEFAULT_TIMEOUT_SECONDS))
+        if self.tea_only and not self.static_only:
+            object.__setattr__(self, "static_only", True)
+
     def validate(self) -> None:
-        if self.task != "express-3936-medium":
-            raise ShootoutError("pi-shootout v0 supports only express-3936-medium")
+        if self.task not in SUPPORTED_TASKS:
+            raise ShootoutError(f"pi-shootout supports only {', '.join(SUPPORTED_TASKS)}")
         if self.provider != "openrouter":
             raise ShootoutError("pi-shootout v0 supports only provider openrouter")
         if self.model != DEFAULT_MODEL:
@@ -94,8 +111,8 @@ class Config:
             raise ShootoutError("repeats must be positive")
         if not isinstance(self.seed, int):
             raise ShootoutError("seed must be an integer")
-        if not isinstance(self.timeout_seconds, int) or self.timeout_seconds < 1:
-            raise ShootoutError("attempt timeout must be a positive integer")
+        if not isinstance(self.timeout_seconds, int) or self.timeout_seconds < 0:
+            raise ShootoutError("attempt timeout must be a non-negative integer (zero disables the outer wall clock)")
         if self.parallel_repeats is not None and (
             not isinstance(self.parallel_repeats, int)
             or self.parallel_repeats < 1
@@ -147,6 +164,8 @@ def randomized_plan(repeats: int, seed: int, baselines: tuple[str, ...] = BASELI
     if repeats < 1:
         raise ShootoutError("repeats must be positive")
     randomizer = random.Random(seed)
+    if baselines == ("tea-static",):
+        return [["tea-static"] for _ in range(repeats)]
     if baselines == STATIC_BASELINES:
         orders = [list(STATIC_BASELINES), list(reversed(STATIC_BASELINES))]
     elif baselines == BASELINES:
@@ -321,7 +340,10 @@ def _run_process(command: list[str], *, cwd: Path, environment: dict[str, str], 
     started = time.monotonic_ns()
     process = subprocess.Popen(command, cwd=cwd, env=environment, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=os.name == "posix")
     try:
-        stdout, stderr = process.communicate(timeout=timeout_seconds)
+        if timeout_seconds == 0:
+            stdout, stderr = process.communicate()
+        else:
+            stdout, stderr = process.communicate(timeout=timeout_seconds)
         return process.returncode, False, _bounded(stdout), _bounded(stderr), (time.monotonic_ns() - started) // 1_000_000
     except subprocess.TimeoutExpired:
         if os.name == "posix":
@@ -381,7 +403,7 @@ def _runtime_revision() -> tuple[str, bool, str | None]:
 def plan(config: Config) -> dict[str, Any]:
     config.validate()
     case = selected_case(config.task)
-    baselines = STATIC_BASELINES if config.static_only else BASELINES
+    baselines = ("tea-static",) if config.tea_only else (STATIC_BASELINES if config.static_only else BASELINES)
     condition_order = randomized_plan(config.repeats, config.seed, baselines)
     toolchain = toolchain_manifest()
     _, dependency_specification = validator_dependency_lockfile(case)
@@ -404,6 +426,7 @@ def plan(config: Config) -> dict[str, Any]:
         "seed": config.seed,
         "conditions": list(baselines),
         "static_only": config.static_only,
+        "tea_only": config.tea_only,
         "condition_order": condition_order,
         "baseline_commit": case["baseline"]["commit"],
         "known_correct_fix_commit": case["baseline"]["fix_commit"],
@@ -596,7 +619,9 @@ def run(config: Config) -> tuple[Path, dict[str, Any]]:
             "attempts": [record for record in attempts if record["attempt_id"].startswith(f"shootout-r{repeat + 1}-")],
         }
         report_root = run_directory / "reports" if config.repeats == 1 else run_directory / "reports" / f"repeat-{repeat + 1}"
-        if config.static_only:
+        if config.tea_only:
+            reports += (write_baseline_report(repeat_summary, report_root, baseline="tea-static"),)
+        elif config.static_only:
             reports += write_static_report(repeat_summary, report_root)
         else:
             reports += write_reports(repeat_summary, report_root)

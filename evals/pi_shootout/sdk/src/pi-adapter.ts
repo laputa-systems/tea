@@ -46,7 +46,7 @@ function parse(): Arguments {
 	const maximum = required("--max-output-tokens");
 	if (maximum !== "unlimited") throw new Error("Pi shootout requires unlimited max output tokens");
 	const outerTimeoutSeconds = Number.parseInt(required("--outer-timeout-seconds"), 10);
-	if (!Number.isSafeInteger(outerTimeoutSeconds) || outerTimeoutSeconds < 1) throw new Error("--outer-timeout-seconds must be positive");
+	if (!Number.isSafeInteger(outerTimeoutSeconds) || outerTimeoutSeconds < 0) throw new Error("--outer-timeout-seconds must be non-negative");
 	let providerRouting: unknown;
 	try {
 		providerRouting = JSON.parse(required("--provider-routing-json")) as unknown;

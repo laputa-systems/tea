@@ -1,11 +1,20 @@
 # Pi shootout
 
 This is a narrowly pinned, repeated comparison of the Pi and Tea coding
-harnesses on `express-3936-medium`. It is not a broad benchmark or a provider
-comparison. Both adapters use OpenRouter with
+harnesses on the checked-in Express cases `express-3936-medium` and
+`express-4205-hard`. It is not a broad benchmark or a provider comparison.
+Both adapters use OpenRouter with
 `deepseek/deepseek-v4-flash-0731`, high reasoning, unlimited output, the
 ordered `read`, `bash`, `edit`, `find` capability set, the same isolated
 baseline, and the same fast validator.
+
+The medium case uses a 900-second per-attempt wall-clock limit. The harder case
+uses a 1,800-second limit to leave headroom for its longer coding trajectories.
+Pass `PI_SHOOTOUT_TIMEOUT_SECONDS=0` for an explicitly uncapped diagnostic
+run only; an uncapped run is not a scoring result because model-generated shell
+commands can themselves wait indefinitely. Tea aligns its provider request
+timeout with the finite task budget (and uses a 24-hour transport guard for
+the zero-budget diagnostic).
 
 `make pi-shootout-check` is provider-free: it checks the result contract,
 direct-request instrumentation, Pi SDK embedding, Tea's OpenRouter payload,
@@ -30,6 +39,21 @@ Use `make pi-shootout` or `make pi-shootout-serious` only when the Tea JIT
 condition is also in scope. Static commands run only `pi-static` and
 `tea-static`.
 
+To establish a Tea-only hard-case baseline, set the task and run the dedicated
+target:
+
+```sh
+PI_SHOOTOUT_TASK=express-4205-hard \
+PI_SHOOTOUT_REPEATS=1 \
+PI_SHOOTOUT_PARALLEL_REPEATS=1 \
+PI_SHOOTOUT_OUT=/tmp/tea-pi-shootout-hard-tea-baseline \
+vault OPENROUTER_API_KEY -- make pi-shootout-tea-static
+```
+
+This writes a single-baseline `reports/tea-static.md`; use the attempt
+`record.json` and `surface/` evidence as the authoritative result. It does not
+produce a paired comparison report.
+
 Repeats are safely parallel lanes by default: `PI_SHOOTOUT_REPEATS=2` starts
 two complete repeats at once, while the counterbalanced Pi/Tea condition order
 within each lane remains sequential. Set `PI_SHOOTOUT_PARALLEL_REPEATS=1` to
@@ -41,7 +65,7 @@ the short npm consumption step is locked before each lane receives its private
 module tree.
 
 Each attempt starts from a clean detached Express checkout. The historical
-baseline has no lockfile, so this case carries a checked-in production-only
+baselines have no lockfile, so each case carries a checked-in production-only
 `package-lock.json`; explicit cache preparation may fetch its tarballs, while
 scoring installs a fresh per-attempt dependency tree with `npm ci --offline`.
 That tree is exposed through the controlled tool environment, never added to

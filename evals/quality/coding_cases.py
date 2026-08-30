@@ -141,7 +141,7 @@ def validate_case(case: dict[str, Any], source: str = "case") -> dict[str, Any]:
     if setup.get("tools") != ["read", "bash", "edit", "find"]:
         raise CodingCaseError(f"{source}: coding tool surface must be pinned")
     validator_dependencies = case.get("validator_dependencies")
-    if case_id == "express-3936-medium":
+    if case_id in {"express-3936-medium", "express-4205-hard"}:
         if not isinstance(validator_dependencies, dict):
             raise CodingCaseError(f"{source}: fast validator dependencies must be pinned")
         if validator_dependencies.get("lockfile") != "package-lock.json":
@@ -149,7 +149,12 @@ def validate_case(case: dict[str, Any], source: str = "case") -> dict[str, Any]:
         lockfile_sha256 = validator_dependencies.get("lockfile_sha256")
         if not isinstance(lockfile_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", lockfile_sha256):
             raise CodingCaseError(f"{source}: validator dependency lockfile hash must be a SHA-256 digest")
-        if validator_dependencies.get("required_modules") != {"body-parser": "1.19.2"}:
+        expected_modules = (
+            {"body-parser": "1.19.2"}
+            if case_id == "express-3936-medium"
+            else {"body-parser": "1.19.0"}
+        )
+        if validator_dependencies.get("required_modules") != expected_modules:
             raise CodingCaseError(f"{source}: validator dependency module set must be pinned")
     elif validator_dependencies is not None:
         raise CodingCaseError(f"{source}: unexpected validator dependency declaration")

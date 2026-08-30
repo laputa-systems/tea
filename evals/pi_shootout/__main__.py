@@ -10,7 +10,7 @@ import subprocess
 import sys
 
 from .compare import ComparisonError, compare_run, write_comparison
-from .runner import Config, DEFAULT_MODEL, DEFAULT_THINKING, ShootoutError, plan, run
+from .runner import Config, DEFAULT_MODEL, DEFAULT_THINKING, DEFAULT_TIMEOUT_SECONDS, TASK_TIMEOUT_SECONDS, ShootoutError, plan, run
 
 
 def parser() -> argparse.ArgumentParser:
@@ -23,7 +23,15 @@ def parser() -> argparse.ArgumentParser:
         item.add_argument("--model", default=DEFAULT_MODEL)
         item.add_argument("--thinking", default=DEFAULT_THINKING)
         item.add_argument("--max-output-tokens", default="unlimited", help="must be unlimited for the fixed v0 experiment")
-        item.add_argument("--timeout-seconds", type=int, default=900)
+        item.add_argument(
+            "--timeout-seconds",
+            type=int,
+            default=None,
+            help=(
+                "outer wall-clock limit; defaults to the task policy "
+                f"({DEFAULT_TIMEOUT_SECONDS}s medium, {TASK_TIMEOUT_SECONDS['express-4205-hard']}s hard; 0 is uncapped diagnostic mode)"
+            ),
+        )
         item.add_argument("--repeats", type=int, default=1)
         item.add_argument(
             "--parallel-repeats",
@@ -37,6 +45,7 @@ def parser() -> argparse.ArgumentParser:
         if name == "run":
             item.add_argument("--keep-worktrees", action="store_true")
         item.add_argument("--static-only", action="store_true", help="run only pi-static and tea-static")
+        item.add_argument("--tea-only", action="store_true", help="run only the tea-static baseline and write single-baseline evidence")
     sub.add_parser("check", help="run only Python provider-free shootout tests")
     compare = sub.add_parser("compare", help="compare persisted pi-static and tea-static evidence")
     compare.add_argument("--run-dir", type=Path, required=True)
@@ -47,6 +56,9 @@ def parser() -> argparse.ArgumentParser:
 
 def _config(args: argparse.Namespace) -> Config:
     maximum = None if args.max_output_tokens == "unlimited" else int(args.max_output_tokens)
+    timeout_seconds = args.timeout_seconds
+    if timeout_seconds is None:
+        timeout_seconds = TASK_TIMEOUT_SECONDS.get(args.task, DEFAULT_TIMEOUT_SECONDS)
     return Config(
         args.task,
         args.provider,
@@ -58,9 +70,10 @@ def _config(args: argparse.Namespace) -> Config:
         args.cache_root,
         args.workspace_root,
         args.out,
-        timeout_seconds=args.timeout_seconds,
+        timeout_seconds=timeout_seconds,
         keep_worktrees=getattr(args, "keep_worktrees", False),
         static_only=getattr(args, "static_only", False),
+        tea_only=getattr(args, "tea_only", False),
         parallel_repeats=getattr(args, "parallel_repeats", None),
     )
 

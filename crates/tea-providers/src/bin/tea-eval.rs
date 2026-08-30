@@ -51,6 +51,10 @@ const REQUIRED_MODEL: &str = "deepseek/deepseek-v4-flash-0731";
 const REQUIRED_THINKING: &str = "high";
 const SHOOTOUT_TEMPERATURE: f64 = 0.0;
 const SHOOTOUT_SEED: u64 = 20260829;
+/// Keep the provider request from expiring before the outer shootout budget.
+/// A zero outer budget is an uncapped diagnostic, but the HTTP transport still
+/// needs a finite deadline to avoid an OS-level socket hanging forever.
+const DIAGNOSTIC_REQUEST_TIMEOUT_SECONDS: u64 = 86_400;
 /// Evaluation-only guidance that mirrors the concise parts of Pi's native
 /// coding prompt. It reduces avoidable exploratory turns without changing the
 /// closed capability set or any core runtime policy.
@@ -182,8 +186,7 @@ impl Args {
         let outer_timeout_seconds = take("--outer-timeout-seconds")?
             .parse::<u64>()
             .ok()
-            .filter(|value| *value > 0)
-            .ok_or_else(|| "--outer-timeout-seconds must be positive".to_owned())?;
+            .ok_or_else(|| "--outer-timeout-seconds must be a non-negative integer".to_owned())?;
         let provider_routing = JsonValue::parse(&take("--provider-routing-json")?)
             .map_err(|_| "--provider-routing-json must be JSON".to_owned())?;
         if !provider_routing.is_object() {
@@ -245,6 +248,14 @@ impl Args {
 fn read_json(path: &Path, label: &str) -> Result<JsonValue, String> {
     let source = fs::read_to_string(path).map_err(|_| format!("cannot read evaluation {label}"))?;
     JsonValue::parse(&source).map_err(|_| format!("evaluation {label} is not JSON"))
+}
+
+fn request_timeout_seconds(outer_timeout_seconds: u64) -> u64 {
+    if outer_timeout_seconds == 0 {
+        DIAGNOSTIC_REQUEST_TIMEOUT_SECONDS
+    } else {
+        outer_timeout_seconds
+    }
 }
 
 fn thinking_name(level: ThinkingLevel) -> &'static str {
@@ -1432,7 +1443,12 @@ fn result_json(input: ResultJsonInput<'_>) -> JsonValue {
                                 ("max_retries", JsonValue::from(0_u64)),
                             ]),
                         ),
-                        ("request_timeout_seconds", JsonValue::from(300_u64)),
+                        (
+                            "request_timeout_seconds",
+                            JsonValue::from(request_timeout_seconds(
+                                input.args.outer_timeout_seconds,
+                            )),
+                        ),
                         ("idle_timeout_seconds", JsonValue::from(60_u64)),
                         (
                             "outer_attempt_timeout_seconds",
@@ -1619,6 +1635,9 @@ fn main() -> Result<(), String> {
         }
         None => OpenRouterConfig::new(api_key, args.model.clone()),
     }
+    .with_request_timeout(Duration::from_secs(request_timeout_seconds(
+        args.outer_timeout_seconds,
+    )))
     .with_provider_routing(args.provider_routing.clone())
     .with_request_capture(request_capture.clone());
     let provider_config = if args.harness_mode == HarnessMode::Static {
@@ -1926,7 +1945,7 @@ mod tests {
     use super::{
         AgentConfiguration, HarnessMode, ModelDescriptor, OpenAiContextHook, OpenRouterConfig,
         OpenRouterProvider, REQUIRED_MODEL, RuntimeServices, model_profile, prompt_total_tokens,
-        sha256, snapshot_spec, uncached_input_tokens,
+        request_timeout_seconds, sha256, snapshot_spec, uncached_input_tokens,
     };
     #[test]
     fn requested_deepseek_model_is_pinned() {
@@ -1951,6 +1970,12 @@ mod tests {
         assert_eq!(prompt_total_tokens(Some(282_674)), Some(282_674));
         assert_eq!(uncached_input_tokens(Some(4), Some(8), Some(1)), Some(0));
         assert_eq!(prompt_total_tokens(Some(4)), Some(4));
+    }
+
+    #[test]
+    fn shootout_request_timeout_matches_outer_budget_and_keeps_diagnostic_guard() {
+        assert_eq!(request_timeout_seconds(1_800), 1_800);
+        assert_eq!(request_timeout_seconds(0), 86_400);
     }
 
     #[test]

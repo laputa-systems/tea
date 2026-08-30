@@ -1,4 +1,4 @@
-.PHONY: lint test test-linux tui local-install local-model local quality-fast quality-resources quality-compaction pi-shootout pi-shootout-static pi-shootout-serious pi-shootout-static-serious pi-shootout-plan pi-shootout-static-plan pi-shootout-check
+.PHONY: lint test test-linux tui local-install local-model local quality-fast quality-resources quality-compaction pi-shootout pi-shootout-static pi-shootout-tea-static pi-shootout-serious pi-shootout-static-serious pi-shootout-plan pi-shootout-static-plan pi-shootout-check
 
 lint:
 	cargo fmt --all
@@ -101,7 +101,11 @@ PI_SHOOTOUT_PROVIDER ?= openrouter
 PI_SHOOTOUT_MODEL ?= deepseek/deepseek-v4-flash-0731
 PI_SHOOTOUT_THINKING ?= high
 PI_SHOOTOUT_MAX_OUTPUT_TOKENS ?= unlimited
+ifeq ($(PI_SHOOTOUT_TASK),express-4205-hard)
+PI_SHOOTOUT_TIMEOUT_SECONDS ?= 1800
+else
 PI_SHOOTOUT_TIMEOUT_SECONDS ?= 900
+endif
 PI_SHOOTOUT_REPEATS ?= 3
 # Each repeat is an isolated lane. Keep the lane count explicit in evidence;
 # by default a two-repeat invocation starts two complete repeats in parallel.
@@ -110,8 +114,10 @@ PI_SHOOTOUT_SEED ?= 20260823
 PI_SHOOTOUT_CACHE_ROOT ?= /tmp/tea-pi-shootout-cache
 PI_SHOOTOUT_WORKSPACE_ROOT ?= /tmp/tea-pi-shootout-workspaces
 PI_SHOOTOUT_OUT ?= /tmp/tea-pi-shootout
+PI_SHOOTOUT_TEA_ONLY ?= 0
+PI_SHOOTOUT_BASELINE_ARGS = $(if $(filter 1 true yes,$(PI_SHOOTOUT_TEA_ONLY)),--tea-only,)
 
-PI_SHOOTOUT_ARGS = --task "$(PI_SHOOTOUT_TASK)" --provider "$(PI_SHOOTOUT_PROVIDER)" --model "$(PI_SHOOTOUT_MODEL)" --thinking "$(PI_SHOOTOUT_THINKING)" --max-output-tokens "$(PI_SHOOTOUT_MAX_OUTPUT_TOKENS)" --timeout-seconds "$(PI_SHOOTOUT_TIMEOUT_SECONDS)" --repeats "$(PI_SHOOTOUT_REPEATS)" --parallel-repeats "$(PI_SHOOTOUT_PARALLEL_REPEATS)" --seed "$(PI_SHOOTOUT_SEED)" --cache-root "$(PI_SHOOTOUT_CACHE_ROOT)" --workspace-root "$(PI_SHOOTOUT_WORKSPACE_ROOT)" --out "$(PI_SHOOTOUT_OUT)"
+PI_SHOOTOUT_ARGS = --task "$(PI_SHOOTOUT_TASK)" --provider "$(PI_SHOOTOUT_PROVIDER)" --model "$(PI_SHOOTOUT_MODEL)" --thinking "$(PI_SHOOTOUT_THINKING)" --max-output-tokens "$(PI_SHOOTOUT_MAX_OUTPUT_TOKENS)" --timeout-seconds "$(PI_SHOOTOUT_TIMEOUT_SECONDS)" --repeats "$(PI_SHOOTOUT_REPEATS)" --parallel-repeats "$(PI_SHOOTOUT_PARALLEL_REPEATS)" --seed "$(PI_SHOOTOUT_SEED)" --cache-root "$(PI_SHOOTOUT_CACHE_ROOT)" --workspace-root "$(PI_SHOOTOUT_WORKSPACE_ROOT)" --out "$(PI_SHOOTOUT_OUT)" $(PI_SHOOTOUT_BASELINE_ARGS)
 
 pi-shootout-plan:
 	@command -v node >/dev/null 2>&1 || { echo "missing required command: node" >&2; exit 1; }
@@ -150,6 +156,9 @@ pi-shootout-static: pi-shootout-static-plan
 	npm --prefix evals/pi_shootout/sdk ci
 	cargo +nightly-2026-07-24 build -p tea-providers --bin tea-eval --features eval-runner --locked
 	PYTHONDONTWRITEBYTECODE=1 python3 -m evals.pi_shootout run $(PI_SHOOTOUT_ARGS) --static-only
+
+pi-shootout-tea-static:
+	$(MAKE) pi-shootout-static PI_SHOOTOUT_TEA_ONLY=1
 
 # Three repeats are intentionally a smoke/diagnostic workflow. The named
 # serious target uses seven counterbalanced repeats and is the minimum run

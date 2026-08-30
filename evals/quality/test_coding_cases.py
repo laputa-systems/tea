@@ -91,6 +91,25 @@ class CodingCasesTest(unittest.TestCase):
         self.assertTrue(result["offline"])
         self.assertEqual(result["modules"]["body-parser"]["version"], "1.19.2")
 
+    def test_hard_validator_uses_its_pinned_production_lock(self) -> None:
+        case = next(case for case in load_cases() if case["id"] == "express-4205-hard")
+        lockfile, specification = validator_dependency_lockfile(case)
+        self.assertEqual(lockfile.name, "package-lock.json")
+        self.assertEqual(specification["required_modules"], {"body-parser": "1.19.0"})
+        with tempfile.TemporaryDirectory(prefix="tea-quality-hard-dependencies-") as temporary:
+            root = Path(temporary)
+
+            def npm(command, *, cwd, **kwargs):
+                package = cwd / "node_modules" / "body-parser" / "package.json"
+                package.parent.mkdir(parents=True)
+                package.write_text('{"version":"1.19.0"}\n', encoding="utf-8")
+                return type("Result", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+            with patch.object(coding_cases.subprocess, "run", side_effect=npm):
+                result = provision_validator_dependencies(case, root / "cache", root / "dependencies", populate_cache=False)
+        self.assertTrue(result["offline"])
+        self.assertEqual(result["modules"]["body-parser"]["version"], "1.19.0")
+
     def test_oracle_isolation_rejects_a_worktree_that_contains_the_fix(self) -> None:
         with tempfile.TemporaryDirectory(prefix="tea-quality-worktree-") as temporary:
             workspace = Path(temporary)

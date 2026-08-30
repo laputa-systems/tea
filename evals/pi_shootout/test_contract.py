@@ -3,9 +3,10 @@ from __future__ import annotations
 import copy
 import threading
 import unittest
+from unittest.mock import Mock, patch
 
 from .contract import ContractError, RESULT_SCHEMA, validate_result
-from .runner import Config, DEFAULT_MODEL, DEFAULT_THINKING, ShootoutError, plan, randomized_plan, run_repeat_lanes, toolchain_manifest
+from .runner import Config, DEFAULT_MODEL, DEFAULT_THINKING, DEFAULT_TIMEOUT_SECONDS, HARD_TIMEOUT_SECONDS, ShootoutError, TASK_TIMEOUT_SECONDS, _run_process, plan, randomized_plan, run_repeat_lanes, toolchain_manifest
 
 
 def result(*, baseline: str = "tea-jit") -> dict:
@@ -97,6 +98,9 @@ class ContractTest(unittest.TestCase):
         schedule = randomized_plan(7, 41, ("pi-static", "tea-static"))
         self.assertLessEqual(abs(schedule.count(["pi-static", "tea-static"]) - schedule.count(["tea-static", "pi-static"])), 1)
 
+    def test_tea_only_schedule_contains_only_tea_static(self) -> None:
+        self.assertEqual(randomized_plan(3, 41, ("tea-static",)), [["tea-static"]] * 3)
+
     def test_three_condition_schedule_balances_positions_over_a_complete_block(self) -> None:
         schedule = randomized_plan(6, 41)
         for condition in ("pi-static", "tea-static", "tea-jit"):
@@ -134,6 +138,44 @@ class ContractTest(unittest.TestCase):
         self.assertEqual(set(value["condition_order"][0]), {"pi-static", "tea-static"})
         self.assertEqual(len(value["validator_dependency_lockfile_sha256"]), 64)
         self.assertEqual(value["parallel_repeats"], 1)
+
+    def test_tea_only_plan_is_a_single_static_baseline(self) -> None:
+        config = Config("express-3936-medium", "openrouter", DEFAULT_MODEL, DEFAULT_THINKING, None, 1, 20260823, __import__("pathlib").Path("/tmp/cache"), __import__("pathlib").Path("/tmp/work"), __import__("pathlib").Path("/tmp/out"), tea_only=True)
+        value = plan(config)
+        self.assertTrue(config.static_only)
+        self.assertEqual(value["conditions"], ["tea-static"])
+        self.assertEqual(value["condition_order"], [["tea-static"]])
+        self.assertTrue(value["tea_only"])
+
+    def test_hard_case_accepts_unbounded_diagnostic_timeout(self) -> None:
+        config = Config("express-4205-hard", "openrouter", DEFAULT_MODEL, DEFAULT_THINKING, None, 1, 20260823, __import__("pathlib").Path("/tmp/cache"), __import__("pathlib").Path("/tmp/work"), __import__("pathlib").Path("/tmp/out"), timeout_seconds=0, static_only=True)
+        config.validate()
+        value = plan(config)
+        self.assertEqual(value["task"], "express-4205-hard")
+        self.assertEqual(value["timeout_seconds"], 0)
+        self.assertEqual(value["conditions"], ["pi-static", "tea-static"])
+
+    def test_timeout_rejects_negative_values(self) -> None:
+        config = Config("express-3936-medium", "openrouter", DEFAULT_MODEL, DEFAULT_THINKING, None, 1, 1, __import__("pathlib").Path("/tmp/cache"), __import__("pathlib").Path("/tmp/work"), __import__("pathlib").Path("/tmp/out"), timeout_seconds=-1)
+        with self.assertRaises(ShootoutError):
+            config.validate()
+
+    def test_task_timeout_policy_gives_hard_case_more_headroom(self) -> None:
+        self.assertEqual(TASK_TIMEOUT_SECONDS["express-3936-medium"], DEFAULT_TIMEOUT_SECONDS)
+        self.assertEqual(TASK_TIMEOUT_SECONDS["express-4205-hard"], HARD_TIMEOUT_SECONDS)
+        self.assertGreater(TASK_TIMEOUT_SECONDS["express-4205-hard"], TASK_TIMEOUT_SECONDS["express-3936-medium"])
+        arguments = ("express-4205-hard", "openrouter", DEFAULT_MODEL, DEFAULT_THINKING, None, 1, 1, __import__("pathlib").Path("/tmp/cache"), __import__("pathlib").Path("/tmp/work"), __import__("pathlib").Path("/tmp/out"))
+        self.assertEqual(Config(*arguments).timeout_seconds, HARD_TIMEOUT_SECONDS)
+
+    def test_zero_timeout_waits_without_a_communicate_deadline(self) -> None:
+        process = Mock()
+        process.communicate.return_value = ("", "")
+        process.returncode = 0
+        with patch("evals.pi_shootout.runner.subprocess.Popen", return_value=process) as popen:
+            result = _run_process(["adapter"], cwd=__import__("pathlib").Path("/tmp"), environment={}, timeout_seconds=0)
+        popen.assert_called_once()
+        process.communicate.assert_called_once_with()
+        self.assertEqual(result[:2], (0, False))
 
     def test_configuration_requires_the_fixed_v0_model_and_unbounded_is_valid(self) -> None:
         config = Config("express-3936-medium", "openrouter", DEFAULT_MODEL, DEFAULT_THINKING, None, 1, 1, __import__("pathlib").Path("/tmp/cache"), __import__("pathlib").Path("/tmp/work"), __import__("pathlib").Path("/tmp/out"))

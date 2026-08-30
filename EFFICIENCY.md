@@ -29,6 +29,10 @@ Run `make pi-shootout-static` for the three-repeat smoke workflow, or
 `make pi-shootout-static-serious` for seven counterbalanced repeats. The
 provider-free `python3 -m evals.pi_shootout compare --run-dir <run>` output
 contains paired deltas and deterministic descriptive bootstrap intervals. The
+Tea-only target `make pi-shootout-tea-static` accepts
+`PI_SHOOTOUT_TASK=express-4205-hard` for a single-baseline hard-case run; it
+writes Tea evidence and `reports/tea-static.md` but intentionally cannot emit a
+paired comparison. The
 live static adapters use temperature `0` and seed `20260829`; the analyzer
 still reports unknown route and timeout fields instead of inferring them.
 
@@ -38,8 +42,15 @@ Each lane has its own worktree, evidence, dependencies, tool npm cache, HOME,
 and TMPDIR; only synchronized setup-cache consumption is shared. Set
 `PI_SHOOTOUT_PARALLEL_REPEATS=1` when a serialized lane schedule is required.
 
-The medium Express case uses a checked-in production-only dependency lock:
-cache preparation is explicit, while attempts use a per-attempt
+The medium Express case uses a checked-in production-only dependency lock;
+the harder `express-4205-hard` diagnostic case has the same pinned-validator
+arrangement. The medium case defaults to a 900-second attempt wall clock and
+the hard case to 1,800 seconds. For calibration only, set
+`PI_SHOOTOUT_TIMEOUT_SECONDS=0` to remove the runner's outer wall clock; this
+is not a scored result because a model-generated shell command can wait
+indefinitely. Tea's shootout OpenRouter request timeout follows the finite
+budget, with a 24-hour transport guard in zero-budget diagnostics. Cache
+preparation is explicit, while attempts use a per-attempt
 `npm ci --offline` tree outside the Git workspace. This removes ambient npm
 resolution from both the model condition and the fast validator.
 

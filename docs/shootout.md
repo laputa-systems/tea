@@ -5,10 +5,12 @@ shootout. It combines the historical implementation brief in
 `shootout.md` with the efficiency mission in `EFFICIENCY.md`. Those root files
 are retained as legacy context; this document is the maintained entry point.
 
-The experiment is deliberately narrow: one checked-in coding task, one model,
-one provider, and two static harnesses. It is evidence for this task and this
-configuration, not a broad benchmark or a claim of general model or product
-superiority.
+The experiment is deliberately narrow: one selected checked-in coding task,
+one model, one provider, and two static harnesses. The repository currently
+pins a medium case for routine comparisons and a harder case for timeout
+calibration and future repeated comparisons. Evidence is specific to the
+selected task and configuration, not a broad benchmark or a claim of general
+model or product superiority.
 
 ## Mission and scope
 
@@ -36,8 +38,9 @@ memory.
 
 ## Fixed experiment contract
 
-The current pinned case is `express-3936-medium` and its checked-in fast
-validator. The fixed live configuration is:
+The default pinned case is `express-3936-medium` and its checked-in fast
+validator. The repository also carries `express-4205-hard` for longer-task
+diagnostics and future repeated comparisons. The fixed live configuration is:
 
 ```text
 provider       = openrouter
@@ -45,7 +48,7 @@ model          = deepseek/deepseek-v4-flash-0731
 thinking       = high
 output limit   = unlimited
 sampling       = temperature 0; seed 20260829
-timeout        = 900 seconds
+timeout        = 900 seconds (medium); 1800 seconds (hard)
 tools          = read, bash, edit, find (this exact order)
 ```
 
@@ -75,6 +78,15 @@ or serialize the key. Pi and Tea both receive the same non-secret shell
 allowlist (`PATH`, attempt-local `HOME`/`TMPDIR`, locale, and the explicit npm
 cache settings). Pi's bash factory disables session-environment exposure;
 Tea's process capability uses the same environment policy.
+
+Timeout policy is task-specific in the Makefile and CLI. Set
+`PI_SHOOTOUT_TIMEOUT_SECONDS=0` or `--timeout-seconds 0` only for an explicit
+uncapped diagnostic: the runner then waits without imposing an outer wall
+clock, while individual model-generated shell commands may still run without
+end. Tea's shootout adapter also derives its OpenRouter request timeout from
+this budget; the zero-budget diagnostic uses a 24-hour transport guard because
+the HTTP client requires a finite deadline. Such a diagnostic is useful for
+calibrating the finite hard-case ceiling but is not a scored efficiency result.
 
 ## Normalized result contract
 
@@ -237,6 +249,12 @@ Use `make pi-shootout` or `make pi-shootout-serious` only when the JIT
 evolution condition is intentionally in scope. To serialize repeat lanes,
 set `PI_SHOOTOUT_PARALLEL_REPEATS=1`; otherwise bound parallelism with a value
 between one and the repeat count.
+
+For a Tea-only hard-case baseline, use `make pi-shootout-tea-static` with
+`PI_SHOOTOUT_TASK=express-4205-hard` (and usually one serialized repeat). The
+run retains Tea's normal attempt and provider evidence and writes
+`reports/tea-static.md`; because Pi is intentionally absent, no paired
+comparison report is produced.
 
 After a run, render the provider-free comparison:
 

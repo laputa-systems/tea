@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from .report import evolution_report, static_report, write_reports
+from .report import baseline_report, evolution_report, static_report, write_baseline_report, write_reports
 from .test_contract import result
 
 
@@ -45,6 +45,16 @@ class ReportTest(unittest.TestCase):
             self.assertTrue(static.is_file())
             self.assertTrue(evolution.is_file())
             self.assertTrue(surface.is_file())
+
+    def test_single_baseline_report_does_not_require_pi(self) -> None:
+        value = summary()
+        value["attempts"] = [value["attempts"][1]]
+        text = baseline_report(value)
+        self.assertIn("single-baseline run", text)
+        self.assertIn("Generation tokens", text)
+        with tempfile.TemporaryDirectory() as temporary:
+            path = write_baseline_report(value, Path(temporary))
+            self.assertTrue(path.is_file())
 
 
 if __name__ == "__main__":
