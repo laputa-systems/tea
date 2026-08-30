@@ -13,7 +13,7 @@ export type ReturnedRoute = {
 	provenance: string | null;
 };
 
-const SENSITIVE_FIELD = /(?:authorization|api[_-]?key|token|credential|secret|password)/iu;
+const SENSITIVE_FIELD = /(?:authorization|api[_-]?key|(?:^|[_-])token(?:$|[_-])|credential|secret|password)/iu;
 const KNOWN_FIELDS = new Set([
 	"model", "messages", "tools", "reasoning", "reasoning_effort", "temperature", "seed",
 	"max_tokens", "max_completion_tokens", "tool_choice", "parallel_tool_calls", "stream",
@@ -38,7 +38,12 @@ export function sanitizeWireValue(value: unknown, paths: readonly AttemptPath[])
 	if (!record) return value;
 	return Object.fromEntries(Object.entries(record).map(([name, entry]) => [
 		name,
-		SENSITIVE_FIELD.test(name) ? "[redacted]" : sanitizeWireValue(entry, paths),
+		// Numeric output ceilings are model-affecting controls, not credentials;
+		// retain them verbatim for the parity audit even though their names
+		// contain the word "tokens".
+		name === "max_tokens" || name === "max_completion_tokens"
+			? sanitizeWireValue(entry, paths)
+			: SENSITIVE_FIELD.test(name) ? "[redacted]" : sanitizeWireValue(entry, paths),
 	]));
 }
 

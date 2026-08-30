@@ -149,7 +149,14 @@ def validate_result(value: Any, *, attempt_id: str | None = None, baseline_id: s
     if usage["prompt_total"] is not None and usage["input"] is not None:
         cache_read = usage["cache_read"] or 0
         cache_write = usage["cache_write"] or 0
-        if usage["prompt_total"] != usage["input"] + cache_read + cache_write:
+        if usage["input"] > usage["prompt_total"]:
+            raise ContractError("usage.input cannot exceed prompt total")
+        # Providers such as OpenRouter report cache components as part of the
+        # raw prompt total. Normally the components partition that total, but
+        # an inconsistent response must not make the adapter invent a larger
+        # prompt total after saturated subtraction. Preserve the raw total and
+        # accept the documented max(..., 0) normalization in that case.
+        if cache_read + cache_write <= usage["prompt_total"] and usage["prompt_total"] != usage["input"] + cache_read + cache_write:
             raise ContractError("usage.prompt_total must include input and cache components")
     cost = _object(result.get("cost"), "cost")
     if cost.get("kind") not in {"provider-reported", "catalog-estimate", "unavailable"}:

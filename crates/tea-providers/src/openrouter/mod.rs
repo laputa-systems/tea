@@ -1305,6 +1305,46 @@ data: [DONE]
     }
 
     #[test]
+    fn model_tool_allowlist_filters_only_the_provider_surface() {
+        let config = OpenRouterConfig::try_new("key", "deepseek/deepseek-v4-flash-0731")
+            .unwrap()
+            .with_model_tool_allowlist(["read", "bash", "edit", "find"]);
+        let definition = |name: &str| ToolDefinition {
+            name: name.into(),
+            description: name.into(),
+            schema: JsonValue::object([("type", JsonValue::from("object"))]),
+            execution_mode: ToolExecutionMode::Sequential,
+            requires_exclusive_batch: false,
+            cancellation_settlement_mode:
+                crate::tool::CancellationSettlementMode::DropFuture,
+        };
+        let payload = build_payload(
+            &config,
+            &ModelRequest {
+                context: "[]".into(),
+                tools: vec![
+                    definition("read"),
+                    definition("bash"),
+                    definition("tea_history_search"),
+                ],
+                ..ModelRequest::default()
+            },
+        )
+        .unwrap();
+        let payload = JsonValue::parse(std::str::from_utf8(&payload).unwrap()).unwrap();
+        let names = payload
+            .get("tools")
+            .and_then(JsonValue::as_array)
+            .unwrap()
+            .iter()
+            .filter_map(|tool| tool.get("function"))
+            .filter_map(|function| function.get("name"))
+            .filter_map(JsonValue::as_str)
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["read", "bash"]);
+    }
+
+    #[test]
     fn requires_tool_capable_openrouter_routing_when_tools_are_admitted() {
         let config = OpenRouterConfig::try_new("key", "deepseek/deepseek-v4-flash-0731").unwrap();
         let payload = super::payload::build_payload(

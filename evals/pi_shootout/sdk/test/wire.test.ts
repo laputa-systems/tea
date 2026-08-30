@@ -18,6 +18,7 @@ test("persists a redacted, path-normalized direct provider request witness", asy
 		tools: [{ type: "function", function: { name: "read", description: "read", parameters: { type: "object" } } }],
 		stream: true,
 		provider: { require_parameters: true },
+		max_completion_tokens: 4096,
 		authorization: "Bearer should-not-persist",
 		nested: { api_key: "also-secret", cache: "/private/cache" },
 	});
@@ -27,6 +28,7 @@ test("persists a redacted, path-normalized direct provider request witness", asy
 	assert.match(persisted, /\[redacted\]/);
 	assert.match(persisted, /\{WORKSPACE\}/);
 	assert.match(persisted, /\{NPM_CACHE\}/);
+	assert.match(persisted, /"max_completion_tokens": 4096/);
 	const summary = wire.summary({ require_parameters: true });
 	assert.equal(JSON.stringify(summary).includes("canonical_payload"), false);
 });

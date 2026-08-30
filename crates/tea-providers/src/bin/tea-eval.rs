@@ -49,6 +49,10 @@ use tea_session::{
 const RESULT_SCHEMA: &str = "tea-coding-eval-result/v3";
 const REQUIRED_MODEL: &str = "deepseek/deepseek-v4-flash-0731";
 const REQUIRED_THINKING: &str = "high";
+/// Evaluation-only guidance that mirrors the concise parts of Pi's native
+/// coding prompt. It reduces avoidable exploratory turns without changing the
+/// closed capability set or any core runtime policy.
+const STATIC_CODING_GUIDELINES: &str = "Guidelines:\n- Be concise in responses and show file paths clearly.\n- Use `read` to inspect known files instead of using `bash` with cat or sed.\n- Batch independent inspections in one tool turn when practical.\n- Use `edit` for precise changes, then run the relevant validator and stop once the fix is verified.\n- For targeted edits, use `files[].edits[]` with exact `oldText` and `newText`; batch independent edits in one call.\n- Keep edit matches small and unique; do not repeat unchanged probes.\n- Once the relevant check passes, finish without further exploratory inspection.";
 const JIT_ADDENDUM: &str = "Task-local harness adaptation is available but optional.\n\nFirst inspect the task and repository using the normal coding tools. Use NoChange unless you have concrete evidence that one bounded harness change is likely to improve this task.\n\nYou may stage at most one task-local harness candidate. It may alter only currently supported prompt, tool-presentation, hook, context, memory-selection, failure-policy, or compaction-policy surfaces. It cannot grant new authority, change the provider or model, access hidden validators, use subagents, or add a web-research tool.\n\nA candidate must include observed task or failure evidence, a root-cause hypothesis, expected effect, regression risk, and the harness surfaces changed. If it activates, continue solving the same task under the new immutable harness revision. All adaptation time and model usage count toward the task result.";
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -477,11 +481,18 @@ fn normalize_attempt_text(value: &str, replacements: &[(String, String)]) -> Str
 
 fn sensitive_wire_field(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
+    if matches!(lower.as_str(), "max_tokens" | "max_completion_tokens") {
+        // These are numeric model controls, not credentials. Keep them in the
+        // retained wire witness so parity checks can see the actual ceiling.
+        return false;
+    }
+    if lower.split(['_', '-']).any(|part| part == "token") {
+        return true;
+    }
     [
         "authorization",
         "api_key",
         "apikey",
-        "token",
         "credential",
         "secret",
         "password",
@@ -1022,16 +1033,12 @@ fn uncached_input_tokens(
     })
 }
 
-fn prompt_total_tokens(
-    input_tokens: Option<u64>,
-    cache_read_tokens: Option<u64>,
-    cache_write_tokens: Option<u64>,
-) -> Option<u64> {
-    input_tokens.map(|input| {
-        input
-            .saturating_add(cache_read_tokens.unwrap_or(0))
-            .saturating_add(cache_write_tokens.unwrap_or(0))
-    })
+/// OpenRouter's `prompt_tokens` already includes cache reads and writes.
+/// Preserve that provider-reported total instead of reconstructing it from a
+/// saturated uncached-input subtraction. The latter is lossy when a provider
+/// reports cache components that exceed its prompt total.
+fn prompt_total_tokens(prompt_tokens: Option<u64>) -> Option<u64> {
+    prompt_tokens
 }
 
 /// The resolved, provider-visible coding surface used by one evaluation run.
@@ -1047,6 +1054,7 @@ struct CodingSurface {
 fn coding_configuration(
     workspace: &Path,
     environment: CommandEnvironment,
+    include_static_guidelines: bool,
 ) -> Result<(AgentConfiguration, CodingSurface), String> {
     let limits = ExtensionLimits {
         max_source_bytes: 64 * 1024,
@@ -1118,13 +1126,19 @@ fn coding_configuration(
             );
         }
     }
+    let prompt_guidelines = include_static_guidelines
+        .then_some(STATIC_CODING_GUIDELINES)
+        .unwrap_or("");
+    let separator = if prompt_guidelines.is_empty() { "" } else { "\n\n" };
     let system_prompt = format!(
-        "{}\nCurrent working directory: {}",
+        "{}{}{}\n\nCurrent working directory: {}",
         prompt_sections
             .iter()
             .map(|section| section.content.as_str())
             .collect::<Vec<_>>()
             .join("\n\n"),
+        separator,
+        prompt_guidelines,
         host.workspace()
             .as_path()
             .to_string_lossy()
@@ -1150,11 +1164,7 @@ fn result_json(input: ResultJsonInput<'_>) -> JsonValue {
         usage.cache_read_tokens,
         usage.cache_write_tokens,
     );
-    let prompt_total = prompt_total_tokens(
-        input_tokens,
-        usage.cache_read_tokens,
-        usage.cache_write_tokens,
-    );
+    let prompt_total = prompt_total_tokens(usage.input_tokens);
     let output = usage.output_tokens;
     let generation = input_tokens
         .zip(output)
@@ -1597,9 +1607,17 @@ fn main() -> Result<(), String> {
     }
     .with_provider_routing(args.provider_routing.clone())
     .with_request_capture(request_capture.clone());
+    let provider_config = if args.harness_mode == HarnessMode::Static {
+        provider_config.with_model_tool_allowlist(["read", "bash", "edit", "find"])
+    } else {
+        provider_config
+    };
     let provider = Arc::new(OpenRouterProvider::new(provider_config));
-    let (configuration, surface) =
-        coding_configuration(&args.workspace, args.shell_environment.clone())?;
+    let (configuration, surface) = coding_configuration(
+        &args.workspace,
+        args.shell_environment.clone(),
+        args.harness_mode == HarnessMode::Static,
+    )?;
     let model = ModelDescriptor {
         provider: "openrouter".into(),
         model: args.model.clone(),
@@ -1913,11 +1931,9 @@ mod tests {
             uncached_input_tokens(Some(282_674), Some(260_352), None),
             Some(22_322)
         );
-        assert_eq!(
-            prompt_total_tokens(Some(22_322), Some(260_352), None),
-            Some(282_674)
-        );
+        assert_eq!(prompt_total_tokens(Some(282_674)), Some(282_674));
         assert_eq!(uncached_input_tokens(Some(4), Some(8), Some(1)), Some(0));
+        assert_eq!(prompt_total_tokens(Some(4)), Some(4));
     }
 
     #[test]

@@ -56,6 +56,12 @@ pub(super) fn build_payload(
     let tools = request
         .tools
         .iter()
+        .filter(|tool| {
+            config
+                .model_tool_allowlist
+                .as_ref()
+                .is_none_or(|allowlist| allowlist.contains(&tool.name))
+        })
         .map(|tool| {
             let schema = tool.schema.clone();
             Ok(json_value!({

@@ -1,5 +1,8 @@
 # Pi/Tea shootout specification
 
+> Maintained contract: [`docs/shootout.md`](docs/shootout.md). This root file
+> is retained as the historical implementation brief.
+
 ## Refinement status
 
 This document contains the original implementation brief and remains useful for

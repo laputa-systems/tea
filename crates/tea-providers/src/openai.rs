@@ -126,12 +126,19 @@ fn openai_message(message: &AgentMessage) -> Result<JsonValue, HookError> {
                 ));
                 model_content.push(']');
             }
-            Ok(JsonValue::object([
+            let mut fields = vec![
                 ("role", JsonValue::from("tool")),
                 ("tool_call_id", JsonValue::from(tool_call_id.as_str())),
                 ("content", JsonValue::from(model_content)),
-                ("is_error", JsonValue::from(*is_error)),
-            ]))
+            ];
+            // OpenAI-compatible providers do not need a success marker, and
+            // Pi omits it from successful tool results. Keep the explicit
+            // error bit only when it carries meaning not already implied by
+            // the role/content shape.
+            if *is_error {
+                fields.push(("is_error", JsonValue::Bool(true)));
+            }
+            Ok(JsonValue::object(fields))
         }
     }
 }
@@ -182,6 +189,24 @@ mod tests {
         };
         let projected = openai_message(&message).expect("projection");
         assert!(projected.get("tool_calls").is_none());
+    }
+
+    #[test]
+    fn successful_tool_projection_omits_redundant_error_flag() {
+        let message = AgentMessage::ToolResult {
+            id: MessageId(1),
+            tool_call_id: ToolCallId::new("call-1").expect("fixture call ID"),
+            tool_name: "fixture".into(),
+            content: "ok".into(),
+            details: None,
+            usage: Box::new(None),
+            added_tool_names: Vec::new(),
+            terminate: false,
+            is_error: false,
+            failure: None,
+        };
+        let projected = openai_message(&message).expect("projection");
+        assert!(projected.get("is_error").is_none());
     }
 
     #[test]

@@ -40,12 +40,18 @@ test("constructs the real pinned Pi session and captures its four-tool request w
 		assert.doesNotMatch(isolated.session.systemPrompt, /Available tools:\s*\(none\)/i);
 		const request = isolated.wire.requests[0] as {
 			tool_count: number; tool_names: string[]; provider_routing: unknown;
-			canonical_payload: { tools: Array<{ function: { name: string; description: string; parameters: unknown; strict?: boolean } }> };
+			canonical_payload: {
+				max_tokens?: unknown;
+				max_completion_tokens?: unknown;
+				tools: Array<{ function: { name: string; description: string; parameters: unknown; strict?: boolean } }>;
+			};
 		};
 		assert.equal(request.tool_count, 4);
 		assert.deepEqual(request.tool_names, ["read", "bash", "edit", "find"]);
 		assert.equal(new Set(request.tool_names).size, 4);
 		assert.deepEqual(request.provider_routing, { require_parameters: true });
+		assert.equal(request.canonical_payload.max_tokens, undefined);
+		assert.equal(request.canonical_payload.max_completion_tokens, undefined);
 		const activeDefinitions = isolated.tools.map((tool) => ({
 			name: tool.name,
 			description: tool.description,

@@ -42,3 +42,4 @@ through the durable harness for every prompt.
 - [Durable subagents](subagents.md)
 - [Verification](verification.md)
 - [Prompt cache-friendliness](cache-friendliness.md) describes content-free logical continuity evidence.
+- [Pi/Tea shootout](shootout.md) defines the pinned static-efficiency and optional JIT evaluation.

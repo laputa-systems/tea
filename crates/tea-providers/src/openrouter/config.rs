@@ -3,6 +3,7 @@
 use super::super::retry::RetryPolicy;
 use super::transport::COMPLETIONS_URL;
 use std::{
+    collections::BTreeSet,
     fmt,
     sync::{Arc, Mutex},
     time::Duration,
@@ -99,6 +100,10 @@ pub struct OpenRouterConfig {
     // controlled policy to both native harnesses instead of changing that
     // production default.
     pub(super) provider_routing: Option<JsonValue>,
+    /// Optional model-facing tool allowlist. The host may retain additional
+    /// durable execution tools while exposing only a closed subset to the
+    /// provider request.
+    pub(super) model_tool_allowlist: Option<BTreeSet<String>>,
     pub(super) request_capture: Option<OpenRouterRequestCapture>,
 }
 
@@ -114,6 +119,7 @@ impl OpenRouterConfig {
             stall_timeout: Duration::from_secs(60),
             retry_policy: RetryPolicy::standard(),
             provider_routing: None,
+            model_tool_allowlist: None,
             request_capture: None,
         }
     }
@@ -162,6 +168,17 @@ impl OpenRouterConfig {
     /// leave it unset and retain the adapter's existing tool-routing default.
     pub fn with_provider_routing(mut self, provider_routing: JsonValue) -> Self {
         self.provider_routing = Some(provider_routing);
+        self
+    }
+
+    /// Restrict the model-facing tool definitions for this explicit provider
+    /// instance while retaining the host's complete execution registry.
+    pub fn with_model_tool_allowlist<I, S>(mut self, names: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.model_tool_allowlist = Some(names.into_iter().map(Into::into).collect());
         self
     }
 

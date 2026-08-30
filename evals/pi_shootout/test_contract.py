@@ -71,6 +71,17 @@ class ContractTest(unittest.TestCase):
         value["final_text"] = ""
         self.assertEqual(validate_result(value)["terminal"]["status"], "failed")
 
+    def test_preserves_raw_prompt_total_when_cache_components_are_inconsistent(self) -> None:
+        value = result()
+        value["usage"].update({"input": 0, "prompt_total": 4, "cache_read": 8, "cache_write": 1, "output": 3, "generation": 3, "all_tokens": 7})
+        self.assertEqual(validate_result(value)["usage"]["prompt_total"], 4)
+
+    def test_rejects_input_larger_than_raw_prompt_total(self) -> None:
+        value = result()
+        value["usage"].update({"input": 5, "prompt_total": 4, "generation": 8})
+        with self.assertRaises(ContractError):
+            validate_result(value)
+
     def test_rejects_static_harness_decision(self) -> None:
         value = result(baseline="tea-static")
         value["harness"]["mode"] = "static"

@@ -110,7 +110,14 @@ function attemptPaths(workspace: string, shell: Record<string, string>): Attempt
 
 function routedPayload(payload: unknown, routing: Record<string, unknown>): Record<string, unknown> {
 	if (!payload || typeof payload !== "object" || Array.isArray(payload)) throw new Error("Pi provider payload is not an object");
-	return { ...(payload as Record<string, unknown>), provider: routing };
+	// The shootout contract uses an unlimited output ceiling. Pi's pinned
+	// OpenRouter converter otherwise supplies its own large
+	// `max_completion_tokens` default, which is still a real provider limit and
+	// can cause a request to be rejected before inference starts.
+	const routed: Record<string, unknown> = { ...(payload as Record<string, unknown>), provider: routing };
+	delete routed.max_tokens;
+	delete routed.max_completion_tokens;
+	return routed;
 }
 
 /** Construct the real pinned Pi SDK session, including the public request

@@ -1,5 +1,8 @@
 # Tea static token-efficiency mission
 
+> Maintained contract: [`docs/shootout.md`](docs/shootout.md). This root file
+> is retained as historical mission context.
+
 ## Measurement hardening notice
 
 The historical numbers and conclusions below predate the current shootout
