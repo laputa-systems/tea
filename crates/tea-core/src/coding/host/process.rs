@@ -114,9 +114,7 @@ fn run_local_command_with_observer(
             Ok(None) => {}
             Err(_) => {
                 let termination = match terminate_owned_scope(&mut child, &scope) {
-                    Ok(()) => indeterminate(
-                        "could not observe the started command's final status",
-                    ),
+                    Ok(()) => indeterminate("could not observe the started command's final status"),
                     Err(reason) => indeterminate(reason),
                 };
                 return Ok(captures.into_output(termination));
@@ -192,7 +190,10 @@ impl OwnedProcessScope {
 /// A shell can exit successfully while ordinary background children remain in
 /// its group. That is not a completed foreground invocation, so the group is
 /// terminated before the recorded shell status is returned.
-fn settle_remaining_scope(child: &mut Child, scope: &OwnedProcessScope) -> Result<(), &'static str> {
+fn settle_remaining_scope(
+    child: &mut Child,
+    scope: &OwnedProcessScope,
+) -> Result<(), &'static str> {
     #[cfg(unix)]
     {
         let OwnedProcessScope::ProcessGroup { id } = scope;
@@ -200,7 +201,7 @@ fn settle_remaining_scope(child: &mut Child, scope: &OwnedProcessScope) -> Resul
             return Ok(());
         }
         signal_process_group(*id)?;
-        return wait_for_process_group_settlement(child, *id);
+        wait_for_process_group_settlement(child, *id)
     }
     #[cfg(not(unix))]
     {
@@ -224,7 +225,7 @@ fn terminate_owned_scope(child: &mut Child, scope: &OwnedProcessScope) -> Result
         if !process_group_is_gone(*id)? {
             signal_process_group(*id)?;
         }
-        return wait_for_process_group_settlement(child, *id);
+        wait_for_process_group_settlement(child, *id)
     }
     #[cfg(not(unix))]
     {
@@ -242,7 +243,10 @@ fn terminate_owned_scope(child: &mut Child, scope: &OwnedProcessScope) -> Result
 }
 
 #[cfg(unix)]
-fn wait_for_process_group_settlement(child: &mut Child, process_group: u32) -> Result<(), &'static str> {
+fn wait_for_process_group_settlement(
+    child: &mut Child,
+    process_group: u32,
+) -> Result<(), &'static str> {
     let started = Instant::now();
     let mut child_reaped = false;
     loop {
@@ -250,7 +254,9 @@ fn wait_for_process_group_settlement(child: &mut Child, process_group: u32) -> R
             match child.try_wait() {
                 Ok(Some(_)) => child_reaped = true,
                 Ok(None) => {}
-                Err(_) => return Err("could not reap the started shell after process-group cleanup"),
+                Err(_) => {
+                    return Err("could not reap the started shell after process-group cleanup");
+                }
             }
         }
         if child_reaped && process_group_is_gone(process_group)? {
@@ -436,7 +442,8 @@ fn emit_capture_updates(
         let mut file = File::open(path)?;
         file.seek(SeekFrom::Start(*offset))?;
         let remaining = length - *offset;
-        let mut bytes = vec![0; usize::try_from(remaining.min(STREAM_CHUNK_BYTES as u64)).unwrap_or(0)];
+        let mut bytes =
+            vec![0; usize::try_from(remaining.min(STREAM_CHUNK_BYTES as u64)).unwrap_or(0)];
         let read = file.read(&mut bytes)?;
         if read == 0 {
             break;
@@ -453,9 +460,9 @@ fn emit_capture_updates(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::contract::CodingOperations;
     use super::super::local_operations::LocalCodingOperations;
+    use super::*;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::mpsc::{Receiver, RecvTimeoutError};
     use std::sync::{Arc, Mutex};
@@ -547,7 +554,10 @@ mod tests {
         root: PathBuf,
         timeout: Duration,
         cancellation: CancellationToken,
-    ) -> (Receiver<Result<CommandOutput, OperationError>>, JoinHandle<()>) {
+    ) -> (
+        Receiver<Result<CommandOutput, OperationError>>,
+        JoinHandle<()>,
+    ) {
         let (sender, receiver) = std::sync::mpsc::sync_channel(1);
         let command = command.into();
         let task = thread::spawn(move || {
@@ -570,7 +580,10 @@ mod tests {
         root: PathBuf,
         timeout: Duration,
         cancellation: CancellationToken,
-    ) -> (Receiver<Result<CommandOutput, OperationError>>, JoinHandle<()>) {
+    ) -> (
+        Receiver<Result<CommandOutput, OperationError>>,
+        JoinHandle<()>,
+    ) {
         let (sender, receiver) = std::sync::mpsc::sync_channel(1);
         let command = command.into();
         let task = thread::spawn(move || {
@@ -594,7 +607,9 @@ mod tests {
     ) -> CommandOutput {
         let result = match receiver.recv_timeout(Duration::from_secs(3)) {
             Ok(result) => result,
-            Err(RecvTimeoutError::Timeout) => panic!("command did not settle within the test bound"),
+            Err(RecvTimeoutError::Timeout) => {
+                panic!("command did not settle within the test bound")
+            }
             Err(RecvTimeoutError::Disconnected) => panic!("command worker disconnected"),
         };
         task.join().expect("command worker joins");
@@ -874,7 +889,9 @@ touch post-cancellation-marker"#,
     impl ChildObserver for FailAfterStarted {
         fn try_wait(&self, _child: &mut Child) -> std::io::Result<Option<ExitStatus>> {
             assert!(wait_for_file(&self.started));
-            Err(std::io::Error::other("injected post-spawn observation failure"))
+            Err(std::io::Error::other(
+                "injected post-spawn observation failure",
+            ))
         }
     }
 
@@ -945,7 +962,10 @@ touch post-cancellation-marker"#,
             .expect("first update arrives before command completion");
         assert!(update.contains("first"));
         assert!(!finished.load(Ordering::Acquire));
-        let output = task.join().expect("streaming task joins").expect("command settles");
+        let output = task
+            .join()
+            .expect("streaming task joins")
+            .expect("command settles");
         assert_eq!(output.termination, CommandTermination::Exited { code: 0 });
         assert_eq!(output.stdout, b"firstsecond");
     }

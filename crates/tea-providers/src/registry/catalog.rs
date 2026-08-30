@@ -59,13 +59,11 @@ static LOCAL_MODELS: &[ModelDescriptor] = &[ModelDescriptor {
 }];
 
 #[cfg(feature = "provider-opencode-zen")]
-static OPENCODE_ZEN_MODELS: &[ModelDescriptor] = &[
-    ModelDescriptor {
-        id: "muse-spark-1.2-contributor-free",
-        display_name: "Muse Spark 1.2 Contributor (Free)",
-        context_window: Some(262_144),
-    },
-];
+static OPENCODE_ZEN_MODELS: &[ModelDescriptor] = &[ModelDescriptor {
+    id: "muse-spark-1.2-contributor-free",
+    display_name: "Muse Spark 1.2 Contributor (Free)",
+    context_window: Some(262_144),
+}];
 
 pub(super) static COMPILED_PROVIDERS: &[ProviderEntry] = &[
     #[cfg(feature = "provider-openrouter")]

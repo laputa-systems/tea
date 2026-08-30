@@ -11,8 +11,8 @@ pub use capabilities::{
     WORKSPACE_READ_CAPABILITY_V1, WORKSPACE_SEARCH_CAPABILITY_V1,
 };
 pub use host::{
-    CodingOperations, CommandEnvironment, CommandOutput, CommandTermination,
-    ConditionalFileCreate, ConditionalFileEdit, EditTransaction, EditTransactionOutcome,
-    EntryMetadata, FileSnapshot, LocalCodingOperations, OperationError, OperationFuture,
-    SearchResult, SearchTruncation, WorkspaceRoot, run_local_command,
+    CodingOperations, CommandEnvironment, CommandOutput, CommandTermination, ConditionalFileCreate,
+    ConditionalFileEdit, EditTransaction, EditTransactionOutcome, EntryMetadata, FileSnapshot,
+    LocalCodingOperations, OperationError, OperationFuture, SearchResult, SearchTruncation,
+    WorkspaceRoot, run_local_command,
 };

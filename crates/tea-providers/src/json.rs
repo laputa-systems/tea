@@ -1,9 +1,6 @@
 //! Small Miniserde-backed helpers for private adapter JSON trees.
 
-#[cfg(any(
-    feature = "provider-openrouter",
-    feature = "provider-opencode-zen"
-))]
+#[cfg(any(feature = "provider-openrouter", feature = "provider-opencode-zen"))]
 use tea_protocol::JsonError;
 use tea_protocol::JsonNumber;
 pub(crate) use tea_protocol::JsonValue;
@@ -111,10 +108,7 @@ where
 }
 
 /// Encode a protocol JSON tree for a byte-oriented transport.
-#[cfg(any(
-    feature = "provider-openrouter",
-    feature = "provider-opencode-zen"
-))]
+#[cfg(any(feature = "provider-openrouter", feature = "provider-opencode-zen"))]
 pub(crate) fn to_bytes(value: &JsonValue) -> Result<Vec<u8>, JsonError> {
     value.to_json_string().map(String::into_bytes)
 }
@@ -146,4 +140,3 @@ macro_rules! json_value {
 }
 
 pub(crate) use json_value;
-

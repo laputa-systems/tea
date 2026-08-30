@@ -8,8 +8,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -183,22 +183,20 @@ impl Args {
         if !provider_routing.is_object() {
             return Err("--provider-routing-json must be an object".into());
         }
-        let attempt_path_replacements = std::iter::once((
-            take("--workspace")?,
-            "{WORKSPACE}".to_owned(),
-        ))
-        .chain(
-            shell
-                .iter()
-                .filter_map(|(name, value)| match name.as_str() {
-                    "HOME" => Some((value.clone(), "{HOME}".to_owned())),
-                    "TMPDIR" => Some((value.clone(), "{TMPDIR}".to_owned())),
-                    "npm_config_cache" => Some((value.clone(), "{NPM_CACHE}".to_owned())),
-                    "NODE_PATH" => Some((value.clone(), "{NODE_PATH}".to_owned())),
-                    _ => None,
-                }),
-        )
-        .collect::<Vec<_>>();
+        let attempt_path_replacements =
+            std::iter::once((take("--workspace")?, "{WORKSPACE}".to_owned()))
+                .chain(
+                    shell
+                        .iter()
+                        .filter_map(|(name, value)| match name.as_str() {
+                            "HOME" => Some((value.clone(), "{HOME}".to_owned())),
+                            "TMPDIR" => Some((value.clone(), "{TMPDIR}".to_owned())),
+                            "npm_config_cache" => Some((value.clone(), "{NPM_CACHE}".to_owned())),
+                            "NODE_PATH" => Some((value.clone(), "{NODE_PATH}".to_owned())),
+                            _ => None,
+                        }),
+                )
+                .collect::<Vec<_>>();
         let shell_environment = shell
             .iter()
             .fold(CommandEnvironment::empty(), |current, (name, value)| {
@@ -479,9 +477,17 @@ fn normalize_attempt_text(value: &str, replacements: &[(String, String)]) -> Str
 
 fn sensitive_wire_field(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
-    ["authorization", "api_key", "apikey", "token", "credential", "secret", "password"]
-        .iter()
-        .any(|needle| lower.contains(needle))
+    [
+        "authorization",
+        "api_key",
+        "apikey",
+        "token",
+        "credential",
+        "secret",
+        "password",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
 }
 
 /// Create the private persisted representation from the exact bytes handed to
@@ -557,15 +563,19 @@ fn wire_request_record(
         .enumerate()
         .map(|(index, message)| {
             let content = message.get("content").cloned().unwrap_or(JsonValue::Null);
-            let structural = message
-                .to_json_string()
-                .expect("sanitized message encodes");
+            let structural = message.to_json_string().expect("sanitized message encodes");
             let content = content.to_json_string().expect("sanitized content encodes");
             JsonValue::object([
                 ("ordinal", JsonValue::from((index + 1) as u64)),
                 ("role", JsonValue::String(roles[index].clone())),
-                ("structural_sha256", JsonValue::String(sha256(structural.as_bytes()))),
-                ("content_sha256", JsonValue::String(sha256(content.as_bytes()))),
+                (
+                    "structural_sha256",
+                    JsonValue::String(sha256(structural.as_bytes())),
+                ),
+                (
+                    "content_sha256",
+                    JsonValue::String(sha256(content.as_bytes())),
+                ),
             ])
         })
         .collect::<Vec<_>>();
@@ -573,7 +583,10 @@ fn wire_request_record(
         messages
             .iter()
             .filter(|message| {
-                matches!(message.get("role").and_then(JsonValue::as_str), Some("system") | Some("developer"))
+                matches!(
+                    message.get("role").and_then(JsonValue::as_str),
+                    Some("system") | Some("developer")
+                )
             })
             .cloned()
             .collect(),
@@ -607,9 +620,20 @@ fn wire_request_record(
         .to_json_string()
         .expect("tools encode");
     let known = [
-        "model", "messages", "tools", "reasoning", "reasoning_effort", "temperature", "seed",
-        "max_tokens", "max_completion_tokens", "tool_choice", "parallel_tool_calls", "stream",
-        "stream_options", "provider",
+        "model",
+        "messages",
+        "tools",
+        "reasoning",
+        "reasoning_effort",
+        "temperature",
+        "seed",
+        "max_tokens",
+        "max_completion_tokens",
+        "tool_choice",
+        "parallel_tool_calls",
+        "stream",
+        "stream_options",
+        "provider",
     ];
     let other = JsonValue::Object(
         object
@@ -649,7 +673,10 @@ fn wire_request_record(
         ),
         ("tool_count", JsonValue::from(tool_names.len() as u64)),
         ("tool_names", strings(tool_names)),
-        ("tool_schema_sha256", JsonValue::String(sha256(tool_json.as_bytes()))),
+        (
+            "tool_schema_sha256",
+            JsonValue::String(sha256(tool_json.as_bytes())),
+        ),
         (
             "reasoning",
             object
@@ -698,7 +725,10 @@ fn write_wire_evidence(
         })
         .collect::<Result<Vec<_>, _>>()?;
     let private = JsonValue::object([
-        ("schema_version", JsonValue::from("tea-pi-wire-request-evidence/v1")),
+        (
+            "schema_version",
+            JsonValue::from("tea-pi-wire-request-evidence/v1"),
+        ),
         ("requests", JsonValue::Array(requests.clone())),
         (
             "returned_route",
@@ -729,7 +759,10 @@ fn write_wire_evidence(
         })
         .collect();
     Ok(JsonValue::object([
-        ("source", JsonValue::from("direct-final-openrouter-boundary")),
+        (
+            "source",
+            JsonValue::from("direct-final-openrouter-boundary"),
+        ),
         ("request_count", JsonValue::from(summaries.len() as u64)),
         ("requests", JsonValue::Array(summaries)),
         ("routing_policy", args.provider_routing.clone()),
@@ -1070,7 +1103,12 @@ fn coding_configuration(
             )
             .map_err(|error| error.to_string())?;
         prompt_sections.extend(descriptor.prompt_sections);
-        for name in resolved.tools.names().map(str::to_owned).collect::<Vec<_>>() {
+        for name in resolved
+            .tools
+            .names()
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+        {
             tools.insert(
                 resolved
                     .tools
@@ -1251,7 +1289,10 @@ fn result_json(input: ResultJsonInput<'_>) -> JsonValue {
                                 .map(|tool| {
                                     JsonValue::object([
                                         ("name", JsonValue::String(tool.name.clone())),
-                                        ("description", JsonValue::String(tool.description.clone())),
+                                        (
+                                            "description",
+                                            JsonValue::String(tool.description.clone()),
+                                        ),
                                     ])
                                 })
                                 .collect(),
@@ -1377,7 +1418,10 @@ fn result_json(input: ResultJsonInput<'_>) -> JsonValue {
                             "model_reasoning",
                             JsonValue::from(thinking_name(input.args.thinking)),
                         ),
-                        ("output_token_ceiling", optional_u64(input.args.max_output_tokens)),
+                        (
+                            "output_token_ceiling",
+                            optional_u64(input.args.max_output_tokens),
+                        ),
                         ("provider_routing", input.args.provider_routing.clone()),
                         (
                             "sampling",
@@ -1422,7 +1466,10 @@ fn result_json(input: ResultJsonInput<'_>) -> JsonValue {
                 // `turns` intentionally follows Pi's user-message semantics.
                 ("turns", JsonValue::from(counts.user_messages)),
                 ("model_turns", JsonValue::from(counts.model_turns)),
-                ("provider_requests", JsonValue::from(counts.provider_requests)),
+                (
+                    "provider_requests",
+                    JsonValue::from(counts.provider_requests),
+                ),
                 ("tool_calls", JsonValue::from(counts.tool_calls)),
                 ("retries", JsonValue::from(counts.retries)),
                 ("compactions", JsonValue::from(counts.compactions)),
@@ -1835,9 +1882,9 @@ mod tests {
     use std::sync::Arc;
 
     use tea_core::event::{AgentEvent, AgentEventKind, EventSequence};
+    use tea_core::runtime::TeaEvent;
     use tea_core::scheduler::AdapterRequestObservation;
     use tea_core::state::{RunId, TurnId};
-    use tea_core::runtime::TeaEvent;
     use tea_core::tool::ToolRegistry;
     use tea_session::LaneId;
 
@@ -1870,10 +1917,7 @@ mod tests {
             prompt_total_tokens(Some(22_322), Some(260_352), None),
             Some(282_674)
         );
-        assert_eq!(
-            uncached_input_tokens(Some(4), Some(8), Some(1)),
-            Some(0)
-        );
+        assert_eq!(uncached_input_tokens(Some(4), Some(8), Some(1)), Some(0));
     }
 
     #[test]

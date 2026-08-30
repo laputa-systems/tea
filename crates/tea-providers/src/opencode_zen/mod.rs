@@ -9,12 +9,12 @@ mod config;
 mod payload;
 mod response;
 
-use crate::transport_runtime::client as http_client;
 use crate::scheduler::{
     AdapterRequestObservation, CancellationToken, ModelEventFuture, ModelEventStream, ModelFuture,
     ModelProvider, ModelRequest, ModelStreamEvent,
 };
 use crate::state::{StopReason, Usage};
+use crate::transport_runtime::client as http_client;
 pub use config::{OpencodeZenConfig, OpencodeZenConfigError};
 use payload::build_payload;
 use response::{OpencodeZenSseDecoder, opencode_zen_context_overflow, response_body_prefix};
@@ -23,8 +23,7 @@ use std::fmt;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use tea_http::{
-    TransportRequest as Request, TransportStream as HttpStream,
-    TransportStreamEvent as StreamEvent,
+    TransportRequest as Request, TransportStream as HttpStream, TransportStreamEvent as StreamEvent,
 };
 
 pub(crate) const RESPONSES_URL: &str = "https://opencode.ai/zen/v1/responses";
@@ -181,23 +180,25 @@ impl OpencodeZenEventStream {
         // and packages/opencode/src/provider/provider.ts BUNDLED_PROVIDERS for opencode).
         // The edge strips x-opencode-* for legacy providers but retains for new inference (console./inf.)
         // so we send minimal correlation headers without leaking workspace paths.
-        event_stream.response = Some(http_client().stream(
-            Request::post(
-                event_stream.provider.config.responses_url(),
-                payload,
-                event_stream.provider.config.request_timeout,
-            )
-            .header(
-                "Authorization",
-                format!("Bearer {}", event_stream.provider.config.api_key),
-            )
-            .header("Content-Type", "application/json")
-            .header("Accept", "text/event-stream")
-            .header("User-Agent", "tea/1.0 opencode-zen")
-            .header("x-opencode-client", "tea")
-            .with_stall_timeout(event_stream.provider.config.stall_timeout),
-            cancellation.clone(),
-        ));
+        event_stream.response = Some(
+            http_client().stream(
+                Request::post(
+                    event_stream.provider.config.responses_url(),
+                    payload,
+                    event_stream.provider.config.request_timeout,
+                )
+                .header(
+                    "Authorization",
+                    format!("Bearer {}", event_stream.provider.config.api_key),
+                )
+                .header("Content-Type", "application/json")
+                .header("Accept", "text/event-stream")
+                .header("User-Agent", "tea/1.0 opencode-zen")
+                .header("x-opencode-client", "tea")
+                .with_stall_timeout(event_stream.provider.config.stall_timeout),
+                cancellation.clone(),
+            ),
+        );
         event_stream.decoder = Some(OpencodeZenSseDecoder::new());
         event_stream
     }
@@ -473,16 +474,20 @@ impl OpencodeZenProvider {
             accounting.input_tokens = Some(accounting.input_tokens.unwrap_or(0).saturating_add(v));
         }
         if let Some(v) = usage.output_tokens {
-            accounting.output_tokens = Some(accounting.output_tokens.unwrap_or(0).saturating_add(v));
+            accounting.output_tokens =
+                Some(accounting.output_tokens.unwrap_or(0).saturating_add(v));
         }
         if let Some(v) = usage.reasoning_tokens {
-            accounting.reasoning_tokens = Some(accounting.reasoning_tokens.unwrap_or(0).saturating_add(v));
+            accounting.reasoning_tokens =
+                Some(accounting.reasoning_tokens.unwrap_or(0).saturating_add(v));
         }
         if let Some(v) = usage.cache_read_tokens {
-            accounting.cache_read_tokens = Some(accounting.cache_read_tokens.unwrap_or(0).saturating_add(v));
+            accounting.cache_read_tokens =
+                Some(accounting.cache_read_tokens.unwrap_or(0).saturating_add(v));
         }
         if let Some(v) = usage.cache_write_tokens {
-            accounting.cache_write_tokens = Some(accounting.cache_write_tokens.unwrap_or(0).saturating_add(v));
+            accounting.cache_write_tokens =
+                Some(accounting.cache_write_tokens.unwrap_or(0).saturating_add(v));
         }
         // Cost handling: if usage.cost is Some, replace/accumulate? For free model cost is "0"
         // Keep last cost for snapshot? For simplicity not accumulating decimal string.
@@ -504,11 +509,17 @@ impl OpencodeZenProvider {
     }
 
     fn record_error(&self, report: OpencodeZenErrorReport) {
-        *self.last_error.lock().expect("OpencodeZen error mutex poisoned") = Some(report);
+        *self
+            .last_error
+            .lock()
+            .expect("OpencodeZen error mutex poisoned") = Some(report);
     }
 
     fn clear_error(&self) {
-        *self.last_error.lock().expect("OpencodeZen error mutex poisoned") = None;
+        *self
+            .last_error
+            .lock()
+            .expect("OpencodeZen error mutex poisoned") = None;
     }
 }
 
@@ -537,7 +548,7 @@ mod tests {
     use super::*;
     use crate::json::JsonValue;
     use crate::state::{ModelDescriptor, ThinkingLevel};
-    use crate::tool::{ToolDefinition, ToolExecutionMode};
+    
     use std::time::Duration;
 
     #[test]
@@ -546,7 +557,10 @@ mod tests {
         assert_eq!(config.request_timeout(), Duration::from_secs(300));
         assert_eq!(config.stall_timeout(), Duration::from_secs(60));
         assert_eq!(
-            config.clone().with_request_timeout(Duration::from_secs(42)).request_timeout(),
+            config
+                .clone()
+                .with_request_timeout(Duration::from_secs(42))
+                .request_timeout(),
             Duration::from_secs(42)
         );
         assert_eq!(
@@ -586,14 +600,24 @@ mod tests {
             payload.get("model").and_then(JsonValue::as_str),
             Some("muse-spark-1.2-contributor-free")
         );
-        assert_eq!(payload.get("stream").and_then(JsonValue::as_bool), Some(true));
         assert_eq!(
-            payload.get("reasoning").and_then(|v| v.get("effort")).and_then(JsonValue::as_str),
+            payload.get("stream").and_then(JsonValue::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            payload
+                .get("reasoning")
+                .and_then(|v| v.get("effort"))
+                .and_then(JsonValue::as_str),
             Some("high")
         );
         // input should contain system prompt
         let input = payload.get("input").and_then(JsonValue::as_array).unwrap();
-        assert!(input.iter().any(|m| m.get("role").and_then(JsonValue::as_str) == Some("system")));
+        assert!(
+            input
+                .iter()
+                .any(|m| m.get("role").and_then(JsonValue::as_str) == Some("system"))
+        );
     }
 
     #[test]
@@ -639,11 +663,18 @@ mod tests {
             .events
             .iter()
             .any(|e| matches!(e, ModelStreamEvent::ToolCall(call) if call.name == "read" && call.id.as_str() == "call_123")));
-        assert!(complete
-            .events
-            .iter()
-            .any(|e| matches!(e, ModelStreamEvent::Usage(u) if u.input_tokens==Some(10))));
-        assert!(complete.events.iter().any(|e| matches!(e, ModelStreamEvent::End(_))));
+        assert!(
+            complete
+                .events
+                .iter()
+                .any(|e| matches!(e, ModelStreamEvent::Usage(u) if u.input_tokens==Some(10)))
+        );
+        assert!(
+            complete
+                .events
+                .iter()
+                .any(|e| matches!(e, ModelStreamEvent::End(_)))
+        );
         // Ensure tool call precedes usage and end
         let tool_pos = complete
             .events

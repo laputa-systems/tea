@@ -1459,7 +1459,7 @@ mod tests {
     #[test]
     fn oversized_activity_payloads_are_refused() {
         let handler = LuaToolHandler::new(
-            &format!(
+            format!(
                 "return function(_) coroutine.yield({{ kind = \"update\", activity = string.rep(\"a\", {}) }}) return 'unreachable' end",
                 MAX_ACTIVITY_BYTES + 1
             ),
@@ -1509,7 +1509,7 @@ mod tests {
             ),
         ] {
             let handler = LuaToolHandler::new(
-                &format!("return function(_) {source} return 'unreachable' end"),
+                format!("return function(_) {source} return 'unreachable' end"),
                 spec(),
                 bindings(denied_capability()),
             )

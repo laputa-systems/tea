@@ -11,13 +11,13 @@ mod payload;
 mod response;
 mod transport;
 
-use crate::transport_runtime::client as http_client;
 use super::retry::{RetryableError, retry_with_backoff};
 use crate::scheduler::{
     AdapterRequestObservation, CancellationToken, ModelEventFuture, ModelEventStream, ModelFuture,
     ModelProvider, ModelRequest, ModelStream, ModelStreamEvent,
 };
 use crate::state::{StopReason, Usage};
+use crate::transport_runtime::client as http_client;
 use accounting::{Accounting, add_usage};
 pub use accounting::{OpenRouterCostReport, OpenRouterCostSource, OpenRouterCostTurn};
 pub use config::{OpenRouterConfig, OpenRouterConfigError, OpenRouterRequestCapture};
@@ -28,8 +28,7 @@ use std::io::Read;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use tea_http::{
-    TransportRequest as Request, TransportStream as HttpStream,
-    TransportStreamEvent as StreamEvent,
+    TransportRequest as Request, TransportStream as HttpStream, TransportStreamEvent as StreamEvent,
 };
 
 use payload::build_payload;
@@ -201,20 +200,22 @@ impl OpenRouterEventStream {
                     payload.len(),
                 ),
             ));
-        event_stream.response = Some(http_client().stream(
-            Request::post(
-                event_stream.provider.config.completion_url(),
-                payload,
-                event_stream.provider.config.request_timeout,
-            )
-            .header(
-                "Authorization",
-                format!("Bearer {}", event_stream.provider.config.api_key),
-            )
-            .header("Content-Type", "application/json")
-            .with_stall_timeout(event_stream.provider.config.stall_timeout),
-            cancellation.clone(),
-        ));
+        event_stream.response = Some(
+            http_client().stream(
+                Request::post(
+                    event_stream.provider.config.completion_url(),
+                    payload,
+                    event_stream.provider.config.request_timeout,
+                )
+                .header(
+                    "Authorization",
+                    format!("Bearer {}", event_stream.provider.config.api_key),
+                )
+                .header("Content-Type", "application/json")
+                .with_stall_timeout(event_stream.provider.config.stall_timeout),
+                cancellation.clone(),
+            ),
+        );
         event_stream.decoder = Some(StreamingSseDecoder::new());
         event_stream
     }
@@ -1054,37 +1055,45 @@ data: [DONE]
                 .with_request_capture(capture.clone()),
         );
         let cancellation = CancellationToken::new();
-        let mut source = smol::block_on(provider.stream(
-            ModelRequest {
-                context: "[]".into(),
-                tools: ["read", "bash", "edit", "find"]
-                    .into_iter()
-                    .map(|name| ToolDefinition {
-                        name: name.into(),
-                        description: format!("shootout {name} capability"),
-                        schema: JsonValue::object([("type", JsonValue::from("object"))]),
-                        execution_mode: ToolExecutionMode::Sequential,
-                        requires_exclusive_batch: false,
-                        cancellation_settlement_mode:
-                            crate::tool::CancellationSettlementMode::DropFuture,
-                    })
-                    .collect(),
-                model: Some(crate::state::ModelDescriptor {
-                    provider: "openrouter".into(),
-                    model: "test-model".into(),
-                    revision: None,
-                }),
-                ..ModelRequest::default()
-            },
-            cancellation.clone(),
-        ))
+        let mut source = smol::block_on(
+            provider.stream(
+                ModelRequest {
+                    context: "[]".into(),
+                    tools: ["read", "bash", "edit", "find"]
+                        .into_iter()
+                        .map(|name| ToolDefinition {
+                            name: name.into(),
+                            description: format!("shootout {name} capability"),
+                            schema: JsonValue::object([("type", JsonValue::from("object"))]),
+                            execution_mode: ToolExecutionMode::Sequential,
+                            requires_exclusive_batch: false,
+                            cancellation_settlement_mode:
+                                crate::tool::CancellationSettlementMode::DropFuture,
+                        })
+                        .collect(),
+                    model: Some(crate::state::ModelDescriptor {
+                        provider: "openrouter".into(),
+                        model: "test-model".into(),
+                        revision: None,
+                    }),
+                    ..ModelRequest::default()
+                },
+                cancellation.clone(),
+            ),
+        )
         .expect("OpenRouter should start an event source");
 
         let captured = capture.payloads();
         assert_eq!(captured.len(), 1);
         let captured = JsonValue::parse(std::str::from_utf8(&captured[0]).unwrap()).unwrap();
-        assert_eq!(captured.get("model").and_then(JsonValue::as_str), Some("test-model"));
-        assert_eq!(captured.get("stream").and_then(JsonValue::as_bool), Some(true));
+        assert_eq!(
+            captured.get("model").and_then(JsonValue::as_str),
+            Some("test-model")
+        );
+        assert_eq!(
+            captured.get("stream").and_then(JsonValue::as_bool),
+            Some(true)
+        );
         let tools = captured
             .get("tools")
             .and_then(JsonValue::as_array)
@@ -1329,7 +1338,10 @@ data: [DONE]
     fn controlled_routing_override_is_serialized_without_changing_default_behavior() {
         let config = OpenRouterConfig::try_new("key", "deepseek/deepseek-v4-flash-0731")
             .unwrap()
-            .with_provider_routing(JsonValue::object([("order", JsonValue::Array(vec![JsonValue::from("DeepSeek")]))]));
+            .with_provider_routing(JsonValue::object([(
+                "order",
+                JsonValue::Array(vec![JsonValue::from("DeepSeek")]),
+            )]));
         let payload = super::payload::build_payload(
             &config,
             &ModelRequest {
@@ -1340,7 +1352,8 @@ data: [DONE]
                     schema: JsonValue::Object(std::collections::BTreeMap::new()),
                     execution_mode: ToolExecutionMode::Sequential,
                     requires_exclusive_batch: false,
-                    cancellation_settlement_mode: crate::tool::CancellationSettlementMode::DropFuture,
+                    cancellation_settlement_mode:
+                        crate::tool::CancellationSettlementMode::DropFuture,
                 }],
                 ..ModelRequest::default()
             },
@@ -1349,7 +1362,10 @@ data: [DONE]
         let payload = JsonValue::parse(std::str::from_utf8(&payload).unwrap()).unwrap();
         assert_eq!(
             payload.get("provider"),
-            Some(&JsonValue::object([("order", JsonValue::Array(vec![JsonValue::from("DeepSeek")]))]))
+            Some(&JsonValue::object([(
+                "order",
+                JsonValue::Array(vec![JsonValue::from("DeepSeek")])
+            )]))
         );
     }
 

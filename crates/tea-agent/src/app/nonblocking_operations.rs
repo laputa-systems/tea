@@ -9,9 +9,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use tea_core::coding::{
-    CodingOperations, CommandEnvironment, CommandOutput, EditTransaction, EditTransactionOutcome,
-    EntryMetadata, FileSnapshot, LocalCodingOperations, OperationError, OperationFuture,
-    SearchResult, run_local_command,
+    run_local_command, CodingOperations, CommandEnvironment, CommandOutput, EditTransaction,
+    EditTransactionOutcome, EntryMetadata, FileSnapshot, LocalCodingOperations, OperationError,
+    OperationFuture, SearchResult,
 };
 use tea_core::scheduler::CancellationToken;
 use tea_core::tool::ToolUpdateSink;
@@ -278,7 +278,9 @@ mod tests {
         let result = smol::block_on(task);
         assert!(started.elapsed() < Duration::from_millis(500));
         assert!(matches!(
-            result.expect("process cancellation settles a receipt").termination,
+            result
+                .expect("process cancellation settles a receipt")
+                .termination,
             tea_core::coding::CommandTermination::Cancelled
         ));
         let _ = fs::remove_dir_all(root);

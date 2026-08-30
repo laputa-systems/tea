@@ -1164,7 +1164,6 @@ fn web_tool_capability_grants() -> BTreeMap<String, String> {
     BTreeMap::from([("web".into(), "network.http".into())])
 }
 
-
 /// Convert the active semantic branch to a presentation-only core-message
 /// projection. It is intentionally not used to restore a core agent: the
 /// durable supervisor remains the sole execution and recovery authority.
@@ -3700,10 +3699,9 @@ data: [DONE]
     fn tinyfish_credential_changes_runtime_availability_not_durable_web_authority() {
         let (without_credential, without_reference) =
             web_capability_binding_with_tinyfish_api_key(None).expect("keyless web binding builds");
-        let (with_credential, with_reference) = web_capability_binding_with_tinyfish_api_key(
-            Some("tinyfish-test-secret"),
-        )
-        .expect("credentialed web binding builds");
+        let (with_credential, with_reference) =
+            web_capability_binding_with_tinyfish_api_key(Some("tinyfish-test-secret"))
+                .expect("credentialed web binding builds");
         assert_eq!(without_reference, with_reference);
         assert_eq!(
             without_credential.binding_digest(),
@@ -4061,10 +4059,12 @@ data: [DONE]
                 &services,
             )
             .expect_err("a candidate cannot remap read to the process capability");
-        assert!(error
-            .to_string()
-            .contains("plugin read tool read names undeclared capability tea.process.v1"),
-            "{error}");
+        assert!(
+            error
+                .to_string()
+                .contains("plugin read tool read names undeclared capability tea.process.v1"),
+            "{error}"
+        );
         let _ = fs::remove_dir_all(home);
     }
 

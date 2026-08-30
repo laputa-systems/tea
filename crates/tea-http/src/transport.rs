@@ -190,7 +190,11 @@ pub struct TransportStream {
 impl TransportStream {
     /// Poll one event without blocking the caller's executor.
     pub fn poll_next(&mut self, context: &mut Context<'_>) -> Poll<TransportStreamEvent> {
-        let mut state = self.shared.state.lock().expect("HTTP stream state mutex poisoned");
+        let mut state = self
+            .shared
+            .state
+            .lock()
+            .expect("HTTP stream state mutex poisoned");
         if let Some(event) = state.events.pop_front() {
             return Poll::Ready(event);
         }
@@ -214,7 +218,11 @@ impl TransportStream {
                     false,
                 ));
             }
-            let state = self.shared.state.lock().expect("HTTP stream state mutex poisoned");
+            let state = self
+                .shared
+                .state
+                .lock()
+                .expect("HTTP stream state mutex poisoned");
             let (mut state, _) = self
                 .shared
                 .arrived
@@ -259,7 +267,9 @@ impl TransportClient {
         let client = self.clone();
         let worker_shared = Arc::clone(&shared);
         self.executor.execute(async move {
-            client.stream_worker(request, cancellation, worker_shared).await;
+            client
+                .stream_worker(request, cancellation, worker_shared)
+                .await;
         });
         TransportStream { shared }
     }
@@ -275,7 +285,9 @@ impl TransportClient {
         let mut body = Vec::new();
         loop {
             match stream.next_blocking(cancellation) {
-                TransportStreamEvent::Response { status_code: status } => status_code = Some(status),
+                TransportStreamEvent::Response {
+                    status_code: status,
+                } => status_code = Some(status),
                 TransportStreamEvent::Chunk(chunk) => body.extend_from_slice(&chunk),
                 TransportStreamEvent::End => {
                     return Ok(TransportResponse {
@@ -320,7 +332,10 @@ impl TransportClient {
         push(&shared, TransportStreamEvent::Response { status_code });
         loop {
             let now = Instant::now();
-            let overall = match deadline.checked_duration_since(now).filter(|duration| !duration.is_zero()) {
+            let overall = match deadline
+                .checked_duration_since(now)
+                .filter(|duration| !duration.is_zero())
+            {
                 Some(remaining) => remaining,
                 None => {
                     push(
@@ -335,12 +350,16 @@ impl TransportClient {
                     return;
                 }
             };
-            let step = request.stall_timeout.map_or(overall, |stall| stall.min(overall));
+            let step = request
+                .stall_timeout
+                .map_or(overall, |stall| stall.min(overall));
             let stalled = request.stall_timeout.is_some_and(|stall| stall <= overall);
             let frame = match run_until(
                 future::poll_fn(|context| Pin::new(&mut body).poll_frame(context)),
                 &cancellation,
-                Instant::now().checked_add(step).unwrap_or_else(Instant::now),
+                Instant::now()
+                    .checked_add(step)
+                    .unwrap_or_else(Instant::now),
                 stalled,
                 Some(status_code),
             )
@@ -357,20 +376,17 @@ impl TransportClient {
                 return;
             };
             match frame {
-                Ok(frame) => match frame.into_data() {
-                    Ok(mut data) => {
-                        let mut chunk = Vec::with_capacity(data.remaining());
-                        while data.has_remaining() {
-                            let bytes = data.chunk();
-                            chunk.extend_from_slice(bytes);
-                            let length = bytes.len();
-                            data.advance(length);
-                        }
-                        if !chunk.is_empty() {
-                            push(&shared, TransportStreamEvent::Chunk(chunk));
-                        }
+                Ok(frame) => if let Ok(mut data) = frame.into_data() {
+                    let mut chunk = Vec::with_capacity(data.remaining());
+                    while data.has_remaining() {
+                        let bytes = data.chunk();
+                        chunk.extend_from_slice(bytes);
+                        let length = bytes.len();
+                        data.advance(length);
                     }
-                    Err(_) => {}
+                    if !chunk.is_empty() {
+                        push(&shared, TransportStreamEvent::Chunk(chunk));
+                    }
                 },
                 Err(_) => {
                     push(
@@ -396,7 +412,12 @@ impl TransportClient {
     ) -> Result<(u16, impl Body<Data = Bytes> + Unpin), TransportError> {
         let request = build_request(request)?;
         let timeout = remaining(deadline).ok_or_else(|| {
-            TransportError::new(TransportErrorCode::Timeout, "HTTP request timed out", None, false)
+            TransportError::new(
+                TransportErrorCode::Timeout,
+                "HTTP request timed out",
+                None,
+                false,
+            )
         })?;
         let options = RequestOptions::new()
             .with_dns_timeout(timeout)
@@ -419,7 +440,10 @@ impl TransportClient {
 
 fn push(shared: &Arc<StreamShared>, event: TransportStreamEvent) {
     let waker = {
-        let mut state = shared.state.lock().expect("HTTP stream state mutex poisoned");
+        let mut state = shared
+            .state
+            .lock()
+            .expect("HTTP stream state mutex poisoned");
         state.events.push_back(event);
         state.waker.take()
     };
@@ -460,14 +484,16 @@ fn build_request(request: TransportRequest) -> Result<Request<RequestBody>, Tran
         })?;
         builder = builder.header(name, value);
     }
-    builder.body(RequestBody::new(request.body)).map_err(|error| {
-        TransportError::new(
-            TransportErrorCode::Write,
-            format!("cannot build HTTP request: {error}"),
-            None,
-            false,
-        )
-    })
+    builder
+        .body(RequestBody::new(request.body))
+        .map_err(|error| {
+            TransportError::new(
+                TransportErrorCode::Write,
+                format!("cannot build HTTP request: {error}"),
+                None,
+                false,
+            )
+        })
 }
 
 fn append_query(mut url: String, query: &[(String, String)]) -> String {
@@ -602,11 +628,15 @@ mod tests {
             let mut request = [0_u8; 1024];
             let _ = socket.read(&mut request).expect("request should read");
             socket
-                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 12\r\nConnection: close\r\n\r\nfirst ")
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 12\r\nConnection: close\r\n\r\nfirst ",
+                )
                 .expect("response prefix should write");
             first_chunk_sent.send(()).expect("receiver remains open");
             wait_for_finish.recv().expect("test releases response");
-            socket.write_all(b"second").expect("response suffix should write");
+            socket
+                .write_all(b"second")
+                .expect("response suffix should write");
         });
 
         let cancellation = CancellationToken::new();
@@ -664,7 +694,9 @@ mod tests {
                     "request should use the expected path"
                 );
                 socket
-                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: keep-alive\r\n\r\nok")
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: keep-alive\r\n\r\nok",
+                    )
                     .expect("response should write");
                 socket.flush().expect("response should flush");
             }
@@ -699,7 +731,9 @@ mod tests {
             socket
                 .write_all(b"HTTP/1.1 429 Too Many Requests\r\nContent-Length: 3\r\nConnection: close\r\n\r\nbad")
                 .expect("response should write");
-            socket.shutdown(Shutdown::Write).expect("response should close");
+            socket
+                .shutdown(Shutdown::Write)
+                .expect("response should close");
         });
         let cancellation = CancellationToken::new();
         let response = client()

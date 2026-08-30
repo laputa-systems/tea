@@ -13,9 +13,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tea_core::coding::{
     CodingHost, CodingOperations, CommandEnvironment, CommandOutput, CommandTermination,
-    EntryMetadata, LocalCodingOperations, OperationError, OperationFuture, SearchResult,
-    SearchTruncation,
-    PROCESS_CAPABILITY_V1, WORKSPACE_MUTATE_CAPABILITY_V1, WORKSPACE_READ_CAPABILITY_V1,
+    EntryMetadata, LocalCodingOperations, OperationError, OperationFuture, PROCESS_CAPABILITY_V1,
+    SearchResult, SearchTruncation, WORKSPACE_MUTATE_CAPABILITY_V1, WORKSPACE_READ_CAPABILITY_V1,
     WORKSPACE_SEARCH_CAPABILITY_V1,
 };
 use tea_core::effect::RunProvenance;
@@ -95,7 +94,11 @@ impl RecordingProcessOperations {
 
 impl CodingOperations for RecordingProcessOperations {
     fn read_file<'a>(&'a self, _path: &'a Path) -> OperationFuture<'a, Vec<u8>> {
-        Box::pin(async { Err(OperationError::new("read is not used by this process fixture")) })
+        Box::pin(async {
+            Err(OperationError::new(
+                "read is not used by this process fixture",
+            ))
+        })
     }
 
     fn metadata<'a>(&'a self, _path: &'a Path) -> OperationFuture<'a, EntryMetadata> {
@@ -338,11 +341,7 @@ fn find_enforces_result_and_output_budgets_with_a_structured_receipt() {
     let oversized_pattern = format!(r#"{{"pattern":"{}"}}"#, "*".repeat(4097));
     let overlong_pattern = invoke(
         host.search_capability().as_ref(),
-        request(
-            WORKSPACE_SEARCH_CAPABILITY_V1,
-            "find",
-            &oversized_pattern,
-        ),
+        request(WORKSPACE_SEARCH_CAPABILITY_V1, "find", &oversized_pattern),
     )
     .expect_err("the host independently rejects overlong glob patterns");
     assert!(matches!(
@@ -497,7 +496,10 @@ fn local_process_capability_surfaces_timeout_and_signal_as_typed_receipts() {
         signaled.get("termination").and_then(JsonValue::as_str),
         Some("signaled")
     );
-    assert_eq!(signaled.get("signal").and_then(JsonValue::as_f64), Some(15.0));
+    assert_eq!(
+        signaled.get("signal").and_then(JsonValue::as_f64),
+        Some(15.0)
+    );
     assert_eq!(signaled.get("exitCode"), Some(&JsonValue::Null));
 }
 
@@ -515,12 +517,19 @@ fn process_resolves_an_omitted_timeout_to_the_finite_host_default() {
 
     let response = invoke(
         host.process_capability().as_ref(),
-        request(PROCESS_CAPABILITY_V1, "run", r#"{"command":"printf recorded"}"#),
+        request(
+            PROCESS_CAPABILITY_V1,
+            "run",
+            r#"{"command":"printf recorded"}"#,
+        ),
     )
     .expect("process capability succeeds");
 
     assert_eq!(
-        observed_timeouts.lock().expect("timeout recorder lock").as_slice(),
+        observed_timeouts
+            .lock()
+            .expect("timeout recorder lock")
+            .as_slice(),
         &[Duration::from_secs(300)]
     );
     assert_eq!(
@@ -552,7 +561,10 @@ fn process_explicit_timeout_replaces_the_host_default() {
     .expect("explicit timeout succeeds");
 
     assert_eq!(
-        observed_timeouts.lock().expect("timeout recorder lock").as_slice(),
+        observed_timeouts
+            .lock()
+            .expect("timeout recorder lock")
+            .as_slice(),
         &[Duration::from_millis(250)]
     );
 }
@@ -579,7 +591,10 @@ fn process_rejects_a_timeout_above_the_existing_maximum() {
     )
     .expect_err("the process timeout maximum remains fixed");
 
-    assert!(matches!(error, ExtensionCapabilityError::InvalidArguments { .. }));
+    assert!(matches!(
+        error,
+        ExtensionCapabilityError::InvalidArguments { .. }
+    ));
     assert!(
         observed_timeouts
             .lock()
@@ -609,7 +624,10 @@ fn process_receipts_make_each_settled_lifecycle_outcome_unambiguous() {
         signaled.get("termination").and_then(JsonValue::as_str),
         Some("signaled")
     );
-    assert_eq!(signaled.get("signal").and_then(JsonValue::as_f64), Some(15.0));
+    assert_eq!(
+        signaled.get("signal").and_then(JsonValue::as_f64),
+        Some(15.0)
+    );
     assert_eq!(signaled.get("exitCode"), Some(&JsonValue::Null));
     assert!(signaled.get("reason").is_none());
 

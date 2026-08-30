@@ -351,7 +351,10 @@ mod tests {
         let success = execute_bash_handler(tea_protocol::JsonValue::object([
             ("content", tea_protocol::JsonValue::String(String::new())),
             ("truncated", tea_protocol::JsonValue::Bool(false)),
-            ("termination", tea_protocol::JsonValue::String("exited".into())),
+            (
+                "termination",
+                tea_protocol::JsonValue::String("exited".into()),
+            ),
             (
                 "exitCode",
                 tea_protocol::JsonValue::Number(tea_protocol::JsonNumber::Signed(0)),
@@ -363,7 +366,10 @@ mod tests {
         let nonzero = execute_bash_handler(tea_protocol::JsonValue::object([
             ("content", tea_protocol::JsonValue::String(String::new())),
             ("truncated", tea_protocol::JsonValue::Bool(false)),
-            ("termination", tea_protocol::JsonValue::String("exited".into())),
+            (
+                "termination",
+                tea_protocol::JsonValue::String("exited".into()),
+            ),
             (
                 "exitCode",
                 tea_protocol::JsonValue::Number(tea_protocol::JsonNumber::Signed(7)),
@@ -375,7 +381,10 @@ mod tests {
         let signaled = execute_bash_handler(tea_protocol::JsonValue::object([
             ("content", tea_protocol::JsonValue::String("partial".into())),
             ("truncated", tea_protocol::JsonValue::Bool(false)),
-            ("termination", tea_protocol::JsonValue::String("signaled".into())),
+            (
+                "termination",
+                tea_protocol::JsonValue::String("signaled".into()),
+            ),
             ("exitCode", tea_protocol::JsonValue::Null),
             (
                 "signal",
@@ -389,7 +398,10 @@ mod tests {
         let timed_out = execute_bash_handler(tea_protocol::JsonValue::object([
             ("content", tea_protocol::JsonValue::String("partial".into())),
             ("truncated", tea_protocol::JsonValue::Bool(false)),
-            ("termination", tea_protocol::JsonValue::String("timed_out".into())),
+            (
+                "termination",
+                tea_protocol::JsonValue::String("timed_out".into()),
+            ),
             ("exitCode", tea_protocol::JsonValue::Null),
         ]));
         assert!(timed_out.is_error);
@@ -404,15 +416,18 @@ mod tests {
                 tea_protocol::JsonValue::String("indeterminate".into()),
             ),
             ("exitCode", tea_protocol::JsonValue::Null),
-            ("reason", tea_protocol::JsonValue::String("ignored here".into())),
+            (
+                "reason",
+                tea_protocol::JsonValue::String("ignored here".into()),
+            ),
         ]));
         assert!(indeterminate.is_error);
-        assert!(
-            indeterminate
-                .content
-                .contains("side effects may already exist")
-        );
-        assert!(indeterminate.content.contains("inspect state before retrying"));
+        assert!(indeterminate
+            .content
+            .contains("side effects may already exist"));
+        assert!(indeterminate
+            .content
+            .contains("inspect state before retrying"));
         assert!(indeterminate.content.contains("ignored here"));
     }
 
@@ -465,7 +480,10 @@ mod tests {
             let descriptor = LuauExtensionEngine
                 .describe(&tree)
                 .expect("builtin descriptor resolves");
-            assert_eq!(descriptor.requested_capabilities, BTreeSet::from([capability.into()]));
+            assert_eq!(
+                descriptor.requested_capabilities,
+                BTreeSet::from([capability.into()])
+            );
             assert_eq!(descriptor.prompt_sections.len(), 1);
             assert_eq!(descriptor.prompt_sections[0].id, name);
             assert!(!descriptor.prompt_sections[0].content.is_empty());
@@ -482,7 +500,9 @@ mod tests {
             );
             assert_eq!(tool.execution_mode, ToolExecutionMode::Parallel);
             if name == "edit" {
-                assert!(tool.description.contains("parent directory must already exist"));
+                assert!(tool
+                    .description
+                    .contains("parent directory must already exist"));
                 assert!(tool.requires_exclusive_batch);
                 assert_eq!(
                     tool.cancellation_settlement_mode,
@@ -529,7 +549,10 @@ mod tests {
                 .insert(capability, implementation, ExtensionToolLimits::default())
                 .expect("capability grant is unique");
             bindings
-                .fix_tool_capabilities(BTreeMap::from([(name.into(), capability.into())]), BTreeSet::new())
+                .fix_tool_capabilities(
+                    BTreeMap::from([(name.into(), capability.into())]),
+                    BTreeSet::new(),
+                )
                 .expect("tool authority is fixed");
             let resolved = LuauExtensionEngine
                 .resolve(
@@ -544,18 +567,13 @@ mod tests {
 
             match name {
                 "read" => {
-                    let output = block_on(
-                        resolved
-                            .tools
-                            .get(name)
-                            .expect("read is resolved")
-                            .execute(
-                                call(name, r#"{"path":"fixture.txt","limit":1}"#),
-                                context.clone(),
-                                ToolUpdateSink::disabled(),
-                            ),
-                    )
-                    .expect("checked-in read handler executes");
+                    let output =
+                        block_on(resolved.tools.get(name).expect("read is resolved").execute(
+                            call(name, r#"{"path":"fixture.txt","limit":1}"#),
+                            context.clone(),
+                            ToolUpdateSink::disabled(),
+                        ))
+                        .expect("checked-in read handler executes");
                     assert_eq!(output.content, "first");
                 }
                 "bash" => {
@@ -577,21 +595,16 @@ mod tests {
                     assert_eq!(output.content, "luau-bash");
                 }
                 "edit" => {
-                    let output = block_on(
-                        resolved
-                            .tools
-                            .get(name)
-                            .expect("edit is resolved")
-                            .execute(
-                                call(
-                                    name,
-                                    r#"{"files":[{"path":"created.txt","content":"created\n"}]}"#,
-                                ),
-                                context.clone(),
-                                ToolUpdateSink::disabled(),
+                    let output =
+                        block_on(resolved.tools.get(name).expect("edit is resolved").execute(
+                            call(
+                                name,
+                                r#"{"files":[{"path":"created.txt","content":"created\n"}]}"#,
                             ),
-                    )
-                    .expect("checked-in edit handler executes");
+                            context.clone(),
+                            ToolUpdateSink::disabled(),
+                        ))
+                        .expect("checked-in edit handler executes");
                     assert_eq!(output.content, "Created 1 file.");
                     assert_eq!(
                         std::fs::read_to_string(workspace.join("created.txt")).unwrap(),
@@ -599,31 +612,21 @@ mod tests {
                     );
                 }
                 "find" => {
-                    let output = block_on(
-                        resolved
-                            .tools
-                            .get(name)
-                            .expect("find is resolved")
-                            .execute(
-                                call(name, r#"{"pattern":"*.txt"}"#),
-                                context.clone(),
-                                ToolUpdateSink::disabled(),
-                            ),
-                    )
-                    .expect("checked-in find handler executes");
+                    let output =
+                        block_on(resolved.tools.get(name).expect("find is resolved").execute(
+                            call(name, r#"{"pattern":"*.txt"}"#),
+                            context.clone(),
+                            ToolUpdateSink::disabled(),
+                        ))
+                        .expect("checked-in find handler executes");
                     assert!(output.content.contains("fixture.txt"));
-                    let bounded = block_on(
-                        resolved
-                            .tools
-                            .get(name)
-                            .expect("find is resolved")
-                            .execute(
-                                call("find-bounded", r#"{"pattern":"*.txt","limit":1}"#),
-                                context.clone(),
-                                ToolUpdateSink::disabled(),
-                            ),
-                    )
-                    .expect("checked-in bounded find handler executes");
+                    let bounded =
+                        block_on(resolved.tools.get(name).expect("find is resolved").execute(
+                            call("find-bounded", r#"{"pattern":"*.txt","limit":1}"#),
+                            context.clone(),
+                            ToolUpdateSink::disabled(),
+                        ))
+                        .expect("checked-in bounded find handler executes");
                     assert!(bounded.content.ends_with("[1 results limit reached]"));
                 }
                 _ => unreachable!("closed builtin catalog"),
@@ -668,10 +671,7 @@ mod tests {
             .expect("capability grant is unique");
         bindings
             .fix_tool_capabilities(
-                BTreeMap::from([(
-                    "edit".into(),
-                    WORKSPACE_MUTATE_CAPABILITY_V1.into(),
-                )]),
+                BTreeMap::from([("edit".into(), WORKSPACE_MUTATE_CAPABILITY_V1.into())]),
                 BTreeSet::new(),
             )
             .expect("edit authority is fixed");
@@ -821,10 +821,13 @@ mod tests {
                             .and_then(|query| query.get("query"))
                             .and_then(tea_protocol::JsonValue::as_str);
                         if query == Some("rate") {
-                            response(429, tea_protocol::JsonValue::object([(
-                                "error",
-                                tea_protocol::JsonValue::String("TinyFish rate limited".into()),
-                            )]))
+                            response(
+                                429,
+                                tea_protocol::JsonValue::object([(
+                                    "error",
+                                    tea_protocol::JsonValue::String("TinyFish rate limited".into()),
+                                )]),
+                            )
                         } else {
                             response_json(
                                 r#"{"results":[{"url":"https://tinyfish.example","title":"TinyFish result","snippet":"fallback snippet","site_name":"tinyfish.example"}]}"#,
@@ -837,107 +840,139 @@ mod tests {
                             .and_then(|json| json.get("urls"))
                             .and_then(tea_protocol::JsonValue::as_array)
                             .expect("TinyFish fetch has URLs");
-                        response(200, tea_protocol::JsonValue::object([
-                            (
-                                "results",
-                                tea_protocol::JsonValue::Array(
-                                    urls.iter()
-                                        .filter_map(tea_protocol::JsonValue::as_str)
-                                        .filter(|url| {
-                                            *url == "https://tinyfish.example"
-                                                || url.contains("fallback")
-                                        })
-                                        .map(|url| {
-                                            tea_protocol::JsonValue::object([
-                                                ("url", tea_protocol::JsonValue::String(url.into())),
-                                                ("title", tea_protocol::JsonValue::String("TinyFish page".into())),
-                                                ("text", tea_protocol::JsonValue::String("TinyFish fallback body".into())),
-                                            ])
-                                        })
-                                        .collect(),
-                                ),
-                            ),
-                            (
-                                "errors",
-                                tea_protocol::JsonValue::Array(
-                                    urls.iter()
-                                        .filter_map(tea_protocol::JsonValue::as_str)
-                                        .filter(|url| {
-                                            *url != "https://tinyfish.example"
-                                                && !url.contains("fallback")
-                                        })
-                                        .map(|url| {
-                                            tea_protocol::JsonValue::object([
-                                                ("url", tea_protocol::JsonValue::String(url.into())),
-                                                ("message", tea_protocol::JsonValue::String("TinyFish fixture fetch failed".into())),
-                                            ])
-                                        })
-                                        .collect(),
-                                ),
-                            ),
-                        ]))
-                    } else {
-                    let query = request
-                        .arguments
-                        .get("json")
-                        .and_then(|json| json.get("query"))
-                        .and_then(tea_protocol::JsonValue::as_str);
-                    if query == Some("tinyfish-query") {
-                        response(503, tea_protocol::JsonValue::object([(
-                            "error",
-                            tea_protocol::JsonValue::String("Firecrawl unavailable".into()),
-                        )]))
-                    } else if query == Some("rate") {
-                        response(429, tea_protocol::JsonValue::object([(
-                            "error",
-                            tea_protocol::JsonValue::String("quota exhausted".into()),
-                        )]))
-                    } else if query == Some("large") {
                         response(
                             200,
                             tea_protocol::JsonValue::object([
-                                ("success", tea_protocol::JsonValue::Bool(true)),
                                 (
-                                    "data",
-                                    tea_protocol::JsonValue::object([(
-                                        "web",
-                                        tea_protocol::JsonValue::Array(vec![
-                                            tea_protocol::JsonValue::object([
-                                                (
-                                                    "url",
-                                                    tea_protocol::JsonValue::String(
-                                                        "https://large.example".into(),
+                                    "results",
+                                    tea_protocol::JsonValue::Array(
+                                        urls.iter()
+                                            .filter_map(tea_protocol::JsonValue::as_str)
+                                            .filter(|url| {
+                                                *url == "https://tinyfish.example"
+                                                    || url.contains("fallback")
+                                            })
+                                            .map(|url| {
+                                                tea_protocol::JsonValue::object([
+                                                    (
+                                                        "url",
+                                                        tea_protocol::JsonValue::String(url.into()),
                                                     ),
-                                                ),
-                                                (
-                                                    "title",
-                                                    tea_protocol::JsonValue::String("Large".into()),
-                                                ),
-                                                (
-                                                    "markdown",
-                                                    tea_protocol::JsonValue::String(
-                                                        "é".repeat(20_000),
+                                                    (
+                                                        "title",
+                                                        tea_protocol::JsonValue::String(
+                                                            "TinyFish page".into(),
+                                                        ),
                                                     ),
-                                                ),
-                                            ]),
-                                        ]),
-                                    )]),
+                                                    (
+                                                        "text",
+                                                        tea_protocol::JsonValue::String(
+                                                            "TinyFish fallback body".into(),
+                                                        ),
+                                                    ),
+                                                ])
+                                            })
+                                            .collect(),
+                                    ),
+                                ),
+                                (
+                                    "errors",
+                                    tea_protocol::JsonValue::Array(
+                                        urls.iter()
+                                            .filter_map(tea_protocol::JsonValue::as_str)
+                                            .filter(|url| {
+                                                *url != "https://tinyfish.example"
+                                                    && !url.contains("fallback")
+                                            })
+                                            .map(|url| {
+                                                tea_protocol::JsonValue::object([
+                                                    (
+                                                        "url",
+                                                        tea_protocol::JsonValue::String(url.into()),
+                                                    ),
+                                                    (
+                                                        "message",
+                                                        tea_protocol::JsonValue::String(
+                                                            "TinyFish fixture fetch failed".into(),
+                                                        ),
+                                                    ),
+                                                ])
+                                            })
+                                            .collect(),
+                                    ),
                                 ),
                             ]),
                         )
-                    } else if query == Some("repair") {
-                        response_json(
-                            r#"{"success":true,"data":{"web":[{"url":"https://one.example","title":"One","markdown":"first"},{"url":"https://two.example","title":"Two"},{"url":"https://three.example","title":"Three"}]}}"#,
-                        )
-                    } else if query == Some("repair-fallback") {
-                        response_json(
-                            r#"{"success":true,"data":{"web":[{"url":"https://fallback.example","title":"Fallback repair"}]}}"#,
-                        )
                     } else {
-                        response_json(
-                            r##"{"success":true,"data":{"web":[{"url":"https://docs.example","title":"Documentation","markdown":"# Evidence\nactual source"}]}}"##,
-                        )
-                    }
+                        let query = request
+                            .arguments
+                            .get("json")
+                            .and_then(|json| json.get("query"))
+                            .and_then(tea_protocol::JsonValue::as_str);
+                        if query == Some("tinyfish-query") {
+                            response(
+                                503,
+                                tea_protocol::JsonValue::object([(
+                                    "error",
+                                    tea_protocol::JsonValue::String("Firecrawl unavailable".into()),
+                                )]),
+                            )
+                        } else if query == Some("rate") {
+                            response(
+                                429,
+                                tea_protocol::JsonValue::object([(
+                                    "error",
+                                    tea_protocol::JsonValue::String("quota exhausted".into()),
+                                )]),
+                            )
+                        } else if query == Some("large") {
+                            response(
+                                200,
+                                tea_protocol::JsonValue::object([
+                                    ("success", tea_protocol::JsonValue::Bool(true)),
+                                    (
+                                        "data",
+                                        tea_protocol::JsonValue::object([(
+                                            "web",
+                                            tea_protocol::JsonValue::Array(vec![
+                                                tea_protocol::JsonValue::object([
+                                                    (
+                                                        "url",
+                                                        tea_protocol::JsonValue::String(
+                                                            "https://large.example".into(),
+                                                        ),
+                                                    ),
+                                                    (
+                                                        "title",
+                                                        tea_protocol::JsonValue::String(
+                                                            "Large".into(),
+                                                        ),
+                                                    ),
+                                                    (
+                                                        "markdown",
+                                                        tea_protocol::JsonValue::String(
+                                                            "é".repeat(20_000),
+                                                        ),
+                                                    ),
+                                                ]),
+                                            ]),
+                                        )]),
+                                    ),
+                                ]),
+                            )
+                        } else if query == Some("repair") {
+                            response_json(
+                                r#"{"success":true,"data":{"web":[{"url":"https://one.example","title":"One","markdown":"first"},{"url":"https://two.example","title":"Two"},{"url":"https://three.example","title":"Three"}]}}"#,
+                            )
+                        } else if query == Some("repair-fallback") {
+                            response_json(
+                                r#"{"success":true,"data":{"web":[{"url":"https://fallback.example","title":"Fallback repair"}]}}"#,
+                            )
+                        } else {
+                            response_json(
+                                r##"{"success":true,"data":{"web":[{"url":"https://docs.example","title":"Documentation","markdown":"# Evidence\nactual source"}]}}"##,
+                            )
+                        }
                     }
                 }
                 "request_many" => {
@@ -1126,7 +1161,9 @@ mod tests {
         let before_repair_fallback = fake.calls.lock().expect("fake web call lock").len();
         let repaired_by_tinyfish = execute("web-repair-fallback", r#"{"query":"repair-fallback"}"#);
         assert!(!repaired_by_tinyfish.is_error);
-        assert!(repaired_by_tinyfish.content.contains("TinyFish fallback body"));
+        assert!(repaired_by_tinyfish
+            .content
+            .contains("TinyFish fallback body"));
         let calls = fake.calls.lock().expect("fake web call lock");
         let repair_fallback_calls = &calls[before_repair_fallback..];
         assert_eq!(repair_fallback_calls.len(), 3);
@@ -1192,21 +1229,37 @@ mod tests {
         assert!(fallback.content.contains("TinyFish fallback body"));
         let calls = fake.calls.lock().expect("fake web call lock");
         let fallback_calls = &calls[before_fallback..];
-        assert_eq!(fallback_calls.len(), 3, "fallback searches then fetches its results");
         assert_eq!(
-            fallback_calls[0].1.get("route").and_then(tea_protocol::JsonValue::as_str),
+            fallback_calls.len(),
+            3,
+            "fallback searches then fetches its results"
+        );
+        assert_eq!(
+            fallback_calls[0]
+                .1
+                .get("route")
+                .and_then(tea_protocol::JsonValue::as_str),
             Some("firecrawl")
         );
         assert_eq!(
-            fallback_calls[1].1.get("route").and_then(tea_protocol::JsonValue::as_str),
+            fallback_calls[1]
+                .1
+                .get("route")
+                .and_then(tea_protocol::JsonValue::as_str),
             Some("tinyfish-search")
         );
         assert_eq!(
-            fallback_calls[1].1.get("method").and_then(tea_protocol::JsonValue::as_str),
+            fallback_calls[1]
+                .1
+                .get("method")
+                .and_then(tea_protocol::JsonValue::as_str),
             Some("GET")
         );
         assert_eq!(
-            fallback_calls[2].1.get("route").and_then(tea_protocol::JsonValue::as_str),
+            fallback_calls[2]
+                .1
+                .get("route")
+                .and_then(tea_protocol::JsonValue::as_str),
             Some("tinyfish-fetch")
         );
         drop(calls);

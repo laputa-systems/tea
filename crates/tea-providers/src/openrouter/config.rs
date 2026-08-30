@@ -2,7 +2,11 @@
 
 use super::super::retry::RetryPolicy;
 use super::transport::COMPLETIONS_URL;
-use std::{fmt, sync::{Arc, Mutex}, time::Duration};
+use std::{
+    fmt,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 use tea_protocol::JsonValue;
 
 /// A deliberately narrow inspection seam for a request that is about to cross
@@ -229,7 +233,10 @@ impl fmt::Debug for OpenRouterConfig {
             .field("stall_timeout", &self.stall_timeout)
             .field("retry_policy", &self.retry_policy)
             .field("provider_routing", &self.provider_routing)
-            .field("request_capture", &self.request_capture.as_ref().map(|_| "enabled"))
+            .field(
+                "request_capture",
+                &self.request_capture.as_ref().map(|_| "enabled"),
+            )
             .finish()
     }
 }

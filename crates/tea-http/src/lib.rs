@@ -13,7 +13,7 @@ mod transport;
 
 pub use capability::NetworkHttpCapability;
 pub use client::{
-    background_executor, Client, HttpOutcome, HttpRequest, RetryPolicy, TransportErrorCode,
+    Client, HttpOutcome, HttpRequest, RetryPolicy, TransportErrorCode, background_executor,
 };
 pub use route::{HttpMethod, Origin, RatePolicy, Route, RouteError};
 pub use transport::{

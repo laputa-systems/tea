@@ -198,15 +198,16 @@ struct MockCodingOperations;
 impl CodingOperations for MockCodingOperations {
     fn read_file<'a>(&'a self, path: &'a Path) -> OperationFuture<'a, Vec<u8>> {
         let path = path.to_path_buf();
-        Box::pin(async move {
-            fs::read(path).map_err(|error| OperationError::new(error.to_string()))
-        })
+        Box::pin(
+            async move { fs::read(path).map_err(|error| OperationError::new(error.to_string())) },
+        )
     }
 
     fn metadata<'a>(&'a self, path: &'a Path) -> OperationFuture<'a, EntryMetadata> {
         let path = path.to_path_buf();
         Box::pin(async move {
-            let metadata = fs::metadata(path).map_err(|error| OperationError::new(error.to_string()))?;
+            let metadata =
+                fs::metadata(path).map_err(|error| OperationError::new(error.to_string()))?;
             Ok(EntryMetadata {
                 is_directory: metadata.is_dir(),
                 is_regular_file: metadata.is_file(),

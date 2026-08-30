@@ -92,16 +92,12 @@ impl GlobMatcher {
                     continue;
                 }
                 match token {
-                    GlobToken::Literal(expected) if *expected == byte => self.activate(
-                        &mut next,
-                        &mut next_fresh_directory_wildcards,
-                        index + 1,
-                    ),
-                    GlobToken::AnyCharacter => self.activate(
-                        &mut next,
-                        &mut next_fresh_directory_wildcards,
-                        index + 1,
-                    ),
+                    GlobToken::Literal(expected) if *expected == byte => {
+                        self.activate(&mut next, &mut next_fresh_directory_wildcards, index + 1)
+                    }
+                    GlobToken::AnyCharacter => {
+                        self.activate(&mut next, &mut next_fresh_directory_wildcards, index + 1)
+                    }
                     GlobToken::ComponentWildcard if byte != b'/' => next[index] = true,
                     GlobToken::PathWildcard => next[index] = true,
                     GlobToken::DirectoryWildcard => {
@@ -182,7 +178,7 @@ pub(crate) fn walk_files(
 
         for entry in entries {
             checked_entries = checked_entries.saturating_add(1);
-            if checked_entries % 64 == 0 {
+            if checked_entries.is_multiple_of(64) {
                 check_cancelled(cancellation)?;
             }
             let path = entry.path();
@@ -275,8 +271,8 @@ mod tests {
         // The old recursive matcher explores an exponential tree for this
         // repeated wildcard shape. Correctness here establishes the same
         // language with the finite-state frontier above.
-        let adversarial = GlobMatcher::new("*a*a*a*a*a*a*a*a*a*a*a*a*b")
-            .expect("adversarial glob parses");
+        let adversarial =
+            GlobMatcher::new("*a*a*a*a*a*a*a*a*a*a*a*a*b").expect("adversarial glob parses");
         assert!(adversarial.matches("aaaaaaaaaaaaab"));
         assert!(!adversarial.matches("aaaaaaaaaaaaac"));
     }

@@ -93,7 +93,10 @@ pub(super) fn build_payload(
                 }
                 if let Some(calls) = msg.get("tool_calls").and_then(JsonValue::as_array) {
                     for call in calls {
-                        let id = call.get("id").and_then(JsonValue::as_str).unwrap_or("call_unknown");
+                        let id = call
+                            .get("id")
+                            .and_then(JsonValue::as_str)
+                            .unwrap_or("call_unknown");
                         let func = call.get("function").and_then(JsonValue::as_object);
                         let name = func
                             .and_then(|f| f.get("name"))

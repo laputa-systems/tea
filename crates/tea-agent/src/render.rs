@@ -523,9 +523,8 @@ fn prefixed_activity_lines(
     }
     let first_prefix = truncate_display(first_prefix, usize::from(width));
     let continuation_prefix = truncate_display(continuation_prefix, usize::from(width));
-    let payload_width = width.saturating_sub(
-        u16::try_from(display_width(&first_prefix)).unwrap_or(u16::MAX),
-    );
+    let payload_width =
+        width.saturating_sub(u16::try_from(display_width(&first_prefix)).unwrap_or(u16::MAX));
     let source = RenderLine::plain(text, first_style);
     let chunks = wrap_styled_line(&source, payload_width, true);
     if chunks.is_empty() {
@@ -1686,9 +1685,7 @@ mod tests {
         let wide = activity_lines(&state, 80);
         let narrow = activity_lines(&state, 40);
         assert!(
-            narrow
-                .iter()
-                .all(|line| display_width(&line.text) <= 40),
+            narrow.iter().all(|line| display_width(&line.text) <= 40),
             "every activity physical row fits the terminal width: {narrow:#?}"
         );
         assert!(

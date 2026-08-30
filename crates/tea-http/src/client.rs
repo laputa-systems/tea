@@ -317,11 +317,7 @@ impl Client {
         cancellation: CancellationToken,
     ) -> HttpOutcome {
         if !route.route.available() {
-            return transport(
-                TransportErrorCode::Unavailable,
-                0,
-                "route is unavailable",
-            );
+            return transport(TransportErrorCode::Unavailable, 0, "route is unavailable");
         }
         let deadline = Instant::now() + route.route.timeout();
         let mut attempts = 0;
@@ -338,7 +334,9 @@ impl Client {
                 Err(code) => return transport(code, attempts, code_message(code)),
             };
             attempts += 1;
-            let attempt = self.execute_once(&route, &request, &cancellation, deadline).await;
+            let attempt = self
+                .execute_once(&route, &request, &cancellation, deadline)
+                .await;
             drop(permit);
             match attempt {
                 Ok(response) => {
@@ -346,13 +344,15 @@ impl Client {
                         .headers
                         .get("retry-after")
                         .and_then(|value| retry_after(value, route.route.retry().max_delay()));
-                    if response.status == StatusCode::TOO_MANY_REQUESTS.as_u16() {
-                        if let Some(delay) = retry_after {
+                    if response.status == StatusCode::TOO_MANY_REQUESTS.as_u16()
+                        && let Some(delay) = retry_after {
                             route.set_cooldown(delay);
                         }
-                    }
-                    if retryable_status(response.status) && retry_index < route.route.retry().max_retries() {
-                        let delay = retry_after.unwrap_or_else(|| route.route.retry().delay_before_retry(retry_index));
+                    if retryable_status(response.status)
+                        && retry_index < route.route.retry().max_retries()
+                    {
+                        let delay = retry_after
+                            .unwrap_or_else(|| route.route.retry().delay_before_retry(retry_index));
                         retry_index += 1;
                         if let Err(code) = wait(delay, &cancellation, deadline).await {
                             return transport(code, attempts, code_message(code));
@@ -366,7 +366,10 @@ impl Client {
                         json: response.json,
                     };
                 }
-                Err(error) if retryable_transport(error.code) && retry_index < route.route.retry().max_retries() => {
+                Err(error)
+                    if retryable_transport(error.code)
+                        && retry_index < route.route.retry().max_retries() =>
+                {
                     let delay = route.route.retry().delay_before_retry(retry_index);
                     retry_index += 1;
                     if let Err(code) = wait(delay, &cancellation, deadline).await {
@@ -402,16 +405,22 @@ impl Client {
             .unwrap_or_default();
         let mut builder = Request::builder()
             .method(request.method.as_str())
-            .uri(append_query(route.route.origin().uri(&request.path), &request.query));
+            .uri(append_query(
+                route.route.origin().uri(&request.path),
+                &request.query,
+            ));
         if request.json.is_some() {
             builder = builder.header(CONTENT_TYPE, "application/json");
         }
         for (name, value) in route.route.fixed_headers() {
             builder = builder.header(name, value);
         }
-        let http_request = builder
-            .body(RequestBody::new(body))
-            .map_err(|error| AttemptError::new(TransportErrorCode::Write, &format!("cannot build request: {error}")))?;
+        let http_request = builder.body(RequestBody::new(body)).map_err(|error| {
+            AttemptError::new(
+                TransportErrorCode::Write,
+                &format!("cannot build request: {error}"),
+            )
+        })?;
         let options = RequestOptions::new()
             .with_dns_timeout(remaining(deadline)?)
             .with_connect_timeout(remaining(deadline)?)
@@ -426,11 +435,25 @@ impl Client {
         .map_err(AttemptError::from_h12)?;
         let (parts, body) = response.into_parts();
         let headers = visible_headers(&parts.headers);
-        let bytes = collect_body(body, route.route.max_response_bytes(), cancellation, deadline).await?;
-        let text = std::str::from_utf8(&bytes)
-            .map_err(|_| AttemptError::new(TransportErrorCode::InvalidResponse, "response body was not valid UTF-8"))?;
-        let json = JsonValue::parse(text)
-            .map_err(|_| AttemptError::new(TransportErrorCode::InvalidResponse, "response body was not valid JSON"))?;
+        let bytes = collect_body(
+            body,
+            route.route.max_response_bytes(),
+            cancellation,
+            deadline,
+        )
+        .await?;
+        let text = std::str::from_utf8(&bytes).map_err(|_| {
+            AttemptError::new(
+                TransportErrorCode::InvalidResponse,
+                "response body was not valid UTF-8",
+            )
+        })?;
+        let json = JsonValue::parse(text).map_err(|_| {
+            AttemptError::new(
+                TransportErrorCode::InvalidResponse,
+                "response body was not valid JSON",
+            )
+        })?;
         Ok(AttemptResponse {
             status: parts.status.as_u16(),
             headers,
@@ -486,8 +509,14 @@ impl RouteRuntime {
                     && state.next_start.is_none_or(|start| start <= now)
                 {
                     state.in_flight += 1;
-                    state.next_start = self.route.rate().minimum_interval.map(|interval| now + interval);
-                    return Ok(RoutePermit { route: Arc::clone(self) });
+                    state.next_start = self
+                        .route
+                        .rate()
+                        .minimum_interval
+                        .map(|interval| now + interval);
+                    return Ok(RoutePermit {
+                        route: Arc::clone(self),
+                    });
                 }
                 state
                     .cooldown_until
@@ -529,7 +558,11 @@ struct RoutePermit {
 impl Drop for RoutePermit {
     fn drop(&mut self) {
         let waiters = {
-            let mut state = self.route.state.lock().expect("route rate state mutex poisoned");
+            let mut state = self
+                .route
+                .state
+                .lock()
+                .expect("route rate state mutex poisoned");
             state.in_flight = state.in_flight.saturating_sub(1);
             std::mem::take(&mut state.waiters)
         };
@@ -550,7 +583,8 @@ async fn wait_for_state(
         let notified = StateNotification { route };
         match delay {
             Some(delay) => {
-                let _ = future::select(Box::pin(notified), Box::pin(async_io::Timer::after(delay))).await;
+                let _ = future::select(Box::pin(notified), Box::pin(async_io::Timer::after(delay)))
+                    .await;
             }
             None => notified.await,
         }
@@ -571,8 +605,16 @@ impl Future for StateNotification {
     type Output = ();
 
     fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
-        let mut state = self.route.state.lock().expect("route rate state mutex poisoned");
-        if !state.waiters.iter().any(|waiter| waiter.will_wake(context.waker())) {
+        let mut state = self
+            .route
+            .state
+            .lock()
+            .expect("route rate state mutex poisoned");
+        if !state
+            .waiters
+            .iter()
+            .any(|waiter| waiter.will_wake(context.waker()))
+        {
             state.waiters.push(context.waker().clone());
         }
         Poll::Pending
@@ -591,7 +633,10 @@ impl Body for RequestBody {
     type Data = Bytes;
     type Error = Infallible;
 
-    fn poll_frame(mut self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        _context: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
         Poll::Ready(self.0.take().map(|bytes| Ok(Frame::data(bytes))))
     }
 
@@ -624,7 +669,6 @@ impl AttemptError {
             message: bounded(message),
         }
     }
-
 }
 
 async fn collect_body<B>(
@@ -648,10 +692,18 @@ where
         let Some(frame) = frame else {
             return Ok(bytes);
         };
-        let frame = frame.map_err(|error| AttemptError::new(TransportErrorCode::Read, &format!("response body read failed: {error}")))?;
+        let frame = frame.map_err(|error| {
+            AttemptError::new(
+                TransportErrorCode::Read,
+                &format!("response body read failed: {error}"),
+            )
+        })?;
         if let Ok(mut data) = frame.into_data() {
             if data.remaining() > maximum.saturating_sub(bytes.len()) {
-                return Err(AttemptError::new(TransportErrorCode::BodyTooLarge, "response body exceeded route limit"));
+                return Err(AttemptError::new(
+                    TransportErrorCode::BodyTooLarge,
+                    "response body exceeded route limit",
+                ));
             }
             while data.has_remaining() {
                 let chunk = data.chunk();
@@ -671,8 +723,14 @@ async fn run_until<T>(
     let timed = future::select(Box::pin(operation), Box::pin(async_io::Timer::at(deadline)));
     match future::select(Box::pin(timed), Box::pin(cancellation.cancelled())).await {
         Either::Left((Either::Left((value, _)), _)) => Ok(value),
-        Either::Left((Either::Right(_), _)) => Err(AttemptError::new(TransportErrorCode::Timeout, "request timed out")),
-        Either::Right(_) => Err(AttemptError::new(TransportErrorCode::Cancelled, "request cancelled")),
+        Either::Left((Either::Right(_), _)) => Err(AttemptError::new(
+            TransportErrorCode::Timeout,
+            "request timed out",
+        )),
+        Either::Right(_) => Err(AttemptError::new(
+            TransportErrorCode::Cancelled,
+            "request cancelled",
+        )),
     }
 }
 
@@ -746,7 +804,7 @@ fn bounded(message: &str) -> String {
     let mut output = String::new();
     for character in message.chars() {
         if output.len() + character.len_utf8() > MAX_DIAGNOSTIC_BYTES {
-            output.push_str("…");
+            output.push('…');
             break;
         }
         output.push(character);
@@ -797,8 +855,14 @@ impl std::fmt::Display for ClientError {
             Self::UnknownRoute(route) => write!(formatter, "unknown HTTP route {route:?}"),
             Self::Route(error) => error.fmt(formatter),
             Self::InvalidJson(error) => write!(formatter, "invalid JSON transport value: {error}"),
-            Self::RequestTooLarge { maximum, actual } => write!(formatter, "request body exceeds {maximum} byte route limit ({actual} bytes)"),
-            Self::InvalidBatchCount { maximum, actual } => write!(formatter, "request_many accepts 1..={maximum} requests, received {actual}"),
+            Self::RequestTooLarge { maximum, actual } => write!(
+                formatter,
+                "request body exceeds {maximum} byte route limit ({actual} bytes)"
+            ),
+            Self::InvalidBatchCount { maximum, actual } => write!(
+                formatter,
+                "request_many accepts 1..={maximum} requests, received {actual}"
+            ),
         }
     }
 }
@@ -810,7 +874,9 @@ impl AttemptError {
         let code = match error.kind() {
             ErrorKind::DnsTimeout => TransportErrorCode::Dns,
             ErrorKind::ConnectTimeout | ErrorKind::Connect => TransportErrorCode::Connect,
-            ErrorKind::TlsTimeout | ErrorKind::Tls | ErrorKind::Alpn | ErrorKind::Handshake => TransportErrorCode::Tls,
+            ErrorKind::TlsTimeout | ErrorKind::Tls | ErrorKind::Alpn | ErrorKind::Handshake => {
+                TransportErrorCode::Tls
+            }
             ErrorKind::SendRequest => TransportErrorCode::Write,
             ErrorKind::Canceled => TransportErrorCode::Read,
             ErrorKind::HeadersTimeout => TransportErrorCode::Timeout,
@@ -852,7 +918,7 @@ mod tests {
 
     #[test]
     fn route_authority_rejects_an_unknown_route_and_unlisted_path_before_io() {
-        let client = Client::new(background_executor(|future| drop(future)), [route()])
+        let client = Client::new(background_executor(drop), [route()])
             .expect("client configures");
         let cancellation = CancellationToken::new();
         let unknown = smol_block(client.request(
@@ -876,7 +942,10 @@ mod tests {
             },
             cancellation,
         ));
-        assert!(matches!(forbidden, Err(ClientError::Route(RouteError::ForbiddenRequest { .. }))));
+        assert!(matches!(
+            forbidden,
+            Err(ClientError::Route(RouteError::ForbiddenRequest { .. }))
+        ));
     }
 
     #[test]
@@ -886,7 +955,10 @@ mod tests {
         assert_eq!(policy.delay_before_retry(1), Duration::from_millis(500));
         assert_eq!(policy.delay_before_retry(2), Duration::from_secs(1));
         assert_eq!(policy.delay_before_retry(8), Duration::from_secs(1));
-        assert_eq!(retry_after("3600", Duration::from_secs(2)), Some(Duration::from_secs(2)));
+        assert_eq!(
+            retry_after("3600", Duration::from_secs(2)),
+            Some(Duration::from_secs(2))
+        );
     }
 
     fn smol_block<T>(future: impl Future<Output = T>) -> T {
@@ -929,7 +1001,10 @@ mod tests {
             method: HttpMethod::Post,
             path: "/ok".into(),
             query: BTreeMap::new(),
-            json: Some(JsonValue::object([("request", JsonValue::String("value".into()))])),
+            json: Some(JsonValue::object([(
+                "request",
+                JsonValue::String("value".into()),
+            )])),
         }
     }
 
@@ -946,14 +1021,20 @@ mod tests {
         };
         let headers = std::str::from_utf8(&bytes[..header_end]).expect("headers are ASCII");
         assert!(headers.starts_with("POST /ok HTTP/1.1\r\n"));
-        assert!(headers.to_ascii_lowercase().contains("content-type: application/json"));
+        assert!(
+            headers
+                .to_ascii_lowercase()
+                .contains("content-type: application/json")
+        );
         let content_length = headers
             .lines()
             .find_map(|line| line.strip_prefix("Content-Length: "))
             .and_then(|value| value.trim().parse::<usize>().ok())
             .expect("request has a fixed JSON content length");
         while bytes.len() < header_end + content_length {
-            let count = stream.read(&mut buffer).expect("fixture request body reads");
+            let count = stream
+                .read(&mut buffer)
+                .expect("fixture request body reads");
             assert_ne!(count, 0, "client must send the complete JSON body");
             bytes.extend_from_slice(&buffer[..count]);
         }
@@ -998,8 +1079,14 @@ mod tests {
         let server = thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("fixture accepts connection");
             let headers = read_headers(&mut stream);
-            assert!(headers.starts_with("GET /?purpose=web%20evidence&query=Rust%20%26%20HTTP%2F2 HTTP/1.1\r\n"));
-            assert!(headers.to_ascii_lowercase().contains("x-api-key: tinyfish-secret\r\n"));
+            assert!(headers.starts_with(
+                "GET /?purpose=web%20evidence&query=Rust%20%26%20HTTP%2F2 HTTP/1.1\r\n"
+            ));
+            assert!(
+                headers
+                    .to_ascii_lowercase()
+                    .contains("x-api-key: tinyfish-secret\r\n")
+            );
             write_response(&mut stream, 200, r#"{"results":[]}"#);
         });
         let route = Route::new(
@@ -1099,7 +1186,10 @@ mod tests {
                 method: HttpMethod::Get,
                 path: "/".into(),
                 query: BTreeMap::from([
-                    ("query".into(), "Rust programming language documentation".into()),
+                    (
+                        "query".into(),
+                        "Rust programming language documentation".into(),
+                    ),
                     (
                         "purpose".into(),
                         "Tea HTTP transport integration smoke test".into(),
@@ -1187,7 +1277,7 @@ mod tests {
         .allow(HttpMethod::Get, "/")
         .expect("path is valid")
         .with_availability(false);
-        let client = Client::new(background_executor(|future| drop(future)), [route])
+        let client = Client::new(background_executor(drop), [route])
             .expect("client configures");
         let outcome = smol_block(client.request(
             HttpRequest {
@@ -1224,7 +1314,7 @@ mod tests {
         .expect("route is valid")
         .allow(HttpMethod::Get, "/")
         .expect("path is valid");
-        let client = Client::new(background_executor(|future| drop(future)), [route])
+        let client = Client::new(background_executor(drop), [route])
             .expect("client configures");
         let result = smol_block(client.request(
             HttpRequest {
@@ -1306,7 +1396,9 @@ mod tests {
     #[test]
     fn request_many_overlaps_local_requests_and_preserves_input_order() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("fixture binds");
-        listener.set_nonblocking(true).expect("fixture listener is nonblocking");
+        listener
+            .set_nonblocking(true)
+            .expect("fixture listener is nonblocking");
         let address = listener.local_addr().expect("fixture has address");
         let active = Arc::new(AtomicUsize::new(0));
         let maximum = Arc::new(AtomicUsize::new(0));
@@ -1354,8 +1446,15 @@ mod tests {
         ))
         .expect("batch is authorized");
         assert_eq!(outcomes.len(), 3);
-        assert!(outcomes.iter().all(|outcome| matches!(outcome, HttpOutcome::Response { status: 200, .. })));
+        assert!(
+            outcomes
+                .iter()
+                .all(|outcome| matches!(outcome, HttpOutcome::Response { status: 200, .. }))
+        );
         server.join().expect("fixture server settles");
-        assert!(maximum.load(Ordering::SeqCst) >= 2, "batch requests overlapped");
+        assert!(
+            maximum.load(Ordering::SeqCst) >= 2,
+            "batch requests overlapped"
+        );
     }
 }

@@ -109,25 +109,45 @@ impl OpencodeZenSseDecoder {
                         if !delta.is_empty() {
                             events.push(ModelStreamEvent::TextDelta(delta.to_owned()));
                         }
-                    } else if let Some(delta) = json.get("text").and_then(JsonValue::as_str) {
-                        if !delta.is_empty() {
+                    } else if let Some(delta) = json.get("text").and_then(JsonValue::as_str)
+                        && !delta.is_empty() {
                             events.push(ModelStreamEvent::TextDelta(delta.to_owned()));
                         }
-                    }
                 }
                 Some("response.output_item.added") => {
                     if let Some(item) = json.get("item").and_then(JsonValue::as_object) {
                         let typ = item.get("type").and_then(JsonValue::as_str).unwrap_or("");
                         if typ == "function_call" {
-                            let item_id = item.get("id").and_then(JsonValue::as_str).unwrap_or("").to_owned();
-                            let name = item.get("name").and_then(JsonValue::as_str).map(|s| s.to_owned());
-                            let call_id = item.get("call_id").and_then(JsonValue::as_str).map(|s| s.to_owned());
-                            let args = item.get("arguments").and_then(JsonValue::as_str).unwrap_or("").to_owned();
+                            let item_id = item
+                                .get("id")
+                                .and_then(JsonValue::as_str)
+                                .unwrap_or("")
+                                .to_owned();
+                            let name = item
+                                .get("name")
+                                .and_then(JsonValue::as_str)
+                                .map(|s| s.to_owned());
+                            let call_id = item
+                                .get("call_id")
+                                .and_then(JsonValue::as_str)
+                                .map(|s| s.to_owned());
+                            let args = item
+                                .get("arguments")
+                                .and_then(JsonValue::as_str)
+                                .unwrap_or("")
+                                .to_owned();
                             if !item_id.is_empty() {
-                                let entry = self.tool_calls.entry(item_id.clone()).or_insert_with(PendingTool::default);
+                                let entry = self
+                                    .tool_calls
+                                    .entry(item_id.clone())
+                                    .or_default();
                                 entry.id = Some(item_id.clone());
-                                if name.is_some() { entry.name = name; }
-                                if call_id.is_some() { entry.call_id = call_id; }
+                                if name.is_some() {
+                                    entry.name = name;
+                                }
+                                if call_id.is_some() {
+                                    entry.call_id = call_id;
+                                }
                                 entry.arguments = args;
                                 if !self.pending_tool_order.contains(&item_id) {
                                     self.pending_tool_order.push(item_id);
@@ -145,7 +165,10 @@ impl OpencodeZenSseDecoder {
                                 entry.arguments.push_str(delta);
                             } else {
                                 // Might be without prior added? create entry
-                                let entry = self.tool_calls.entry(item_id.to_owned()).or_insert_with(PendingTool::default);
+                                let entry = self
+                                    .tool_calls
+                                    .entry(item_id.to_owned())
+                                    .or_default();
                                 entry.id = Some(item_id.to_owned());
                                 entry.arguments.push_str(delta);
                                 if !self.pending_tool_order.contains(&item_id.to_owned()) {
@@ -153,43 +176,56 @@ impl OpencodeZenSseDecoder {
                                 }
                             }
                         }
-                    } else if let Some(delta) = json.get("arguments_delta").and_then(JsonValue::as_str) {
+                    } else if let Some(delta) =
+                        json.get("arguments_delta").and_then(JsonValue::as_str)
+                    {
                         // fallback alternative field name
-                        if let Some(item_id) = json.get("item_id").and_then(JsonValue::as_str) {
-                            if let Some(entry) = self.tool_calls.get_mut(item_id) {
+                        if let Some(item_id) = json.get("item_id").and_then(JsonValue::as_str)
+                            && let Some(entry) = self.tool_calls.get_mut(item_id) {
                                 entry.arguments.push_str(delta);
                             }
-                        }
                     }
                 }
                 Some("response.function_call_arguments.done") => {
-                    if let Some(args) = json.get("arguments").and_then(JsonValue::as_str) {
-                        if let Some(item_id) = json.get("item_id").and_then(JsonValue::as_str) {
-                            if let Some(entry) = self.tool_calls.get_mut(item_id) {
+                    if let Some(args) = json.get("arguments").and_then(JsonValue::as_str)
+                        && let Some(item_id) = json.get("item_id").and_then(JsonValue::as_str)
+                            && let Some(entry) = self.tool_calls.get_mut(item_id) {
                                 entry.arguments = args.to_owned();
                             }
-                        }
-                    }
-                    if let Some(name) = json.get("name").and_then(JsonValue::as_str) {
-                        if let Some(item_id) = json.get("item_id").and_then(JsonValue::as_str) {
-                            if let Some(entry) = self.tool_calls.get_mut(item_id) {
-                                if entry.name.is_none() {
+                    if let Some(name) = json.get("name").and_then(JsonValue::as_str)
+                        && let Some(item_id) = json.get("item_id").and_then(JsonValue::as_str)
+                            && let Some(entry) = self.tool_calls.get_mut(item_id)
+                                && entry.name.is_none() {
                                     entry.name = Some(name.to_owned());
                                 }
-                            }
-                        }
-                    }
                 }
                 Some("response.output_item.done") => {
                     if let Some(item) = json.get("item").and_then(JsonValue::as_object) {
                         let typ = item.get("type").and_then(JsonValue::as_str).unwrap_or("");
                         if typ == "function_call" {
-                            let item_id = item.get("id").and_then(JsonValue::as_str).unwrap_or("").to_owned();
-                            let name = item.get("name").and_then(JsonValue::as_str).map(|s| s.to_owned());
-                            let call_id = item.get("call_id").and_then(JsonValue::as_str).map(|s| s.to_owned());
-                            let args = item.get("arguments").and_then(JsonValue::as_str).unwrap_or("").to_owned();
+                            let item_id = item
+                                .get("id")
+                                .and_then(JsonValue::as_str)
+                                .unwrap_or("")
+                                .to_owned();
+                            let name = item
+                                .get("name")
+                                .and_then(JsonValue::as_str)
+                                .map(|s| s.to_owned());
+                            let call_id = item
+                                .get("call_id")
+                                .and_then(JsonValue::as_str)
+                                .map(|s| s.to_owned());
+                            let args = item
+                                .get("arguments")
+                                .and_then(JsonValue::as_str)
+                                .unwrap_or("")
+                                .to_owned();
                             if !item_id.is_empty() {
-                                let entry = self.tool_calls.entry(item_id.clone()).or_insert_with(PendingTool::default);
+                                let entry = self
+                                    .tool_calls
+                                    .entry(item_id.clone())
+                                    .or_default();
                                 entry.id = Some(item_id.clone());
                                 if name.is_some() {
                                     entry.name = name;
@@ -241,26 +277,29 @@ impl OpencodeZenSseDecoder {
                 Some(_) => {
                     // Unknown event: try to extract text delta fallback?
                     // Check if json has delta field generically
-                    if let Some(delta) = json.get("delta").and_then(JsonValue::as_str) {
-                        if !delta.is_empty() {
+                    if let Some(delta) = json.get("delta").and_then(JsonValue::as_str)
+                        && !delta.is_empty() {
                             // Might be text delta without correct event? emit
                             // But only if not already handled
                         }
-                    }
                 }
                 None => {
                     // No event type: might be data with choices.delta style? fallback
                     // Check if JSON looks like chat completions delta
-                    if let Some(choices) = json.get("choices").and_then(JsonValue::as_array) {
-                        if let Some(choice) = choices.first() {
-                            if let Some(delta) = choice.get("delta").and_then(JsonValue::as_object) {
-                                if let Some(content) = delta.get("content").and_then(JsonValue::as_str) {
-                                    if !content.is_empty() {
-                                        events.push(ModelStreamEvent::TextDelta(content.to_owned()));
+                    if let Some(choices) = json.get("choices").and_then(JsonValue::as_array)
+                        && let Some(choice) = choices.first() {
+                            if let Some(delta) = choice.get("delta").and_then(JsonValue::as_object)
+                            {
+                                if let Some(content) =
+                                    delta.get("content").and_then(JsonValue::as_str)
+                                    && !content.is_empty() {
+                                        events
+                                            .push(ModelStreamEvent::TextDelta(content.to_owned()));
                                     }
-                                }
                                 // tool_calls handling for chat completions fallback
-                                if let Some(calls) = delta.get("tool_calls").and_then(JsonValue::as_array) {
+                                if let Some(calls) =
+                                    delta.get("tool_calls").and_then(JsonValue::as_array)
+                                {
                                     for _call in calls {
                                         // This is fragment, need to assemble similar to OpenRouter but we don't have index handling here.
                                         // For simplicity ignore chat completions tool calls for zen (responses format is primary).
@@ -268,14 +307,15 @@ impl OpencodeZenSseDecoder {
                                     }
                                 }
                             }
-                            if let Some(reason) = choice.get("finish_reason").and_then(JsonValue::as_str) {
+                            if let Some(reason) =
+                                choice.get("finish_reason").and_then(JsonValue::as_str)
+                            {
                                 self.finish_reason = Some(reason.to_owned());
                             }
                             if let Some(usage) = json.get("usage") {
                                 self.usage = Some(parse_usage(usage));
                             }
                         }
-                    }
                 }
             }
         }
@@ -311,12 +351,21 @@ impl OpencodeZenSseDecoder {
                         // If we got events from truncated remainder and not allowed partial, error
                     }
                 }
-                if !allow_partial && !text.trim().ends_with("[DONE]") && !self.saw_done && self.finish_reason.is_none() {
+                if !allow_partial
+                    && !text.trim().ends_with("[DONE]")
+                    && !self.saw_done
+                    && self.finish_reason.is_none()
+                {
                     // For partial handling, allow
                 }
             }
         }
-        if !self.saw_data && !allow_partial && !self.saw_done && self.finish_reason.is_none() && self.tool_calls.is_empty() {
+        if !self.saw_data
+            && !allow_partial
+            && !self.saw_done
+            && self.finish_reason.is_none()
+            && self.tool_calls.is_empty()
+        {
             return Err("OpenCode Zen SSE response ended before completion".to_owned());
         }
         if allow_partial && !self.saw_done && self.finish_reason.is_none() {
@@ -328,7 +377,9 @@ impl OpencodeZenSseDecoder {
             if let Some(entry) = self.tool_calls.get(&item_id) {
                 if let (Some(name), Some(call_id)) = (entry.name.clone(), entry.call_id.clone()) {
                     let call = AgentToolCall {
-                        id: ToolCallId::new(call_id).unwrap_or_else(|_| ToolCallId::new(format!("call_{item_id}")).expect("fallback")),
+                        id: ToolCallId::new(call_id).unwrap_or_else(|_| {
+                            ToolCallId::new(format!("call_{item_id}")).expect("fallback")
+                        }),
                         name,
                         arguments: SerializedJson::new(entry.arguments.clone()),
                     };
@@ -348,7 +399,11 @@ impl OpencodeZenSseDecoder {
         if usage.is_reported() {
             events.push(ModelStreamEvent::Usage(usage.clone()));
         }
-        let has_tools = !events.iter().filter(|e| matches!(e, ModelStreamEvent::ToolCall(_))).collect::<Vec<_>>().is_empty()
+        let has_tools = !events
+            .iter()
+            .filter(|e| matches!(e, ModelStreamEvent::ToolCall(_)))
+            .collect::<Vec<_>>()
+            .is_empty()
             || self.tool_calls.values().any(|t| t.name.is_some());
         let stop_reason = match self.finish_reason.as_deref() {
             Some("length") | Some("max_output_tokens") => StopReason::Length,
@@ -370,13 +425,18 @@ impl OpencodeZenSseDecoder {
         // Search for pattern "\n\n" or "\r\n\r\n" or "\r\r"
         let bytes = &self.buffered;
         for i in 0..bytes.len() {
-            if i + 1 < bytes.len() && bytes[i] == b'\n' && bytes[i+1] == b'\n' {
+            if i + 1 < bytes.len() && bytes[i] == b'\n' && bytes[i + 1] == b'\n' {
                 return Some((i, 2));
             }
-            if i + 3 < bytes.len() && bytes[i]==b'\r' && bytes[i+1]==b'\n' && bytes[i+2]==b'\r' && bytes[i+3]==b'\n' {
+            if i + 3 < bytes.len()
+                && bytes[i] == b'\r'
+                && bytes[i + 1] == b'\n'
+                && bytes[i + 2] == b'\r'
+                && bytes[i + 3] == b'\n'
+            {
                 return Some((i, 4));
             }
-            if i + 1 < bytes.len() && bytes[i]==b'\r' && bytes[i+1]==b'\r' {
+            if i + 1 < bytes.len() && bytes[i] == b'\r' && bytes[i + 1] == b'\r' {
                 return Some((i, 2));
             }
         }
@@ -386,18 +446,34 @@ impl OpencodeZenSseDecoder {
 
 fn parse_usage(usage: &JsonValue) -> Usage {
     // Responses usage shape: {input_tokens, output_tokens, total_tokens, input_tokens_details:{cached_tokens}, output_tokens_details:{reasoning_tokens}}
-    let input = usage.get("input_tokens").and_then(JsonValue::as_u64)
+    let input = usage
+        .get("input_tokens")
+        .and_then(JsonValue::as_u64)
         .or_else(|| usage.get("prompt_tokens").and_then(JsonValue::as_u64));
-    let output = usage.get("output_tokens").and_then(JsonValue::as_u64)
+    let output = usage
+        .get("output_tokens")
+        .and_then(JsonValue::as_u64)
         .or_else(|| usage.get("completion_tokens").and_then(JsonValue::as_u64));
-    let cached = usage.get("input_tokens_details")
+    let cached = usage
+        .get("input_tokens_details")
         .and_then(|d| d.get("cached_tokens"))
         .and_then(JsonValue::as_u64)
-        .or_else(|| usage.get("prompt_tokens_details").and_then(|d| d.get("cached_tokens")).and_then(JsonValue::as_u64));
-    let reasoning = usage.get("output_tokens_details")
+        .or_else(|| {
+            usage
+                .get("prompt_tokens_details")
+                .and_then(|d| d.get("cached_tokens"))
+                .and_then(JsonValue::as_u64)
+        });
+    let reasoning = usage
+        .get("output_tokens_details")
         .and_then(|d| d.get("reasoning_tokens"))
         .and_then(JsonValue::as_u64)
-        .or_else(|| usage.get("completion_tokens_details").and_then(|d| d.get("reasoning_tokens")).and_then(JsonValue::as_u64));
+        .or_else(|| {
+            usage
+                .get("completion_tokens_details")
+                .and_then(|d| d.get("reasoning_tokens"))
+                .and_then(JsonValue::as_u64)
+        });
 
     Usage {
         input_tokens: input,
@@ -405,20 +481,46 @@ fn parse_usage(usage: &JsonValue) -> Usage {
         reasoning_tokens: reasoning,
         cache_read_tokens: cached,
         cache_write_tokens: None,
-        cost: usage.get("cost").and_then(JsonValue::as_str).map(|s| s.to_owned()),
+        cost: usage
+            .get("cost")
+            .and_then(JsonValue::as_str)
+            .map(|s| s.to_owned()),
         ..Usage::default()
     }
 }
 
 pub(super) fn opencode_zen_context_overflow(bytes: &[u8]) -> bool {
-    let Some(message) = from_bytes(bytes).ok()
+    let Some(message) = from_bytes(bytes)
+        .ok()
         .and_then(|response| response.get("error").cloned())
-        .and_then(|error| error.get("message").and_then(JsonValue::as_str).map(str::to_owned))
-    else { return false };
+        .and_then(|error| {
+            error
+                .get("message")
+                .and_then(JsonValue::as_str)
+                .map(str::to_owned)
+        })
+    else {
+        return false;
+    };
     let m = message.to_ascii_lowercase();
-    let overflow = m.contains("maximum") || m.contains("exceed") || m.contains("too long") || m.contains("over limit") || m.contains("limit reached");
-    let poolside = m.contains("input length") && m.contains("maximum allowed input length") && m.contains("token");
-    (overflow && m.contains("context") && (m.contains("length") || m.contains("limit") || m.contains("window") || m.contains("token") || m.contains("capacity"))) || poolside || m.contains("too many tokens") || m.contains("prompt is too long")
+    let overflow = m.contains("maximum")
+        || m.contains("exceed")
+        || m.contains("too long")
+        || m.contains("over limit")
+        || m.contains("limit reached");
+    let poolside = m.contains("input length")
+        && m.contains("maximum allowed input length")
+        && m.contains("token");
+    (overflow
+        && m.contains("context")
+        && (m.contains("length")
+            || m.contains("limit")
+            || m.contains("window")
+            || m.contains("token")
+            || m.contains("capacity")))
+        || poolside
+        || m.contains("too many tokens")
+        || m.contains("prompt is too long")
 }
 
 #[allow(dead_code)]
@@ -428,11 +530,16 @@ pub(super) fn opencode_zen_status_retryable(status: Option<u16>) -> bool {
 
 #[allow(dead_code)]
 pub(super) fn opencode_zen_response_retryable(bytes: &[u8]) -> bool {
-    let Some(error) = from_bytes(bytes).ok()
+    let Some(error) = from_bytes(bytes)
+        .ok()
         .and_then(|response| response.get("error").cloned())
         .and_then(|error| error.as_object().cloned())
-    else { return false };
-    let status = error.get("code").and_then(JsonValue::as_u64)
+    else {
+        return false;
+    };
+    let status = error
+        .get("code")
+        .and_then(JsonValue::as_u64)
         .or_else(|| error.get("status").and_then(JsonValue::as_u64));
     matches!(status, Some(429) | Some(500..=599))
 }
@@ -444,8 +551,14 @@ pub(super) fn response_body_prefix(bytes: &[u8], secret: Option<&str>) -> String
     if let Some(secret) = secret.filter(|secret| !secret.is_empty()) {
         value = value.replace(secret, "[redacted]");
     }
-    let value = value.chars().map(|c| if c.is_control() { ' ' } else { c }).collect::<String>();
+    let value = value
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect::<String>();
     let v = value.trim();
-    if v.is_empty() { "<empty>".to_owned() } else { v.to_owned() }
+    if v.is_empty() {
+        "<empty>".to_owned()
+    } else {
+        v.to_owned()
+    }
 }
-

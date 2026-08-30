@@ -346,16 +346,16 @@ fn renaming_reordering_and_reparenting_are_inferred_from_the_document() {
 #[test]
 fn structural_sync_reopens_a_closed_ancestor_of_active_work() {
     let todo = TodoFixture::new();
-    todo.ok(&markdown_call("- [ ] Finished parent\n- [ ] Active child\n"));
+    todo.ok(&markdown_call(
+        "- [ ] Finished parent\n- [ ] Active child\n",
+    ));
     todo.ok(r#"{"updates":[{"id":1,"status":"done"}]}"#);
 
     let synchronized = todo.ok(&markdown_call(
         "- [ ] #1 Finished parent\n  - [>] #2 Active child\n",
     ));
     assert!(synchronized.content.contains("- [ ] #1 Finished parent"));
-    assert!(synchronized
-        .content
-        .contains("  - [>] #2 Active child"));
+    assert!(synchronized.content.contains("  - [>] #2 Active child"));
 }
 
 #[test]

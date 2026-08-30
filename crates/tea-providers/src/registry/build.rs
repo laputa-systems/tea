@@ -147,7 +147,9 @@ impl ProviderRegistry {
                 }
                 Ok(ConfiguredProvider {
                     descriptor,
-                    provider: Arc::new(crate::opencode_zen::OpencodeZenProvider::new(configuration)),
+                    provider: Arc::new(crate::opencode_zen::OpencodeZenProvider::new(
+                        configuration,
+                    )),
                 })
             }
         }

@@ -46,11 +46,16 @@ pub struct Origin {
 impl Origin {
     /// Create a fixed origin after validating that it cannot contain a path,
     /// query, fragment, or user information.
-    pub fn new(scheme: impl Into<String>, authority: impl Into<String>) -> Result<Self, RouteError> {
+    pub fn new(
+        scheme: impl Into<String>,
+        authority: impl Into<String>,
+    ) -> Result<Self, RouteError> {
         let scheme = scheme.into();
         let authority = authority.into();
         if !matches!(scheme.as_str(), "http" | "https") {
-            return Err(RouteError::InvalidOrigin("scheme must be http or https".into()));
+            return Err(RouteError::InvalidOrigin(
+                "scheme must be http or https".into(),
+            ));
         }
         if authority.is_empty()
             || authority.contains(['/', '?', '#', '@'])
@@ -128,9 +133,9 @@ impl Route {
     ) -> Result<Self, RouteError> {
         let name = name.into();
         if name.is_empty()
-            || !name
-                .chars()
-                .all(|character| character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_'))
+            || !name.chars().all(|character| {
+                character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_')
+            })
         {
             return Err(RouteError::InvalidRouteName(name));
         }
@@ -152,7 +157,11 @@ impl Route {
     }
 
     /// Permit exactly one method/path pair on this fixed origin.
-    pub fn allow(mut self, method: HttpMethod, path: impl Into<String>) -> Result<Self, RouteError> {
+    pub fn allow(
+        mut self,
+        method: HttpMethod,
+        path: impl Into<String>,
+    ) -> Result<Self, RouteError> {
         let path = path.into();
         if !valid_path(&path) {
             return Err(RouteError::InvalidPath(path));
@@ -173,7 +182,7 @@ impl Route {
             .map_err(|_| RouteError::InvalidHeaderName(raw_name))?;
         let value = HeaderValue::try_from(value.into())
             .map_err(|_| RouteError::InvalidHeaderValue(name.as_str().into()))?;
-        self.fixed_headers.retain(|(existing, _)| existing != &name);
+        self.fixed_headers.retain(|(existing, _)| existing != name);
         self.fixed_headers.push((name, value));
         self.fixed_headers
             .sort_by(|(left, _), (right, _)| left.as_str().cmp(right.as_str()));
@@ -197,7 +206,11 @@ impl Route {
         if !valid_path(path) {
             return Err(RouteError::InvalidPath(path.into()));
         }
-        if !self.allowed.iter().any(|(allowed_method, allowed_path)| *allowed_method == method && allowed_path == path) {
+        if !self
+            .allowed
+            .iter()
+            .any(|(allowed_method, allowed_path)| *allowed_method == method && allowed_path == path)
+        {
             return Err(RouteError::ForbiddenRequest {
                 method: method.as_str().into(),
                 path: path.into(),
@@ -264,7 +277,9 @@ impl Route {
             self.retry.initial_delay().as_millis(),
             self.retry.max_delay().as_millis(),
             self.rate.max_in_flight,
-            self.rate.minimum_interval.map_or(0, |interval| interval.as_millis()),
+            self.rate
+                .minimum_interval
+                .map_or(0, |interval| interval.as_millis()),
         )
     }
 }
@@ -325,8 +340,12 @@ impl fmt::Display for RouteError {
             Self::InvalidOrigin(message) => write!(formatter, "invalid origin: {message}"),
             Self::InvalidPath(path) => write!(formatter, "invalid route path {path:?}"),
             Self::InvalidBounds => formatter.write_str("route bounds and timeout must be non-zero"),
-            Self::InvalidHeaderName(name) => write!(formatter, "invalid fixed header name {name:?}"),
-            Self::InvalidHeaderValue(name) => write!(formatter, "invalid fixed header value for {name:?}"),
+            Self::InvalidHeaderName(name) => {
+                write!(formatter, "invalid fixed header name {name:?}")
+            }
+            Self::InvalidHeaderValue(name) => {
+                write!(formatter, "invalid fixed header value for {name:?}")
+            }
             Self::ForbiddenRequest { method, path } => {
                 write!(formatter, "route does not allow {method} {path}")
             }

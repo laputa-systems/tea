@@ -92,7 +92,10 @@ fn parse_many(arguments: &JsonValue) -> Result<Vec<HttpRequest>, ExtensionCapabi
 
 fn parse_request(arguments: &JsonValue) -> Result<HttpRequest, ExtensionCapabilityError> {
     let object = object(arguments, "network.http request arguments")?;
-    exact_fields(object, &["route", "method", "path", "query", "json", "response"])?;
+    exact_fields(
+        object,
+        &["route", "method", "path", "query", "json", "response"],
+    )?;
     response_is_json(object)?;
     let route = required_string(object, "route")?;
     let method = required_string(object, "method")?;
@@ -109,7 +112,9 @@ fn parse_request(arguments: &JsonValue) -> Result<HttpRequest, ExtensionCapabili
     let json = object.get("json").cloned();
     match (method, json.is_some()) {
         (HttpMethod::Post, false) => return Err(invalid("POST requests require a JSON body")),
-        (HttpMethod::Get, true) => return Err(invalid("GET requests must not include a JSON body")),
+        (HttpMethod::Get, true) => {
+            return Err(invalid("GET requests must not include a JSON body"));
+        }
         _ => {}
     }
     Ok(HttpRequest {
@@ -136,9 +141,7 @@ fn parse_query(value: &JsonValue) -> Result<BTreeMap<String, String>, ExtensionC
         .collect()
 }
 
-fn response_is_json(
-    object: &BTreeMap<String, JsonValue>,
-) -> Result<(), ExtensionCapabilityError> {
+fn response_is_json(object: &BTreeMap<String, JsonValue>) -> Result<(), ExtensionCapabilityError> {
     if required_string(object, "response")? != "json" {
         return Err(invalid("response must be the supported literal json"));
     }
@@ -179,7 +182,7 @@ fn exact_fields(
 ) -> Result<(), ExtensionCapabilityError> {
     if let Some(field) = object
         .keys()
-        .find(|field| !expected.iter().any(|expected| *expected == field.as_str()))
+        .find(|field| !expected.contains(&field.as_str()))
     {
         return Err(invalid(&format!("unexpected field {field:?}")));
     }
@@ -278,7 +281,10 @@ mod tests {
             headers: BTreeMap::from([("retry-after".into(), "1".into())]),
             json: JsonValue::Object(BTreeMap::new()),
         });
-        assert_eq!(json.get("kind").and_then(JsonValue::as_str), Some("response"));
+        assert_eq!(
+            json.get("kind").and_then(JsonValue::as_str),
+            Some("response")
+        );
         assert_eq!(json.get("status").and_then(JsonValue::as_u64), Some(429));
     }
 
@@ -296,7 +302,10 @@ mod tests {
         ]))
         .expect("a fixed GET query is valid");
         assert_eq!(request.method, HttpMethod::Get);
-        assert_eq!(request.query.get("query").map(String::as_str), Some("Rust & HTTP/2"));
+        assert_eq!(
+            request.query.get("query").map(String::as_str),
+            Some("Rust & HTTP/2")
+        );
         assert!(request.json.is_none());
 
         let invalid = parse_request(&JsonValue::object([
@@ -306,7 +315,10 @@ mod tests {
             ("json", JsonValue::Object(BTreeMap::new())),
             ("response", JsonValue::String("json".into())),
         ]));
-        assert!(matches!(invalid, Err(ExtensionCapabilityError::InvalidArguments { .. })));
+        assert!(matches!(
+            invalid,
+            Err(ExtensionCapabilityError::InvalidArguments { .. })
+        ));
     }
 
     #[test]

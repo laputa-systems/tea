@@ -23,8 +23,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
 use std::task::{Context, Poll};
 use tea_http::{
-    TransportRequest as Request, TransportStream as HttpStream,
-    TransportStreamEvent as StreamEvent,
+    TransportRequest as Request, TransportStream as HttpStream, TransportStreamEvent as StreamEvent,
 };
 
 /// The model ID exposed by the documented 5-bit Laguna checkpoint.
@@ -105,16 +104,18 @@ impl LocalEventStream {
             "{}/chat/completions",
             event_stream.config.base_url.trim_end_matches('/')
         );
-        event_stream.response = Some(http_client().stream(
-            Request::post(
-                endpoint,
-                payload.into_bytes(),
-                event_stream.config.request_timeout,
-            )
-            .header("Content-Type", "application/json")
-            .header("Accept", "text/event-stream"),
-            cancellation.clone(),
-        ));
+        event_stream.response = Some(
+            http_client().stream(
+                Request::post(
+                    endpoint,
+                    payload.into_bytes(),
+                    event_stream.config.request_timeout,
+                )
+                .header("Content-Type", "application/json")
+                .header("Accept", "text/event-stream"),
+                cancellation.clone(),
+            ),
+        );
         event_stream.decoder = Some(LocalSseDecoder::new());
         event_stream
     }

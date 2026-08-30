@@ -22,9 +22,15 @@ impl fmt::Display for OpencodeZenConfigError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::EmptyField(field) => write!(formatter, "OpenCode Zen {field} must not be empty"),
-            Self::ZeroMaxTokens => formatter.write_str("OpenCode Zen max tokens must be greater than zero"),
-            Self::ZeroRequestTimeout => formatter.write_str("OpenCode Zen request timeout must be greater than zero"),
-            Self::ZeroStallTimeout => formatter.write_str("OpenCode Zen stall timeout must be greater than zero"),
+            Self::ZeroMaxTokens => {
+                formatter.write_str("OpenCode Zen max tokens must be greater than zero")
+            }
+            Self::ZeroRequestTimeout => {
+                formatter.write_str("OpenCode Zen request timeout must be greater than zero")
+            }
+            Self::ZeroStallTimeout => {
+                formatter.write_str("OpenCode Zen stall timeout must be greater than zero")
+            }
             Self::ApiKeyContainsLineBreak => {
                 formatter.write_str("OpenCode Zen API key must not contain line breaks")
             }

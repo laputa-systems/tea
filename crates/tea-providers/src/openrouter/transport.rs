@@ -5,8 +5,8 @@
 
 #![allow(dead_code)]
 
-use crate::transport_runtime::client as http_client;
 use crate::scheduler::CancellationToken;
+use crate::transport_runtime::client as http_client;
 use tea_http::TransportRequest as Request;
 
 pub(super) const COMPLETIONS_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
