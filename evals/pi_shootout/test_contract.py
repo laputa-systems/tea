@@ -6,7 +6,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from .contract import ContractError, RESULT_SCHEMA, validate_result
-from .runner import Config, DEFAULT_MODEL, DEFAULT_THINKING, DEFAULT_TIMEOUT_SECONDS, HARD_TIMEOUT_SECONDS, ShootoutError, TASK_TIMEOUT_SECONDS, _run_process, plan, randomized_plan, run_repeat_lanes, toolchain_manifest
+from .runner import Config, DEFAULT_MODEL, DEFAULT_THINKING, DEFAULT_TIMEOUT_SECONDS, HARD_TIMEOUT_SECONDS, ShootoutError, TASK_TIMEOUT_SECONDS, _run_process, attempt_hard_timeout_seconds, plan, randomized_plan, run_repeat_lanes, toolchain_manifest
 
 
 def result(*, baseline: str = "tea-jit") -> dict:
@@ -176,6 +176,13 @@ class ContractTest(unittest.TestCase):
         popen.assert_called_once()
         process.communicate.assert_called_once_with()
         self.assertEqual(result[:2], (0, False))
+
+    def test_only_tea_static_reserves_finalization_grace(self) -> None:
+        self.assertEqual(attempt_hard_timeout_seconds("tea-static", 1_800), 1_815)
+        self.assertEqual(attempt_hard_timeout_seconds("tea-static", 900), 915)
+        self.assertEqual(attempt_hard_timeout_seconds("pi-static", 1_800), 1_800)
+        self.assertEqual(attempt_hard_timeout_seconds("tea-jit", 1_800), 1_800)
+        self.assertEqual(attempt_hard_timeout_seconds("tea-static", 0), 0)
 
     def test_configuration_requires_the_fixed_v0_model_and_unbounded_is_valid(self) -> None:
         config = Config("express-3936-medium", "openrouter", DEFAULT_MODEL, DEFAULT_THINKING, None, 1, 1, __import__("pathlib").Path("/tmp/cache"), __import__("pathlib").Path("/tmp/work"), __import__("pathlib").Path("/tmp/out"))

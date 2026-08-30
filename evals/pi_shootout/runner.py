@@ -48,6 +48,10 @@ TASK_TIMEOUT_SECONDS = {
     "express-4205-hard": HARD_TIMEOUT_SECONDS,
 }
 MAX_LOG_BYTES = 256 * 1024
+# The adapter receives the scored task deadline unchanged.  The runner keeps a
+# short additional interval only for a terminal adapter timeout to flush its
+# result and direct-request witness before forced process-group cleanup.
+FINALIZATION_GRACE_SECONDS = 15
 SUPPORTED_TASKS = ("express-3936-medium", "express-4205-hard")
 # This is intentionally an explicit shared policy rather than a Tea production
 # default. It keeps both native harnesses eligible for the same OpenRouter
@@ -336,6 +340,13 @@ def _bounded(text: str) -> str:
     return encoded[:MAX_LOG_BYTES].decode("utf-8", errors="replace") + "\n[truncated]\n"
 
 
+def attempt_hard_timeout_seconds(baseline: str, timeout_seconds: int) -> int:
+    """Reserve Tea static evidence-finalization time without extending model work."""
+    if timeout_seconds == 0 or baseline != "tea-static":
+        return timeout_seconds
+    return timeout_seconds + FINALIZATION_GRACE_SECONDS
+
+
 def _run_process(command: list[str], *, cwd: Path, environment: dict[str, str], timeout_seconds: int) -> tuple[int | None, bool, str, str, int]:
     started = time.monotonic_ns()
     process = subprocess.Popen(command, cwd=cwd, env=environment, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=os.name == "posix")
@@ -494,7 +505,12 @@ def _attempt(
         adapter_environment = {"PATH": os.environ.get("PATH", ""), "LANG": "C", "LC_ALL": "C"}
         if os.environ.get("HOME"):
             adapter_environment["HOME"] = os.environ["HOME"]
-        code, timed_out, stdout, stderr, adapter_ms = _run_process(command, cwd=ROOT, environment=adapter_environment, timeout_seconds=config.timeout_seconds)
+        code, timed_out, stdout, stderr, adapter_ms = _run_process(
+            command,
+            cwd=ROOT,
+            environment=adapter_environment,
+            timeout_seconds=attempt_hard_timeout_seconds(baseline, config.timeout_seconds),
+        )
         (attempt_directory / "stdout.log").write_text(stdout, encoding="utf-8")
         (attempt_directory / "stderr.log").write_text(stderr, encoding="utf-8")
         result: dict[str, Any] | None = None
