@@ -39,6 +39,7 @@ use tea_luau::{LuauExtensionEngine, builtins};
 use tea_protocol::{JsonNumber, JsonValue};
 use tea_providers::openai::OpenAiContextHook;
 use tea_providers::openrouter::{OpenRouterConfig, OpenRouterProvider, OpenRouterRequestCapture};
+use tea_providers::RetryPolicy;
 use tea_session::{
     CanonicalHashWriter, Digest, DurabilityMode, EntryId, HarnessRevisionChangedEntry,
     JsonlSession, LaneId, LaneRecord, ModelChangedEntry, ProvisionedEntry, SessionEntry,
@@ -51,6 +52,7 @@ const REQUIRED_MODEL: &str = "deepseek/deepseek-v4-flash-0731";
 const REQUIRED_THINKING: &str = "high";
 const SHOOTOUT_TEMPERATURE: f64 = 0.0;
 const SHOOTOUT_SEED: u64 = 20260829;
+const SHOOTOUT_PROVIDER_MAX_RETRIES: u32 = 3;
 /// Keep the provider request from expiring before the outer shootout budget.
 /// A zero outer budget is an uncapped diagnostic, but the HTTP transport still
 /// needs a finite deadline to avoid an OS-level socket hanging forever.
@@ -1440,7 +1442,10 @@ fn result_json(input: ResultJsonInput<'_>) -> JsonValue {
                             "provider_retry",
                             JsonValue::object([
                                 ("enabled", JsonValue::Bool(true)),
-                                ("max_retries", JsonValue::from(0_u64)),
+                                (
+                                    "max_retries",
+                                    JsonValue::from(u64::from(SHOOTOUT_PROVIDER_MAX_RETRIES)),
+                                ),
                             ]),
                         ),
                         (
@@ -1449,7 +1454,12 @@ fn result_json(input: ResultJsonInput<'_>) -> JsonValue {
                                 input.args.outer_timeout_seconds,
                             )),
                         ),
-                        ("idle_timeout_seconds", JsonValue::from(60_u64)),
+                        (
+                            "idle_timeout_seconds",
+                            JsonValue::from(request_timeout_seconds(
+                                input.args.outer_timeout_seconds,
+                            )),
+                        ),
                         (
                             "outer_attempt_timeout_seconds",
                             JsonValue::from(input.args.outer_timeout_seconds),
@@ -1638,6 +1648,17 @@ fn main() -> Result<(), String> {
     .with_request_timeout(Duration::from_secs(request_timeout_seconds(
         args.outer_timeout_seconds,
     )))
+    // Pi permits a disabled HTTP body idle timeout and Fx has no body deadline
+    // after response headers. Keep Tea's finite outer request budget without
+    // introducing a shorter stream-idle cutoff for this evaluation.
+    .with_stall_timeout(Duration::from_secs(request_timeout_seconds(
+        args.outer_timeout_seconds,
+    )))
+    .with_retry_policy(RetryPolicy::new(
+        SHOOTOUT_PROVIDER_MAX_RETRIES,
+        Duration::from_millis(250),
+        Duration::from_secs(8),
+    ))
     .with_provider_routing(args.provider_routing.clone())
     .with_request_capture(request_capture.clone());
     let provider_config = if args.harness_mode == HarnessMode::Static {

@@ -13,8 +13,8 @@ mod transport;
 
 use super::retry::{RetryableError, retry_with_backoff};
 use crate::scheduler::{
-    AdapterRequestObservation, CancellationToken, ModelEventFuture, ModelEventStream, ModelFuture,
-    ModelProvider, ModelRequest, ModelStream, ModelStreamEvent,
+    AdapterRequestObservation, CancellationToken, CancellationWait, ModelEventFuture,
+    ModelEventStream, ModelFuture, ModelProvider, ModelRequest, ModelStream, ModelStreamEvent,
 };
 use crate::state::{StopReason, Usage};
 use crate::transport_runtime::client as http_client;
@@ -23,10 +23,12 @@ pub use accounting::{OpenRouterCostReport, OpenRouterCostSource, OpenRouterCostT
 pub use config::{OpenRouterConfig, OpenRouterConfigError, OpenRouterRequestCapture};
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
+use std::pin::Pin;
 #[cfg(test)]
 use std::io::Read;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
+use std::time::Duration;
 use tea_http::{
     TransportRequest as Request, TransportStream as HttpStream, TransportStreamEvent as StreamEvent,
 };
@@ -147,12 +149,20 @@ pub struct OpenRouterProvider {
 /// remains caller-polled through the core's provider-neutral stream boundary.
 struct OpenRouterEventStream {
     provider: OpenRouterProvider,
+    payload: Vec<u8>,
     response: Option<HttpStream>,
     decoder: Option<StreamingSseDecoder>,
     pending: VecDeque<ModelStreamEvent>,
     status_code: Option<u16>,
+    response_headers: Vec<(String, String)>,
+    response_headers_received: bool,
     error_body: Vec<u8>,
     payload_bytes: usize,
+    attempt: u32,
+    visible_stream_event: bool,
+    terminal_event_emitted: bool,
+    retry_timer: Option<Pin<Box<smol::Timer>>>,
+    retry_cancellation: Option<Pin<Box<CancellationWait>>>,
 }
 
 impl OpenRouterEventStream {
@@ -164,12 +174,20 @@ impl OpenRouterEventStream {
         provider.clear_error();
         let mut event_stream = Self {
             provider,
+            payload: Vec::new(),
             response: None,
             decoder: None,
             pending: VecDeque::new(),
             status_code: None,
+            response_headers: Vec::new(),
+            response_headers_received: false,
             error_body: Vec::new(),
             payload_bytes: 0,
+            attempt: 0,
+            visible_stream_event: false,
+            terminal_event_emitted: false,
+            retry_timer: None,
+            retry_cancellation: None,
         };
         if cancellation.is_cancelled() {
             event_stream
@@ -189,11 +207,12 @@ impl OpenRouterEventStream {
             }
         };
         event_stream.payload_bytes = payload.len();
+        event_stream.payload = payload;
         if let Some(capture) = &event_stream.provider.config.request_capture {
             // This observes the exact bytes passed immediately below into the
             // HTTP request. It intentionally excludes Authorization, which is
             // added as a header after this point.
-            capture.observe(&payload);
+            capture.observe(&event_stream.payload);
         }
         event_stream
             .pending
@@ -201,27 +220,39 @@ impl OpenRouterEventStream {
                 openrouter_request_observation(
                     &event_stream.provider.config,
                     &request,
-                    payload.len(),
+                    event_stream.payload.len(),
                 ),
             ));
-        event_stream.response = Some(
-            http_client().stream(
-                Request::post(
-                    event_stream.provider.config.completion_url(),
-                    payload,
-                    event_stream.provider.config.request_timeout,
-                )
-                .header(
-                    "Authorization",
-                    format!("Bearer {}", event_stream.provider.config.api_key),
-                )
-                .header("Content-Type", "application/json")
-                .with_stall_timeout(event_stream.provider.config.stall_timeout),
-                cancellation.clone(),
-            ),
-        );
-        event_stream.decoder = Some(StreamingSseDecoder::new());
+        event_stream.start_attempt(&cancellation);
         event_stream
+    }
+
+    fn start_attempt(&mut self, cancellation: &CancellationToken) {
+        if cancellation.is_cancelled() {
+            self.pending
+                .push_back(ModelStreamEvent::End(StopReason::Cancelled));
+            return;
+        }
+        self.attempt = self.attempt.saturating_add(1);
+        self.status_code = None;
+        self.response_headers.clear();
+        self.response_headers_received = false;
+        self.error_body.clear();
+        self.response = Some(http_client().stream(
+            Request::post(
+                self.provider.config.completion_url(),
+                self.payload.clone(),
+                self.provider.config.request_timeout,
+            )
+            .header(
+                "Authorization",
+                format!("Bearer {}", self.provider.config.api_key),
+            )
+            .header("Content-Type", "application/json")
+            .with_stall_timeout(self.provider.config.stall_timeout),
+            cancellation.clone(),
+        ));
+        self.decoder = Some(StreamingSseDecoder::new());
     }
 
     fn adapter_failure(&mut self, message: String) {
@@ -252,7 +283,7 @@ impl OpenRouterEventStream {
             message: message.clone(),
             status_code,
             retryable: false,
-            attempt: 1,
+            attempt: self.attempt,
             response_bytes: (!self.error_body.is_empty()).then_some(self.error_body.len()),
             request_bytes: Some(self.payload_bytes),
             response_prefix: (!self.error_body.is_empty()).then(|| {
@@ -268,6 +299,109 @@ impl OpenRouterEventStream {
         self.pending.push_back(ModelStreamEvent::Error { message });
     }
 
+    /// Queue a bounded, cancellation-aware retry before any model-visible event escaped.
+    /// Replaying after output would make delivery ambiguous and can duplicate provider work,
+    /// so the stream deliberately leaves that recovery to its embedding.
+    fn queue_retry(&mut self, retry_after: Option<Duration>) -> bool {
+        if self.visible_stream_event
+            || self.attempt > self.provider.config.retry_policy.max_retries()
+        {
+            return false;
+        }
+        let retry_index = self.attempt.saturating_sub(1);
+        let backoff = self
+            .provider
+            .config
+            .retry_policy
+            .delay_before_retry(retry_index);
+        let delay = retry_after
+            .unwrap_or(backoff)
+            .min(self.provider.config.retry_policy.max_delay());
+        self.response = None;
+        self.decoder = None;
+        self.status_code = None;
+        self.response_headers.clear();
+        self.response_headers_received = false;
+        self.error_body.clear();
+        self.retry_timer = Some(Box::pin(smol::Timer::after(delay)));
+        self.retry_cancellation = None;
+        true
+    }
+
+    fn retry_after(&self) -> Option<Duration> {
+        let value = self
+            .response_headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("retry-after"))
+            .map(|(_, value)| value.trim())?;
+        Some(Duration::from_secs(value.parse::<u64>().ok()?))
+    }
+
+    fn handle_status_failure(&mut self) {
+        if openrouter_status_retryable(self.status_code)
+            && self.queue_retry(self.retry_after())
+        {
+            return;
+        }
+        self.response_failure(format!(
+            "OpenRouter rejected the request{}",
+            self.status_code
+                .map(|status| format!(" with status {status}"))
+                .unwrap_or_default()
+        ));
+    }
+
+    fn handle_transport_failure(
+        &mut self,
+        failure: tea_http::TransportError,
+        cancellation: &CancellationToken,
+    ) {
+        if cancellation.is_cancelled() {
+            self.response = None;
+            self.decoder = None;
+            self.pending
+                .push_back(ModelStreamEvent::End(StopReason::Cancelled));
+            return;
+        }
+        self.status_code = self.status_code.or(failure.status_code);
+        self.error_body.extend_from_slice(&failure.body);
+        if !self.visible_stream_event {
+            if openrouter_status_retryable(self.status_code)
+                && self.queue_retry(self.retry_after())
+            {
+                return;
+            }
+            if !self.response_headers_received && self.queue_retry(None) {
+                return;
+            }
+        }
+        self.transport_failure(
+            format!(
+                "OpenRouter HTTP transport failed{}: {}",
+                self.status_code
+                    .map(|status| format!(" with status {status}"))
+                    .unwrap_or_default(),
+                failure.message
+            ),
+            self.status_code,
+        );
+    }
+
+    fn handle_decoded_events(&mut self, events: Vec<ModelStreamEvent>) {
+        for event in events {
+            if matches!(
+                event,
+                ModelStreamEvent::TextDelta(_)
+                    | ModelStreamEvent::ToolCall(_)
+                    | ModelStreamEvent::OpaqueProviderContext(_)
+                    | ModelStreamEvent::Usage(_)
+            ) {
+                self.visible_stream_event = true;
+            }
+            self.pending.push_back(event);
+        }
+    }
+
     fn response_failure(&mut self, message: String) {
         self.response = None;
         self.decoder = None;
@@ -278,7 +412,7 @@ impl OpenRouterEventStream {
             message: message.clone(),
             status_code: self.status_code,
             retryable: false,
-            attempt: 1,
+            attempt: self.attempt,
             response_bytes: Some(self.error_body.len()),
             request_bytes: Some(self.payload_bytes),
             response_prefix: Some(response_body_prefix(
@@ -323,7 +457,7 @@ impl OpenRouterEventStream {
                 if usage.is_reported() {
                     self.provider.record(usage, cost);
                 }
-                self.pending.extend(events);
+                self.handle_decoded_events(events);
             }
             Err(message) => self.response_failure(message),
         }
@@ -335,21 +469,66 @@ impl OpenRouterEventStream {
         cancellation: CancellationToken,
     ) -> Poll<Result<Option<ModelStreamEvent>, crate::error::SchedulerError>> {
         loop {
+            if self.terminal_event_emitted {
+                return Poll::Ready(Ok(None));
+            }
             if let Some(event) = self.pending.pop_front() {
+                if matches!(
+                    event,
+                    ModelStreamEvent::End(_)
+                        | ModelStreamEvent::Error { .. }
+                        | ModelStreamEvent::ContextOverflow { .. }
+                        | ModelStreamEvent::Aborted { .. }
+                ) {
+                    self.terminal_event_emitted = true;
+                    self.response = None;
+                    self.decoder = None;
+                    self.retry_timer = None;
+                    self.retry_cancellation = None;
+                }
                 return Poll::Ready(Ok(Some(event)));
             }
             if cancellation.is_cancelled() {
                 self.response = None;
                 self.decoder = None;
+                self.retry_timer = None;
+                self.retry_cancellation = None;
+                self.terminal_event_emitted = true;
                 return Poll::Ready(Ok(Some(ModelStreamEvent::End(StopReason::Cancelled))));
+            }
+            if let Some(timer) = self.retry_timer.as_mut() {
+                if self.retry_cancellation.is_none() {
+                    self.retry_cancellation = Some(Box::pin(cancellation.cancelled()));
+                }
+                if let Some(wait) = self.retry_cancellation.as_mut()
+                    && wait.as_mut().poll(context).is_ready()
+                {
+                    self.retry_timer = None;
+                    self.retry_cancellation = None;
+                    continue;
+                }
+                match timer.as_mut().poll(context) {
+                    Poll::Pending => return Poll::Pending,
+                    Poll::Ready(_) => {
+                        self.retry_timer = None;
+                        self.retry_cancellation = None;
+                        self.start_attempt(&cancellation);
+                        continue;
+                    }
+                }
             }
             let Some(response) = self.response.as_mut() else {
                 return Poll::Ready(Ok(None));
             };
             match response.poll_next(context) {
                 Poll::Pending => return Poll::Pending,
-                Poll::Ready(StreamEvent::Response { status_code, .. }) => {
+                Poll::Ready(StreamEvent::Response {
+                    status_code,
+                    headers,
+                }) => {
+                    self.response_headers_received = true;
                     self.status_code = Some(status_code);
+                    self.response_headers = headers;
                 }
                 Poll::Ready(StreamEvent::Chunk(bytes)) => {
                     if self
@@ -366,7 +545,7 @@ impl OpenRouterEventStream {
                         continue;
                     };
                     match decoder.push(&bytes) {
-                        Ok(events) => self.pending.extend(events),
+                        Ok(events) => self.handle_decoded_events(events),
                         Err(message) => self.response_failure(message),
                     }
                 }
@@ -375,7 +554,7 @@ impl OpenRouterEventStream {
                         .status_code
                         .is_some_and(|status| !(200..300).contains(&status))
                     {
-                        self.response_failure("OpenRouter rejected the request".into());
+                        self.handle_status_failure();
                     } else {
                         self.finish_sse();
                     }
@@ -387,17 +566,7 @@ impl OpenRouterEventStream {
                         self.pending
                             .push_back(ModelStreamEvent::End(StopReason::Cancelled));
                     } else {
-                        self.transport_failure(
-                            format!(
-                                "OpenRouter HTTP transport failed{}: {}",
-                                failure
-                                    .status_code
-                                    .map(|status| format!(" with status {status}"))
-                                    .unwrap_or_default(),
-                                failure.message
-                            ),
-                            failure.status_code,
-                        );
+                        self.handle_transport_failure(failure, &cancellation);
                     }
                 }
             }
@@ -1174,6 +1343,125 @@ data: [DONE]
     }
 
     #[test]
+    fn live_event_stream_retries_pre_output_status_with_cancellable_backoff() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        fn drain_request(socket: &mut std::net::TcpStream) {
+            let mut bytes = Vec::new();
+            let mut chunk = [0_u8; 4096];
+            let expected = loop {
+                let read = socket.read(&mut chunk).expect("request should remain readable");
+                assert_ne!(read, 0, "request must not close before its body");
+                bytes.extend_from_slice(&chunk[..read]);
+                let Some(header_end) = bytes
+                    .windows(4)
+                    .position(|window| window == b"\r\n\r\n")
+                    .map(|offset| offset + 4)
+                else {
+                    continue;
+                };
+                let headers = std::str::from_utf8(&bytes[..header_end])
+                    .expect("request headers should be UTF-8");
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().ok())
+                            .flatten()
+                    })
+                    .expect("request should include content length");
+                break header_end + content_length;
+            };
+            while bytes.len() < expected {
+                let read = socket.read(&mut chunk).expect("request body should remain readable");
+                assert_ne!(read, 0, "request must not close before its body");
+                bytes.extend_from_slice(&chunk[..read]);
+            }
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("mock HTTP server should bind");
+        let address = listener.local_addr().expect("mock HTTP server address");
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let observed_attempts = Arc::clone(&attempts);
+        let server = std::thread::spawn(move || {
+            for attempt in 0..2 {
+                let (mut socket, _) = listener.accept().expect("provider should connect");
+                drain_request(&mut socket);
+                observed_attempts.fetch_add(1, Ordering::SeqCst);
+                if attempt == 0 {
+                    socket
+                        .write_all(
+                            b"HTTP/1.1 503 Service Unavailable\r\nRetry-After: 0\r\nContent-Length: 3\r\nConnection: close\r\n\r\nbad",
+                        )
+                        .expect("retryable response should write");
+                    continue;
+                }
+                let body = br#"data: {"id":"retry","choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}
+
+data: [DONE]
+
+"#;
+                socket
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .expect("success response headers should write");
+                socket.write_all(body).expect("success response body should write");
+            }
+        });
+
+        let provider = OpenRouterProvider::new(
+            OpenRouterConfig::try_new("test-key", "test-model")
+                .expect("explicit test configuration")
+                .with_test_completion_url(format!("http://{address}/"))
+                .with_retry_policy(crate::retry::RetryPolicy::new(
+                    1,
+                    Duration::ZERO,
+                    Duration::ZERO,
+                )),
+        );
+        let cancellation = CancellationToken::new();
+        let mut source = smol::block_on(provider.stream(
+            ModelRequest {
+                context: "[]".into(),
+                model: Some(crate::state::ModelDescriptor {
+                    provider: "openrouter".into(),
+                    model: "test-model".into(),
+                    revision: None,
+                }),
+                ..ModelRequest::default()
+            },
+            cancellation.clone(),
+        ))
+        .expect("OpenRouter should start an event source");
+
+        assert!(matches!(
+            smol::block_on(source.next_event(cancellation.clone())),
+            Ok(Some(ModelStreamEvent::RequestObservation(_)))
+        ));
+        assert_eq!(
+            smol::block_on(source.next_event(cancellation.clone()))
+                .expect("retry should eventually expose the successful response"),
+            Some(ModelStreamEvent::TextDelta("ok".into()))
+        );
+        assert_eq!(
+            smol::block_on(source.next_event(cancellation.clone()))
+                .expect("successful retry should settle"),
+            Some(ModelStreamEvent::End(StopReason::Stop))
+        );
+        server.join().expect("mock HTTP server should finish");
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
     fn parses_partial_sse_as_output_limit_only_when_explicitly_allowed() {
         let bytes = br#"data: {"id":"gen_partial","choices":[{"delta":{"content":"partial"},"finish_reason":null}]}
 
@@ -1516,12 +1804,20 @@ data: [DONE]
         let provider = OpenRouterProvider::new(OpenRouterConfig::new("key", "model"));
         let mut stream = OpenRouterEventStream {
             provider,
+            payload: Vec::new(),
             response: None,
             decoder: None,
             pending: VecDeque::new(),
             status_code: Some(400),
+            response_headers: Vec::new(),
+            response_headers_received: true,
             error_body: br#"{"error":{"message":"maximum context length exceeded"}}"#.to_vec(),
             payload_bytes: 0,
+            attempt: 1,
+            visible_stream_event: false,
+            terminal_event_emitted: false,
+            retry_timer: None,
+            retry_cancellation: None,
         };
         stream.response_failure("OpenRouter rejected the request".into());
         assert!(matches!(
@@ -1538,6 +1834,39 @@ data: [DONE]
                 .iter()
                 .any(|event| matches!(event, ModelStreamEvent::ContextOverflow { .. }))
         );
+    }
+
+    #[test]
+    fn retry_backoff_is_interruptible_by_cancellation() {
+        let provider = OpenRouterProvider::new(OpenRouterConfig::new("key", "model"));
+        let mut stream = OpenRouterEventStream {
+            provider,
+            payload: Vec::new(),
+            response: None,
+            decoder: None,
+            pending: VecDeque::new(),
+            status_code: None,
+            response_headers: Vec::new(),
+            response_headers_received: false,
+            error_body: Vec::new(),
+            payload_bytes: 0,
+            attempt: 1,
+            visible_stream_event: false,
+            terminal_event_emitted: false,
+            retry_timer: None,
+            retry_cancellation: None,
+        };
+        assert!(stream.queue_retry(None));
+        let cancellation = CancellationToken::new();
+        let cancel = cancellation.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            cancel.cancel();
+        });
+        let started = std::time::Instant::now();
+        let event = smol::block_on(stream.next_event(cancellation));
+        assert_eq!(event, Ok(Some(ModelStreamEvent::End(StopReason::Cancelled))));
+        assert!(started.elapsed() < Duration::from_millis(200));
     }
 
     #[test]

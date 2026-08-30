@@ -5,11 +5,13 @@ The default `tea-core` build contains only the `ModelProvider` and
 or discover credentials. Optional adapters are an embedding convenience, not
 a change to that core boundary.
 
-The finite-response adapters retry replay-safe failures with a bounded
-exponential backoff. The standard policy makes the initial attempt plus three
+The finite-response adapters and incremental OpenRouter/Codex streams retry
+replay-safe failures with a bounded exponential backoff. The standard policy
+makes the initial attempt plus three
 retries at 250 ms, 500 ms, and 1 s, capped at 8 s. Transport failures are
-retryable for finite adapters; provider response errors are retried only when
-the adapter can classify them as transient (for example, 429 or 5xx). Hosts can
+retryable before output for adapters that can safely replay them; provider
+response errors are retried only when the adapter can classify them as
+transient (for example, 429 or 5xx). Hosts can
 replace the policy with `RetryPolicy` through each finite adapter config's
 `with_retry_policy` method. The generic `ModelProvider` port does not retry
 opaque caller providers or replay a stream after it has exposed events.
@@ -59,8 +61,11 @@ that pre-response period; callers can replace both with
 `OpenRouterConfig::with_request_timeout` and `with_stall_timeout` to keep
 retries inside their own session wall budget. The factory host derives both
 timeouts from the admitted assignment wall limit rather than using the adapter
-defaults. A response stall reaches the configured receive timeout and
-enters the same bounded retry policy as other transport failures.
+defaults. Retryable setup and response-status failures are retried with the
+configured bounded backoff before any model-visible event escapes; the timer
+wait is interrupted by cancellation. Once output, a tool call, or usage has
+escaped, a later stream failure is terminal to the adapter rather than replaying
+an ambiguous request for the caller.
 Request-scoped `ThinkingLevel` values are mapped to OpenRouter's native
 `reasoning: { "effort": ... }` object (`off` maps to `none`); the default level
 omits the field. This keeps provider-specific wire details in the adapter while

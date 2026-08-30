@@ -85,7 +85,12 @@ uncapped diagnostic: the runner then waits without imposing an outer wall
 clock, while individual model-generated shell commands may still run without
 end. Tea's shootout adapter also derives its OpenRouter request timeout from
 this budget; the zero-budget diagnostic uses a 24-hour transport guard because
-the HTTP client requires a finite deadline. Such a diagnostic is useful for
+the HTTP client requires a finite deadline. Its stream idle timeout is derived
+from the same budget, so the evaluator does not impose a shorter body-idle
+cutoff while the provider is still delivering a response. Retryable
+pre-output transport/status failures use Tea's three-retry bounded,
+cancellation-aware provider policy; output-bearing failures remain terminal
+because replay would make delivery ambiguous. Such a diagnostic is useful for
 calibrating the finite hard-case ceiling but is not a scored efficiency result.
 
 ## Normalized result contract
