@@ -100,7 +100,7 @@ export class Reporter {
 			baseline_id: this.options.baselineId,
 			terminal,
 			final_text: finalText,
-			runtime: { implementation: "pi-sdk", version: "0.84.2", revision: "npm:@earendil-works/pi-coding-agent@0.84.2", dirty: false, dirty_digest: null },
+			runtime: { implementation: "pi-sdk", version: "0.84.4", revision: "npm:@earendil-works/pi-coding-agent@0.84.4", dirty: false, dirty_digest: null },
 			model: {
 				provider: "openrouter", requested_model: this.options.requestedModel,
 				returned_model: session.model?.id ?? null, returned_provider: session.model?.provider ?? null,

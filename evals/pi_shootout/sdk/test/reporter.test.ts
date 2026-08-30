@@ -30,6 +30,8 @@ test("normalizes successful session accounting and surfaces", async () => {
 	assert.equal((result.usage as { all_tokens: number }).all_tokens, 18);
 	assert.equal((result.counts as { turns: number }).turns, 2);
 	assert.equal((result.model as { max_output_tokens: null }).max_output_tokens, null);
+	assert.equal((result.runtime as { version: string }).version, "0.84.4");
+	assert.equal((result.runtime as { revision: string }).revision, "npm:@earendil-works/pi-coding-agent@0.84.4");
 	assert.equal(((result.trace as Array<{ content: { bytes: number } }>)[0].content.bytes), 1000);
 	assert.match(await readFile(join(directory, "system-prompt.txt"), "utf8"), /cwd/);
 });

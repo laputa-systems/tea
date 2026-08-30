@@ -35,7 +35,7 @@ It should then emit two first-class reports:
 * `static.md`: Pi static versus Tea static.
 * `evolution.md`: Tea static versus Tea JIT, with Pi static versus Tea JIT as an external reference.
 
-Tea already has an appropriate default task: `express-3936-medium`, pinned to exact `pi-bench` and Express commits, with a direct fast validator whose baseline is known to fail and whose fix commit is known to pass.   The Pi SDK exposes the exact machinery required for a controlled adapter—isolated services, in-memory settings/session management, event subscription, system-prompt access, tool factories, session statistics, and cleanup—and Pi’s own eval harness demonstrates the intended pattern.   The current published SDK manifest is `0.84.2` and requires Node `>=22.19.0`, so this can be pinned exactly and run without Pi CLI headless mode.
+Tea already has an appropriate default task: `express-3936-medium`, pinned to exact `pi-bench` and Express commits, with a direct fast validator whose baseline is known to fail and whose fix commit is known to pass.   The Pi SDK exposes the exact machinery required for a controlled adapter—isolated services, in-memory settings/session management, event subscription, system-prompt access, tool factories, session statistics, and cleanup—and Pi’s own eval harness demonstrates the intended pattern.   The current published SDK manifest is `0.84.4` and requires Node `>=22.19.0`, so this can be pinned exactly and run without Pi CLI headless mode.
 
 # Goal: scaffold Tea Harness JIT v0 and `make pi-shootout`
 
@@ -309,8 +309,8 @@ Use:
     "node": ">=22.19.0"
   },
   "dependencies": {
-    "@earendil-works/pi-ai": "0.84.2",
-    "@earendil-works/pi-coding-agent": "0.84.2"
+    "@earendil-works/pi-ai": "0.84.4",
+    "@earendil-works/pi-coding-agent": "0.84.4"
   },
   "devDependencies": {
     "@types/node": "22.19.19",
@@ -325,8 +325,8 @@ Do not use:
 
 ```text
 latest
-^0.84.2
-~0.84.2
+^0.84.4
+~0.84.4
 npx with an unpinned package
 a global Pi installation
 ```

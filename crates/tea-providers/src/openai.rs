@@ -91,7 +91,7 @@ fn openai_message(message: &AgentMessage) -> Result<JsonValue, HookError> {
                     ])
                 })
                 .collect::<Vec<_>>();
-            Ok(JsonValue::object([
+            let mut fields = vec![
                 ("role", JsonValue::from("assistant")),
                 (
                     "content",
@@ -101,8 +101,14 @@ fn openai_message(message: &AgentMessage) -> Result<JsonValue, HookError> {
                         JsonValue::from(content.clone())
                     },
                 ),
-                ("tool_calls", JsonValue::Array(calls)),
-            ]))
+            ];
+            // Pi only emits tool_calls when the assistant actually called a tool.
+            // Omitting an empty array keeps the OpenAI-compatible wire shape and
+            // avoids spending context tokens on a field with no semantic value.
+            if !calls.is_empty() {
+                fields.push(("tool_calls", JsonValue::Array(calls)));
+            }
+            Ok(JsonValue::object(fields))
         }
         AgentMessage::ToolResult {
             tool_call_id,
@@ -163,6 +169,19 @@ mod tests {
                 .and_then(JsonValue::as_str)
                 .is_some_and(|content| content.contains("[tool details (serialized JSON):"))
         );
+    }
+
+    #[test]
+    fn assistant_projection_omits_empty_tool_calls_like_pi() {
+        let message = AgentMessage::Assistant {
+            id: MessageId(1),
+            content: "finished".into(),
+            tool_calls: Vec::new(),
+            stop_reason: Some(crate::state::StopReason::Stop),
+            error_message: None,
+        };
+        let projected = openai_message(&message).expect("projection");
+        assert!(projected.get("tool_calls").is_none());
     }
 
     #[test]

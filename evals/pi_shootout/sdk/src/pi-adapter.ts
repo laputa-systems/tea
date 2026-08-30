@@ -2,7 +2,7 @@ import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { AgentSession, createAgentSessionFromServices, createAgentSessionServices, createBashTool, createEditTool, createFindTool, createReadTool, ModelRuntime, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
+import { createAgentSessionFromServices, createAgentSessionServices, createBashToolDefinition, createEditToolDefinition, createFindToolDefinition, createReadToolDefinition, ModelRuntime, SessionManager, SettingsManager, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { getModel } from "@earendil-works/pi-ai/compat";
 
 import { canonical, normalizeWorkspace, sha256 } from "./canonical.ts";
@@ -85,33 +85,31 @@ async function main(): Promise<void> {
 	const model = modelRuntime.getModel("openrouter", args.model as never) ?? getModel("openrouter", args.model as never);
 	if (!model) throw new Error(`pinned Pi SDK lacks model ${args.model}`)
 	const manager = SessionManager.inMemory(args.workspace);
-	const first = await createAgentSessionFromServices({ services, sessionManager: manager, model, thinkingLevel: args.thinkingLevel, tools: [] });
-	first.session.dispose();
 	const tools = [
-		createReadTool(args.workspace),
-		createBashTool(args.workspace, { exposeSessionEnvironment: false, spawnHook: ({ command, cwd }) => ({ command, cwd, env: { ...args.shell } }) }),
-		createEditTool(args.workspace),
-		createFindTool(args.workspace),
-	];
-	const second = new AgentSession({ agent: first.session.agent, sessionManager: manager, settingsManager: settings, cwd: args.workspace, resourceLoader: services.resourceLoader, modelRuntime, initialActiveToolNames: ["read", "bash", "edit", "find"], allowedToolNames: ["read", "bash", "edit", "find"], baseToolsOverride: Object.fromEntries(tools.map((tool) => [tool.name, tool])) });
+		createReadToolDefinition(args.workspace),
+		createBashToolDefinition(args.workspace, { exposeSessionEnvironment: false, spawnHook: ({ command, cwd }) => ({ command, cwd, env: { ...args.shell } }) }),
+		createEditToolDefinition(args.workspace),
+		createFindToolDefinition(args.workspace),
+	] as unknown as ToolDefinition[];
+	const { session } = await createAgentSessionFromServices({ services, sessionManager: manager, model, thinkingLevel: args.thinkingLevel, tools: ["read", "bash", "edit", "find"], customTools: tools });
 	const shellHash = sha256(canonical(Object.fromEntries(Object.entries(args.shell).map(([name, value]) => [name, name === "HOME" ? "{HOME}" : name === "TMPDIR" ? "{TMPDIR}" : name === "npm_config_cache" ? "{NPM_CACHE}" : normalizeWorkspace(value, args.workspace)]))));
 	const reporter = new Reporter({ attemptId: args.attemptId, baselineId: args.baselineId, requestedModel: args.model, thinkingLevel: args.thinkingLevel, maxOutputTokens: args.maxOutputTokens, workspace: args.workspace, evidenceDir: args.evidenceDir, shellEnvironmentSha256: shellHash, shellCurlAvailable: true });
 	reporter.start();
-	const unsubscribe = second.subscribe((event) => reporter.observe(event));
+	const unsubscribe = session.subscribe((event) => reporter.observe(event));
 	let terminal: { status: "completed" | "failed" | "cancelled" | "aborted"; code: string | null } = { status: "completed", code: null };
 	try {
-		await reporter.captureSurface(second);
-		if (second.getActiveToolNames().join(",") !== "read,bash,edit,find") throw new Error("Pi active tool surface drifted")
-		await second.prompt(prompt, { expandPromptTemplates: false });
-		const failure = terminalFailure(second);
+		await reporter.captureSurface(session);
+		if (session.getActiveToolNames().join(",") !== "read,bash,edit,find") throw new Error("Pi active tool surface drifted")
+		await session.prompt(prompt, { expandPromptTemplates: false });
+		const failure = terminalFailure(session);
 		if (failure) terminal = { status: "failed", code: failure };
 	} catch (error) {
 		terminal = { status: "failed", code: error instanceof Error ? "pi_sdk_error" : "pi_sdk_failure" };
 	} finally {
 		unsubscribe();
-		const result = reporter.finish(second, terminal);
+		const result = reporter.finish(session, terminal);
 		await reporter.write(args.resultJson, result);
-		second.dispose();
+		session.dispose();
 	}
 	if (terminal.status !== "completed") process.exitCode = 1;
 }

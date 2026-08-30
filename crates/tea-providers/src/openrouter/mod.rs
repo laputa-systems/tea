@@ -1202,6 +1202,36 @@ data: [DONE]
                 .and_then(JsonValue::as_bool),
             Some(true)
         );
+        // Pi leaves temperature unset for this shootout, so OpenRouter applies
+        // its provider default. An explicit zero would be a different sampling
+        // condition even though the result schema says provider-default.
+        assert!(payload.get("temperature").is_none());
+    }
+
+    #[test]
+    fn replays_empty_reasoning_content_for_openrouter_assistant_history() {
+        let config = OpenRouterConfig::try_new("key", "deepseek/deepseek-v4-flash-0731").unwrap();
+        let payload = build_payload(
+            &config,
+            &ModelRequest {
+                context: r#"[{"role":"assistant","content":null,"tool_calls":[]}]"#.into(),
+                thinking_level: ThinkingLevel::High,
+                ..ModelRequest::default()
+            },
+        )
+        .unwrap();
+        let payload = JsonValue::parse(std::str::from_utf8(&payload).unwrap()).unwrap();
+        let messages = payload
+            .get("messages")
+            .and_then(JsonValue::as_array)
+            .expect("messages array");
+        assert_eq!(
+            messages
+                .get(1)
+                .and_then(|message| message.get("reasoning_content"))
+                .and_then(JsonValue::as_str),
+            Some("")
+        );
     }
 
     #[test]

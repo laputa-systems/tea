@@ -26,6 +26,27 @@ pub(super) fn build_payload(
         .as_array()
         .ok_or_else(|| "OpenRouter converted context must be an array".to_owned())?
         .to_owned();
+    let mut messages = messages;
+    if request.thinking_level != crate::state::ThinkingLevel::Off {
+        // Pi's OpenRouter compatibility profile replays an empty
+        // `reasoning_content` field on assistant messages. DeepSeek uses that
+        // marker to distinguish a completed reasoning turn from a malformed
+        // continuation; omitting it changes both the wire contract and model
+        // trajectory even when the visible assistant content is unchanged.
+        for message in &mut messages {
+            let Some(object) = message.as_object_mut() else {
+                continue;
+            };
+            if object.get("role").and_then(JsonValue::as_str) == Some("assistant")
+                && !object.contains_key("reasoning_content")
+            {
+                object.insert(
+                    "reasoning_content".to_owned(),
+                    JsonValue::String(String::new()),
+                );
+            }
+        }
+    }
     let mut chat_messages = Vec::with_capacity(messages.len() + 1);
     chat_messages.push(json_value!({
         "role": "system",
@@ -50,7 +71,6 @@ pub(super) fn build_payload(
     let mut payload = json_value!({
         "model": config.model.clone(),
         "messages": chat_messages,
-        "temperature": 0,
         "stream": true,
         "stream_options": json_value!({"include_usage": true}),
     });
