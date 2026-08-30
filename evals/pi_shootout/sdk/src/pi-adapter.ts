@@ -11,6 +11,9 @@ import { terminalFailure } from "./outcome.ts";
 import { Reporter } from "./reporter.ts";
 import { WireEvidence, type AttemptPath } from "./wire.ts";
 
+const SHOOTOUT_TEMPERATURE = 0;
+const SHOOTOUT_SEED = 20260829;
+
 type Arguments = {
 	taskJson: string; workspace: string; capabilitiesJson: string; resultJson: string; evidenceDir: string;
 	attemptId: string; baselineId: "pi-static"; provider: "openrouter"; model: string; thinkingLevel: "high"; maxOutputTokens: number | null; outerTimeoutSeconds: number; providerRouting: Record<string, unknown>; shell: Record<string, string>;
@@ -115,6 +118,8 @@ function routedPayload(payload: unknown, routing: Record<string, unknown>): Reco
 	// `max_completion_tokens` default, which is still a real provider limit and
 	// can cause a request to be rejected before inference starts.
 	const routed: Record<string, unknown> = { ...(payload as Record<string, unknown>), provider: routing };
+	routed.temperature = SHOOTOUT_TEMPERATURE;
+	routed.seed = SHOOTOUT_SEED;
 	delete routed.max_tokens;
 	delete routed.max_completion_tokens;
 	return routed;
@@ -212,7 +217,7 @@ async function main(): Promise<void> {
 					: name === "NODE_PATH" ? "{NODE_PATH}"
 						: normalizeWorkspace(value, args.workspace),
 	]))));
-	const reporter = new Reporter({ attemptId: args.attemptId, baselineId: args.baselineId, requestedModel: args.model, thinkingLevel: args.thinkingLevel, maxOutputTokens: args.maxOutputTokens, outerTimeoutSeconds: args.outerTimeoutSeconds, providerRouting: args.providerRouting, workspace: args.workspace, evidenceDir: args.evidenceDir, shellEnvironmentSha256: shellHash, shellCurlAvailable: true, wire });
+	const reporter = new Reporter({ attemptId: args.attemptId, baselineId: args.baselineId, requestedModel: args.model, thinkingLevel: args.thinkingLevel, maxOutputTokens: args.maxOutputTokens, outerTimeoutSeconds: args.outerTimeoutSeconds, providerRouting: args.providerRouting, samplingTemperature: SHOOTOUT_TEMPERATURE, samplingSeed: SHOOTOUT_SEED, samplingSource: "adapter-set", workspace: args.workspace, evidenceDir: args.evidenceDir, shellEnvironmentSha256: shellHash, shellCurlAvailable: true, wire });
 	reporter.start();
 	const unsubscribe = session.subscribe((event) => reporter.observe(event));
 	let terminal: { status: "completed" | "failed" | "cancelled" | "aborted"; code: string | null } = { status: "completed", code: null };

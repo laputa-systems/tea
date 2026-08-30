@@ -24,6 +24,9 @@ export type ReporterOptions = {
 	maxOutputTokens: number | null;
 	outerTimeoutSeconds: number;
 	providerRouting: Record<string, unknown>;
+	samplingTemperature?: number | null;
+	samplingSeed?: number | null;
+	samplingSource?: string;
 	workspace: string;
 	evidenceDir: string;
 	shellEnvironmentSha256: string;
@@ -172,7 +175,7 @@ export class Reporter {
 				returned_model_provenance: returned.model === null ? null : returned.provenance,
 				returned_provider_provenance: returned.provider === null ? null : returned.provenance,
 				thinking_level: this.options.thinkingLevel, max_output_tokens: this.options.maxOutputTokens,
-				sampling: { temperature: null, seed: null, source: "provider-default" },
+				sampling: { temperature: this.options.samplingTemperature ?? null, seed: this.options.samplingSeed ?? null, source: this.options.samplingSource ?? "provider-default" },
 			},
 			wire: this.options.wire.summary(this.options.providerRouting),
 			effective_policy: {
@@ -186,7 +189,7 @@ export class Reporter {
 					model_reasoning: this.options.thinkingLevel,
 					output_token_ceiling: this.options.maxOutputTokens,
 					provider_routing: this.options.providerRouting,
-					sampling: { temperature: null, seed: null },
+					sampling: { temperature: this.options.samplingTemperature ?? null, seed: this.options.samplingSeed ?? null },
 				},
 				native: { tool_execution: canonicalTools(session).map((tool) => ({ name: tool.name, execution_mode: tool.execution_mode })) },
 				observability_unknown: ["request_timeout_seconds", "idle_timeout_seconds"],

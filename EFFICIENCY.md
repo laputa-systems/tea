@@ -28,8 +28,9 @@ The comparison distinguishes three kinds of facts:
 Run `make pi-shootout-static` for the three-repeat smoke workflow, or
 `make pi-shootout-static-serious` for seven counterbalanced repeats. The
 provider-free `python3 -m evals.pi_shootout compare --run-dir <run>` output
-contains paired deltas and deterministic descriptive bootstrap intervals. It
-does not turn provider-default sampling into causal proof.
+contains paired deltas and deterministic descriptive bootstrap intervals. The
+live static adapters use temperature `0` and seed `20260829`; the analyzer
+still reports unknown route and timeout fields instead of inferring them.
 
 Repeats are isolated parallel lanes by default: two requested repeats run in
 parallel, but the Pi/Tea condition order remains sequential within each lane.
@@ -178,9 +179,9 @@ shootout's isolated bash environment. This is the first valid Pi surface to
 use for new measurements; older artifacts with the `(none)` prompt are
 historical and must not be pooled with it.
 
-The OpenRouter wire audit also found two real sampling/context mismatches in
-Tea. Tea no longer sends an explicit `temperature: 0` when the run claims
-provider-default sampling, and reasoning runs now replay the empty
+The OpenRouter wire audit also found a real context mismatch in Tea. The live
+static condition now sets `temperature: 0` and seed `20260829` on both adapters,
+while reasoning runs now replay the empty
 `reasoning_content` field required by Pi's DeepSeek/OpenRouter compatibility
 profile. Empty assistant `tool_calls` arrays are omitted to match Pi's message
 converter. These changes are covered by provider tests.
@@ -221,7 +222,7 @@ digests rather than raw commands. Pi's trace is marked partial if it lacks
 those fields. The report has separate **Evidence**, **Hypotheses**, and
 **Unknowns** sections, so observed extra work is not mistaken for a causal
 runtime effect. Do not hand-reconstruct token totals or declare a regression
-from one unseeded attempt.
+from one attempt.
 
 ## Friction points found
 

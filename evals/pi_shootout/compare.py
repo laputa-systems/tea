@@ -276,6 +276,7 @@ def _attempt_view(run_dir: Path, record: dict[str, Any]) -> dict[str, Any]:
         "validator_passed": bool(record.get("validator", {}).get("passed")),
         "counts": {name: result["counts"].get(name) for name in COUNT_FIELDS},
         "usage": {name: result["usage"].get(name) for name in (*USAGE_FIELDS, "reasoning")},
+        "model": result["model"],
         "surface": {name: result["surface"].get(name) for name in ("active_tools", "authority", "workspace_normalized_system_prompt_sha256", "system_prompt_sha256", "tool_surface_sha256", "prompt_tool_surface_sha256", "wire_tool_surface_sha256", "execution_surface_sha256", "system_prompt_bytes")},
         "wire": result["wire"],
         "effective_policy": result["effective_policy"],
@@ -522,7 +523,20 @@ def compare_run(run_dir: Path) -> dict[str, Any]:
         hypotheses.append("Observed extra Tea turns can be attributed to their recorded work categories, but category counts are evidence of behavior, not proof that the runtime caused it.")
     if checks["native_harness_surface_differences"]:
         evidence.append("Native prompt and tool-schema differences are retained as measured harness surfaces; they are not controlled-condition failures in this native-harness shootout.")
-    unknowns.append("Provider-default sampling has no shared seed; one paired attempt cannot separate harness effects from model variance.")
+    pi_sampling = pairs[0]["pi"].get("model", {}).get("sampling", {}) if pairs else {}
+    tea_sampling = pairs[0]["tea"].get("model", {}).get("sampling", {}) if pairs else {}
+    fixed_sampling = (
+        isinstance(pi_sampling, dict)
+        and isinstance(tea_sampling, dict)
+        and pi_sampling.get("source") == "adapter-set"
+        and tea_sampling.get("source") == "adapter-set"
+        and isinstance(pi_sampling.get("temperature"), (int, float))
+        and isinstance(tea_sampling.get("temperature"), (int, float))
+        and isinstance(pi_sampling.get("seed"), (int, float))
+        and isinstance(tea_sampling.get("seed"), (int, float))
+    )
+    if not fixed_sampling:
+        unknowns.append("Sampling is not fixed identically for both adapters; paired runs cannot separate harness effects from model variance.")
     unknowns.extend(checks["observability_unknown"])
     comparable = not checks["controlled_condition_mismatches"] and not checks["wire_shape_bugs"] and not checks["route_mismatches"]
     strict_efficiency_conclusion = comparable and not checks["observability_unknown"]

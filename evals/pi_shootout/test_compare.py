@@ -126,6 +126,22 @@ def _summary(directory: Path, *, repeats: int = 1) -> None:
 
 
 class CompareTest(unittest.TestCase):
+    def test_fixed_sampling_is_not_reported_as_a_variance_unknown(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            _summary(directory)
+            summary = json.loads((directory / "summary.json").read_text())
+            for attempt in summary["attempts"]:
+                result = attempt["adapter_result"]
+                result["model"]["sampling"] = {"temperature": 0, "seed": 20260829, "source": "adapter-set"}
+                result["effective_policy"]["controlled"]["sampling"] = {"temperature": 0, "seed": 20260829}
+                request = result["wire"]["requests"][0]
+                request["temperature"] = {"present": True, "value": 0}
+                request["seed"] = {"present": True, "value": 20260829}
+            (directory / "summary.json").write_text(json.dumps(summary))
+            analysis = compare_run(directory)
+        self.assertFalse(any("Sampling is not fixed" in unknown for unknown in analysis["unknowns"]))
+
     def test_reports_normalized_delta_and_durable_turn_categories(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)

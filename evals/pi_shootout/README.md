@@ -75,8 +75,8 @@ Tea-minus-Pi observations and deterministic bootstrap intervals. It separates:
 
 An analysis is only strict when required controls agree, direct wire evidence
 is valid, observed routes do not conflict, and no required observation remains
-unknown. Provider-default sampling remains unseeded, so repeated paired runs
-are descriptive evidence rather than causal proof.
+unknown. The static adapters set the same zero temperature and fixed seed;
+provider-default sampling is retained only for non-shootout reporter tests.
 
 The adapter process receives `OPENROUTER_API_KEY` only through `vault`. Pi
 clears inherited environment before its session and passes the explicit shell

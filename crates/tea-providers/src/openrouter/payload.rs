@@ -86,6 +86,18 @@ pub(super) fn build_payload(
             .expect("OpenRouter payload is an object")
             .insert("max_tokens".to_owned(), json_value!(max_tokens));
     }
+    if let Some(temperature) = config.temperature {
+        payload
+            .as_object_mut()
+            .expect("OpenRouter payload is an object")
+            .insert("temperature".to_owned(), json_value!(temperature));
+    }
+    if let Some(seed) = config.seed {
+        payload
+            .as_object_mut()
+            .expect("OpenRouter payload is an object")
+            .insert("seed".to_owned(), json_value!(seed));
+    }
     if let Some(effort) = reasoning_effort(request.thinking_level) {
         payload
             .as_object_mut()

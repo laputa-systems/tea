@@ -825,6 +825,21 @@ mod tests {
     }
 
     #[test]
+    fn validates_explicit_sampling_controls() {
+        let config = OpenRouterConfig::try_new("key", "model")
+            .unwrap()
+            .with_temperature(0.0)
+            .with_seed(42);
+        assert_eq!(config.validate(), Ok(()));
+        assert_eq!(
+            OpenRouterConfig::new("key", "model")
+                .with_temperature(2.1)
+                .validate(),
+            Err(OpenRouterConfigError::InvalidTemperature)
+        );
+    }
+
+    #[test]
     fn parses_redacted_generation_cost_without_retaining_identifier() {
         let usage = Usage {
             input_tokens: Some(10),
@@ -1220,7 +1235,10 @@ data: [DONE]
     fn builds_explicit_output_cap_and_openrouter_reasoning_wire() {
         let config = OpenRouterConfig::try_new("key", "openai/gpt-5.6-luna").unwrap();
         let payload = build_payload(
-            &config.with_max_tokens(128_000),
+            &config
+                .with_max_tokens(128_000)
+                .with_temperature(0.0)
+                .with_seed(42),
             &ModelRequest {
                 system_prompt: "system".into(),
                 context: "[]".into(),
@@ -1257,10 +1275,16 @@ data: [DONE]
                 .and_then(JsonValue::as_bool),
             Some(true)
         );
-        // Pi leaves temperature unset for this shootout, so OpenRouter applies
-        // its provider default. An explicit zero would be a different sampling
-        // condition even though the result schema says provider-default.
-        assert!(payload.get("temperature").is_none());
+        assert_eq!(
+            payload.get("temperature").and_then(JsonValue::as_f64),
+            Some(0.0)
+        );
+        assert_eq!(payload.get("seed").and_then(JsonValue::as_u64), Some(42));
+        assert_eq!(
+            payload.get("temperature").and_then(JsonValue::as_f64),
+            Some(0.0)
+        );
+        assert_eq!(payload.get("seed").and_then(JsonValue::as_u64), Some(42));
     }
 
     #[test]
@@ -1302,6 +1326,8 @@ data: [DONE]
         .unwrap();
         let payload = JsonValue::parse(std::str::from_utf8(&payload).unwrap()).unwrap();
         assert!(payload.get("max_tokens").is_none());
+        assert!(payload.get("temperature").is_none());
+        assert!(payload.get("seed").is_none());
     }
 
     #[test]

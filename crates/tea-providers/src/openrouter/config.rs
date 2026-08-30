@@ -49,6 +49,8 @@ pub enum OpenRouterConfigError {
     EmptyField(&'static str),
     /// The maximum output token cap was zero.
     ZeroMaxTokens,
+    /// The sampling temperature was outside OpenRouter's supported range.
+    InvalidTemperature,
     /// The HTTP request timeout was zero.
     ZeroRequestTimeout,
     /// The response-stall timeout was zero.
@@ -63,6 +65,9 @@ impl fmt::Display for OpenRouterConfigError {
             Self::EmptyField(field) => write!(formatter, "OpenRouter {field} must not be empty"),
             Self::ZeroMaxTokens => {
                 formatter.write_str("OpenRouter max tokens must be greater than zero")
+            }
+            Self::InvalidTemperature => {
+                formatter.write_str("OpenRouter temperature must be finite and between zero and two")
             }
             Self::ZeroRequestTimeout => {
                 formatter.write_str("OpenRouter request timeout must be greater than zero")
@@ -92,6 +97,10 @@ pub struct OpenRouterConfig {
     pub(super) test_completion_url: Option<String>,
     /// Optional provider request hint. `None` leaves output length to the provider/model.
     pub(super) max_tokens: Option<u64>,
+    /// Optional sampling temperature. `None` leaves sampling to the provider/model.
+    pub(super) temperature: Option<f64>,
+    /// Optional deterministic sampling seed.
+    pub(super) seed: Option<u64>,
     pub(super) request_timeout: Duration,
     pub(super) stall_timeout: Duration,
     pub(super) retry_policy: RetryPolicy,
@@ -115,6 +124,8 @@ impl OpenRouterConfig {
             model: model.into(),
             test_completion_url: None,
             max_tokens: None,
+            temperature: None,
+            seed: None,
             request_timeout: Duration::from_secs(300),
             stall_timeout: Duration::from_secs(60),
             retry_policy: RetryPolicy::standard(),
@@ -132,6 +143,18 @@ impl OpenRouterConfig {
     /// Replace the explicit maximum completion-token cap.
     pub fn with_max_tokens(mut self, max_tokens: u64) -> Self {
         self.max_tokens = Some(max_tokens);
+        self
+    }
+
+    /// Set the provider-facing sampling temperature.
+    pub fn with_temperature(mut self, temperature: f64) -> Self {
+        self.temperature = Some(temperature);
+        self
+    }
+
+    /// Set the provider-facing deterministic sampling seed.
+    pub fn with_seed(mut self, seed: u64) -> Self {
+        self.seed = Some(seed);
         self
     }
 
@@ -216,6 +239,14 @@ impl OpenRouterConfig {
         if self.max_tokens == Some(0) {
             return Err(OpenRouterConfigError::ZeroMaxTokens);
         }
+        if self
+            .temperature
+            .is_some_and(|temperature| {
+                !temperature.is_finite() || !(0.0..=2.0).contains(&temperature)
+            })
+        {
+            return Err(OpenRouterConfigError::InvalidTemperature);
+        }
         if self.request_timeout.is_zero() {
             return Err(OpenRouterConfigError::ZeroRequestTimeout);
         }
@@ -246,6 +277,8 @@ impl fmt::Debug for OpenRouterConfig {
             .field("api_key", &"[redacted]")
             .field("model", &self.model)
             .field("max_tokens", &self.max_tokens)
+            .field("temperature", &self.temperature)
+            .field("seed", &self.seed)
             .field("request_timeout", &self.request_timeout)
             .field("stall_timeout", &self.stall_timeout)
             .field("retry_policy", &self.retry_policy)

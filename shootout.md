@@ -895,9 +895,12 @@ model = deepseek/deepseek-v4-flash-0731
 thinking level = high
 maximum output tokens = unconstrained
 attempt timeout = 900 seconds
+static sampling = temperature 0, seed 20260829
 ```
 
-Do not claim temperature or seed equality unless both adapters actually set and verify those fields.
+The current static adapters set and verify the shared sampling fields at the
+final provider boundary. The provider-default object below describes legacy
+unseeded runs only.
 
 If neither adapter sets sampling fields and both rely on provider defaults, record:
 
@@ -909,7 +912,8 @@ If neither adapter sets sampling fields and both rely on provider defaults, reco
 }
 ```
 
-Do not write a fictitious deterministic sampling configuration into the report.
+For a legacy provider-default run, do not write a fictitious deterministic
+sampling configuration into the report.
 
 If the returned model or provider revision differs between conditions, mark the report with a comparability warning.
 

@@ -49,10 +49,12 @@ use tea_session::{
 const RESULT_SCHEMA: &str = "tea-coding-eval-result/v3";
 const REQUIRED_MODEL: &str = "deepseek/deepseek-v4-flash-0731";
 const REQUIRED_THINKING: &str = "high";
+const SHOOTOUT_TEMPERATURE: f64 = 0.0;
+const SHOOTOUT_SEED: u64 = 20260829;
 /// Evaluation-only guidance that mirrors the concise parts of Pi's native
 /// coding prompt. It reduces avoidable exploratory turns without changing the
 /// closed capability set or any core runtime policy.
-const STATIC_CODING_GUIDELINES: &str = "Guidelines:\n- Be concise in responses and show file paths clearly.\n- Use `read` to inspect known files instead of using `bash` with cat or sed.\n- Batch independent inspections in one tool turn when practical.\n- Use `edit` for precise changes, then run the relevant validator and stop once the fix is verified.\n- For targeted edits, use `files[].edits[]` with exact `oldText` and `newText`; batch independent edits in one call.\n- Keep edit matches small and unique; do not repeat unchanged probes.\n- Once the relevant check passes, finish without further exploratory inspection.";
+const STATIC_CODING_GUIDELINES: &str = "Guidelines:\n- Be concise in responses and show file paths clearly.\n- Use `read` to inspect known files instead of using `bash` with cat or sed.\n- Use `find` for workspace discovery; never search from `/`, inspect home/cache directories, or inspect outside the workspace.\n- Keep bash commands bounded and workspace-local; do not run network, package-install, or upstream/repository-history probes.\n- Honor the requested null/undefined semantics; when an optional nullish value should be ignored, guard it before validation or calculation.\n- Batch independent inspections in one tool turn when practical.\n- Use `edit` for precise changes, then run the relevant validator and stop once the fix is verified.\n- For targeted edits, use `files[].edits[]` with exact `oldText` and `newText`; batch independent edits in one call.\n- Keep edit matches small and unique; do not repeat unchanged probes.\n- Once the relevant check passes, finish without further exploratory inspection.";
 const JIT_ADDENDUM: &str = "Task-local harness adaptation is available but optional.\n\nFirst inspect the task and repository using the normal coding tools. Use NoChange unless you have concrete evidence that one bounded harness change is likely to improve this task.\n\nYou may stage at most one task-local harness candidate. It may alter only currently supported prompt, tool-presentation, hook, context, memory-selection, failure-policy, or compaction-policy surfaces. It cannot grant new authority, change the provider or model, access hidden validators, use subagents, or add a web-research tool.\n\nA candidate must include observed task or failure evidence, a root-cause hypothesis, expected effect, regression risk, and the harness surfaces changed. If it activates, continue solving the same task under the new immutable harness revision. All adaptation time and model usage count toward the task result.";
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -1177,6 +1179,18 @@ fn result_json(input: ResultJsonInput<'_>) -> JsonValue {
         &input.args.workspace.to_string_lossy().replace('\\', "/"),
         "{WORKSPACE}",
     );
+    let controlled_sampling = input.args.harness_mode == HarnessMode::Static;
+    let sampling_temperature = controlled_sampling
+        .then_some(JsonValue::Number(JsonNumber::Float(SHOOTOUT_TEMPERATURE)))
+        .unwrap_or(JsonValue::Null);
+    let sampling_seed = controlled_sampling
+        .then_some(JsonValue::from(SHOOTOUT_SEED))
+        .unwrap_or(JsonValue::Null);
+    let sampling_source = if controlled_sampling {
+        JsonValue::from("adapter-set")
+    } else {
+        JsonValue::from("provider-default")
+    };
     let tools = JsonValue::Array(
         input
             .surface
@@ -1265,9 +1279,9 @@ fn result_json(input: ResultJsonInput<'_>) -> JsonValue {
                 (
                     "sampling",
                     JsonValue::object([
-                        ("temperature", JsonValue::Null),
-                        ("seed", JsonValue::Null),
-                        ("source", JsonValue::from("provider-default")),
+                        ("temperature", sampling_temperature.clone()),
+                        ("seed", sampling_seed.clone()),
+                        ("source", sampling_source.clone()),
                     ]),
                 ),
             ]),
@@ -1436,8 +1450,8 @@ fn result_json(input: ResultJsonInput<'_>) -> JsonValue {
                         (
                             "sampling",
                             JsonValue::object([
-                                ("temperature", JsonValue::Null),
-                                ("seed", JsonValue::Null),
+                                ("temperature", sampling_temperature),
+                                ("seed", sampling_seed),
                             ]),
                         ),
                     ]),
@@ -1608,7 +1622,10 @@ fn main() -> Result<(), String> {
     .with_provider_routing(args.provider_routing.clone())
     .with_request_capture(request_capture.clone());
     let provider_config = if args.harness_mode == HarnessMode::Static {
-        provider_config.with_model_tool_allowlist(["read", "bash", "edit", "find"])
+        provider_config
+            .with_temperature(SHOOTOUT_TEMPERATURE)
+            .with_seed(SHOOTOUT_SEED)
+            .with_model_tool_allowlist(["read", "bash", "edit", "find"])
     } else {
         provider_config
     };

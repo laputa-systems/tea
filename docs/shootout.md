@@ -44,6 +44,7 @@ provider       = openrouter
 model          = deepseek/deepseek-v4-flash-0731
 thinking       = high
 output limit   = unlimited
+sampling       = temperature 0; seed 20260829
 timeout        = 900 seconds
 tools          = read, bash, edit, find (this exact order)
 ```
@@ -140,6 +141,9 @@ Reports distinguish:
 - unobserved fields, such as missing route headers or Pi timeout visibility,
   which remain unknown rather than being guessed into equivalence.
 
+The live static adapters set the same explicit zero temperature and seed;
+provider-default sampling is not part of the static condition.
+
 ## Adapter boundaries
 
 ### Pi
@@ -152,6 +156,8 @@ public Pi `read`, `bash`, `edit`, and `find` tool definitions, subscribes to
 events before prompting, and disposes the session on every path. The observer
 captures the public provider payload and removes any converter default output
 ceiling because the shootout contract is unlimited.
+The observer also applies the static condition's shared temperature `0` and
+seed `20260829` at the final request boundary.
 
 ### Tea
 
@@ -161,6 +167,8 @@ JSONL session, the pinned Luau coding builtins, and the same OpenRouter
 configuration. Static-only guidance is evaluation-scoped and is not added to
 JIT. Static mode also selects a non-model-readable artifact policy so durable
 recovery readers stay host-only and cannot expand the four-tool wire surface.
+Static Tea sends the same explicit temperature and seed through its OpenRouter
+configuration; JIT leaves provider sampling at its normal default.
 
 Tea preserves provider-neutral core behavior: tool execution, durable session
 reopen, effect attribution, and provider request capture remain in the core
@@ -258,11 +266,11 @@ Use this order:
 5. Inspect native surface differences and durable turn categories as causal
    uncertainties, not as proof that the runtime caused an observed behavior.
 
-Never declare a regression or win from one unseeded attempt. For repeated
+Never declare a regression or win from one attempt. For repeated
 static runs, report the paired outcome classes (`both pass`, one-sided pass,
 or both fail), median and worst-case normalized totals, and the evidence path.
 If cost kinds differ, say so explicitly. If Pi cannot expose reasoning,
-provider-request, route, or timeout fields, retain `null` and name the
+provider-request, or route fields, retain `null` and name the
 resulting uncertainty.
 
 ## Current evidence and known bottleneck
@@ -284,7 +292,8 @@ The latest corrected smoke evidence (three repeats in
 validators pass and all Pi validators fail; it is therefore not a paired
 efficiency result. A subsequent comparable single pair
 (`20260830T042924Z-fdfbb25ce3fc`) passed both validators: Tea used 23,235
-uncached-generation tokens versus Pi's 12,836. With provider-default sampling,
+uncached-generation tokens versus Pi's 12,836. That historical pair used
+provider-default sampling,
 native prompt/tool differences, and missing route/timeout observations, the
 analyzer correctly withheld a strict conclusion. These paths are ephemeral
 diagnostic artifacts, not checked-in fixtures.
