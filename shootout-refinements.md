@@ -535,6 +535,24 @@ serious repeated comparison
 
 Do not leave stale numerical claims prominently documented after changing a condition that invalidates those historical numbers. Historical results may remain clearly labeled as pre-hardening/non-comparable evidence.
 
+### TODO: make validator dependencies deterministic
+
+The pinned Express `express-3936-medium` checkout declares `body-parser` in
+`package.json` but does not include `node_modules` (or a lockfile that the
+shootout cache can key). The fast validator invokes Node directly, so a clean
+attempt fails with `Cannot find module 'body-parser'` unless the model happens
+to run `npm install` first. This happened for Tea in medium repeat 1; Pi and
+Tea repeat 2 installed dependencies during their sessions and therefore did
+not exercise the same setup.
+
+Before the next live shootout, choose and implement one deterministic,
+network-disabled dependency strategy (for example, a pinned lockfile plus
+runner-provisioned cache, or an identical pre-validator install for every
+attempt). Dependency availability must not depend on whether a model remembers
+to run `npm install`, and setup failures must be distinguished from model
+validator failures. Add a provider-free regression check and record the
+resolved dependency/toolchain fingerprint in the attempt evidence.
+
 15. Verification and completion criteria.
 
 Run all provider-free checks, including:
