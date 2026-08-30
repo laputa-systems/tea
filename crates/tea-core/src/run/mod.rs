@@ -911,10 +911,15 @@ impl RunHandle {
 
         let mut queued = self.drain_steering(agent);
         let has_more_tool_calls = !tool_calls.is_empty() && !tool_batch.all_terminate;
-        if !has_more_tool_calls && queued.is_empty() {
+        // A provider length stop is not a completed assistant response. With
+        // no tool calls there is otherwise no queue event to keep the loop
+        // alive, so retain the prepared context and request the unfinished
+        // continuation on the next model turn.
+        let response_was_truncated = continuation.reason == StopReason::Length;
+        if !has_more_tool_calls && !response_was_truncated && queued.is_empty() {
             queued = self.drain_follow_up(agent);
         }
-        if has_more_tool_calls || !queued.is_empty() {
+        if has_more_tool_calls || response_was_truncated || !queued.is_empty() {
             let next_turn_id = TurnId(continuation.turn_id.0.saturating_add(1));
             self.advance_turn(next_turn_id)?;
             self.emit(

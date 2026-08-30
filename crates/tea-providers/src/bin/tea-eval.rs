@@ -6,10 +6,12 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
+use std::future::Future;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::task::Poll;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -58,9 +60,10 @@ const SHOOTOUT_PROVIDER_MAX_RETRIES: u32 = 3;
 /// needs a finite deadline to avoid an OS-level socket hanging forever.
 const DIAGNOSTIC_REQUEST_TIMEOUT_SECONDS: u64 = 86_400;
 /// Evaluation-only guidance that mirrors the concise parts of Pi's native
-/// coding prompt. It reduces avoidable exploratory turns without changing the
-/// closed capability set or any core runtime policy.
-const STATIC_CODING_GUIDELINES: &str = "Guidelines:\n- Be concise in responses and show file paths clearly.\n- Use `read` to inspect known files instead of using `bash` with cat or sed.\n- Use `find` for workspace discovery; never search from `/`, inspect home/cache directories, or inspect outside the workspace.\n- Keep bash commands bounded and workspace-local; do not run network, package-install, or upstream/repository-history probes.\n- Honor the requested null/undefined semantics; when an optional nullish value should be ignored, guard it before validation or calculation.\n- Batch independent inspections in one tool turn when practical.\n- Use `edit` for precise changes, then run the relevant validator and stop once the fix is verified.\n- For targeted edits, use `files[].edits[]` with exact `oldText` and `newText`; batch independent edits in one call.\n- Keep edit matches small and unique; do not repeat unchanged probes.\n- Once the relevant check passes, finish without further exploratory inspection.";
+/// coding prompt. It makes completion—not repository-history exploration—the
+/// static agent's next action after it has identified a bounded code fix. It
+/// does not change the closed capability set or any core runtime policy.
+const STATIC_CODING_GUIDELINES: &str = "You are an expert coding assistant operating inside Tea, a coding agent harness. You help users by reading files, executing bounded commands, and editing code.\n\nGuidelines:\n- Work directly toward the requested code change. Do not finish after inspection when the requested code change is still unmade. A code-change task is not complete with an empty diff.\n- Treat the stated task as the specification. Do not inspect Git history, branches, tags, reflogs, remotes, or upstream references. Do not repeat an inspection that did not change the repair decision.\n- When a task names a source file, inspect it and then make the smallest safe edit before giving a long explanation. If the next response would only restate the same hypothesis, edit or run the focused check instead.\n- After inspecting the named target and its immediate dependencies, form the smallest root-cause hypothesis, make the edit, and run a focused reproduction or validator.\n- Be concise in responses and show file paths clearly.\n- Use `read` to inspect known files instead of using `bash` with cat or sed.\n- Use `find` for workspace discovery; never search from `/`, inspect home/cache directories, or inspect outside the workspace.\n- Keep bash commands bounded and workspace-local; do not run network, package-install, or upstream/repository-history probes.\n- Honor the requested null/undefined semantics; when an optional nullish value should be ignored, guard it before validation or calculation.\n- Batch independent inspections in one tool turn when practical.\n- Use `edit` for precise changes, then run the relevant validator and stop once the fix is verified.\n- For targeted edits, use `files[].edits[]` with exact `oldText` and `newText`; batch independent edits in one call.\n- Keep edit matches small and unique; do not repeat unchanged probes.\n- Once the relevant check passes, finish without further exploratory inspection.";
 const JIT_ADDENDUM: &str = "Task-local harness adaptation is available but optional.\n\nFirst inspect the task and repository using the normal coding tools. Use NoChange unless you have concrete evidence that one bounded harness change is likely to improve this task.\n\nYou may stage at most one task-local harness candidate. It may alter only currently supported prompt, tool-presentation, hook, context, memory-selection, failure-policy, or compaction-policy surfaces. It cannot grant new authority, change the provider or model, access hidden validators, use subagents, or add a web-research tool.\n\nA candidate must include observed task or failure evidence, a root-cause hypothesis, expected effect, regression risk, and the harness surfaces changed. If it activates, continue solving the same task under the new immutable harness revision. All adaptation time and model usage count toward the task result.";
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -257,6 +260,46 @@ fn request_timeout_seconds(outer_timeout_seconds: u64) -> u64 {
         DIAGNOSTIC_REQUEST_TIMEOUT_SECONDS
     } else {
         outer_timeout_seconds
+    }
+}
+
+/// Drive one durable operation to settlement, cancelling it at the evaluator's
+/// finite wall-clock boundary. Provider request timeouts are intentionally
+/// per-request; a coding run can span multiple requests, so this boundary must
+/// cover the whole durable operation instead. When the deadline wins, the
+/// caller's cancellation action runs before the same drive future is awaited,
+/// preserving the normal durable terminal record and evaluator epilogue.
+async fn settle_with_outer_deadline<T>(
+    deadline: Option<Duration>,
+    drive: impl Future<Output = T>,
+    on_deadline: impl FnOnce(),
+) -> (T, bool) {
+    let Some(deadline) = deadline else {
+        return (drive.await, false);
+    };
+    let mut drive = Box::pin(drive);
+    let mut timer = Box::pin(smol::Timer::after(deadline));
+    let mut completed = None;
+    let deadline_fired = std::future::poll_fn(|context| {
+        if let Poll::Ready(outcome) = drive.as_mut().poll(context) {
+            completed = Some(outcome);
+            return Poll::Ready(false);
+        }
+        if timer.as_mut().poll(context).is_ready() {
+            Poll::Ready(true)
+        } else {
+            Poll::Pending
+        }
+    })
+    .await;
+    if deadline_fired {
+        on_deadline();
+        (drive.await, true)
+    } else {
+        (
+            completed.expect("completed operation remains available after deadline race"),
+            false,
+        )
     }
 }
 
@@ -1829,13 +1872,27 @@ fn main() -> Result<(), String> {
         events
     });
     let started = Instant::now();
-    let outcome = smol::block_on(async {
-        if args.harness_mode == HarnessMode::Jit {
-            harness.run_authoring_prompt(prompt).await
-        } else {
-            harness.run_root_prompt(prompt).await
-        }
-    });
+    // `request_timeout` bounds one provider stream. The scored static run may
+    // make many streams, so enforce its task budget once across the durable
+    // root operation and leave the runner's static-only grace for evidence
+    // finalization after cancellation. JIT keeps its existing outer handling.
+    let outer_deadline = (args.harness_mode == HarnessMode::Static
+        && args.outer_timeout_seconds != 0)
+        .then(|| Duration::from_secs(args.outer_timeout_seconds));
+    let deadline_harness = Arc::clone(&harness);
+    let (outcome, outer_deadline_fired) = smol::block_on(settle_with_outer_deadline(
+        outer_deadline,
+        async {
+            if args.harness_mode == HarnessMode::Jit {
+                harness.run_authoring_prompt(prompt).await
+            } else {
+                harness.run_root_prompt(prompt).await
+            }
+        },
+        move || {
+            let _ = deadline_harness.abort_root();
+        },
+    ));
     let agent_ms = started.elapsed().as_millis() as u64;
     collecting.store(false, Ordering::Release);
     let events = collector
@@ -1866,7 +1923,10 @@ fn main() -> Result<(), String> {
             Some(status) => format!("openrouter_{:?}_{status}", report.source).to_ascii_lowercase(),
             None => format!("openrouter_{:?}", report.source).to_ascii_lowercase(),
         });
-    let terminal = match &outcome {
+    let terminal = if outer_deadline_fired {
+        ("failed", Some("outer_timeout"))
+    } else {
+        match &outcome {
         Ok(operation) if operation.is_completed() => ("completed", None),
         Ok(_) => (
             "failed",
@@ -1878,6 +1938,7 @@ fn main() -> Result<(), String> {
             "failed",
             provider_error.as_deref().or(Some("durable_runtime_error")),
         ),
+        }
     };
     fs::create_dir_all(&args.evidence_dir).map_err(|error| error.to_string())?;
     let system_prompt = &surface.system_prompt;
@@ -1955,6 +2016,7 @@ fn main() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     use tea_core::event::{AgentEvent, AgentEventKind, EventSequence};
     use tea_core::runtime::TeaEvent;
@@ -1964,9 +2026,10 @@ mod tests {
     use tea_session::LaneId;
 
     use super::{
-        AgentConfiguration, HarnessMode, ModelDescriptor, OpenAiContextHook, OpenRouterConfig,
-        OpenRouterProvider, REQUIRED_MODEL, RuntimeServices, model_profile, prompt_total_tokens,
-        request_timeout_seconds, sha256, snapshot_spec, uncached_input_tokens,
+        AgentConfiguration, CommandEnvironment, HarnessMode, ModelDescriptor, OpenAiContextHook,
+        OpenRouterConfig, OpenRouterProvider, REQUIRED_MODEL, RuntimeServices,
+        coding_configuration, model_profile, prompt_total_tokens, request_timeout_seconds, sha256,
+        snapshot_spec, uncached_input_tokens,
     };
     #[test]
     fn requested_deepseek_model_is_pinned() {
@@ -1997,6 +2060,76 @@ mod tests {
     fn shootout_request_timeout_matches_outer_budget_and_keeps_diagnostic_guard() {
         assert_eq!(request_timeout_seconds(1_800), 1_800);
         assert_eq!(request_timeout_seconds(0), 86_400);
+    }
+
+    #[test]
+    fn outer_deadline_cancels_then_waits_for_the_drive_to_settle() {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let cancelled_for_drive = Arc::clone(&cancelled);
+        let cancelled_for_deadline = Arc::clone(&cancelled);
+
+        let (outcome, deadline_fired) = smol::block_on(super::settle_with_outer_deadline(
+            Some(std::time::Duration::ZERO),
+            async move {
+                while !cancelled_for_drive.load(Ordering::Acquire) {
+                    smol::Timer::after(std::time::Duration::from_millis(1)).await;
+                }
+                "durably settled"
+            },
+            move || cancelled_for_deadline.store(true, Ordering::Release),
+        ));
+
+        assert!(deadline_fired);
+        assert_eq!(outcome, "durably settled");
+        assert!(cancelled.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn completed_drive_disarms_outer_deadline() {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let cancelled_for_deadline = Arc::clone(&cancelled);
+
+        let (outcome, deadline_fired) = smol::block_on(super::settle_with_outer_deadline(
+            Some(std::time::Duration::from_secs(1)),
+            async { "completed" },
+            move || cancelled_for_deadline.store(true, Ordering::Release),
+        ));
+
+        assert!(!deadline_fired);
+        assert_eq!(outcome, "completed");
+        assert!(!cancelled.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn static_coding_prompt_sets_completion_oriented_agent_role() {
+        let workspace = std::env::temp_dir().join(format!(
+            "tea-eval-static-prompt-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&workspace).expect("temporary workspace");
+        let (configuration, _) = coding_configuration(
+            &workspace,
+            CommandEnvironment::empty(),
+            true,
+        )
+        .expect("static coding configuration");
+        std::fs::remove_dir_all(&workspace).expect("temporary workspace cleanup");
+
+        assert!(configuration.system_prompt.contains(
+            "You are an expert coding assistant operating inside Tea, a coding agent harness."
+        ));
+        assert!(configuration.system_prompt.contains(
+            "Do not finish after inspection when the requested code change is still unmade."
+        ));
+        assert!(configuration.system_prompt.contains(
+            "Do not inspect Git history, branches, tags, reflogs, remotes, or upstream references."
+        ));
+        assert!(configuration.system_prompt.contains(
+            "A code-change task is not complete with an empty diff."
+        ));
+        assert!(configuration.system_prompt.contains(
+            "When a task names a source file, inspect it and then make the smallest safe edit before giving a long explanation."
+        ));
     }
 
     #[test]

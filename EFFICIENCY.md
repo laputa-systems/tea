@@ -86,6 +86,64 @@ If the counters are not semantically comparable, repair the accounting and
 tests first. Never claim an efficiency improvement from an accounting
 artifact.
 
+### Hard efficiency gate
+
+This requirement applies to `express-4205-hard` as well as the routine medium
+case. A completed Tea hard-case attempt is not an efficiency success merely
+because its validator passes or its wall time is lower. Tea must match or beat
+Pi's **uncached generation** on a comparable Pi/Tea hard-case run; a higher
+token total fails the mission. Faster elapsed time, fewer retries, or a lower
+provider price never offsets a token-efficiency loss.
+
+## Current hard-case comparison (2026-08-30): correctness pass, efficiency fail
+
+The following completed single-baseline attempts use the pinned
+`express-4205-hard` task, `deepseek/deepseek-v4-flash-0731` through OpenRouter,
+high thinking, unlimited output, and the closed `read`, `bash`, `edit`, `find`
+surface. Both changed only `lib/router/index.js` and passed the fast validator.
+They are useful current evidence, but not a replacement for the required
+counterbalanced repeated comparison.
+
+| Metric | Pi static | Tea static | Tea relative to Pi |
+| --- | ---: | ---: | ---: |
+| Agent wall time | 1,461,642 ms (24m22s) | 835,041 ms (13m55s) | 42.9% faster |
+| Model turns | 33 | 98 | 3.0x |
+| Tool calls | 32 | 104 | 3.25x |
+| Uncached generation | 46,706 | 471,622 | 10.1x (`+424,916`) |
+| Prompt total | 570,492 | 2,255,778 | 4.0x |
+| All tokens | 583,538 | 2,297,158 | 3.9x |
+
+Tea therefore passes correctness but **fails the hard efficiency gate**. Its
+shorter wall time does not compensate for the 10.1x uncached-generation cost.
+The Pi record is
+`/private/tmp/tea-pi-shootout-hard-pi-only/runs/pi-static-only/attempts/pi-static/record.json`;
+the Tea record is
+`/private/tmp/tea-pi-shootout-hard-tea-bounded-edit/runs/20260830T195918Z-89e45fd93370/attempts/tea-static/record.json`.
+Their corresponding adapter results retain the normalized counters. Do not
+rank the recorded dollar totals: Pi's is a `catalog-estimate`, while Tea's is
+`provider-reported`.
+
+## Goal prompt
+
+Use this objective with the bundled Goal extension; the short invocation
+`/goal achieve the goal in EFFICIENCY.md` refers to this contract.
+
+> Achieve Tea static token-efficiency parity with Pi as defined in
+> `EFFICIENCY.md`. Work only on `tea-static`; do not run, modify, or compare
+> `tea-jit`. Start from the retained shootout evidence, adapters, normalized
+> usage accounting, and focused tests. Keep the task, validator, baseline,
+> pinned model/provider, high thinking, unlimited output, timeout contract,
+> and exact model-visible `read`, `bash`, `edit`, `find` tools unchanged. Do
+> not add dependencies or weaken workspace/shell isolation. Make evidence-led,
+> narrow changes with a failing regression test before each bug fix. A
+> validator pass or faster wall time alone is not success: on comparable,
+> repeated, counterbalanced Pi/Tea static hard-case runs, every Tea attempt
+> must pass and Tea's median and worst-case normalized uncached generation
+> must be less than or equal to Pi's. Preserve raw prompt, cache, and output
+> evidence; do not claim parity from mismatched accounting, incomparable cost
+> kinds, a Tea-only run, or a missing artifact. Verify focused checks, then
+> `make pi-shootout-check`, and retain the final paired evidence and report.
+
 ## Evidence to start from
 
 The pinned run below is the baseline for this investigation:

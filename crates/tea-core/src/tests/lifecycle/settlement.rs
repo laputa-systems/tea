@@ -322,6 +322,52 @@ fn length_stop_refuses_truncated_tool_calls_and_allows_a_recovery_turn() {
 }
 
 #[test]
+fn length_stop_without_tool_calls_continues_the_unfinished_response() {
+    smol::block_on(async {
+        let provider = Arc::new(ScriptedProvider::new([
+            ModelStream {
+                events: vec![
+                    ModelStreamEvent::TextDelta("partial analysis".into()),
+                    ModelStreamEvent::End(StopReason::Length),
+                ],
+            },
+            ModelStream {
+                events: vec![
+                    ModelStreamEvent::TextDelta("completed response".into()),
+                    ModelStreamEvent::End(StopReason::Stop),
+                ],
+            },
+        ]));
+        let agent = Agent::builder().model_provider(provider.clone()).build();
+        let run = agent.start_prompt("finish despite one truncated response")?;
+
+        run.drive().await?;
+
+        assert_eq!(provider.requests().len(), 2);
+        assert!(matches!(
+            agent.snapshot().messages[1],
+            crate::state::AgentMessage::Assistant {
+                stop_reason: Some(StopReason::Length),
+                ref content,
+                ref tool_calls,
+                ..
+            } if content == "partial analysis" && tool_calls.is_empty()
+        ));
+        assert!(matches!(
+            agent.snapshot().messages.last(),
+            Some(crate::state::AgentMessage::Assistant {
+                content,
+                stop_reason: Some(StopReason::Stop),
+                ..
+            }) if content == "completed response"
+        ));
+
+        Ok::<(), CoreError>(())
+    })
+    .expect("length stop without tools should continue");
+}
+
+#[test]
 fn cancellation_settles_terminal_events_before_wait_for_idle() {
     smol::block_on(async {
         let observer_agent = Arc::new(Mutex::new(None));
