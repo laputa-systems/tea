@@ -2,7 +2,7 @@
 
 use std::fmt::Write as _;
 
-use super::command::{CommandSpec, OptionSpec, ROOT_COMMAND, ROOT_OPTIONS, SESSION};
+use super::command::{CommandSpec, OptionSpec, AUTH, ROOT_COMMAND, ROOT_OPTIONS, SESSION};
 
 /// Render the complete top-level reference. This is one recursive command
 /// reference rather than a short index followed by copied standalone pages.
@@ -206,6 +206,12 @@ fn command_path(command: &CommandSpec) -> String {
         .any(|candidate| candidate.name == command.name)
     {
         format!("tea {}", command.name)
+    } else if AUTH
+        .subcommands
+        .iter()
+        .any(|candidate| candidate.name == command.name)
+    {
+        format!("tea {} {}", AUTH.name, command.name)
     } else {
         format!("{} {} {}", ROOT_COMMAND.name, SESSION.name, command.name)
     }

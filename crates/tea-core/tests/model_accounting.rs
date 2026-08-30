@@ -27,6 +27,7 @@ impl ModelProvider for FixtureProvider {
 
 fn usage(input: Option<u64>, output: Option<u64>, cost: Option<&str>) -> Usage {
     Usage {
+        total_tokens: input.zip(output).map(|(input, output)| input + output),
         input_tokens: input,
         output_tokens: output,
         reasoning_tokens: None,
@@ -48,6 +49,7 @@ fn usage_is_reduced_into_a_settled_turn_event_and_snapshot() {
             events: vec![
                 ModelStreamEvent::TextDelta("answer".into()),
                 ModelStreamEvent::Usage(Usage {
+                    total_tokens: Some(4),
                     input_tokens: Some(4),
                     output_tokens: Some(0),
                     reasoning_tokens: Some(2),

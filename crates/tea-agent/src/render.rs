@@ -1422,6 +1422,7 @@ mod tests {
             tool_calls: Vec::new(),
             stop_reason: Some(tea_core::state::StopReason::Stop),
             error_message: None,
+            opaque_context: Vec::new(),
         };
         state.apply_event(&tea_core::event::AgentEvent {
             run_id: tea_core::state::RunId(1),

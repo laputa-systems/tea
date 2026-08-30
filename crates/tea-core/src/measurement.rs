@@ -384,6 +384,9 @@ pub fn measure_request_layout(
         if previous.thinking_level != current.thinking_level {
             changed_cache_domain_components.push("thinking".into());
         }
+        if previous.session_id != current.session_id {
+            changed_cache_domain_components.push("session_identity".into());
+        }
         compare_adapter_components(
             previous_adapter,
             current_adapter,
@@ -444,6 +447,7 @@ fn cache_domains_match(
         && tool_definition_bytes(previous) == current_tools
         && previous.model == current.model
         && previous.thinking_level == current.thinking_level
+        && previous.session_id == current.session_id
 }
 
 fn cache_domain_fingerprint(request: &ModelRequest, tools: &[u8]) -> u64 {
@@ -469,6 +473,10 @@ fn cache_domain_fingerprint(request: &ModelRequest, tools: &[u8]) -> u64 {
     }
     bytes.push(0);
     bytes.extend_from_slice(format!("{:?}", request.thinking_level).as_bytes());
+    bytes.push(0);
+    if let Some(session_id) = &request.session_id {
+        bytes.extend_from_slice(session_id.as_bytes());
+    }
     stable_fingerprint(&bytes)
 }
 
@@ -556,7 +564,7 @@ fn canonical_request_surface_bytes(request: &ModelRequest) -> Vec<u8> {
             .saturating_add(request.context.len())
             .saturating_add(128),
     );
-    bytes.extend_from_slice(b"tea-core-request-surface-v1\0");
+    bytes.extend_from_slice(b"tea-core-request-surface-v2\0");
     append_length_delimited(&mut bytes, request.system_prompt.as_bytes());
     append_length_delimited(&mut bytes, &tools);
     match &request.model {
@@ -578,6 +586,13 @@ fn canonical_request_surface_bytes(request: &ModelRequest) -> Vec<u8> {
         &mut bytes,
         format!("{:?}", request.thinking_level).as_bytes(),
     );
+    match &request.session_id {
+        Some(session_id) => {
+            bytes.push(1);
+            append_length_delimited(&mut bytes, session_id.as_bytes());
+        }
+        None => bytes.push(0),
+    }
     // Context deliberately occupies the tail: an append-only context change
     // then preserves an equally append-only canonical request prefix.
     bytes.extend_from_slice(b"context\0");
@@ -625,6 +640,7 @@ mod tests {
                 revision: None,
             }),
             thinking_level: ThinkingLevel::Off,
+            session_id: None,
         }
     }
 
@@ -652,6 +668,23 @@ mod tests {
         let measurement = measure_prompt_cacheability(Some(&previous), &current);
         assert_eq!(measurement.common_context_prefix_bytes, 0);
         assert!(measurement.cache_domain_changed);
+    }
+
+    #[test]
+    fn session_identity_is_a_cache_domain_boundary() {
+        let mut previous = request("[one]");
+        previous.session_id = Some("session-a".into());
+        let mut current = request("[one][two]");
+        current.session_id = Some("session-b".into());
+
+        let measurement = measure_prompt_cacheability(Some(&previous), &current);
+        assert!(measurement.cache_domain_changed);
+        assert_eq!(measurement.common_context_prefix_bytes, 0);
+        assert!(
+            measurement
+                .changed_cache_domain_components
+                .contains(&"session_identity".into())
+        );
     }
 
     #[test]

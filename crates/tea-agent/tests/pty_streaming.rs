@@ -1289,9 +1289,12 @@ fn mock_keeps_submitted_user_message_visible_after_acceptance() {
         .wait_for_screen(
             terminal.deadline(Duration::from_secs(3)),
             "cancelled submitted message",
-            |screen| screen.contains("submitted user message"),
+            |screen| {
+                screen.contains("submitted user message")
+                    && screen.contains("cancelled; prompt restored for explicit re-submit")
+            },
         )
-        .expect("cancel redraw must preserve the submitted user message");
+        .expect("settled cancel redraw must preserve the submitted user message");
     terminal
         .send_key(terminal.deadline(Duration::from_secs(3)), Key::Ctrl('c'))
         .expect("clear restored prompt");

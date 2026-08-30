@@ -7,6 +7,7 @@ use crate::{
 #[cfg(test)]
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tea_protocol::JsonValue;
 
@@ -217,6 +218,7 @@ impl ProvisionedEntry {
                 tool_calls,
                 stop_reason: None,
                 error_message: None,
+                opaque_context: Vec::new(),
                 metadata: Metadata::new(),
             }),
         }
@@ -243,8 +245,43 @@ pub struct AssistantMessageEntry {
     pub stop_reason: Option<String>,
     /// Provider-facing error text when the assistant turn settled as an error.
     pub error_message: Option<String>,
+    /// Provider-private continuation material ordered with this assistant turn.
+    ///
+    /// This is durable but is not a model-visible transcript field. The
+    /// matching provider adapter is responsible for deciding whether and how
+    /// to replay it on a later request.
+    pub opaque_context: Vec<OpaqueProviderContextEntry>,
     /// Host-owned stable metadata.
     pub metadata: Metadata,
+}
+
+/// One bounded provider-private continuation item retained with an assistant turn.
+///
+/// The payload intentionally has a redacted `Debug` implementation because it
+/// can contain server-issued opaque state that is not safe diagnostic text.
+#[derive(Clone, Eq, PartialEq)]
+pub struct OpaqueProviderContextEntry {
+    /// Stable provider identifier allowed to interpret the payload.
+    pub provider: String,
+    /// Provider-defined payload kind.
+    pub kind: String,
+    /// Provider item identity, when one was supplied.
+    pub item_id: Option<String>,
+    /// Exact opaque server-issued payload.
+    pub payload: String,
+}
+
+impl fmt::Debug for OpaqueProviderContextEntry {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("OpaqueProviderContextEntry")
+            .field("provider", &self.provider)
+            .field("kind", &self.kind)
+            .field("item_id", &self.item_id)
+            .field("payload", &"[redacted]")
+            .field("payload_bytes", &self.payload.len())
+            .finish()
+    }
 }
 
 /// One provider-supplied assistant tool call.
@@ -431,6 +468,8 @@ pub struct CustomEntry {
 /// Usage remains independent by category; an absent value is unknown, not zero.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Usage {
+    /// Provider-reported total-token usage.
+    pub total_tokens: Option<u64>,
     /// Input-token usage.
     pub input_tokens: Option<u64>,
     /// Output-token usage.
@@ -449,6 +488,7 @@ impl Usage {
     /// Accumulate known categories without converting unknown measurements to zero. Exact
     /// reported costs are added as decimal text.
     pub fn saturating_add_assign(&mut self, other: &Self) {
+        self.total_tokens = add_optional(self.total_tokens, other.total_tokens);
         self.input_tokens = add_optional(self.input_tokens, other.input_tokens);
         self.output_tokens = add_optional(self.output_tokens, other.output_tokens);
         self.reasoning_tokens = add_optional(self.reasoning_tokens, other.reasoning_tokens);
@@ -854,6 +894,19 @@ pub struct ProviderErrorRecord {
     pub status_code: Option<u16>,
     /// One-based transport attempt, or zero for an adapter-side rejection.
     pub attempt: Option<u32>,
+    /// Provider-generated logical request identity, when safe to retain.
+    ///
+    /// This is never an authorization credential and stays stable across
+    /// retries of the same logical model turn.
+    pub logical_request_id: Option<String>,
+    /// Whether any externally observable model-stream event had been exposed
+    /// before this failure was settled.
+    pub visible_stream_event: Option<bool>,
+    /// Whether this logical request already attempted an authentication refresh.
+    pub auth_refresh_attempted: Option<bool>,
+    /// Subscription or rate-limit reset timestamp, in Unix seconds, when the
+    /// provider supplied one in a bounded trusted diagnostic.
+    pub quota_reset_at_unix_seconds: Option<u64>,
     /// Provider error type, when reported.
     pub error_type: Option<String>,
     /// Provider error code, when reported.

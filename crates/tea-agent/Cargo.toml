@@ -16,6 +16,10 @@ path = "src/lib.rs"
 [features]
 # Compiles the real-binary PTY regression harness. The tests supply their own loopback endpoint.
 pty-harness = []
+# Direct ChatGPT-subscription Codex support remains opt-in so ordinary Tea
+# terminal builds do not link OAuth, PKCE, or credential-persistence code.
+provider-codex = ["tea-providers/provider-codex"]
+provider-codex-test-support = ["provider-codex", "tea-providers/provider-codex-test-support"]
 
 [dependencies]
 laputa-hi-lite = "0.1"

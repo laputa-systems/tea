@@ -71,6 +71,8 @@ pub(super) fn is_compaction_request(request: &ModelRequest) -> bool {
 pub(super) struct ProviderCompactor {
     provider: Arc<dyn ModelProvider>,
     model: ModelDescriptor,
+    context_hook: Arc<dyn HookSet>,
+    tool_free_requests: bool,
 }
 
 impl fmt::Debug for ProviderCompactor {
@@ -85,7 +87,24 @@ impl fmt::Debug for ProviderCompactor {
 impl ProviderCompactor {
     /// Bind one compactor to the exact provider/model descriptor selected by the host.
     pub(super) fn new(model: ModelDescriptor, provider: Arc<dyn ModelProvider>) -> Self {
-        Self { provider, model }
+        let context_hook: Arc<dyn HookSet> = {
+            #[cfg(feature = "provider-codex")]
+            if model.provider == "codex" {
+                Arc::new(tea_providers::codex::CodexContextHook)
+            } else {
+                Arc::new(OpenAiContextHook)
+            }
+            #[cfg(not(feature = "provider-codex"))]
+            {
+                Arc::new(OpenAiContextHook)
+            }
+        };
+        Self {
+            provider,
+            tool_free_requests: model.provider == "codex",
+            model,
+            context_hook,
+        }
     }
 
     fn configured(
@@ -114,12 +133,21 @@ impl Compactor for ProviderCompactor {
         cancellation: CancellationToken,
     ) -> CompactionFuture<'a> {
         let configured = self.configured(&context);
+        let context_hook = Arc::clone(&self.context_hook);
+        let tool_free_requests = self.tool_free_requests;
         Box::pin(async move {
             let (provider, model) = configured?;
             if context.messages.is_empty() {
                 return Ok(CompactionResult::new(Vec::new()));
             }
-            let prepared = prepare_summary_request(model, context.messages.clone(), None)?;
+            let prepared = prepare_summary_request(
+                model,
+                context.messages.clone(),
+                None,
+                context_hook.as_ref(),
+                tool_free_requests,
+                context.session_id.clone(),
+            )?;
             let layout = prepared.layout;
             let source_is_active_context_prefix = prepared.source_is_active_context_prefix;
             let (summary, usage, request_observation) =
@@ -144,6 +172,8 @@ impl Compactor for ProviderCompactor {
         cancellation: CancellationToken,
     ) -> CompactionFuture<'a> {
         let configured = self.configured(&context);
+        let context_hook = Arc::clone(&self.context_hook);
+        let tool_free_requests = self.tool_free_requests;
         Box::pin(async move {
             let (provider, model) = configured?;
             let source_context = context
@@ -155,8 +185,14 @@ impl Compactor for ProviderCompactor {
             if messages_to_summarize.is_empty() {
                 return Ok(CompactionResult::new(request.retained_messages));
             }
-            let prepared =
-                prepare_summary_request(model, messages_to_summarize.clone(), source_context)?;
+            let prepared = prepare_summary_request(
+                model,
+                messages_to_summarize.clone(),
+                source_context,
+                context_hook.as_ref(),
+                tool_free_requests,
+                context.session_id.clone(),
+            )?;
             let layout = prepared.layout;
             let source_is_active_context_prefix = prepared.source_is_active_context_prefix;
             let (summary, usage, request_observation) =
@@ -215,7 +251,14 @@ fn prepare_summary_request(
     model: ModelDescriptor,
     messages: Vec<AgentMessage>,
     source_context: Option<&ProviderContext>,
+    context_hook: &dyn HookSet,
+    tool_free_requests: bool,
+    session_id: Option<String>,
 ) -> Result<PreparedSummaryRequest, CompactionError> {
+    // The converted context is provider-owned. Codex uses Responses `input`
+    // items rather than the older `{role, content: string}` shape, so the
+    // cache-friendly update instruction must preserve that exact boundary.
+    let codex_responses_context = model.provider == "codex";
     let (system_prompt, context, tools, layout, source_is_active_context_prefix) =
         if let Some(source) = source_context {
             // Tool execution is prohibited by the compactor stream, but retaining
@@ -223,20 +266,27 @@ fn prepare_summary_request(
             // ordinary request for an honest adapter-domain observation.
             (
                 source.system_prompt.clone(),
-                append_update_instruction(&source.context)?,
-                source.tools.clone(),
+                append_update_instruction(&source.context, codex_responses_context)?,
+                if tool_free_requests {
+                    Vec::new()
+                } else {
+                    source.tools.clone()
+                },
                 CompactionRequestLayout::ExactReplay,
                 Some(true),
             )
         } else {
             (
                 SUMMARY_SYSTEM_PROMPT.into(),
-                convert_messages(messages)?,
+                convert_messages(context_hook, messages)?,
                 Vec::new(),
                 CompactionRequestLayout::StandaloneFallback,
                 None,
             )
         };
+    let session_id = source_context
+        .and_then(|source| source.session_id.clone())
+        .or(session_id);
     Ok(PreparedSummaryRequest {
         request: ModelRequest {
             system_prompt,
@@ -244,14 +294,18 @@ fn prepare_summary_request(
             tools,
             model: Some(model),
             thinking_level: ThinkingLevel::Off,
+            session_id,
         },
         layout,
         source_is_active_context_prefix,
     })
 }
 
-fn convert_messages(messages: Vec<AgentMessage>) -> Result<String, CompactionError> {
-    OpenAiContextHook
+fn convert_messages(
+    context_hook: &dyn HookSet,
+    messages: Vec<AgentMessage>,
+) -> Result<String, CompactionError> {
+    context_hook
         .convert_to_llm(ContextEnvelope {
             version: 1,
             messages,
@@ -296,6 +350,10 @@ async fn summarize(
             }
             ModelStreamEvent::TextDelta(delta) => summary.push_str(&delta),
             ModelStreamEvent::Usage(reported) => usage = Some(reported),
+            // A compaction summary is an ordinary, tool-free assistant turn.
+            // Provider-private continuation state belongs only to the source
+            // conversation, so never attach it to the synthetic summary.
+            ModelStreamEvent::OpaqueProviderContext(_) => {}
             ModelStreamEvent::End(reason) => {
                 if reason == StopReason::Error {
                     return Err(CompactionError::failed(
@@ -390,15 +448,26 @@ fn is_exact_message_prefix(source: &str, active: &str) -> bool {
     active_messages.starts_with(&source_messages)
 }
 
-fn append_update_instruction(context: &str) -> Result<String, CompactionError> {
-    append_instruction(context, UPDATE_SUMMARIZATION_INSTRUCTIONS)
+fn append_update_instruction(
+    context: &str,
+    codex_responses_context: bool,
+) -> Result<String, CompactionError> {
+    append_instruction(
+        context,
+        UPDATE_SUMMARIZATION_INSTRUCTIONS,
+        codex_responses_context,
+    )
 }
 
 /// Append exactly one host instruction to an already converted provider context.
 ///
 /// The observed request is the same JSON value passed to the provider; no hook
 /// or provider projection is rerun for measurement.
-fn append_instruction(context: &str, instruction: &str) -> Result<String, CompactionError> {
+fn append_instruction(
+    context: &str,
+    instruction: &str,
+    codex_responses_context: bool,
+) -> Result<String, CompactionError> {
     let mut value = JsonValue::parse(context).map_err(|error| {
         CompactionError::failed(format!("active provider context is not JSON: {error}"))
     })?;
@@ -407,11 +476,61 @@ fn append_instruction(context: &str, instruction: &str) -> Result<String, Compac
             "active provider context is not a message array",
         ));
     };
-    messages.push(JsonValue::object([
-        ("role", JsonValue::from("user")),
-        ("content", JsonValue::from(instruction)),
-    ]));
+    let instruction = if codex_responses_context {
+        JsonValue::object([
+            ("type", JsonValue::from("message")),
+            ("role", JsonValue::from("user")),
+            (
+                "content",
+                JsonValue::Array(vec![JsonValue::object([
+                    ("type", JsonValue::from("input_text")),
+                    ("text", JsonValue::from(instruction)),
+                ])]),
+            ),
+        ])
+    } else {
+        JsonValue::object([
+            ("role", JsonValue::from("user")),
+            ("content", JsonValue::from(instruction)),
+        ])
+    };
+    messages.push(instruction);
     value
         .to_json_string()
         .map_err(|error| CompactionError::failed(error.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn codex_cache_replay_update_uses_a_responses_input_message() {
+        let context = r#"[{"type":"message","role":"user","content":[{"type":"input_text","text":"before"}]}]"#;
+        let updated = append_update_instruction(context, true)
+            .expect("Codex cache-replay context should remain valid JSON");
+        let items = JsonValue::parse(&updated)
+            .expect("updated context should parse")
+            .as_array()
+            .expect("updated context should remain an array")
+            .to_vec();
+        let appended = items.last().expect("update instruction is appended");
+        assert_eq!(
+            appended.get("type").and_then(JsonValue::as_str),
+            Some("message")
+        );
+        assert_eq!(
+            appended.get("role").and_then(JsonValue::as_str),
+            Some("user")
+        );
+        assert_eq!(
+            appended
+                .get("content")
+                .and_then(JsonValue::as_array)
+                .and_then(|content| content.first())
+                .and_then(|part| part.get("type"))
+                .and_then(JsonValue::as_str),
+            Some("input_text"),
+        );
+    }
 }

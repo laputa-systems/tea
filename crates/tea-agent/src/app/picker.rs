@@ -368,7 +368,7 @@ impl App {
             .workspace
             .as_ref()
             .ok_or_else(|| AppError::Setup("workspace is not initialized".into()))?;
-        super::host::host_configuration(&workspace.to_string_lossy())
+        super::host::host_configuration_for_provider(&workspace.to_string_lossy(), Some(provider))
     }
 }
 

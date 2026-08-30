@@ -95,6 +95,7 @@ fn task_mode_child_request_with_assignment_last(task: &str, model: &str) -> Mode
             revision: None,
         }),
         thinking_level: ThinkingLevel::Off,
+        session_id: None,
         context: format!(
             "stable child context\nlogical workspace: /workspace/logical\nassignment: {task}"
         ),

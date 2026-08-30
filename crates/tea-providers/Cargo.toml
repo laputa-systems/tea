@@ -25,6 +25,17 @@ provider-opencode-zen = [
     "dep:tea-http",
 ]
 provider-opencode-zen-test-support = ["provider-opencode-zen"]
+provider-codex = [
+    "dep:base64",
+    "dep:getrandom",
+    "dep:percent-encoding",
+    "dep:rustix",
+    "dep:sha2",
+    "dep:smol",
+    "dep:tea-http",
+]
+# Narrow loopback-origin injection used only by deterministic Codex provider tests.
+provider-codex-test-support = ["provider-codex"]
 eval-runner = ["dep:smol", "provider-openrouter"]
 
 [dependencies]
@@ -34,6 +45,11 @@ tea-protocol = { path = "../tea-protocol" }
 tea-session = { path = "../tea-session" }
 smol = { workspace = true, optional = true }
 tea-http = { path = "../tea-http", optional = true }
+base64 = { version = "=0.22.1", optional = true }
+getrandom = { version = "=0.3.4", optional = true }
+percent-encoding = { version = "=2.3.2", optional = true }
+rustix = { version = "=1.1.4", default-features = false, features = ["fs", "std"], optional = true }
+sha2 = { version = "=0.10.9", optional = true }
 
 [dev-dependencies]
 smol = { workspace = true }

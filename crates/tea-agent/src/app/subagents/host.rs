@@ -522,7 +522,7 @@ mod tests {
                 tea_providers::ProviderRegistry::new(),
                 None,
                 None,
-                "logical repository".into(),
+                std::path::PathBuf::from("/tmp/tea-provider-factory-fixture"),
             )),
             artifacts,
             Vec::new(),

@@ -186,6 +186,7 @@ mod tests {
             tool_calls: Vec::new(),
             stop_reason: Some(crate::state::StopReason::Stop),
             error_message: None,
+            opaque_context: Vec::new(),
         };
         let projected = openai_message(&message).expect("projection");
         assert!(projected.get("tool_calls").is_none());

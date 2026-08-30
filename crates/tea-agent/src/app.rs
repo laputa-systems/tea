@@ -4,6 +4,7 @@
 //! projected state, durable host assembly, runtime/input handling, picker
 //! behavior, and presentation helpers.
 
+mod auth;
 mod commands;
 mod compaction;
 mod config;
@@ -28,6 +29,7 @@ mod support;
 mod tests;
 
 pub use crate::cli::{CliCommand, CliError, CliOptions, SessionCommand};
+pub(crate) use auth::run_auth_command;
 pub use config::ConfigError;
 pub use error::AppError;
 pub use persistence::run_session_command;

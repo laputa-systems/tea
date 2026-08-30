@@ -43,6 +43,7 @@ def main() -> int:
         "tea-protocol",
         "tea-session",
         "tea-trace",
+        "tea-http",
         "tea-core",
         "tea-providers",
         "tea-luau",
@@ -64,10 +65,11 @@ def main() -> int:
         "tea-trace": {"tea-core"},
     }
     direct_prohibited = {
-        # `tea-providers -> tea-core -> tea-session/tea-trace` and the same Luau path are
-        # intentional consequences of the final graph. These adapters must still have no direct
-        # durable edge of their own.
-        "tea-providers": {"tea-session", "tea-trace", "tea-luau", "tea-agent"},
+        # Provider diagnostics are intentionally converted into the durable
+        # `tea-session::ProviderErrorRecord` at the adapter boundary. The
+        # feature-gated `tea-eval` binary also owns a direct `tea-luau` edge.
+        # Adapters must not otherwise reach the terminal or trace layers.
+        "tea-providers": {"tea-trace", "tea-agent"},
         "tea-luau": {"tea-session", "tea-trace", "tea-providers", "tea-agent"},
     }
     failures: list[str] = []

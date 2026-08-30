@@ -58,6 +58,9 @@ pub enum ProviderConfigurationKind {
     /// OpenCode Zen's caller-owned API key and model configuration.
     #[cfg(feature = "provider-opencode-zen")]
     OpencodeZen,
+    /// Direct ChatGPT-subscription Codex Responses configuration.
+    #[cfg(feature = "provider-codex")]
+    Codex,
 }
 
 /// Metadata for one adapter compiled into this crate.
@@ -127,6 +130,9 @@ pub enum ProviderConfiguration {
     /// Fully configured OpenCode Zen adapter.
     #[cfg(feature = "provider-opencode-zen")]
     OpencodeZen(crate::opencode_zen::OpencodeZenConfig),
+    /// Fully configured direct ChatGPT-subscription Codex adapter.
+    #[cfg(feature = "provider-codex")]
+    Codex(crate::codex::CodexConfig),
 }
 
 /// A provider and the exact model descriptor it was configured to serve.

@@ -78,6 +78,10 @@ impl OpencodeZenErrorReport {
             message: Some(self.message.clone()),
             status_code: self.status_code,
             attempt: Some(self.attempt),
+            logical_request_id: None,
+            visible_stream_event: None,
+            auth_refresh_attempted: None,
+            quota_reset_at_unix_seconds: None,
             error_type: None,
             error_code: None,
             retryable: Some(self.retryable),
@@ -318,7 +322,7 @@ impl OpencodeZenEventStream {
             };
             match response.poll_next(context) {
                 Poll::Pending => return Poll::Pending,
-                Poll::Ready(StreamEvent::Response { status_code }) => {
+                Poll::Ready(StreamEvent::Response { status_code, .. }) => {
                     self.status_code = Some(status_code);
                 }
                 Poll::Ready(StreamEvent::Chunk(bytes)) => {
@@ -548,7 +552,7 @@ mod tests {
     use super::*;
     use crate::json::JsonValue;
     use crate::state::{ModelDescriptor, ThinkingLevel};
-    
+
     use std::time::Duration;
 
     #[test]

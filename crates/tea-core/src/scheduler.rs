@@ -5,7 +5,9 @@
 //! in actual completion order, and context results are recovered in source order.
 
 use crate::error::SchedulerError;
-use crate::state::{AgentToolCall, ModelDescriptor, ThinkingLevel, ToolCallId};
+use crate::state::{
+    AgentToolCall, ModelDescriptor, OpaqueProviderContextItem, ThinkingLevel, ToolCallId,
+};
 use crate::tool::{AgentToolResult, ToolCall, ToolDefinition, ToolExecutionMode};
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -64,6 +66,13 @@ pub struct ModelRequest {
     /// This is request-scoped: a `prepare_next_turn` hook may replace it for a
     /// later turn without mutating the agent's configured default.
     pub thinking_level: ThinkingLevel,
+    /// Stable durable-session identity when the host owns one.
+    ///
+    /// This is opaque provider metadata, never user content. Providers that
+    /// support session/cache correlation may use it for a stable request
+    /// header or cache key; a missing value means the embedding has no durable
+    /// session identity for this request.
+    pub session_id: Option<String>,
 }
 
 /// Content-safe request facts observed by a provider adapter.
@@ -104,6 +113,12 @@ pub enum ModelStreamEvent {
     TextDelta(String),
     /// A complete assistant tool call.
     ToolCall(AgentToolCall),
+    /// Provider-private continuation state associated with the current assistant output.
+    ///
+    /// The core persists this beside the settled assistant message but never
+    /// renders it or passes it to tools. Only an adapter with the matching
+    /// provider ID may replay it on a later request.
+    OpaqueProviderContext(OpaqueProviderContextItem),
     /// Provider usage update.
     Usage(crate::state::Usage),
     /// Provider/model failure represented as a terminal assistant response.

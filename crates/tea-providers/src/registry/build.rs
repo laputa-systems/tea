@@ -7,7 +7,8 @@ use super::contracts::{
 #[cfg(any(
     feature = "provider-openrouter",
     feature = "provider-local",
-    feature = "provider-opencode-zen"
+    feature = "provider-opencode-zen",
+    feature = "provider-codex"
 ))]
 use std::sync::Arc;
 
@@ -150,6 +151,25 @@ impl ProviderRegistry {
                     provider: Arc::new(crate::opencode_zen::OpencodeZenProvider::new(
                         configuration,
                     )),
+                })
+            }
+            #[cfg(feature = "provider-codex")]
+            ProviderConfiguration::Codex(configuration) => {
+                if descriptor.provider != crate::codex::PROVIDER_ID {
+                    return Err(RegistryError::ConfigurationProviderMismatch {
+                        expected: descriptor.provider.clone(),
+                        actual: crate::codex::PROVIDER_ID,
+                    });
+                }
+                if configuration.model() != descriptor.model {
+                    return Err(RegistryError::ConfigurationModelMismatch {
+                        expected: descriptor.model,
+                        actual: configuration.model().to_owned(),
+                    });
+                }
+                Ok(ConfiguredProvider {
+                    descriptor,
+                    provider: Arc::new(crate::codex::CodexProvider::new(configuration)),
                 })
             }
         }

@@ -375,6 +375,7 @@ impl RunHandle {
                 tool_calls: Vec::new(),
                 stop_reason: Some(StopReason::Error),
                 error_message: Some(error.to_string()),
+                opaque_context: Vec::new(),
             };
             state.partial_response = None;
             state.pending_tool_calls.clear();
@@ -979,6 +980,7 @@ impl RunHandle {
             tools,
             model,
             thinking_level,
+            session_id: self.configuration.provenance.session_id.clone(),
         })
     }
 
@@ -1018,6 +1020,7 @@ impl RunHandle {
             system_prompt: self.configuration.system_prompt.clone(),
             context: converted?,
             tools: self.configuration.tools.definitions(),
+            session_id: self.configuration.provenance.session_id.clone(),
             active_context: None,
         })
     }
@@ -1909,6 +1912,7 @@ impl RunHandle {
         let mut assistant_id = None;
         let mut assistant_text = String::new();
         let mut tool_calls = Vec::new();
+        let mut opaque_context = Vec::new();
         let mut reason = None;
         let mut error_message = None;
         let mut usage: Option<Usage> = None;
@@ -1954,6 +1958,7 @@ impl RunHandle {
                                 tool_calls: Vec::new(),
                                 stop_reason: None,
                                 error_message: None,
+                                opaque_context: Vec::new(),
                             });
                         }
                         assistant_text.push_str(&delta);
@@ -1964,6 +1969,7 @@ impl RunHandle {
                             tool_calls: Vec::new(),
                             stop_reason: None,
                             error_message: None,
+                            opaque_context: opaque_context.clone(),
                         };
                         state.replace_last_message(message.clone());
                         (message, id, first_delta)
@@ -1978,6 +1984,7 @@ impl RunHandle {
                                     tool_calls: Vec::new(),
                                     stop_reason: None,
                                     error_message: None,
+                                    opaque_context: Vec::new(),
                                 },
                             },
                         )
@@ -1993,6 +2000,7 @@ impl RunHandle {
                     .await?;
                 }
                 ModelStreamEvent::ToolCall(call) => tool_calls.push(call),
+                ModelStreamEvent::OpaqueProviderContext(item) => opaque_context.push(item),
                 ModelStreamEvent::Usage(update) => {
                     if let Some(current) = usage.as_mut() {
                         current.merge(update);
@@ -2025,6 +2033,7 @@ impl RunHandle {
             stop_reason: reason,
             assistant_text: assistant_text.clone(),
             tool_calls: tool_calls.clone(),
+            opaque_context: opaque_context.clone(),
             error_message: error_message.clone(),
             usage: usage.clone(),
             context_overflow,
@@ -2039,6 +2048,7 @@ impl RunHandle {
                 tool_calls: tool_calls.clone(),
                 stop_reason: Some(reason),
                 error_message: error_message.clone(),
+                opaque_context,
             };
             state.partial_response = None;
             state.is_streaming = false;
@@ -2162,6 +2172,7 @@ impl RunHandle {
                     tool_calls: Vec::new(),
                     stop_reason: Some(StopReason::Aborted),
                     error_message: Some("Operation aborted".into()),
+                    opaque_context: Vec::new(),
                 };
                 state.append_message(message.clone());
                 Some(message)

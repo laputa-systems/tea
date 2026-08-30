@@ -910,6 +910,7 @@ fn generated_artifact_tool_session_fixture_measures_buffered_replay_and_verifica
                 operation_id: operation.clone(),
                 request_id: None,
                 usage: Usage {
+                    total_tokens: Some(USER_ENTRY_COUNT + 512),
                     input_tokens: Some(USER_ENTRY_COUNT),
                     output_tokens: Some(512),
                     reasoning_tokens: Some(128),
@@ -1183,6 +1184,7 @@ fn generated_mixed_medium_session_fixture_measures_replay_and_verification() {
                     operation_id: operation.clone(),
                     request_id: None,
                     usage: Usage {
+                        total_tokens: Some(2_200),
                         input_tokens: Some(2_000),
                         output_tokens: Some(200),
                         reasoning_tokens: Some(100),
@@ -1378,6 +1380,10 @@ fn generated_operation_session_fixture_measures_buffered_append_and_replay() {
                             message: Some("upstream rejected request".into()),
                             status_code: Some(429),
                             attempt: Some(1),
+                            logical_request_id: Some("generated-request-id".into()),
+                            visible_stream_event: Some(false),
+                            auth_refresh_attempted: Some(false),
+                            quota_reset_at_unix_seconds: Some(1_704_069_000),
                             error_type: Some("rate_limit".into()),
                             error_code: Some("too_many_requests".into()),
                             retryable: Some(true),
@@ -1396,6 +1402,7 @@ fn generated_operation_session_fixture_measures_buffered_append_and_replay() {
                     operation_id: operation_id.clone(),
                     request_id: Some(request_id),
                     usage: Usage {
+                        total_tokens: Some(1_100),
                         input_tokens: Some(1_000),
                         output_tokens: Some(100),
                         reasoning_tokens: Some(50),
@@ -2094,6 +2101,7 @@ fn jsonl_reopen_preserves_tool_intent_and_derives_the_same_recovery_plan() {
             operation_id: operation_id.clone(),
             request_id: Some(second_request),
             usage: Usage {
+                total_tokens: Some(5),
                 input_tokens: Some(3),
                 output_tokens: Some(2),
                 reasoning_tokens: None,
@@ -4298,6 +4306,63 @@ fn canonical_hashes_are_domain_separated_and_length_delimited() {
     assert_ne!(same.finish(), different_domain.finish());
     assert!(NormalizedPath::new("plugins/session.verify/main.luau").is_ok());
     assert!(NormalizedPath::new("../escape.luau").is_err());
+}
+
+#[test]
+fn jsonl_reopen_retains_redacted_opaque_provider_context_with_its_assistant_turn() {
+    let directory = temporary_session_directory("opaque-provider-context");
+    let mut session = JsonlSession::create(
+        &directory,
+        SessionHeader::new(
+            SessionId::new("opaque-provider-context").expect("valid session ID"),
+            "workspace-test",
+            Metadata::new(),
+        ),
+        DurabilityMode::Strict,
+    )
+    .expect("session creates");
+    session
+        .append_entry(
+            &LaneId::main(),
+            ProvisionedEntry {
+                id: EntryId::new("opaque-provider-context-assistant")
+                    .expect("valid assistant entry ID"),
+                body: SessionEntry::AssistantMessage(AssistantMessageEntry {
+                    content: "visible assistant answer".into(),
+                    tool_calls: Vec::new(),
+                    stop_reason: Some("stop".into()),
+                    error_message: None,
+                    opaque_context: vec![OpaqueProviderContextEntry {
+                        provider: "codex".into(),
+                        kind: "reasoning".into(),
+                        item_id: Some("rs_1".into()),
+                        payload: "encrypted-provider-state".into(),
+                    }],
+                    metadata: Metadata::new(),
+                }),
+            },
+        )
+        .expect("assistant entry commits");
+    drop(session);
+
+    let reopened = JsonlSession::open(&directory, DurabilityMode::Strict)
+        .expect("session with opaque provider state reopens");
+    let snapshot = reopened.snapshot().expect("snapshot");
+    let assistant = match &snapshot.entries()[0].body {
+        SessionEntry::AssistantMessage(entry) => entry,
+        other => panic!("expected assistant entry, got {other:?}"),
+    };
+    assert_eq!(assistant.opaque_context.len(), 1);
+    assert_eq!(assistant.opaque_context[0].provider, "codex");
+    assert_eq!(assistant.opaque_context[0].kind, "reasoning");
+    assert_eq!(assistant.opaque_context[0].item_id.as_deref(), Some("rs_1"));
+    assert_eq!(
+        assistant.opaque_context[0].payload,
+        "encrypted-provider-state"
+    );
+    assert!(!format!("{:?}", assistant.opaque_context[0]).contains("encrypted-provider-state"));
+    drop(reopened);
+    let _ = std::fs::remove_dir_all(&directory);
 }
 
 fn temporary_session_directory(label: &str) -> std::path::PathBuf {

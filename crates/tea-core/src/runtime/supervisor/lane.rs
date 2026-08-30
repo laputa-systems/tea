@@ -75,6 +75,7 @@ mod tests {
                 revision: None,
             }),
             thinking_level: ThinkingLevel::Off,
+            session_id: None,
         }
     }
 

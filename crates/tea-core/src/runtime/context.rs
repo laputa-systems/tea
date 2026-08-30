@@ -12,7 +12,8 @@ use tea_core::harness::extension::{
     ExtensionContextEntry, ExtensionContextInput, ExtensionContextPolicy,
 };
 use tea_core::state::{
-    AgentMessage, AgentToolCall, MessageId, SerializedJson, StopReason, ToolCallId,
+    AgentMessage, AgentToolCall, MessageId, OpaqueProviderContextItem, SerializedJson, StopReason,
+    ToolCallId,
 };
 use tea_session::{
     EntryId, LaneId, MemoryVisibility, PayloadRef, SessionEntry, SessionReader, SessionSnapshot,
@@ -330,7 +331,14 @@ fn derive_snapshot_context_with_patch_allowing_pending_tool_calls(
         if !selected.contains(&entry.header.id) {
             continue;
         }
-        if let Some(message) = message_for_entry(entry, messages.len() as u64 + 1)? {
+        // A child lane may inherit canonical parent messages as visible
+        // context, but provider-private continuation bytes belong only to the
+        // lane that produced them. Do not copy a parent's encrypted reasoning
+        // state into a child/provider boundary.
+        let retain_opaque_context = entry.lane_id == lane;
+        if let Some(message) =
+            message_for_entry(entry, messages.len() as u64 + 1, retain_opaque_context)?
+        {
             messages.push(message);
             included_entries.push(entry.header.id.clone());
         }
@@ -755,6 +763,7 @@ fn validate_protected_context(
 fn message_for_entry(
     entry: &StoredEntry,
     message_number: u64,
+    retain_opaque_context: bool,
 ) -> Result<Option<AgentMessage>, HarnessError> {
     let id = MessageId(message_number);
     match &entry.body {
@@ -784,6 +793,27 @@ fn message_for_entry(
                     })
                 })
                 .collect::<Result<Vec<_>, HarnessError>>()?;
+            let opaque_context = if retain_opaque_context {
+                assistant
+                    .opaque_context
+                    .iter()
+                    .map(|item| {
+                        OpaqueProviderContextItem::new(
+                            item.provider.clone(),
+                            item.kind.clone(),
+                            item.item_id.clone(),
+                            item.payload.clone(),
+                        )
+                        .map_err(|error| {
+                            HarnessError::invalid_state(format!(
+                                "durable assistant opaque provider context is invalid: {error}"
+                            ))
+                        })
+                    })
+                    .collect::<Result<Vec<_>, HarnessError>>()?
+            } else {
+                Vec::new()
+            };
             Ok(Some(AgentMessage::Assistant {
                 id,
                 content: assistant.content.clone(),
@@ -794,6 +824,7 @@ fn message_for_entry(
                     .map(parse_stop_reason)
                     .transpose()?,
                 error_message: assistant.error_message.clone(),
+                opaque_context,
             }))
         }
         SessionEntry::ToolResult(result) => {
@@ -810,6 +841,7 @@ fn message_for_entry(
                 content,
                 details: details.map(SerializedJson::new),
                 usage: Box::new(Some(tea_core::state::Usage {
+                    total_tokens: result.usage.total_tokens,
                     input_tokens: result.usage.input_tokens,
                     output_tokens: result.usage.output_tokens,
                     reasoning_tokens: result.usage.reasoning_tokens,
@@ -1108,4 +1140,59 @@ fn portable_label(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parent_opaque_continuation_is_not_projected_into_a_child_lane() {
+        let entry = StoredEntry {
+            lane_id: LaneId::main(),
+            header: tea_session::EntryHeader {
+                id: EntryId::new("assistant-with-opaque").expect("fixture entry ID"),
+                parent_id: None,
+                seq: tea_session::Sequence(1),
+                timestamp_ms: 1,
+            },
+            body: SessionEntry::AssistantMessage(tea_session::AssistantMessageEntry {
+                content: "visible parent answer".into(),
+                tool_calls: Vec::new(),
+                stop_reason: Some("stop".into()),
+                error_message: None,
+                opaque_context: vec![tea_session::OpaqueProviderContextEntry {
+                    provider: "codex".into(),
+                    kind: "reasoning".into(),
+                    item_id: Some("rs_1".into()),
+                    payload: "opaque-parent-state".into(),
+                }],
+                metadata: BTreeMap::new(),
+            }),
+        };
+
+        let child_projection = message_for_entry(&entry, 1, false)
+            .expect("parent entry should project")
+            .expect("assistant is model visible");
+        let own_lane_projection = message_for_entry(&entry, 1, true)
+            .expect("same-lane entry should project")
+            .expect("assistant is model visible");
+        let AgentMessage::Assistant {
+            opaque_context: child_opaque,
+            ..
+        } = child_projection
+        else {
+            panic!("fixture must project as an assistant message");
+        };
+        let AgentMessage::Assistant {
+            opaque_context: own_opaque,
+            ..
+        } = own_lane_projection
+        else {
+            panic!("fixture must project as an assistant message");
+        };
+        assert!(child_opaque.is_empty());
+        assert_eq!(own_opaque.len(), 1);
+        assert_eq!(own_opaque[0].provider(), "codex");
+    }
 }

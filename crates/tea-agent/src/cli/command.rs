@@ -19,6 +19,8 @@ pub enum OptionKey {
     TeaHome,
     Root,
     Apply,
+    Device,
+    NoOpen,
 }
 
 /// One option spelling and its user-facing contract.
@@ -226,6 +228,34 @@ pub static APPLY: OptionSpec = OptionSpec {
     error_name: "--apply",
 };
 
+pub static DEVICE: OptionSpec = OptionSpec {
+    key: OptionKey::Device,
+    short: None,
+    aliases: &[],
+    long: "device",
+    value_name: None,
+    required: false,
+    repeatable: false,
+    default: None,
+    env: None,
+    help: "Use the headless ChatGPT device authorization flow.",
+    error_name: "--device",
+};
+
+pub static NO_OPEN: OptionSpec = OptionSpec {
+    key: OptionKey::NoOpen,
+    short: None,
+    aliases: &[],
+    long: "no-open",
+    value_name: None,
+    required: false,
+    repeatable: false,
+    default: None,
+    env: None,
+    help: "Print the browser authorization URL without launching it.",
+    error_name: "--no-open",
+};
+
 pub static ROOT_OPTIONS: &[OptionSpec] = &[
     HELP,
     VERSION,
@@ -246,6 +276,9 @@ pub static VERIFY_OPTIONS: &[OptionSpec] = &[HELP, VERSION, ROOT];
 pub static GC_OPTIONS: &[OptionSpec] = &[HELP, VERSION, ROOT, APPLY];
 pub static EXPORT_OPTIONS: &[OptionSpec] = &[HELP, VERSION, ROOT];
 pub static EMPTY_OPTIONS: &[OptionSpec] = &[HELP, VERSION];
+pub static AUTH_OPTIONS: &[OptionSpec] = &[HELP, VERSION];
+pub static AUTH_LOGIN_OPTIONS: &[OptionSpec] = &[HELP, VERSION, TEA_HOME, DEVICE, NO_OPEN];
+pub static AUTH_STATUS_OPTIONS: &[OptionSpec] = &[HELP, VERSION, TEA_HOME];
 
 pub static INSPECT_POSITIONALS: &[PositionalSpec] = &[PositionalSpec {
     name: "SESSION_ID",
@@ -290,6 +323,12 @@ pub static RESTORE_POSITIONALS: &[PositionalSpec] = &[
         help: "Non-overwriting restore directory.",
     },
 ];
+pub static AUTH_PROVIDER_POSITIONALS: &[PositionalSpec] = &[PositionalSpec {
+    name: "PROVIDER",
+    required: true,
+    repeatable: false,
+    help: "Provider identity; currently only `codex` is supported.",
+}];
 
 pub static INSPECT: CommandSpec = CommandSpec {
     name: "inspect",
@@ -359,6 +398,46 @@ pub static RESTORE: CommandSpec = CommandSpec {
     examples: &["tea session restore SOURCE DESTINATION"],
 };
 
+pub static AUTH_LOGIN: CommandSpec = CommandSpec {
+    name: "login",
+    description: "Authorize a Tea-owned provider credential.",
+    options: AUTH_LOGIN_OPTIONS,
+    positionals: AUTH_PROVIDER_POSITIONALS,
+    subcommands: &[],
+    examples: &[
+        "tea auth login codex",
+        "tea auth login codex --device",
+        "tea auth login codex --no-open",
+    ],
+};
+
+pub static AUTH_LOGOUT: CommandSpec = CommandSpec {
+    name: "logout",
+    description: "Revoke when possible and remove a Tea-owned provider credential.",
+    options: AUTH_STATUS_OPTIONS,
+    positionals: AUTH_PROVIDER_POSITIONALS,
+    subcommands: &[],
+    examples: &["tea auth logout codex"],
+};
+
+pub static AUTH_STATUS: CommandSpec = CommandSpec {
+    name: "status",
+    description: "Show non-secret status for a Tea-owned provider credential.",
+    options: AUTH_STATUS_OPTIONS,
+    positionals: AUTH_PROVIDER_POSITIONALS,
+    subcommands: &[],
+    examples: &["tea auth status codex"],
+};
+
+pub static AUTH: CommandSpec = CommandSpec {
+    name: "auth",
+    description: "Manage explicit Tea-owned provider authorizations.",
+    options: AUTH_OPTIONS,
+    positionals: &[],
+    subcommands: &[&AUTH_LOGIN, &AUTH_LOGOUT, &AUTH_STATUS],
+    examples: &["tea auth login codex --device"],
+};
+
 pub static SESSION: CommandSpec = CommandSpec {
     name: "session",
     description: "Inspect, repair, verify, collect, export, or restore durable sessions.",
@@ -382,9 +461,10 @@ pub static ROOT_COMMAND: CommandSpec = CommandSpec {
     description: "Minimal interactive terminal host and durable-session operator.",
     options: ROOT_OPTIONS,
     positionals: &[],
-    subcommands: &[&SESSION],
+    subcommands: &[&SESSION, &AUTH],
     examples: &[
         "tea --provider PROVIDER --model MODEL",
+        "tea auth login codex",
         "tea session inspect SESSION_ID",
     ],
 };

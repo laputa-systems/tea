@@ -1943,6 +1943,16 @@ fn encode_entry(entry: &SessionEntry) -> JsonValue {
                 "error_message",
                 optional_string(entry.error_message.as_deref()),
             ),
+            (
+                "opaque_context",
+                JsonValue::Array(
+                    entry
+                        .opaque_context
+                        .iter()
+                        .map(encode_opaque_provider_context)
+                        .collect(),
+                ),
+            ),
             ("metadata", JsonValue::Object(entry.metadata.clone())),
         ]),
         SessionEntry::ToolResult(entry) => JsonValue::object([
@@ -2069,6 +2079,19 @@ fn decode_entry(value: &JsonValue) -> Result<SessionEntry, String> {
                 .collect::<Result<Vec<_>, _>>()?,
             stop_reason: optional_string_of(object, "stop_reason")?,
             error_message: optional_string_of(object, "error_message")?,
+            opaque_context: optional_value_of(object, "opaque_context")?
+                .map(|value| {
+                    value
+                        .as_array()
+                        .ok_or_else(|| {
+                            "field \"opaque_context\" must be an array or null".to_owned()
+                        })?
+                        .iter()
+                        .map(decode_opaque_provider_context)
+                        .collect::<Result<Vec<_>, _>>()
+                })
+                .transpose()?
+                .unwrap_or_default(),
             metadata: required_metadata(object, "metadata")?,
         })),
         "tool_result" => Ok(SessionEntry::ToolResult(ToolResultEntry {
@@ -2973,6 +2996,79 @@ fn decode_assistant_tool_call(value: &JsonValue) -> Result<AssistantToolCall, St
     })
 }
 
+const MAX_OPAQUE_PROVIDER_CONTEXT_BYTES: usize = 65_536;
+const MAX_OPAQUE_PROVIDER_CONTEXT_PROVIDER_BYTES: usize = 64;
+const MAX_OPAQUE_PROVIDER_CONTEXT_KIND_BYTES: usize = 64;
+const MAX_OPAQUE_PROVIDER_CONTEXT_ITEM_ID_BYTES: usize = 512;
+
+fn encode_opaque_provider_context(value: &OpaqueProviderContextEntry) -> JsonValue {
+    JsonValue::object([
+        ("provider", JsonValue::String(value.provider.clone())),
+        ("kind", JsonValue::String(value.kind.clone())),
+        ("item_id", optional_string(value.item_id.as_deref())),
+        ("payload", JsonValue::String(value.payload.clone())),
+    ])
+}
+
+fn decode_opaque_provider_context(value: &JsonValue) -> Result<OpaqueProviderContextEntry, String> {
+    let object = object(value)?;
+    let provider = required_string(object, "provider")?;
+    let kind = required_string(object, "kind")?;
+    let item_id = optional_string_of(object, "item_id")?;
+    let payload = required_string(object, "payload")?;
+    if provider.trim().is_empty() {
+        return Err("opaque provider context provider must not be empty".into());
+    }
+    if provider.len() > MAX_OPAQUE_PROVIDER_CONTEXT_PROVIDER_BYTES {
+        return Err(format!(
+            "opaque provider context provider exceeds {MAX_OPAQUE_PROVIDER_CONTEXT_PROVIDER_BYTES} bytes"
+        ));
+    }
+    if provider.chars().any(char::is_control) {
+        return Err("opaque provider context provider must not contain control characters".into());
+    }
+    if kind.trim().is_empty() {
+        return Err("opaque provider context kind must not be empty".into());
+    }
+    if kind.len() > MAX_OPAQUE_PROVIDER_CONTEXT_KIND_BYTES {
+        return Err(format!(
+            "opaque provider context kind exceeds {MAX_OPAQUE_PROVIDER_CONTEXT_KIND_BYTES} bytes"
+        ));
+    }
+    if kind.chars().any(char::is_control) {
+        return Err("opaque provider context kind must not contain control characters".into());
+    }
+    if let Some(item_id) = item_id.as_deref() {
+        if item_id.is_empty() {
+            return Err("opaque provider context item_id must not be empty".into());
+        }
+        if item_id.len() > MAX_OPAQUE_PROVIDER_CONTEXT_ITEM_ID_BYTES {
+            return Err(format!(
+                "opaque provider context item_id exceeds {MAX_OPAQUE_PROVIDER_CONTEXT_ITEM_ID_BYTES} bytes"
+            ));
+        }
+        if item_id.chars().any(char::is_control) {
+            return Err(
+                "opaque provider context item_id must not contain control characters".into(),
+            );
+        }
+    }
+    if payload.is_empty() {
+        return Err("opaque provider context payload must not be empty".into());
+    }
+    if payload.len() > MAX_OPAQUE_PROVIDER_CONTEXT_BYTES {
+        return Err(format!(
+            "opaque provider context payload exceeds {MAX_OPAQUE_PROVIDER_CONTEXT_BYTES} bytes"
+        ));
+    }
+    Ok(OpaqueProviderContextEntry {
+        provider,
+        kind,
+        item_id,
+        payload,
+    })
+}
+
 fn encode_payload_ref(value: &PayloadRef) -> JsonValue {
     match value {
         PayloadRef::Inline(value) => JsonValue::object([
@@ -3007,6 +3103,7 @@ fn decode_payload_ref(value: &JsonValue) -> Result<PayloadRef, String> {
 
 fn encode_usage(usage: &Usage) -> JsonValue {
     JsonValue::object([
+        ("total_tokens", optional_u64(usage.total_tokens)),
         ("input_tokens", optional_u64(usage.input_tokens)),
         ("output_tokens", optional_u64(usage.output_tokens)),
         ("reasoning_tokens", optional_u64(usage.reasoning_tokens)),
@@ -3019,6 +3116,7 @@ fn encode_usage(usage: &Usage) -> JsonValue {
 fn decode_usage(value: &JsonValue) -> Result<Usage, String> {
     let object = object(value)?;
     Ok(Usage {
+        total_tokens: optional_u64_of(object, "total_tokens")?,
         input_tokens: optional_u64_of(object, "input_tokens")?,
         output_tokens: optional_u64_of(object, "output_tokens")?,
         reasoning_tokens: optional_u64_of(object, "reasoning_tokens")?,
@@ -3221,6 +3319,26 @@ fn encode_provider_error(error: &ProviderErrorRecord) -> JsonValue {
                 .attempt
                 .map_or(JsonValue::Null, |value| JsonValue::from(u64::from(value))),
         ),
+        (
+            "logical_request_id",
+            optional_string(error.logical_request_id.as_deref()),
+        ),
+        (
+            "visible_stream_event",
+            error
+                .visible_stream_event
+                .map_or(JsonValue::Null, JsonValue::Bool),
+        ),
+        (
+            "auth_refresh_attempted",
+            error
+                .auth_refresh_attempted
+                .map_or(JsonValue::Null, JsonValue::Bool),
+        ),
+        (
+            "quota_reset_at_unix_seconds",
+            optional_u64(error.quota_reset_at_unix_seconds),
+        ),
         ("error_type", optional_string(error.error_type.as_deref())),
         ("error_code", optional_string(error.error_code.as_deref())),
         (
@@ -3265,6 +3383,10 @@ fn decode_provider_error(value: &JsonValue) -> Result<ProviderErrorRecord, Strin
         message: optional_string_of(object, "message")?,
         status_code,
         attempt,
+        logical_request_id: optional_string_of(object, "logical_request_id")?,
+        visible_stream_event: optional_bool_of(object, "visible_stream_event")?,
+        auth_refresh_attempted: optional_bool_of(object, "auth_refresh_attempted")?,
+        quota_reset_at_unix_seconds: optional_u64_of(object, "quota_reset_at_unix_seconds")?,
         error_type: optional_string_of(object, "error_type")?,
         error_code: optional_string_of(object, "error_code")?,
         retryable: optional_bool_of(object, "retryable")?,

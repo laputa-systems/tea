@@ -7,6 +7,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU64;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tea_core::runtime::{SubagentModel, SubagentPolicy};
 use tea_core::state::ModelDescriptor;
@@ -65,7 +66,7 @@ pub(super) struct ProviderFactory {
     registry: ProviderRegistry,
     local_base_url: Option<String>,
     local_context_window: Option<NonZeroU64>,
-    logical_workspace: String,
+    tea_home: PathBuf,
     credentials: Arc<dyn CredentialSource>,
     cache: Mutex<BTreeMap<ProviderDescriptorKey, Arc<ConfiguredProvider>>>,
     compactors: Mutex<BTreeMap<ProviderDescriptorKey, Arc<ProviderCompactor>>>,
@@ -78,7 +79,7 @@ impl std::fmt::Debug for ProviderFactory {
             .field("registry", &self.registry)
             .field("local_base_url", &self.local_base_url)
             .field("local_context_window", &self.local_context_window)
-            .field("logical_workspace", &self.logical_workspace)
+            .field("tea_home", &self.tea_home)
             .field(
                 "cached_adapter_count",
                 &self.cache.lock().map(|cache| cache.len()),
@@ -93,13 +94,13 @@ impl ProviderFactory {
         registry: ProviderRegistry,
         local_base_url: Option<String>,
         local_context_window: Option<NonZeroU64>,
-        logical_workspace: String,
+        tea_home: PathBuf,
     ) -> Self {
         Self::with_credentials(
             registry,
             local_base_url,
             local_context_window,
-            logical_workspace,
+            tea_home,
             Arc::new(EnvironmentCredentials),
         )
     }
@@ -108,14 +109,14 @@ impl ProviderFactory {
         registry: ProviderRegistry,
         local_base_url: Option<String>,
         local_context_window: Option<NonZeroU64>,
-        logical_workspace: String,
+        tea_home: PathBuf,
         credentials: Arc<dyn CredentialSource>,
     ) -> Self {
         Self {
             registry,
             local_base_url,
             local_context_window,
-            logical_workspace,
+            tea_home,
             credentials,
             cache: Mutex::new(BTreeMap::new()),
             compactors: Mutex::new(BTreeMap::new()),
@@ -152,12 +153,30 @@ impl ProviderFactory {
                             "subagent model catalog contains duplicate model {model_id:?}"
                         )));
                     }
-                    let model = provider.model(model_id).ok_or_else(|| {
-                        AppError::Setup(format!(
-                            "subagent model {model_id:?} is not a checked-in model for provider {provider_id:?}"
-                        ))
-                    })?;
-                    resolved.push(self.catalog_model(provider_id, model));
+                    if let Some(model) = provider.model(model_id) {
+                        resolved.push(self.catalog_model(provider_id, model));
+                        continue;
+                    }
+                    // Codex deliberately has no static child catalog: model
+                    // availability is subscription- and rollout-specific.
+                    // Its explicit subagent allowlist therefore uses the same
+                    // registry-authorized custom-model path as the root
+                    // descriptor, while populated catalogs stay closed here.
+                    if provider.models.is_empty() && provider.allows_custom_model() {
+                        let descriptor = self
+                            .registry
+                            .custom_model(provider_id, model_id.clone())?
+                            .into_descriptor();
+                        resolved.push(SubagentModel {
+                            context_window: self.context_window(&descriptor),
+                            display_name: model_id.clone(),
+                            descriptor,
+                        });
+                        continue;
+                    }
+                    return Err(AppError::Setup(format!(
+                        "subagent model {model_id:?} is not a checked-in model for provider {provider_id:?}"
+                    )));
                 }
                 resolved
             }
@@ -342,6 +361,28 @@ impl ProviderFactory {
                         .map_err(|error| AppError::Setup(error.to_string()))?,
                 )
             }
+            "codex" => {
+                #[cfg(feature = "provider-codex")]
+                {
+                    let store = Arc::new(tea_providers::codex::FileCredentialStore::new(
+                        self.tea_home.join("auth").join("codex.json"),
+                    ));
+                    let auth = Arc::new(tea_providers::codex::CodexAuthManager::with_system_clock(
+                        store,
+                    ));
+                    ProviderConfiguration::Codex(
+                        tea_providers::codex::CodexConfig::try_new(auth, &descriptor.model)
+                            .map_err(|error| AppError::Setup(error.to_string()))?,
+                    )
+                }
+                #[cfg(not(feature = "provider-codex"))]
+                {
+                    return Err(AppError::Setup(
+                        "Codex support is not compiled into this tea binary; rebuild with --features provider-codex"
+                            .into(),
+                    ));
+                }
+            }
             _ => {
                 return Err(AppError::Setup(format!(
                     "provider {:?} is not compiled in",
@@ -408,7 +449,7 @@ mod tests {
             ProviderRegistry::new(),
             Some("http://127.0.0.1:12345/v1".into()),
             NonZeroU64::new(48_000),
-            "/logical/workspace".into(),
+            PathBuf::from("/tmp/tea-provider-factory-test"),
             credentials,
         )
     }
@@ -585,6 +626,46 @@ mod tests {
         assert!(Arc::ptr_eq(&first_openrouter, &second_openrouter));
         assert_eq!(credentials.loads.load(Ordering::SeqCst), 1);
         assert_eq!(factory.cached_adapter_count(), 2);
+    }
+
+    #[cfg(feature = "provider-codex")]
+    #[test]
+    fn codex_custom_model_construction_is_lazy_and_does_not_use_api_key_authority() {
+        let credentials = Arc::new(RecordingCredentials {
+            loads: AtomicUsize::new(0),
+        });
+        let factory = factory(Arc::clone(&credentials) as Arc<dyn CredentialSource>);
+        let descriptor = root("codex", "current-account-model");
+
+        let configured = factory
+            .configured(&descriptor)
+            .expect("compiled Codex custom model should configure lazily");
+        assert_eq!(configured.descriptor, descriptor);
+        assert_eq!(credentials.loads.load(Ordering::SeqCst), 0);
+        assert_eq!(factory.cached_adapter_count(), 1);
+    }
+
+    #[cfg(feature = "provider-codex")]
+    #[test]
+    fn codex_explicit_subagent_models_use_the_authorized_custom_model_path() {
+        let factory = factory(Arc::new(RecordingCredentials {
+            loads: AtomicUsize::new(0),
+        }));
+        let policy = factory
+            .resolve_subagent_policy(
+                &root("codex", "current-account-model"),
+                &SubagentTuiConfig {
+                    provider: Some("codex".into()),
+                    models: Some(vec!["current-account-model".into()]),
+                    ..SubagentTuiConfig::default()
+                },
+            )
+            .expect("explicit Codex custom model should be authorized");
+        assert_eq!(policy.models.len(), 1);
+        assert_eq!(
+            policy.models[0].descriptor,
+            root("codex", "current-account-model")
+        );
     }
 
     #[test]

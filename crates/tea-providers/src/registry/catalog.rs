@@ -3,16 +3,24 @@
 #[cfg(any(
     feature = "provider-openrouter",
     feature = "provider-local",
-    feature = "provider-opencode-zen"
+    feature = "provider-opencode-zen",
+    feature = "provider-codex"
 ))]
 use super::MODEL_CATALOG_VERSION;
-use super::contracts::ProviderEntry;
 #[cfg(any(
     feature = "provider-openrouter",
     feature = "provider-local",
     feature = "provider-opencode-zen"
 ))]
-use super::contracts::{ModelDescriptor, ProviderCapabilities, ProviderConfigurationKind};
+use super::contracts::ModelDescriptor;
+use super::contracts::ProviderEntry;
+#[cfg(any(
+    feature = "provider-openrouter",
+    feature = "provider-local",
+    feature = "provider-opencode-zen",
+    feature = "provider-codex"
+))]
+use super::contracts::{ProviderCapabilities, ProviderConfigurationKind};
 // Source/update evidence for these lists is intentionally local and reviewable. Model identifiers
 // and context capacities are synchronized from the pinned Pi model registry in
 // `~/d/pi/packages/ai/dist/models.generated.js`. OpenRouter values use Pi's
@@ -100,6 +108,22 @@ pub(super) static COMPILED_PROVIDERS: &[ProviderEntry] = &[
         models: OPENCODE_ZEN_MODELS,
         allows_custom_models: true,
         configuration: ProviderConfigurationKind::OpencodeZen,
+        capabilities: ProviderCapabilities {
+            provider_reported_cost: false,
+            concrete_compactor: false,
+        },
+    },
+    #[cfg(feature = "provider-codex")]
+    ProviderEntry {
+        id: crate::codex::PROVIDER_ID,
+        display_name: crate::codex::PROVIDER_LABEL,
+        model_catalog_version: MODEL_CATALOG_VERSION,
+        // Subscription access is account- and rollout-specific. Tea therefore
+        // exposes Codex strictly through the explicit custom-model path rather
+        // than claiming a checked-in default model is universally available.
+        models: &[],
+        allows_custom_models: true,
+        configuration: ProviderConfigurationKind::Codex,
         capabilities: ProviderCapabilities {
             provider_reported_cost: false,
             concrete_compactor: false,

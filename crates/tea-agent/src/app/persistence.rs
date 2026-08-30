@@ -316,9 +316,10 @@ fn dump_session(directory: &Path) -> Result<JsonValue, AppError> {
         }
         let line = std::str::from_utf8(line)
             .map_err(|error| AppError::Setup(format!("session record is not UTF-8: {error}")))?;
-        records.push(JsonValue::parse(line).map_err(|error| {
-            AppError::Setup(format!("could not parse session record: {error}"))
-        })?);
+        let mut record = JsonValue::parse(line)
+            .map_err(|error| AppError::Setup(format!("could not parse session record: {error}")))?;
+        redact_opaque_continuation_payloads(&mut record);
+        records.push(record);
     }
     Ok(JsonValue::object([
         ("operation", JsonValue::String("dump".into())),
@@ -357,6 +358,34 @@ fn dump_session(directory: &Path) -> Result<JsonValue, AppError> {
         ),
         ("records", JsonValue::Array(records)),
     ]))
+}
+
+/// Remove provider-private continuation bytes from the human-facing dump while
+/// preserving every other authoritative record field. The JSONL file itself
+/// remains complete so the matching adapter can resume its protocol state.
+fn redact_opaque_continuation_payloads(value: &mut JsonValue) {
+    match value {
+        JsonValue::Array(values) => {
+            for value in values {
+                redact_opaque_continuation_payloads(value);
+            }
+        }
+        JsonValue::Object(fields) => {
+            if let Some(JsonValue::Array(items)) = fields.get_mut("opaque_context") {
+                for item in items {
+                    if let Some(item) = item.as_object_mut() {
+                        if item.contains_key("payload") {
+                            item.insert("payload".into(), JsonValue::String("[redacted]".into()));
+                        }
+                    }
+                }
+            }
+            for value in fields.values_mut() {
+                redact_opaque_continuation_payloads(value);
+            }
+        }
+        JsonValue::Null | JsonValue::Bool(_) | JsonValue::Number(_) | JsonValue::String(_) => {}
+    }
 }
 
 fn inspection_json(
@@ -610,4 +639,34 @@ fn read_export_roots(
         ));
     }
     Ok(roots)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dump_redacts_opaque_continuation_payloads_without_removing_their_identity() {
+        let mut record = JsonValue::object([(
+            "body",
+            JsonValue::object([(
+                "opaque_context",
+                JsonValue::Array(vec![JsonValue::object([
+                    ("provider", JsonValue::String("codex".into())),
+                    ("kind", JsonValue::String("reasoning".into())),
+                    ("item_id", JsonValue::String("rs_1".into())),
+                    ("payload", JsonValue::String("encrypted-secret".into())),
+                ])]),
+            )]),
+        )]);
+
+        redact_opaque_continuation_payloads(&mut record);
+        let rendered = record
+            .to_json_string()
+            .expect("redacted dump record should serialize");
+        assert!(!rendered.contains("encrypted-secret"));
+        assert!(rendered.contains("[redacted]"));
+        assert!(rendered.contains("\"provider\":\"codex\""));
+        assert!(rendered.contains("\"item_id\":\"rs_1\""));
+    }
 }

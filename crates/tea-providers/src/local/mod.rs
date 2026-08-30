@@ -191,7 +191,7 @@ impl LocalEventStream {
             };
             match response.poll_next(context) {
                 Poll::Pending => return Poll::Pending,
-                Poll::Ready(StreamEvent::Response { status_code }) => {
+                Poll::Ready(StreamEvent::Response { status_code, .. }) => {
                     self.status_code = Some(status_code);
                 }
                 Poll::Ready(StreamEvent::Chunk(bytes)) => {
@@ -344,6 +344,7 @@ mod tests {
                     revision: None,
                 }),
                 thinking_level: ThinkingLevel::High,
+                session_id: None,
             },
         )
         .expect("payload should serialize");
@@ -419,6 +420,7 @@ data: [DONE]
                 revision: None,
             }),
             thinking_level: ThinkingLevel::High,
+            session_id: None,
         };
         let cancellation = CancellationToken::new();
         let mut source = smol::block_on(provider.stream(request, cancellation.clone()))

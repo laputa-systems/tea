@@ -56,8 +56,8 @@ use tea_core::harness::extension::{
     ExtensionStateStore, ExtensionStateUpdate, ExtensionStateView,
 };
 use tea_core::state::{
-    AgentMessage, AgentSnapshot, AgentToolCall, MessageId, ModelDescriptor, SerializedJson,
-    StopReason, ThinkingLevel, ToolCallId,
+    AgentMessage, AgentSnapshot, AgentToolCall, MessageId, ModelDescriptor,
+    OpaqueProviderContextItem, SerializedJson, StopReason, ThinkingLevel, ToolCallId,
 };
 use tea_core::tool::{AgentTool, AgentToolResult, ToolCall, ToolFailureDisposition, ToolRegistry};
 use tea_core::trace::TraceObserver;
@@ -5716,9 +5716,17 @@ fn session_time_ms() -> u64 {
 }
 
 fn provider_request_digest(request: &tea_core::scheduler::ModelRequest) -> Digest {
-    let mut writer = CanonicalHashWriter::new("tea-provider-request-surface-v1", 1, 1);
+    // Session/cache identity is observable at a provider boundary (for
+    // example Codex emits it in both a header and a prompt-cache key), so a
+    // durable request surface must not treat two different identities as the
+    // same physical request.
+    let mut writer = CanonicalHashWriter::new("tea-provider-request-surface-v2", 2, 1);
     writer.string("system_prompt", &request.system_prompt);
     writer.string("context", &request.context);
+    writer.boolean("has_session_id", request.session_id.is_some());
+    if let Some(session_id) = &request.session_id {
+        writer.string("session_id", session_id);
+    }
     writer.discriminant(
         "thinking_level",
         thinking_discriminant(request.thinking_level),
@@ -5865,6 +5873,16 @@ fn assistant_entry(
         tool_calls,
         stop_reason: Some(stop_reason_label(response.stop_reason).into()),
         error_message: response.error_message.clone(),
+        opaque_context: response
+            .opaque_context
+            .iter()
+            .map(|item| tea_session::OpaqueProviderContextEntry {
+                provider: item.provider().to_owned(),
+                kind: item.kind().to_owned(),
+                item_id: item.item_id().map(str::to_owned),
+                payload: item.payload().to_owned(),
+            })
+            .collect(),
         metadata: BTreeMap::new(),
     })
 }
@@ -5973,6 +5991,7 @@ fn persisted_tool_result_matches(
 
 fn core_usage(usage: &tea_core::state::Usage) -> Usage {
     Usage {
+        total_tokens: usage.total_tokens,
         input_tokens: usage.input_tokens,
         output_tokens: usage.output_tokens,
         reasoning_tokens: usage.reasoning_tokens,
@@ -6470,12 +6489,30 @@ fn derive_core_messages(
                     .as_deref()
                     .map(parse_stop_reason)
                     .transpose()?;
+                let opaque_context = assistant
+                    .opaque_context
+                    .iter()
+                    .map(|item| {
+                        OpaqueProviderContextItem::new(
+                            item.provider.clone(),
+                            item.kind.clone(),
+                            item.item_id.clone(),
+                            item.payload.clone(),
+                        )
+                        .map_err(|error| {
+                            HarnessError::invalid_state(format!(
+                                "durable assistant opaque provider context is invalid: {error}"
+                            ))
+                        })
+                    })
+                    .collect::<Result<Vec<_>, HarnessError>>()?;
                 messages.push(AgentMessage::Assistant {
                     id: message_id,
                     content: assistant.content.clone(),
                     tool_calls,
                     stop_reason,
                     error_message: assistant.error_message.clone(),
+                    opaque_context,
                 });
             }
             SessionEntry::ToolResult(result) => {
@@ -6494,6 +6531,7 @@ fn derive_core_messages(
                     content,
                     details: details.map(SerializedJson::new),
                     usage: Box::new(Some(tea_core::state::Usage {
+                        total_tokens: result.usage.total_tokens,
                         input_tokens: result.usage.input_tokens,
                         output_tokens: result.usage.output_tokens,
                         reasoning_tokens: result.usage.reasoning_tokens,

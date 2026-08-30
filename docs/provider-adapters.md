@@ -19,6 +19,7 @@ opaque caller providers or replay a stream after it has exposed events.
 | `provider-openrouter` | `tea_providers::openrouter` | OpenRouter Chat Completions SSE plus inline usage/accounting | Opt-in incremental rustls + Graviola HTTPS transport with packet-bound model validation and response-stall timeouts. |
 | `provider-local` | `tea_providers::local` | Caller-selected local OpenAI-compatible Chat Completions SSE endpoint | Opt-in incremental HTTP transport for oMLX and similar local servers; no credentials or endpoint discovery. |
 | `provider-opencode-zen` | `tea_providers::opencode_zen` | OpenCode Zen Responses API SSE (`https://opencode.ai/zen/v1/responses`) via `input` array | Opt-in incremental rustls + Graviola HTTPS transport for `opencode-zen`/`muse-spark-1.2-contributor-free` (free). Mirrors the real `opencode` TUI provider (`opencode` → `https://opencode.ai/zen/v1`, `OPENCODE_API_KEY`, `openai-compatible` for most models, `responses` for `muse-spark`). Uses `Authorization: Bearer` + `Accept: text/event-stream`, `User-Agent: tea/1.0 opencode-zen`, `x-opencode-client: tea`. |
+| `provider-codex` | `tea_providers::codex` | Direct ChatGPT-subscription Codex Responses SSE | Opt-in ChatGPT OAuth, Tea-owned rotating credentials, honest `originator: tea`, encrypted reasoning continuity, and no OpenAI Platform API key. See [Codex provider](codex-provider.md). |
 
 All repository HTTP I/O goes through `tea-http`. Provider adapters share one
 pooled `tea_http::TransportClient` through their `transport_runtime` executor
@@ -121,13 +122,35 @@ isolated child's physical session worktree. Stable logical repository labeling a
 project metadata should remain stable across equivalent child leases; private index
 paths, worktree paths, and lease suffixes should not cross provider boundaries.
 
+## Codex subscription contract
+
+The optional `codex` adapter is deliberately distinct from API-key adapters.
+`FileCredentialStore` receives the terminal-owned explicit
+`auth/codex.json` path, while `CodexAuthManager` receives that store and
+`CodexProvider` receives the shared manager. None discovers a home directory,
+an environment variable, or another client credential. The terminal wires
+`tea auth login|status|logout codex` and requires an explicit
+`codex/<model-id>` descriptor.
+
+`CodexProvider` uses the fixed ChatGPT backend origin, not an OpenAI Platform
+origin. It sends `originator: tea` and never substitutes a first-party Codex
+identity. It is intentionally SSE-only, without WebSocket continuation or
+request compression. The detailed OAuth, persistence, context-continuity, and
+upstream-contract maintenance rules are in [Codex provider](codex-provider.md).
+
 ## Context and stream mapping
 
-Hosts using either concrete adapter should install
+Hosts using OpenRouter, Local, or other Chat Completions adapters should install
 `tea_providers::openai::OpenAiContextHook` on the agent. It converts
 the core transcript to the standard Chat Completions message array consumed by
 both adapters. The core default `NoHooks` value is intentionally diagnostic
 Rust text and is not a provider wire format.
+
+Hosts using `codex` instead install `tea_providers::codex::CodexContextHook`.
+It emits native Responses input items, places effective system instructions in
+the top-level Codex payload, and replays only `codex`-scoped opaque encrypted
+reasoning context alongside the assistant turn that produced it. Other
+providers neither render nor reuse that opaque material.
 
 Before conversion, core applies the configured `ToolResultProjectionPolicy` to
 a clone of canonical tool results. Raw content/details stay in the transcript
@@ -146,13 +169,14 @@ stay generic before entering agent state, so a remote service cannot inject
 arbitrary transcript text. Hosts can read `last_error_report()` from the concrete
 adapter for the last failure's source, message, status, and retryability classification.
 
-Reasoning deltas
-are intentionally not retained: the current core model-stream contract has no
-separate reasoning content variant, so treating them as assistant text would
-corrupt the visible answer. This is a known API limitation rather than a hidden
-fallback. The current gateway may emit a `provider-metadata` envelope after
-`finish`; it is accepted as non-content metadata rather than misclassified as a
-second terminal event.
+Reasoning summaries and raw reasoning text are intentionally not assistant
+content: the current core model-stream contract has no visible reasoning event,
+so treating them as an answer would corrupt the transcript. The Codex adapter
+additionally preserves only its opaque encrypted continuation item for a later
+compatible request; it never renders or interprets it. This is an explicit
+boundary rather than a hidden fallback. The current gateway may emit a
+`provider-metadata` envelope after `finish`; it is accepted as non-content
+metadata rather than misclassified as a second terminal event.
 
 OpenRouter and Local expose network-time assistant deltas through the core
 stream while preserving final usage before their terminal events. The generic

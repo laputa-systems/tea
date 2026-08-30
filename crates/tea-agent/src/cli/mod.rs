@@ -5,6 +5,7 @@
 //! command.rs. The application modules receive typed values only after this
 //! boundary has accepted the complete command.
 
+mod auth;
 pub mod command;
 mod dump;
 mod error;
@@ -28,7 +29,7 @@ use lexopt::{Arg, Parser};
 use tea_core::state::ThinkingLevel;
 use tea_protocol::JsonValue;
 
-use crate::app::{run_session_command, App, AppError};
+use crate::app::{run_auth_command, run_session_command, App, AppError};
 use command::{CommandSpec, OptionKey, OptionSpec, ROOT_OPTIONS};
 pub use error::CliError;
 
@@ -56,7 +57,9 @@ impl CliOptions {
             CliCommand::Help | CliCommand::Version | CliCommand::CommandHelp(_) => {
                 Err(CliError::UnknownOption(OsString::from("--help")))
             }
-            CliCommand::Session(_) => Err(CliError::UnexpectedArgument(OsString::from("session"))),
+            CliCommand::Session(_) | CliCommand::Auth(_) => Err(CliError::UnexpectedArgument(
+                OsString::from("control command"),
+            )),
         }
     }
 
@@ -134,7 +137,12 @@ impl CliOptions {
                 }
                 return Ok(());
             }
-            OptionKey::Help | OptionKey::Version | OptionKey::Root | OptionKey::Apply => {
+            OptionKey::Help
+            | OptionKey::Version
+            | OptionKey::Root
+            | OptionKey::Apply
+            | OptionKey::Device
+            | OptionKey::NoOpen => {
                 return Err(CliError::UnknownOption(OsString::from(option.error_name)));
             }
         };
@@ -155,6 +163,30 @@ pub enum CliCommand {
     /// Detailed help for a command selected before required-value validation.
     CommandHelp(&'static CommandSpec),
     Session(SessionCommand),
+    /// Explicit provider authorization operation.
+    Auth(AuthCommand),
+}
+
+/// A command over a Tea-owned provider credential.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AuthCommand {
+    /// Start browser or device authorization.
+    Login {
+        provider: OsString,
+        device: bool,
+        no_open: bool,
+        tea_home: Option<PathBuf>,
+    },
+    /// Revoke when possible and remove the local Tea credential.
+    Logout {
+        provider: OsString,
+        tea_home: Option<PathBuf>,
+    },
+    /// Show a non-secret status projection.
+    Status {
+        provider: OsString,
+        tea_home: Option<PathBuf>,
+    },
 }
 
 /// An explicit persistence operation over a durable session.
@@ -208,6 +240,13 @@ where
         Some(OwnedArg::Value(command)) if command == OsStr::new(command::SESSION.name) => {
             if recognize_control {
                 session::parse(&mut parser, true)
+            } else {
+                Err(CliError::UnexpectedArgument(command))
+            }
+        }
+        Some(OwnedArg::Value(command)) if command == OsStr::new(command::AUTH.name) => {
+            if recognize_control {
+                auth::parse(&mut parser, true)
             } else {
                 Err(CliError::UnexpectedArgument(command))
             }
@@ -388,6 +427,18 @@ where
                 ExitCode::from(2)
             }
         },
+        Ok(CliCommand::Auth(command)) => match run_auth_command(command) {
+            Ok(output) => {
+                if !output.is_empty() {
+                    println!("{output}");
+                }
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("tea: {error}");
+                ExitCode::from(2)
+            }
+        },
         Ok(CliCommand::Options(options)) => {
             let prompt = options.prompt().map(OsStr::to_owned);
             let mut app = App::new(options);
@@ -427,7 +478,7 @@ fn print_session_error(error: &AppError) {
 #[cfg(test)]
 mod tests {
     use super::command;
-    use super::{help, CliCommand, CliError, CliOptions, SessionCommand};
+    use super::{help, AuthCommand, CliCommand, CliError, CliOptions, SessionCommand};
     use lexopt::{Arg, Parser};
     use std::ffi::OsString;
     use std::path::PathBuf;
@@ -440,6 +491,7 @@ mod tests {
     fn schema_is_complete_and_help_is_generated() {
         command::validate_schema().expect("command metadata is valid");
         let help = help::render_root();
+        assert!(help.contains("tea auth"), "missing auth reference");
         for name in [
             "inspect",
             "dump",
@@ -489,6 +541,36 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn auth_commands_parse_with_feature_independent_grammar() {
+        assert!(matches!(
+            CliOptions::parse_command(args(&["tea", "auth", "login", "codex", "--device"])),
+            Ok(CliCommand::Auth(AuthCommand::Login {
+                device: true,
+                no_open: false,
+                ..
+            }))
+        ));
+        assert!(matches!(
+            CliOptions::parse_command(args(&[
+                "tea",
+                "auth",
+                "status",
+                "codex",
+                "--tea-home",
+                "/tmp/tea"
+            ])),
+            Ok(CliCommand::Auth(AuthCommand::Status {
+                tea_home: Some(_),
+                ..
+            }))
+        ));
+        assert!(matches!(
+            CliOptions::parse_command(args(&["tea", "auth", "login", "--help"])),
+            Ok(CliCommand::CommandHelp(command)) if command.name == "login"
+        ));
     }
 
     #[test]

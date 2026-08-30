@@ -474,6 +474,10 @@ pub struct CompactionContext {
     pub system_prompt: String,
     /// Selected model identity, if the host configured one.
     pub model: Option<ModelDescriptor>,
+    /// Stable host-owned session identity when the active configuration has
+    /// one. A provider-backed compactor may reuse this only as opaque cache
+    /// correlation metadata; it is never conversation content.
+    pub session_id: Option<String>,
     /// Canonical retained conversation.
     pub messages: Vec<AgentMessage>,
     /// Canonical-history generation captured with `messages`.
@@ -505,6 +509,8 @@ pub struct ProviderContext {
     pub active_context: Option<String>,
     /// Ordered prompt-facing tool definitions used for the active request.
     pub tools: Vec<ToolDefinition>,
+    /// Stable host-owned session/cache identity from the active request.
+    pub session_id: Option<String>,
 }
 
 /// A validated-on-return proposal from a [`Compactor`].
@@ -1118,10 +1124,18 @@ impl Agent {
 
 pub(crate) fn snapshot_context(agent: &AgentInner) -> CompactionContext {
     let state = agent.state.lock().expect("agent state mutex poisoned");
+    let session_id = agent
+        .configuration
+        .read()
+        .expect("agent configuration lock poisoned")
+        .provenance
+        .session_id
+        .clone();
     CompactionContext {
         version: COMPACTION_CONTEXT_VERSION,
         system_prompt: state.system_prompt.clone(),
         model: state.model.clone(),
+        session_id,
         messages: state.messages.clone(),
         source_history_revision: state.history_revision,
         host_messages: state.host_messages.clone(),

@@ -5,6 +5,11 @@ use super::*;
 /// Provider usage counters.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Usage {
+    /// Total tokens, when the provider reports an explicit total.
+    ///
+    /// This remains distinct from the sum of the other fields because some
+    /// providers account for categories Tea does not model individually.
+    pub total_tokens: Option<u64>,
     /// Input tokens, when reported by the provider.
     pub input_tokens: Option<u64>,
     /// Output tokens, when reported by the provider.
@@ -26,7 +31,8 @@ pub struct Usage {
 impl Usage {
     /// Whether this usage value contains at least one provider-reported field.
     pub fn is_reported(&self) -> bool {
-        self.input_tokens.is_some()
+        self.total_tokens.is_some()
+            || self.input_tokens.is_some()
             || self.output_tokens.is_some()
             || self.reasoning_tokens.is_some()
             || self.cache_read_tokens.is_some()
@@ -36,6 +42,9 @@ impl Usage {
 
     /// Merge a later provider update into this value without turning unknown fields into zero.
     pub fn merge(&mut self, update: Self) {
+        if update.total_tokens.is_some() {
+            self.total_tokens = update.total_tokens;
+        }
         if update.input_tokens.is_some() {
             self.input_tokens = update.input_tokens;
         }
@@ -59,6 +68,7 @@ impl Usage {
     /// Accumulate one provider report into session totals without turning unknown fields into
     /// zero. Reported decimal costs are added exactly as decimal text.
     pub fn accumulate(&mut self, update: Self) {
+        add_usage(&mut self.total_tokens, update.total_tokens);
         add_usage(&mut self.input_tokens, update.input_tokens);
         add_usage(&mut self.output_tokens, update.output_tokens);
         add_usage(&mut self.reasoning_tokens, update.reasoning_tokens);
@@ -103,6 +113,10 @@ pub struct ModelAccountingSnapshot {
 impl ModelAccountingSnapshot {
     /// Record one settled model-turn report and update its aggregate view.
     pub(crate) fn record(&mut self, accounting: ModelTurnAccounting) {
+        add_usage(
+            &mut self.aggregate.total_tokens,
+            accounting.usage.total_tokens,
+        );
         add_usage(
             &mut self.aggregate.input_tokens,
             accounting.usage.input_tokens,

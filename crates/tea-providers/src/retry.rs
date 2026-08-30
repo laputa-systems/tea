@@ -1,5 +1,6 @@
 //! Bounded retry policy shared by the finite-response provider adapters.
 
+#[cfg(feature = "provider-openrouter")]
 use crate::scheduler::CancellationToken;
 use std::time::Duration;
 
@@ -75,12 +76,14 @@ impl Default for RetryPolicy {
 }
 
 /// A one-attempt failure with an adapter-local retry classification.
+#[cfg(feature = "provider-openrouter")]
 pub(crate) struct RetryableError {
     pub(crate) message: String,
     pub(crate) retryable: bool,
 }
 
 /// Run a replay-safe operation with bounded exponential backoff.
+#[cfg(feature = "provider-openrouter")]
 pub(crate) fn retry_with_backoff<T, F>(
     policy: RetryPolicy,
     cancellation: &CancellationToken,
@@ -111,6 +114,7 @@ where
 }
 
 /// Wait between attempts without making cancellation wait for the full backoff interval.
+#[cfg(feature = "provider-openrouter")]
 pub(crate) fn wait_with_cancellation(delay: Duration, cancellation: &CancellationToken) -> bool {
     let started = std::time::Instant::now();
     while started.elapsed() < delay {
@@ -135,6 +139,7 @@ mod tests {
         assert_eq!(policy.delay_before_retry(10), Duration::from_secs(8));
     }
 
+    #[cfg(feature = "provider-openrouter")]
     #[test]
     fn retries_transient_attempts_then_returns_success() {
         let policy = RetryPolicy::new(2, Duration::ZERO, Duration::ZERO);

@@ -22,6 +22,29 @@ use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
 use tea_core::scheduler::CancellationToken;
 
+const MAX_EXPOSED_RESPONSE_HEADERS: usize = 64;
+const MAX_EXPOSED_RESPONSE_HEADER_BYTES: usize = 8_192;
+
+fn debug_headers(headers: &[(String, String)]) -> Vec<(&str, &str)> {
+    headers
+        .iter()
+        .map(|(name, value)| {
+            if matches!(
+                name.to_ascii_lowercase().as_str(),
+                "authorization"
+                    | "cookie"
+                    | "proxy-authorization"
+                    | "chatgpt-account-id"
+                    | "set-cookie"
+            ) {
+                (name.as_str(), "[redacted]")
+            } else {
+                (name.as_str(), value.as_str())
+            }
+        })
+        .collect()
+}
+
 const QUERY_ENCODED: &AsciiSet = &CONTROLS
     .add(b' ')
     .add(b'"')
@@ -51,7 +74,7 @@ const QUERY_ENCODED: &AsciiSet = &CONTROLS
 
 /// A generic direct-origin byte request. Providers use this to express their
 /// own HTTP wire format without constructing a transport client themselves.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct TransportRequest {
     method: Method,
     url: String,
@@ -60,6 +83,22 @@ pub struct TransportRequest {
     body: Vec<u8>,
     timeout: Duration,
     stall_timeout: Option<Duration>,
+}
+
+impl std::fmt::Debug for TransportRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let headers = debug_headers(&self.headers);
+        formatter
+            .debug_struct("TransportRequest")
+            .field("method", &self.method)
+            .field("url", &self.url)
+            .field("query", &self.query)
+            .field("headers", &headers)
+            .field("body_bytes", &self.body.len())
+            .field("timeout", &self.timeout)
+            .field("stall_timeout", &self.stall_timeout)
+            .finish()
+    }
 }
 
 impl TransportRequest {
@@ -107,16 +146,31 @@ impl TransportRequest {
 
 /// A complete generic byte response. HTTP statuses remain responses so the
 /// caller's adapter can apply its own protocol-specific classification.
-#[derive(Debug)]
 pub struct TransportResponse {
     /// The received HTTP status.
     pub status_code: u16,
+    /// Bounded textual response headers for adapter-level protocol handling.
+    ///
+    /// Header values that are non-textual or exceed the transport bound are
+    /// omitted. Callers must treat this as a protocol convenience rather than
+    /// a complete raw-header representation.
+    pub headers: Vec<(String, String)>,
     /// The complete response body.
     pub body: Vec<u8>,
 }
 
+impl std::fmt::Debug for TransportResponse {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TransportResponse")
+            .field("status_code", &self.status_code)
+            .field("headers", &debug_headers(&self.headers))
+            .field("body_bytes", &self.body.len())
+            .finish()
+    }
+}
+
 /// A transport failure that preserves status and partial bytes when available.
-#[derive(Debug)]
 pub struct TransportError {
     /// Stable error class independent of h12tiny internals.
     pub code: TransportErrorCode,
@@ -127,6 +181,19 @@ pub struct TransportError {
     /// Partial bytes received before the failure, when any.
     pub body: Vec<u8>,
     stalled: bool,
+}
+
+impl std::fmt::Debug for TransportError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TransportError")
+            .field("code", &self.code)
+            .field("message", &self.message)
+            .field("status_code", &self.status_code)
+            .field("body_bytes", &self.body.len())
+            .field("stalled", &self.stalled)
+            .finish()
+    }
 }
 
 impl TransportError {
@@ -157,16 +224,44 @@ impl TransportError {
 }
 
 /// Incremental items emitted by [`TransportStream`].
-#[derive(Debug)]
 pub enum TransportStreamEvent {
     /// Response headers arrived.
-    Response { status_code: u16 },
+    Response {
+        /// Received HTTP status.
+        status_code: u16,
+        /// Bounded textual response headers.
+        headers: Vec<(String, String)>,
+    },
     /// A non-empty response body chunk.
     Chunk(Vec<u8>),
     /// The body reached EOF.
     End,
     /// The request could not be opened or read further.
     Failure(TransportError),
+}
+
+impl std::fmt::Debug for TransportStreamEvent {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Response {
+                status_code,
+                headers,
+            } => formatter
+                .debug_struct("TransportStreamEvent::Response")
+                .field("status_code", status_code)
+                .field("headers", &debug_headers(headers))
+                .finish(),
+            Self::Chunk(bytes) => formatter
+                .debug_tuple("TransportStreamEvent::Chunk")
+                .field(&format_args!("{} bytes", bytes.len()))
+                .finish(),
+            Self::End => formatter.write_str("TransportStreamEvent::End"),
+            Self::Failure(error) => formatter
+                .debug_tuple("TransportStreamEvent::Failure")
+                .field(error)
+                .finish(),
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -282,16 +377,22 @@ impl TransportClient {
     ) -> Result<TransportResponse, TransportError> {
         let mut stream = self.stream(request, cancellation.clone());
         let mut status_code = None;
+        let mut headers = Vec::new();
         let mut body = Vec::new();
         loop {
             match stream.next_blocking(cancellation) {
                 TransportStreamEvent::Response {
                     status_code: status,
-                } => status_code = Some(status),
+                    headers: response_headers,
+                } => {
+                    status_code = Some(status);
+                    headers = response_headers;
+                }
                 TransportStreamEvent::Chunk(chunk) => body.extend_from_slice(&chunk),
                 TransportStreamEvent::End => {
                     return Ok(TransportResponse {
                         status_code: status_code.expect("HTTP stream ended after response headers"),
+                        headers,
                         body,
                     });
                 }
@@ -328,8 +429,14 @@ impl TransportClient {
                 return;
             }
         };
-        let (status_code, mut body) = response;
-        push(&shared, TransportStreamEvent::Response { status_code });
+        let (status_code, headers, mut body) = response;
+        push(
+            &shared,
+            TransportStreamEvent::Response {
+                status_code,
+                headers,
+            },
+        );
         loop {
             let now = Instant::now();
             let overall = match deadline
@@ -376,18 +483,20 @@ impl TransportClient {
                 return;
             };
             match frame {
-                Ok(frame) => if let Ok(mut data) = frame.into_data() {
-                    let mut chunk = Vec::with_capacity(data.remaining());
-                    while data.has_remaining() {
-                        let bytes = data.chunk();
-                        chunk.extend_from_slice(bytes);
-                        let length = bytes.len();
-                        data.advance(length);
+                Ok(frame) => {
+                    if let Ok(mut data) = frame.into_data() {
+                        let mut chunk = Vec::with_capacity(data.remaining());
+                        while data.has_remaining() {
+                            let bytes = data.chunk();
+                            chunk.extend_from_slice(bytes);
+                            let length = bytes.len();
+                            data.advance(length);
+                        }
+                        if !chunk.is_empty() {
+                            push(&shared, TransportStreamEvent::Chunk(chunk));
+                        }
                     }
-                    if !chunk.is_empty() {
-                        push(&shared, TransportStreamEvent::Chunk(chunk));
-                    }
-                },
+                }
                 Err(_) => {
                     push(
                         &shared,
@@ -409,7 +518,7 @@ impl TransportClient {
         request: TransportRequest,
         cancellation: &CancellationToken,
         deadline: Instant,
-    ) -> Result<(u16, impl Body<Data = Bytes> + Unpin), TransportError> {
+    ) -> Result<(u16, Vec<(String, String)>, impl Body<Data = Bytes> + Unpin), TransportError> {
         let request = build_request(request)?;
         let timeout = remaining(deadline).ok_or_else(|| {
             TransportError::new(
@@ -434,8 +543,26 @@ impl TransportClient {
         .await?
         .map_err(TransportError::from_h12)?;
         let (parts, body) = response.into_parts();
-        Ok((parts.status.as_u16(), body))
+        Ok((
+            parts.status.as_u16(),
+            bounded_response_headers(&parts.headers),
+            body,
+        ))
     }
+}
+
+fn bounded_response_headers(headers: &http::HeaderMap) -> Vec<(String, String)> {
+    headers
+        .iter()
+        .filter_map(|(name, value)| {
+            let value = value.to_str().ok()?;
+            if name.as_str().len() + value.len() > MAX_EXPOSED_RESPONSE_HEADER_BYTES {
+                return None;
+            }
+            Some((name.as_str().to_owned(), value.to_owned()))
+        })
+        .take(MAX_EXPOSED_RESPONSE_HEADERS)
+        .collect()
 }
 
 fn push(shared: &Arc<StreamShared>, event: TransportStreamEvent) {
@@ -618,6 +745,48 @@ mod tests {
     }
 
     #[test]
+    fn request_debug_redacts_secret_headers_and_body() {
+        let request = TransportRequest::post(
+            "https://example.invalid",
+            b"refresh_token=private-token".to_vec(),
+            Duration::from_secs(1),
+        )
+        .header("Authorization", "Bearer private-token")
+        .header("ChatGPT-Account-ID", "acct_private")
+        .header("originator", "tea");
+        let debug = format!("{request:?}");
+        assert!(!debug.contains("private-token"));
+        assert!(!debug.contains("refresh_token"));
+        assert!(!debug.contains("acct_private"));
+        assert!(debug.contains("[redacted]"));
+        assert!(debug.contains("originator"));
+    }
+
+    #[test]
+    fn response_and_transport_debug_do_not_expose_body_or_cookie_values() {
+        let response = TransportResponse {
+            status_code: 200,
+            headers: vec![("Set-Cookie".into(), "session=private-cookie".into())],
+            body: b"access_token=private-token".to_vec(),
+        };
+        let failure =
+            TransportError::new(TransportErrorCode::Read, "read failed", Some(502), false)
+                .with_body(b"refresh_token=private-token".to_vec());
+        let stream = TransportStreamEvent::Chunk(b"id_token=private-token".to_vec());
+        let debug = format!("{response:?} {failure:?} {stream:?}");
+        for secret in [
+            "private-cookie",
+            "private-token",
+            "access_token",
+            "refresh_token",
+            "id_token",
+        ] {
+            assert!(!debug.contains(secret), "transport debug leaked {secret}");
+        }
+        assert!(debug.contains("body_bytes"));
+    }
+
+    #[test]
     fn streams_before_settlement() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("mock HTTP server should bind");
         let address = listener.local_addr().expect("mock HTTP server address");
@@ -649,7 +818,10 @@ mod tests {
             .expect("server sends the first response chunk");
         assert!(matches!(
             smol::block_on(std::future::poll_fn(|context| response.poll_next(context))),
-            TransportStreamEvent::Response { status_code: 200 }
+            TransportStreamEvent::Response {
+                status_code: 200,
+                ..
+            }
         ));
         assert!(matches!(
             smol::block_on(std::future::poll_fn(|context| response.poll_next(context))),

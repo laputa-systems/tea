@@ -275,10 +275,11 @@ impl App {
     /// exact provider configuration for root and explicitly enabled child lanes.
     pub(super) fn provider_factory(&mut self) -> Result<Arc<ProviderFactory>, AppError> {
         if self.provider_factory.is_none() {
-            let workspace = self
-                .workspace
+            let tea_home = self
+                .tea_home
                 .as_ref()
-                .ok_or_else(|| AppError::Setup("workspace is not initialized".into()))?;
+                .cloned()
+                .ok_or_else(|| AppError::Setup("Tea home is not initialized".into()))?;
             let local_base_url = self
                 .options
                 .local_base_url()
@@ -288,7 +289,7 @@ impl App {
                 self.registry,
                 local_base_url,
                 self.options.local_context_window(),
-                workspace.to_string_lossy().into_owned(),
+                tea_home,
             )));
         }
         self.provider_factory
@@ -883,7 +884,7 @@ pub(super) fn os_text(value: &OsStr, flag: &str) -> Result<String, AppError> {
 
 /// Resolve the terminal-owned durable-state root without exposing home lookup
 /// to `tea-core` or the durable crates.
-fn resolve_tea_home(override_path: Option<&Path>) -> Result<PathBuf, AppError> {
+pub(super) fn resolve_tea_home(override_path: Option<&Path>) -> Result<PathBuf, AppError> {
     if let Some(path) = override_path {
         if path.as_os_str().is_empty() {
             return Err(AppError::Setup("--tea-home must not be empty".into()));

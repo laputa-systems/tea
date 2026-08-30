@@ -1214,6 +1214,7 @@ fn event_projection_keeps_streaming_text_as_one_raw_line() {
         tool_calls: Vec::new(),
         stop_reason: None,
         error_message: None,
+        opaque_context: Vec::new(),
     };
     state.apply_event(&tea_core::event::AgentEvent {
         run_id: tea_core::state::RunId(1),
@@ -1400,6 +1401,7 @@ fn event_projection_makes_provider_failure_and_abort_explicit() {
                 tool_calls: Vec::new(),
                 stop_reason: Some(tea_core::state::StopReason::Error),
                 error_message: Some("provider rejected the request".into()),
+                opaque_context: Vec::new(),
             },
         },
     });
@@ -1698,6 +1700,7 @@ fn local_compactor_summarizes_and_preserves_the_core_retained_suffix() {
             tool_calls: Vec::new(),
             stop_reason: Some(tea_core::state::StopReason::Stop),
             error_message: None,
+            opaque_context: Vec::new(),
         };
         let request = AutomaticCompactionRequest {
             reason: AutomaticCompactionReason::Threshold,
@@ -1716,6 +1719,7 @@ fn local_compactor_summarizes_and_preserves_the_core_retained_suffix() {
                     version: tea_core::compaction::COMPACTION_CONTEXT_VERSION,
                     system_prompt: String::new(),
                     model: Some(model),
+                    session_id: None,
                     messages: vec![prefix, retained.clone()],
                     source_history_revision: 0,
                     host_messages: Vec::new(),
@@ -1760,6 +1764,7 @@ fn cache_friendly_compaction_appends_one_instruction_to_an_exact_source_prefix()
                     version: tea_core::compaction::COMPACTION_CONTEXT_VERSION,
                     system_prompt: "unused standalone prompt".into(),
                     model: Some(model),
+                    session_id: Some("fixture-session".into()),
                     messages: vec![AgentMessage::User {
                         id: MessageId(1),
                         content: "old work".into(),
@@ -1782,6 +1787,7 @@ fn cache_friendly_compaction_appends_one_instruction_to_an_exact_source_prefix()
                             cancellation_settlement_mode:
                                 tea_core::tool::CancellationSettlementMode::DropFuture,
                         }],
+                        session_id: Some("fixture-session".into()),
                     }),
                 },
                 AutomaticCompactionRequest {
@@ -1846,6 +1852,7 @@ fn cache_friendly_compaction_falls_back_when_a_transform_breaks_the_prefix() {
                     version: tea_core::compaction::COMPACTION_CONTEXT_VERSION,
                     system_prompt: "standalone".into(),
                     model: Some(model),
+                    session_id: None,
                     messages: vec![AgentMessage::User {
                         id: MessageId(1),
                         content: "old work".into(),
@@ -1859,6 +1866,7 @@ fn cache_friendly_compaction_falls_back_when_a_transform_breaks_the_prefix() {
                             r#"[{"content":"injected metadata","role":"user"},{"content":"old work","role":"user"}]"#.into(),
                         ),
                         tools: Vec::new(),
+                        session_id: None,
                     }),
                 },
                 AutomaticCompactionRequest {
@@ -1955,12 +1963,6 @@ fn custom_local_model_enables_automatic_compaction_with_explicit_capacity() {
         "ctx ?%/33k (auto)"
     );
     let _ = fs::remove_dir_all(tea_home);
-}
-
-#[test]
-fn civil_date_epoch_is_stable_without_a_time_dependency() {
-    assert_eq!(support::civil_from_days(0), (1970, 1, 1));
-    assert_eq!(support::civil_from_days(20_000), (2024, 10, 4));
 }
 
 #[test]
@@ -2065,6 +2067,7 @@ fn restored_session_user_messages_rebuild_prompt_history() {
             tool_calls: Vec::new(),
             stop_reason: None,
             error_message: None,
+            opaque_context: Vec::new(),
         },
         AgentMessage::User {
             id: MessageId(3),
@@ -2417,6 +2420,7 @@ fn a_published_activity_survives_the_rest_of_its_root_operation() {
                 tool_calls: Vec::new(),
                 stop_reason: None,
                 error_message: None,
+                opaque_context: Vec::new(),
             },
             text_delta: Some("thinking".into()),
         },

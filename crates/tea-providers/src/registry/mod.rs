@@ -33,7 +33,12 @@ mod tests {
         );
     }
 
-    #[cfg(not(any(feature = "provider-openrouter", feature = "provider-local")))]
+    #[cfg(not(any(
+        feature = "provider-openrouter",
+        feature = "provider-local",
+        feature = "provider-opencode-zen",
+        feature = "provider-codex"
+    )))]
     #[test]
     fn default_build_remains_provider_free() {
         assert!(ProviderRegistry::new().providers().is_empty());

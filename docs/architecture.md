@@ -92,12 +92,13 @@ First-party coding tools are resolved from immutable Luau harness source;
 provider-visible semantics.
 
 The optional `tea_providers` crate is a separate adapter layer behind explicit
-Cargo features. `provider-openrouter`, `provider-local`, and `provider-opencode-zen`
-are opt-in blocking HTTP/1.1 transports backed by Rustls/Graviola, with caller-supplied
-keys and no ambient configuration discovery; the provider-owned worker thread keeps that
-blocking I/O outside the core executor. The evaluation runner selects one only through its
-explicit provider argument. They do not change the default build or the `ModelProvider` contract. See
-[provider adapters](provider-adapters.md) for their wire and context boundaries.
+Cargo features. `provider-openrouter`, `provider-local`, `provider-opencode-zen`,
+and `provider-codex` are opt-in transports with provider-owned request and
+credential boundaries; they do not change the default build or the
+`ModelProvider` contract. The Codex feature adds Tea-owned ChatGPT OAuth only
+when selected, while the other remote adapters receive caller-supplied keys.
+See [provider adapters](provider-adapters.md) and the
+[Codex provider](codex-provider.md) for their wire and context boundaries.
 
 ## Durable harness composition
 

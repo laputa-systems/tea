@@ -39,8 +39,8 @@ use tea_core::runtime::{
 };
 use tea_core::scheduler::ModelProvider;
 use tea_core::state::{
-    AgentMessage, AgentToolCall, MessageId, ModelDescriptor, SerializedJson, ThinkingLevel,
-    ToolCallId, Usage,
+    AgentMessage, AgentToolCall, MessageId, ModelDescriptor, OpaqueProviderContextItem,
+    SerializedJson, ThinkingLevel, ToolCallId, Usage,
 };
 use tea_core::tool::ToolExecutionMode;
 use tea_luau::LuauExtensionEngine;
@@ -195,8 +195,9 @@ fn create_host_harness_with_operations(
         automatic_compaction,
     );
     let child_configuration = if subagent_policy.is_some() {
-        Some(super::host::host_configuration(
+        Some(super::host::host_configuration_for_provider(
             &workspace.to_string_lossy(),
+            Some(&model.provider),
         )?)
     } else {
         None
@@ -718,7 +719,10 @@ fn reopen_host_harness_with_operations(
             // Keep model-facing context anchored to the durable, original
             // workspace spelling. Only child tool execution gets a physical
             // lease worktree later in `TuiSubagentHost::prepared`.
-            let child_configuration = super::host::host_configuration(&header.workspace)?;
+            let child_configuration = super::host::host_configuration_for_provider(
+                &header.workspace,
+                Some(&stored_model.provider),
+            )?;
             let resource_limits = HarnessResourceLimits::default();
             let child_harnesses = derive_child_harnesses(
                 Arc::clone(&artifacts),
@@ -1219,12 +1223,30 @@ pub(super) fn project_host_messages(
                         })
                     })
                     .collect::<Result<Vec<_>, AppError>>()?;
+                let opaque_context = assistant
+                    .opaque_context
+                    .iter()
+                    .map(|item| {
+                        OpaqueProviderContextItem::new(
+                            item.provider.clone(),
+                            item.kind.clone(),
+                            item.item_id.clone(),
+                            item.payload.clone(),
+                        )
+                        .map_err(|error| {
+                            AppError::Setup(format!(
+                                "durable assistant opaque provider context is invalid: {error}"
+                            ))
+                        })
+                    })
+                    .collect::<Result<Vec<_>, AppError>>()?;
                 messages.push(AgentMessage::Assistant {
                     id: message_id,
                     content: assistant.content.clone(),
                     tool_calls,
                     stop_reason: None,
                     error_message: assistant.error_message.clone(),
+                    opaque_context,
                 });
             }
             SessionEntry::ToolResult(result) => messages.push(AgentMessage::ToolResult {
@@ -1249,6 +1271,7 @@ pub(super) fn project_host_messages(
                 tool_calls: Vec::new(),
                 stop_reason: None,
                 error_message: None,
+                opaque_context: Vec::new(),
             }),
             SessionEntry::BranchSummary(summary) => messages.push(AgentMessage::Assistant {
                 id: message_id,
@@ -1256,6 +1279,7 @@ pub(super) fn project_host_messages(
                 tool_calls: Vec::new(),
                 stop_reason: None,
                 error_message: None,
+                opaque_context: Vec::new(),
             }),
             SessionEntry::ModelChanged(_)
             | SessionEntry::ThinkingChanged(_)
@@ -2179,6 +2203,7 @@ fn projected_tool_content(result: &tea_session::ToolResultEntry) -> String {
 
 pub(super) fn core_usage(usage: &tea_session::Usage) -> Usage {
     Usage {
+        total_tokens: usage.total_tokens,
         input_tokens: usage.input_tokens,
         output_tokens: usage.output_tokens,
         reasoning_tokens: usage.reasoning_tokens,
@@ -2399,6 +2424,10 @@ mod tests {
                         message: Some("OpenRouter rejected the request".into()),
                         status_code: Some(400),
                         attempt: Some(1),
+                        logical_request_id: None,
+                        visible_stream_event: None,
+                        auth_refresh_attempted: None,
+                        quota_reset_at_unix_seconds: None,
                         error_type: None,
                         error_code: None,
                         retryable: Some(false),
@@ -3017,7 +3046,7 @@ mod tests {
                 tea_providers::ProviderRegistry::new(),
                 None,
                 None,
-                "fixture logical workspace".into(),
+                std::path::PathBuf::from("/tmp/tea-provider-factory-fixture"),
             )),
             config,
         }
@@ -3251,7 +3280,7 @@ data: [DONE]
                 tea_providers::ProviderRegistry::new(),
                 Some(format!("http://{address}/v1")),
                 None,
-                workspace.to_string_lossy().into_owned(),
+                std::path::PathBuf::from("/tmp/tea-provider-factory-fixture"),
             )),
             config: SubagentTuiConfig {
                 provider: Some("local".into()),
@@ -4178,7 +4207,7 @@ data: [DONE]
                 tea_providers::ProviderRegistry::new(),
                 Some(format!("http://{address}/v1")),
                 None,
-                workspace.to_string_lossy().into_owned(),
+                std::path::PathBuf::from("/tmp/tea-provider-factory-fixture"),
             )),
             config: SubagentTuiConfig {
                 provider: Some("local".into()),

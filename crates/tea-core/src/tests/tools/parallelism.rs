@@ -412,6 +412,7 @@ fn recovered_assistant_tool_calls_use_the_shared_scheduler_before_the_next_reque
                     tool_calls: recovered_calls.clone(),
                     stop_reason: Some(StopReason::ToolUse),
                     error_message: None,
+                    opaque_context: Vec::new(),
                 },
             ],
             recovered_calls.clone(),
@@ -485,6 +486,7 @@ fn recovery_resumes_only_the_missing_suffix_of_a_partially_committed_tool_batch(
                     tool_calls: calls,
                     stop_reason: Some(StopReason::ToolUse),
                     error_message: None,
+                    opaque_context: Vec::new(),
                 },
                 AgentMessage::ToolResult {
                     id: MessageId(3),

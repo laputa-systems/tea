@@ -8,7 +8,7 @@
 //! provenance or persist a particular format.
 
 use crate::scheduler::ModelRequest;
-use crate::state::{AgentToolCall, RunId, StopReason, Usage};
+use crate::state::{AgentToolCall, OpaqueProviderContextItem, RunId, StopReason, Usage};
 use crate::tool::{AgentToolResult, ToolCall};
 use std::fmt;
 use std::future::Future;
@@ -276,6 +276,8 @@ pub struct ProviderResponse {
     pub assistant_text: String,
     /// Provider tool calls in their original source order.
     pub tool_calls: Vec<AgentToolCall>,
+    /// Provider-private continuation items ordered with this response.
+    pub opaque_context: Vec<OpaqueProviderContextItem>,
     /// Redacted terminal provider diagnostic, when supplied.
     pub error_message: Option<String>,
     /// Aggregated provider usage, including discarded responses.

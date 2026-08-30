@@ -345,9 +345,10 @@ impl Client {
                         .get("retry-after")
                         .and_then(|value| retry_after(value, route.route.retry().max_delay()));
                     if response.status == StatusCode::TOO_MANY_REQUESTS.as_u16()
-                        && let Some(delay) = retry_after {
-                            route.set_cooldown(delay);
-                        }
+                        && let Some(delay) = retry_after
+                    {
+                        route.set_cooldown(delay);
+                    }
                     if retryable_status(response.status)
                         && retry_index < route.route.retry().max_retries()
                     {
@@ -918,8 +919,7 @@ mod tests {
 
     #[test]
     fn route_authority_rejects_an_unknown_route_and_unlisted_path_before_io() {
-        let client = Client::new(background_executor(drop), [route()])
-            .expect("client configures");
+        let client = Client::new(background_executor(drop), [route()]).expect("client configures");
         let cancellation = CancellationToken::new();
         let unknown = smol_block(client.request(
             HttpRequest {
@@ -1277,8 +1277,7 @@ mod tests {
         .allow(HttpMethod::Get, "/")
         .expect("path is valid")
         .with_availability(false);
-        let client = Client::new(background_executor(drop), [route])
-            .expect("client configures");
+        let client = Client::new(background_executor(drop), [route]).expect("client configures");
         let outcome = smol_block(client.request(
             HttpRequest {
                 route: "optional".into(),
@@ -1314,8 +1313,7 @@ mod tests {
         .expect("route is valid")
         .allow(HttpMethod::Get, "/")
         .expect("path is valid");
-        let client = Client::new(background_executor(drop), [route])
-            .expect("client configures");
+        let client = Client::new(background_executor(drop), [route]).expect("client configures");
         let result = smol_block(client.request(
             HttpRequest {
                 route: "bounded-query".into(),

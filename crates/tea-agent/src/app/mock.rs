@@ -137,6 +137,7 @@ impl ModelProvider for MockProvider {
         Box::pin(std::future::ready(Ok(Box::new(MockStream {
             events,
             initial_delay: Some(self.thinking_delay()),
+            cancellation_terminal_emitted: false,
         }) as _)))
     }
 }
@@ -165,6 +166,10 @@ impl MockProvider {
 struct MockStream {
     events: Vec<ModelStreamEvent>,
     initial_delay: Option<Duration>,
+    /// A finite model stream may expose its terminal cancellation exactly once.
+    /// Core polls once more after a terminal event to verify that the source
+    /// has closed, so re-emitting cancellation would violate that boundary.
+    cancellation_terminal_emitted: bool,
 }
 
 impl ModelEventStream for MockStream {
@@ -182,7 +187,11 @@ impl ModelEventStream for MockStream {
                 .await;
             }
             if cancellation.is_cancelled() {
-                return Ok(Some(ModelStreamEvent::End(StopReason::Cancelled)));
+                self.events.clear();
+                return Ok((!self.cancellation_terminal_emitted).then(|| {
+                    self.cancellation_terminal_emitted = true;
+                    ModelStreamEvent::End(StopReason::Cancelled)
+                }));
             }
             Ok((!self.events.is_empty()).then(|| self.events.remove(0)))
         })
@@ -280,5 +289,28 @@ mod tests {
     fn mock_configuration_leaves_model_facing_tools_to_the_luau_coding_builtins() {
         let configuration = configuration();
         assert_eq!(configuration.tools.names().next(), None);
+    }
+
+    #[test]
+    fn cancelled_mock_stream_emits_one_terminal_event_then_closes() {
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+        let mut stream = MockStream {
+            events: vec![ModelStreamEvent::TextDelta("unreachable".into())],
+            initial_delay: None,
+            cancellation_terminal_emitted: false,
+        };
+
+        assert!(matches!(
+            smol::block_on(stream.next_event(cancellation.clone()))
+                .expect("mock cancellation polling succeeds"),
+            Some(ModelStreamEvent::End(StopReason::Cancelled))
+        ));
+        assert!(
+            smol::block_on(stream.next_event(cancellation))
+                .expect("mock cancellation close polling succeeds")
+                .is_none(),
+            "a finite stream must close after its terminal cancellation event"
+        );
     }
 }

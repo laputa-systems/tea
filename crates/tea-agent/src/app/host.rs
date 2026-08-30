@@ -1,5 +1,6 @@
 use std::sync::Arc;
 use tea_core::agent::AgentConfiguration;
+use tea_core::hooks::HookSet;
 use tea_core::tool::ToolRegistry;
 use tea_providers::{openai::OpenAiContextHook, ModelDescriptor, ProviderRegistry};
 
@@ -13,13 +14,36 @@ use super::error::AppError;
 pub(super) fn host_configuration(
     logical_workspace_label: &str,
 ) -> Result<AgentConfiguration, AppError> {
+    host_configuration_for_provider(logical_workspace_label, None)
+}
+
+/// Assemble a host configuration whose transcript encoder matches one exact
+/// selected provider. The provider remains an explicit host choice; the core
+/// only sees the provider-neutral hook port.
+pub(super) fn host_configuration_for_provider(
+    logical_workspace_label: &str,
+    provider: Option<&str>,
+) -> Result<AgentConfiguration, AppError> {
     // The durable coding builtins are resolved as Luau extensions. Leaving the
     // trusted base registry empty makes a missing or invalid builtin fail
     // closed instead of restoring a compiled Rust tool implementation.
+    let hooks: Arc<dyn HookSet> = {
+        #[cfg(feature = "provider-codex")]
+        if provider == Some("codex") {
+            Arc::new(tea_providers::codex::CodexContextHook)
+        } else {
+            Arc::new(OpenAiContextHook)
+        }
+        #[cfg(not(feature = "provider-codex"))]
+        {
+            let _ = provider;
+            Arc::new(OpenAiContextHook)
+        }
+    };
     Ok(AgentConfiguration::new(
         format!("Current working directory: {logical_workspace_label}"),
         ToolRegistry::default(),
-        Arc::new(OpenAiContextHook),
+        hooks,
     ))
 }
 

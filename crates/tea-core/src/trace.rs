@@ -822,6 +822,7 @@ mod tests {
                     }],
                     stop_reason: Some(StopReason::ToolUse),
                     error_message: None,
+                    opaque_context: Vec::new(),
                 },
             },
         );

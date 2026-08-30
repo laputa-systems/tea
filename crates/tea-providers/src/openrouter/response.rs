@@ -459,6 +459,7 @@ fn parse_usage(usage: &JsonValue) -> Usage {
         .and_then(|details| details.get("reasoning_tokens"))
         .and_then(JsonValue::as_u64);
     Usage {
+        total_tokens: token("total_tokens"),
         input_tokens: token("prompt_tokens"),
         output_tokens: token("completion_tokens"),
         reasoning_tokens: reasoning,

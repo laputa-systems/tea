@@ -110,9 +110,10 @@ impl OpencodeZenSseDecoder {
                             events.push(ModelStreamEvent::TextDelta(delta.to_owned()));
                         }
                     } else if let Some(delta) = json.get("text").and_then(JsonValue::as_str)
-                        && !delta.is_empty() {
-                            events.push(ModelStreamEvent::TextDelta(delta.to_owned()));
-                        }
+                        && !delta.is_empty()
+                    {
+                        events.push(ModelStreamEvent::TextDelta(delta.to_owned()));
+                    }
                 }
                 Some("response.output_item.added") => {
                     if let Some(item) = json.get("item").and_then(JsonValue::as_object) {
@@ -137,10 +138,7 @@ impl OpencodeZenSseDecoder {
                                 .unwrap_or("")
                                 .to_owned();
                             if !item_id.is_empty() {
-                                let entry = self
-                                    .tool_calls
-                                    .entry(item_id.clone())
-                                    .or_default();
+                                let entry = self.tool_calls.entry(item_id.clone()).or_default();
                                 entry.id = Some(item_id.clone());
                                 if name.is_some() {
                                     entry.name = name;
@@ -165,10 +163,7 @@ impl OpencodeZenSseDecoder {
                                 entry.arguments.push_str(delta);
                             } else {
                                 // Might be without prior added? create entry
-                                let entry = self
-                                    .tool_calls
-                                    .entry(item_id.to_owned())
-                                    .or_default();
+                                let entry = self.tool_calls.entry(item_id.to_owned()).or_default();
                                 entry.id = Some(item_id.to_owned());
                                 entry.arguments.push_str(delta);
                                 if !self.pending_tool_order.contains(&item_id.to_owned()) {
@@ -181,23 +176,26 @@ impl OpencodeZenSseDecoder {
                     {
                         // fallback alternative field name
                         if let Some(item_id) = json.get("item_id").and_then(JsonValue::as_str)
-                            && let Some(entry) = self.tool_calls.get_mut(item_id) {
-                                entry.arguments.push_str(delta);
-                            }
+                            && let Some(entry) = self.tool_calls.get_mut(item_id)
+                        {
+                            entry.arguments.push_str(delta);
+                        }
                     }
                 }
                 Some("response.function_call_arguments.done") => {
                     if let Some(args) = json.get("arguments").and_then(JsonValue::as_str)
                         && let Some(item_id) = json.get("item_id").and_then(JsonValue::as_str)
-                            && let Some(entry) = self.tool_calls.get_mut(item_id) {
-                                entry.arguments = args.to_owned();
-                            }
+                        && let Some(entry) = self.tool_calls.get_mut(item_id)
+                    {
+                        entry.arguments = args.to_owned();
+                    }
                     if let Some(name) = json.get("name").and_then(JsonValue::as_str)
                         && let Some(item_id) = json.get("item_id").and_then(JsonValue::as_str)
-                            && let Some(entry) = self.tool_calls.get_mut(item_id)
-                                && entry.name.is_none() {
-                                    entry.name = Some(name.to_owned());
-                                }
+                        && let Some(entry) = self.tool_calls.get_mut(item_id)
+                        && entry.name.is_none()
+                    {
+                        entry.name = Some(name.to_owned());
+                    }
                 }
                 Some("response.output_item.done") => {
                     if let Some(item) = json.get("item").and_then(JsonValue::as_object) {
@@ -222,10 +220,7 @@ impl OpencodeZenSseDecoder {
                                 .unwrap_or("")
                                 .to_owned();
                             if !item_id.is_empty() {
-                                let entry = self
-                                    .tool_calls
-                                    .entry(item_id.clone())
-                                    .or_default();
+                                let entry = self.tool_calls.entry(item_id.clone()).or_default();
                                 entry.id = Some(item_id.clone());
                                 if name.is_some() {
                                     entry.name = name;
@@ -278,44 +273,44 @@ impl OpencodeZenSseDecoder {
                     // Unknown event: try to extract text delta fallback?
                     // Check if json has delta field generically
                     if let Some(delta) = json.get("delta").and_then(JsonValue::as_str)
-                        && !delta.is_empty() {
-                            // Might be text delta without correct event? emit
-                            // But only if not already handled
-                        }
+                        && !delta.is_empty()
+                    {
+                        // Might be text delta without correct event? emit
+                        // But only if not already handled
+                    }
                 }
                 None => {
                     // No event type: might be data with choices.delta style? fallback
                     // Check if JSON looks like chat completions delta
                     if let Some(choices) = json.get("choices").and_then(JsonValue::as_array)
-                        && let Some(choice) = choices.first() {
-                            if let Some(delta) = choice.get("delta").and_then(JsonValue::as_object)
+                        && let Some(choice) = choices.first()
+                    {
+                        if let Some(delta) = choice.get("delta").and_then(JsonValue::as_object) {
+                            if let Some(content) = delta.get("content").and_then(JsonValue::as_str)
+                                && !content.is_empty()
                             {
-                                if let Some(content) =
-                                    delta.get("content").and_then(JsonValue::as_str)
-                                    && !content.is_empty() {
-                                        events
-                                            .push(ModelStreamEvent::TextDelta(content.to_owned()));
-                                    }
-                                // tool_calls handling for chat completions fallback
-                                if let Some(calls) =
-                                    delta.get("tool_calls").and_then(JsonValue::as_array)
-                                {
-                                    for _call in calls {
-                                        // This is fragment, need to assemble similar to OpenRouter but we don't have index handling here.
-                                        // For simplicity ignore chat completions tool calls for zen (responses format is primary).
-                                        let _ = _call;
-                                    }
+                                events.push(ModelStreamEvent::TextDelta(content.to_owned()));
+                            }
+                            // tool_calls handling for chat completions fallback
+                            if let Some(calls) =
+                                delta.get("tool_calls").and_then(JsonValue::as_array)
+                            {
+                                for _call in calls {
+                                    // This is fragment, need to assemble similar to OpenRouter but we don't have index handling here.
+                                    // For simplicity ignore chat completions tool calls for zen (responses format is primary).
+                                    let _ = _call;
                                 }
                             }
-                            if let Some(reason) =
-                                choice.get("finish_reason").and_then(JsonValue::as_str)
-                            {
-                                self.finish_reason = Some(reason.to_owned());
-                            }
-                            if let Some(usage) = json.get("usage") {
-                                self.usage = Some(parse_usage(usage));
-                            }
                         }
+                        if let Some(reason) =
+                            choice.get("finish_reason").and_then(JsonValue::as_str)
+                        {
+                            self.finish_reason = Some(reason.to_owned());
+                        }
+                        if let Some(usage) = json.get("usage") {
+                            self.usage = Some(parse_usage(usage));
+                        }
+                    }
                 }
             }
         }
@@ -476,6 +471,7 @@ fn parse_usage(usage: &JsonValue) -> Usage {
         });
 
     Usage {
+        total_tokens: usage.get("total_tokens").and_then(JsonValue::as_u64),
         input_tokens: input,
         output_tokens: output,
         reasoning_tokens: reasoning,
