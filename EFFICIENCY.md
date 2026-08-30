@@ -115,6 +115,41 @@ tool calls versus Pi's 24 and 32. The comparison command records the observed
 Tea work categories and marks the pair non-comparable until the differing
 model-facing prompt/tool surfaces are deliberately controlled.
 
+## Apples-to-apples audit (2026-08-30)
+
+The Pi reference was checked against `/Users/josh/d/pi` and the public npm
+registry. Both `packages/ai/package.json` and `packages/coding-agent/package.json`
+in that checkout are `0.84.4`, and `npm view` reports `0.84.4` for both packages.
+The shootout SDK is now pinned to those exact versions in
+`evals/pi_shootout/sdk/package.json` and its lockfile; adapter telemetry records
+`npm:@earendil-works/pi-coding-agent@0.84.4`.
+
+The adapter previously created a second Pi session from plain `AgentTool`
+wrappers. Those wrappers dropped Pi's prompt metadata, so the captured Pi
+system prompt said `Available tools: (none)` even though `read`, `bash`, `edit`,
+and `find` were active. It now registers the SDK's public
+`create*ToolDefinition` values as custom tools, retaining Pi's native schemas,
+descriptions, prompt snippets, and execution behavior while keeping the
+shootout's isolated bash environment. This is the first valid Pi surface to
+use for new measurements; older artifacts with the `(none)` prompt are
+historical and must not be pooled with it.
+
+The OpenRouter wire audit also found two real sampling/context mismatches in
+Tea. Tea no longer sends an explicit `temperature: 0` when the run claims
+provider-default sampling, and reasoning runs now replay the empty
+`reasoning_content` field required by Pi's DeepSeek/OpenRouter compatibility
+profile. Empty assistant `tool_calls` arrays are omitted to match Pi's message
+converter. These changes are covered by provider tests.
+
+The surfaces are still intentionally not byte-identical: Tea's safety-oriented
+tool schemas and concise builtin prompt differ from Pi's builtins. The analyzer
+continues to mark such pairs non-comparable rather than hiding that confounder;
+the shared contract is the exact ordered capability set (`read`, `bash`, `edit`,
+`find`), task/workspace/validator, model/provider, reasoning level, output
+ceiling, shell authority, and timeout. A future efficiency result must either
+control those remaining presentation differences or report them as a causal
+uncertainty.
+
 ## Reusable comparison procedure
 
 The comparison work is checked in as a provider-free command. After any
