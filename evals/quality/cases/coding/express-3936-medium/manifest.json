@@ -27,6 +27,13 @@
     "tools": ["read", "bash", "edit", "find"],
     "dependency_cache": "package-lock-sha256"
   },
+  "validator_dependencies": {
+    "lockfile": "package-lock.json",
+    "lockfile_sha256": "6ef32ac4f7a71bf6986964304b78f315518bb5d0ab727fcc5c7bd2e70e8d474a",
+    "required_modules": {
+      "body-parser": "1.19.2"
+    }
+  },
   "validators": {
     "full": {
       "audit_command": "npm install && npm test",

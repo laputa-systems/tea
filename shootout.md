@@ -1,3 +1,39 @@
+# Pi/Tea shootout specification
+
+## Refinement status
+
+This document contains the original implementation brief and remains useful for
+its scope boundaries. The checked-in runner now has a stricter evidence
+contract that supersedes any older text here about result schema versions or
+surface parity:
+
+- The direct final OpenRouter payload is retained per attempt in
+  `surface/wire-requests.json`, with credentials redacted and attempt paths
+  normalized. Its result-schema summary is derived evidence, not a substitute
+  for the retained request witness.
+- Model/routing/sampling fields, the exact ordered wire tool surface, and any
+  observed OpenRouter route must agree before a strict efficiency conclusion is
+  permitted. A malformed/missing wire surface or conflicting returned route is
+  an integrity failure.
+- Native prompt, schema, and execution differences are measurements of the
+  two native harnesses. They remain prominent in reports but are not parity
+  gates by themselves.
+- Three repeats are smoke diagnostics. `make pi-shootout-serious` and
+  `make pi-shootout-static-serious` use seven counterbalanced repeats and
+  report paired observations plus descriptive bootstrap intervals.
+- Repeats are independent parallel lanes by default. Each lane retains its
+  sequential counterbalanced condition order and owns distinct workspace,
+  evidence, dependency, HOME, TMPDIR, and tool npm-cache paths; synchronized
+  setup caches never supply a shared `node_modules` or working tree.
+- `express-3936-medium` now carries a production-only validator lock. Cache
+  preparation may fetch it explicitly; model attempts and validators use a
+  fresh `npm ci --offline` dependency tree outside the Git worktree.
+
+See `evals/pi_shootout/README.md` for the current commands and interpretation
+rules. The remainder of this file is the historical design brief.
+
+---
+
 The shootout should execute **three conditions** from fresh copies of the same pinned repository state:
 
 1. `pi-static`
@@ -353,7 +389,7 @@ If Node’s direct `.ts` execution proves incompatible with the exact supported 
 Replace or extend the existing evaluation result contract with one canonical contract emitted by both the Pi TypeScript adapter and the Tea Rust adapter:
 
 ```text
-tea-coding-eval-result/v2
+tea-coding-eval-result/v3
 ```
 
 Update all repository-owned readers and tests together. No backward compatibility is required for the old eval result schema.
@@ -362,7 +398,7 @@ The normalized result must have this semantic shape:
 
 ```json
 {
-  "schema_version": "tea-coding-eval-result/v2",
+  "schema_version": "tea-coding-eval-result/v3",
   "attempt_id": "…",
   "baseline_id": "pi-static | tea-static | tea-jit",
 
@@ -889,7 +925,7 @@ Add:
 --harness-mode jit
 ```
 
-The adapter must emit the same `tea-coding-eval-result/v2` contract as the Pi adapter.
+The adapter must emit the same `tea-coding-eval-result/v3` contract as the Pi adapter.
 
 ## Use the durable runtime for both Tea conditions
 
@@ -1458,7 +1494,7 @@ no web-search tool
 no subagents
 ```
 
-## Harness-surface parity
+## Native harness-surface results
 
 Show:
 
@@ -1939,7 +1975,7 @@ The implementation is complete only when:
 * Tea JIT may choose `NoChange`.
 * All JIT time and usage are included in totals.
 * Static and evolution reports are both produced.
-* Static report includes harness-surface parity.
+* Static report includes native harness-surface results and the direct wire-evidence reference.
 * Evolution report includes candidate lineage and Tea-static delta.
 * Benchmark failure still produces reports.
 * Infrastructure failure exits nonzero.

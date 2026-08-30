@@ -67,7 +67,7 @@ def _rows(left: dict[str, Any], right: dict[str, Any], reference: dict[str, Any]
     return rows
 
 
-def _surface_parity(pi: dict[str, Any], tea: dict[str, Any]) -> list[str]:
+def _native_surfaces(pi: dict[str, Any], tea: dict[str, Any]) -> list[str]:
     pi_surface, tea_surface = _result(pi)["surface"], _result(tea)["surface"]
     values = [
         ("System prompt normalized equal", pi_surface["workspace_normalized_system_prompt_sha256"] == tea_surface["workspace_normalized_system_prompt_sha256"]),
@@ -96,13 +96,17 @@ def static_report(summary: dict[str, Any]) -> str:
         f"- Model/provider: `{run['model']}` / `{run['provider']}`",
         f"- Thinking/output ceiling: `{run['thinking_level']}` / `{run['max_output_tokens']}`",
         f"- Shared attempt timeout: `{run['timeout_seconds']}` seconds",
+        f"- Run class: `{run.get('run_class', 'unclassified')}`",
+        f"- Toolchain manifest: `{run.get('toolchain_manifest_sha256', 'unrecorded')}`",
+        f"- Validator dependency lock: `{run.get('validator_dependency_lockfile_sha256', 'unrecorded')}`",
         f"- Condition order: `{', '.join(run['condition_order'])}`",
         "",
-        "## Harness-surface parity",
+        "## Native harness surfaces",
         "",
-        *_surface_parity(pi, tea),
+        *_native_surfaces(pi, tea),
         "",
-        "See [surface-diff.md](surface-diff.md) for retained, redacted surface differences when present.",
+        "Native prompt and tool differences are measured results of this experiment, not parity gates. See [surface-diff.md](surface-diff.md) for retained, redacted differences.",
+        "Each adapter's `surface/wire-requests.json` is the direct final-provider request evidence. The normalized result summary is derived from it and is not a substitute for that retained witness.",
         "",
         "## Results",
         "",
@@ -111,7 +115,7 @@ def static_report(summary: dict[str, Any]) -> str:
         "## Observed comparison",
         "",
         _comparability_note(pi, tea),
-        "Provider requests are shown when an adapter exposes an exact count; Pi currently leaves this field null rather than inferring wire requests from turn totals.",
+        "Provider requests are shown when an adapter exposes an exact count; Pi currently leaves this field null rather than inferring wire requests from turn totals. A provider-routing, request-shape, or observed-route mismatch invalidates a strict efficiency conclusion; native harness differences do not by themselves do so.",
         "",
     ]
     return "\n".join(lines)

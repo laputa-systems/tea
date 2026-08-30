@@ -3,7 +3,11 @@ import { createHash } from "node:crypto";
 export function canonical(value: unknown): string {
 	return JSON.stringify(value, (_, item: unknown) => {
 		if (item && typeof item === "object" && !Array.isArray(item)) {
-			return Object.fromEntries(Object.entries(item).sort(([left], [right]) => left.localeCompare(right)));
+			// Rust's JsonValue and Python's sort_keys use byte/code-unit ordering
+			// for these ASCII protocol field names. `localeCompare` placed the
+			// lowercase npm_config_cache between uppercase NPM_* keys on some
+			// hosts, making otherwise identical cross-adapter fingerprints differ.
+			return Object.fromEntries(Object.entries(item).sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0));
 		}
 		return item;
 	});

@@ -8,7 +8,14 @@ from pathlib import Path
 from unittest.mock import call, patch
 
 from . import coding_cases
-from .coding_cases import CodingCaseError, assert_oracle_isolated_worktree, cache_bare_repository, load_cases
+from .coding_cases import (
+    CodingCaseError,
+    assert_oracle_isolated_worktree,
+    cache_bare_repository,
+    load_cases,
+    provision_validator_dependencies,
+    validator_dependency_lockfile,
+)
 from .coding_runner import _adapter_task, coding_bundle_capabilities
 
 
@@ -59,6 +66,30 @@ class CodingCasesTest(unittest.TestCase):
         task = _adapter_task(load_cases()[0], capabilities)
         self.assertEqual(task["capabilities"], capabilities)
         self.assertEqual([tool["name"] for tool in capabilities], ["read", "bash", "edit", "find"])
+
+    def test_medium_validator_uses_a_checked_in_lock_and_offline_npm_ci(self) -> None:
+        case = next(case for case in load_cases() if case["id"] == "express-3936-medium")
+        lockfile, specification = validator_dependency_lockfile(case)
+        self.assertEqual(lockfile.name, "package-lock.json")
+        self.assertEqual(specification["required_modules"], {"body-parser": "1.19.2"})
+        with tempfile.TemporaryDirectory(prefix="tea-quality-dependencies-") as temporary:
+            root = Path(temporary)
+
+            def npm(command, *, cwd, **kwargs):
+                package = cwd / "node_modules" / "body-parser" / "package.json"
+                package.parent.mkdir(parents=True)
+                package.write_text('{"version":"1.19.2"}\n', encoding="utf-8")
+                return type("Result", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+            with patch.object(coding_cases.subprocess, "run", side_effect=npm) as run:
+                result = provision_validator_dependencies(case, root / "cache", root / "dependencies", populate_cache=False)
+        command = run.call_args.args[0]
+        environment = run.call_args.kwargs["env"]
+        self.assertEqual(command[:2], ["npm", "ci"])
+        self.assertIn("--offline", command)
+        self.assertEqual(environment["NPM_CONFIG_OFFLINE"], "true")
+        self.assertTrue(result["offline"])
+        self.assertEqual(result["modules"]["body-parser"]["version"], "1.19.2")
 
     def test_oracle_isolation_rejects_a_worktree_that_contains_the_fix(self) -> None:
         with tempfile.TemporaryDirectory(prefix="tea-quality-worktree-") as temporary:

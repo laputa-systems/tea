@@ -140,6 +140,19 @@ def validate_case(case: dict[str, Any], source: str = "case") -> dict[str, Any]:
         raise CodingCaseError(f"{source}: setup.network must be false")
     if setup.get("tools") != ["read", "bash", "edit", "find"]:
         raise CodingCaseError(f"{source}: coding tool surface must be pinned")
+    validator_dependencies = case.get("validator_dependencies")
+    if case_id == "express-3936-medium":
+        if not isinstance(validator_dependencies, dict):
+            raise CodingCaseError(f"{source}: fast validator dependencies must be pinned")
+        if validator_dependencies.get("lockfile") != "package-lock.json":
+            raise CodingCaseError(f"{source}: validator dependency lockfile must be package-lock.json")
+        lockfile_sha256 = validator_dependencies.get("lockfile_sha256")
+        if not isinstance(lockfile_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", lockfile_sha256):
+            raise CodingCaseError(f"{source}: validator dependency lockfile hash must be a SHA-256 digest")
+        if validator_dependencies.get("required_modules") != {"body-parser": "1.19.2"}:
+            raise CodingCaseError(f"{source}: validator dependency module set must be pinned")
+    elif validator_dependencies is not None:
+        raise CodingCaseError(f"{source}: unexpected validator dependency declaration")
     validators = case.get("validators")
     if not isinstance(validators, dict) or not isinstance(validators.get("full"), dict):
         raise CodingCaseError(f"{source}: full audit validator is required")
@@ -290,6 +303,132 @@ def dependency_cache_path(workspace: Path, cache_root: Path) -> Path:
     return root
 
 
+def validator_dependency_lockfile(case: dict[str, Any]) -> tuple[Path, dict[str, Any]]:
+    """Resolve the checked-in fast-validator dependency lock without using a workspace.
+
+    The Express baseline predates npm lockfiles.  The evaluator therefore owns a
+    small, production-only sidecar lock rather than letting a model attempt or a
+    validator resolve the historical semver ranges from the network.
+    """
+    validate_case(case)
+    specification = case.get("validator_dependencies")
+    if not isinstance(specification, dict):
+        raise CodingCaseError("this case has no pinned validator dependency lock")
+    manifest = case.get("_manifest_path")
+    if not isinstance(manifest, str):
+        raise CodingCaseError("validator dependency resolution requires a manifest path")
+    lockfile = Path(manifest).parent / specification["lockfile"]
+    if not lockfile.is_file() or lockfile.is_symlink():
+        raise CodingCaseError("validator dependency lockfile must be a regular checked-in file")
+    actual = hashlib.sha256(lockfile.read_bytes()).hexdigest()
+    if actual != specification["lockfile_sha256"]:
+        raise CodingCaseError("validator dependency lockfile does not match its pinned SHA-256")
+    return lockfile, specification
+
+
+def validator_dependency_cache_path(case: dict[str, Any], cache_root: Path) -> Path:
+    """Return the content-addressed npm cache for a checked-in validator lock."""
+    lockfile, _ = validator_dependency_lockfile(case)
+    key = hashlib.sha256(lockfile.read_bytes()).hexdigest()
+    root = _explicit_root(cache_root, "cache_root") / "npm" / key
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _validator_package(lockfile: Path) -> dict[str, Any]:
+    """Derive the minimal npm project accepted by the production-only lockfile."""
+    lock = _read_json(lockfile)
+    package = lock.get("packages", {}).get("") if isinstance(lock.get("packages"), dict) else None
+    if not isinstance(package, dict) or not isinstance(package.get("dependencies"), dict):
+        raise CodingCaseError("validator dependency lockfile has no root production dependency set")
+    # npm ci compares this project declaration with the lock.  Keep only the
+    # fields that affect dependency resolution; scripts and development tools
+    # are deliberately unavailable to the benchmark setup.
+    return {
+        "name": package.get("name"),
+        "version": package.get("version"),
+        "private": True,
+        "dependencies": package["dependencies"],
+    }
+
+
+def provision_validator_dependencies(
+    case: dict[str, Any],
+    cache_root: Path,
+    destination: Path,
+    *,
+    populate_cache: bool,
+) -> dict[str, Any]:
+    """Install pinned production dependencies outside an agent worktree.
+
+    ``populate_cache`` is only for the explicit cache-preparation workflow.
+    Scoring is offline: it consumes the verified npm content cache and places a
+    fresh, per-attempt module tree under ``destination``.  ``NODE_PATH`` then
+    exposes that tree to both adapters and the fast validator without adding
+    generated files to the baseline Git worktree.
+    """
+    lockfile, specification = validator_dependency_lockfile(case)
+    cache = validator_dependency_cache_path(case, cache_root).resolve()
+    if destination.exists() or destination.is_symlink():
+        raise CodingCaseError("validator dependency destination must not already exist")
+    destination.mkdir(parents=True)
+    try:
+        shutil.copy2(lockfile, destination / "package-lock.json")
+        (destination / "package.json").write_text(
+            json.dumps(_validator_package(lockfile), sort_keys=True, indent=2) + "\n", encoding="utf-8"
+        )
+        environment = _safe_environment() | {
+            "npm_config_cache": str(cache),
+            "NPM_CONFIG_AUDIT": "false",
+            "NPM_CONFIG_FUND": "false",
+            "NPM_CONFIG_IGNORE_SCRIPTS": "true",
+        }
+        command = ["npm", "ci", "--ignore-scripts", "--omit=dev", "--no-audit", "--no-fund"]
+        if not populate_cache:
+            environment["NPM_CONFIG_OFFLINE"] = "true"
+            command.append("--offline")
+        # npm treats its content cache as mostly immutable, but it also writes
+        # metadata and logs. Serialize only this short cache-consumption step;
+        # every resulting node_modules tree remains private to one attempt.
+        with _cache_lock(cache.parent / f"{cache.name}.npm-ci.lock"):
+            completed = subprocess.run(
+                command,
+                cwd=destination,
+                env=environment,
+                text=True,
+                capture_output=True,
+                timeout=300,
+                check=False,
+            )
+        if completed.returncode != 0:
+            mode = "cache preparation" if populate_cache else "offline scoring"
+            detail = (completed.stderr or completed.stdout).strip()
+            raise CodingCaseError(f"npm ci failed during validator {mode}: {detail[:512]}")
+        modules = destination / "node_modules"
+        if not modules.is_dir() or modules.is_symlink():
+            raise CodingCaseError("npm ci did not create a regular validator node_modules directory")
+        verified: dict[str, dict[str, str]] = {}
+        for name, version in sorted(specification["required_modules"].items()):
+            package = modules / name / "package.json"
+            if not package.is_file() or package.is_symlink():
+                raise CodingCaseError(f"npm ci did not install required validator module {name}")
+            metadata = _read_json(package)
+            if metadata.get("version") != version:
+                raise CodingCaseError(f"npm ci installed unexpected {name} version")
+            verified[name] = {"version": version, "package_sha256": hashlib.sha256(package.read_bytes()).hexdigest()}
+        return {
+            "schema_version": "tea-quality-validator-dependencies/v1",
+            "lockfile_sha256": specification["lockfile_sha256"],
+            "npm_cache_key": hashlib.sha256(lockfile.read_bytes()).hexdigest(),
+            "offline": not populate_cache,
+            "modules": verified,
+            "node_path": str(modules),
+        }
+    except BaseException:
+        shutil.rmtree(destination, ignore_errors=True)
+        raise
+
+
 @dataclass(frozen=True)
 class CleanWorktree:
     path: Path
@@ -397,7 +536,12 @@ def _safe_environment() -> dict[str, str]:
 
 
 def run_validator(
-    case: dict[str, Any], workspace: Path, name: str = "fast", *, dependency_cache: Path | None = None
+    case: dict[str, Any],
+    workspace: Path,
+    name: str = "fast",
+    *,
+    dependency_cache: Path | None = None,
+    node_path: Path | None = None,
 ) -> ValidatorResult:
     """Run a structured validator with no shell and no ambient credentials."""
     validate_case(case)
@@ -423,6 +567,12 @@ def run_validator(
         if not cache.is_dir() or cache.is_symlink():
             raise CodingCaseError("dependency_cache must be a real directory")
         environment["npm_config_cache"] = str(cache)
+    if node_path is not None:
+        modules = node_path.resolve()
+        if not modules.is_dir() or modules.is_symlink():
+            raise CodingCaseError("validator node_path must be a real node_modules directory")
+        environment["NODE_PATH"] = str(modules)
+        environment["NPM_CONFIG_OFFLINE"] = "true"
     output: list[str] = []
     errors: list[str] = []
     for command in commands:

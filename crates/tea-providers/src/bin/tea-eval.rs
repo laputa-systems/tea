@@ -38,7 +38,7 @@ use tea_core::tool::{ToolExecutionMode, ToolRegistry};
 use tea_luau::{LuauExtensionEngine, builtins};
 use tea_protocol::{JsonNumber, JsonValue};
 use tea_providers::openai::OpenAiContextHook;
-use tea_providers::openrouter::{OpenRouterConfig, OpenRouterProvider};
+use tea_providers::openrouter::{OpenRouterConfig, OpenRouterProvider, OpenRouterRequestCapture};
 use tea_session::{
     CanonicalHashWriter, Digest, DurabilityMode, EntryId, HarnessRevisionChangedEntry,
     JsonlSession, LaneId, LaneRecord, ModelChangedEntry, ProvisionedEntry, SessionEntry,
@@ -46,7 +46,7 @@ use tea_session::{
     ThinkingChangedEntry,
 };
 
-const RESULT_SCHEMA: &str = "tea-coding-eval-result/v2";
+const RESULT_SCHEMA: &str = "tea-coding-eval-result/v3";
 const REQUIRED_MODEL: &str = "deepseek/deepseek-v4-flash-0731";
 const REQUIRED_THINKING: &str = "high";
 const JIT_ADDENDUM: &str = "Task-local harness adaptation is available but optional.\n\nFirst inspect the task and repository using the normal coding tools. Use NoChange unless you have concrete evidence that one bounded harness change is likely to improve this task.\n\nYou may stage at most one task-local harness candidate. It may alter only currently supported prompt, tool-presentation, hook, context, memory-selection, failure-policy, or compaction-policy surfaces. It cannot grant new authority, change the provider or model, access hidden validators, use subagents, or add a web-research tool.\n\nA candidate must include observed task or failure evidence, a root-cause hypothesis, expected effect, regression risk, and the harness surfaces changed. If it activates, continue solving the same task under the new immutable harness revision. All adaptation time and model usage count toward the task result.";
@@ -91,8 +91,11 @@ struct Args {
     harness_mode: HarnessMode,
     thinking: ThinkingLevel,
     max_output_tokens: Option<u64>,
+    outer_timeout_seconds: u64,
+    provider_routing: JsonValue,
     shell_environment: CommandEnvironment,
     shell_environment_json: JsonValue,
+    attempt_path_replacements: Vec<(String, String)>,
 }
 
 impl Args {
@@ -136,6 +139,8 @@ impl Args {
             "--harness-mode",
             "--thinking-level",
             "--max-output-tokens",
+            "--outer-timeout-seconds",
+            "--provider-routing-json",
         ];
         if values
             .keys()
@@ -168,6 +173,32 @@ impl Args {
             return Err("tea shootout requires unlimited max output tokens".into());
         }
         let max_output_tokens = None;
+        let outer_timeout_seconds = take("--outer-timeout-seconds")?
+            .parse::<u64>()
+            .ok()
+            .filter(|value| *value > 0)
+            .ok_or_else(|| "--outer-timeout-seconds must be positive".to_owned())?;
+        let provider_routing = JsonValue::parse(&take("--provider-routing-json")?)
+            .map_err(|_| "--provider-routing-json must be JSON".to_owned())?;
+        if !provider_routing.is_object() {
+            return Err("--provider-routing-json must be an object".into());
+        }
+        let attempt_path_replacements = std::iter::once((
+            take("--workspace")?,
+            "{WORKSPACE}".to_owned(),
+        ))
+        .chain(
+            shell
+                .iter()
+                .filter_map(|(name, value)| match name.as_str() {
+                    "HOME" => Some((value.clone(), "{HOME}".to_owned())),
+                    "TMPDIR" => Some((value.clone(), "{TMPDIR}".to_owned())),
+                    "npm_config_cache" => Some((value.clone(), "{NPM_CACHE}".to_owned())),
+                    "NODE_PATH" => Some((value.clone(), "{NODE_PATH}".to_owned())),
+                    _ => None,
+                }),
+        )
+        .collect::<Vec<_>>();
         let shell_environment = shell
             .iter()
             .fold(CommandEnvironment::empty(), |current, (name, value)| {
@@ -180,6 +211,7 @@ impl Args {
                     "HOME" => "{HOME}".into(),
                     "TMPDIR" => "{TMPDIR}".into(),
                     "npm_config_cache" => "{NPM_CACHE}".into(),
+                    "NODE_PATH" => "{NODE_PATH}".into(),
                     _ => value,
                 };
                 (name, JsonValue::String(normalized))
@@ -197,8 +229,11 @@ impl Args {
             harness_mode,
             thinking: ThinkingLevel::High,
             max_output_tokens,
+            outer_timeout_seconds,
+            provider_routing,
             shell_environment,
             shell_environment_json: JsonValue::Object(normalized_shell),
+            attempt_path_replacements,
         })
     }
 }
@@ -430,6 +465,285 @@ fn strings(values: impl IntoIterator<Item = String>) -> JsonValue {
     JsonValue::Array(values.into_iter().map(JsonValue::String).collect())
 }
 
+fn normalize_attempt_text(value: &str, replacements: &[(String, String)]) -> String {
+    let mut normalized = value.to_owned();
+    let mut ordered = replacements.to_vec();
+    ordered.sort_by_key(|(source, _)| std::cmp::Reverse(source.len()));
+    for (source, target) in ordered {
+        if !source.is_empty() {
+            normalized = normalized.replace(&source, &target);
+        }
+    }
+    normalized
+}
+
+fn sensitive_wire_field(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    ["authorization", "api_key", "apikey", "token", "credential", "secret", "password"]
+        .iter()
+        .any(|needle| lower.contains(needle))
+}
+
+/// Create the private persisted representation from the exact bytes handed to
+/// the OpenRouter HTTP client. This copy never includes headers, and redacts
+/// credential-shaped fields defensively before it reaches disk.
+fn sanitize_wire_value(value: &JsonValue, replacements: &[(String, String)]) -> JsonValue {
+    match value {
+        JsonValue::String(text) => JsonValue::String(normalize_attempt_text(text, replacements)),
+        JsonValue::Array(values) => JsonValue::Array(
+            values
+                .iter()
+                .map(|entry| sanitize_wire_value(entry, replacements))
+                .collect(),
+        ),
+        JsonValue::Object(values) => JsonValue::Object(
+            values
+                .iter()
+                .map(|(name, entry)| {
+                    (
+                        name.clone(),
+                        if sensitive_wire_field(name) {
+                            JsonValue::String("[redacted]".into())
+                        } else {
+                            sanitize_wire_value(entry, replacements)
+                        },
+                    )
+                })
+                .collect(),
+        ),
+        scalar => scalar.clone(),
+    }
+}
+
+fn wire_field(payload: &JsonValue, name: &str) -> JsonValue {
+    JsonValue::object([
+        ("present", JsonValue::Bool(payload.get(name).is_some())),
+        (
+            "value",
+            payload.get(name).cloned().unwrap_or(JsonValue::Null),
+        ),
+    ])
+}
+
+fn wire_request_record(
+    payload: JsonValue,
+    ordinal: usize,
+    replacements: &[(String, String)],
+) -> Result<JsonValue, String> {
+    let payload = sanitize_wire_value(&payload, replacements);
+    let object = payload
+        .as_object()
+        .ok_or_else(|| "OpenRouter payload must be an object".to_owned())?;
+    let messages = object
+        .get("messages")
+        .and_then(JsonValue::as_array)
+        .unwrap_or(&[]);
+    let roles = messages
+        .iter()
+        .map(|message| {
+            message
+                .get("role")
+                .and_then(JsonValue::as_str)
+                .unwrap_or("<missing>")
+                .to_owned()
+        })
+        .collect::<Vec<_>>();
+    let assistant_messages = messages
+        .iter()
+        .filter(|message| message.get("role").and_then(JsonValue::as_str) == Some("assistant"))
+        .collect::<Vec<_>>();
+    let message_records = messages
+        .iter()
+        .enumerate()
+        .map(|(index, message)| {
+            let content = message.get("content").cloned().unwrap_or(JsonValue::Null);
+            let structural = message
+                .to_json_string()
+                .expect("sanitized message encodes");
+            let content = content.to_json_string().expect("sanitized content encodes");
+            JsonValue::object([
+                ("ordinal", JsonValue::from((index + 1) as u64)),
+                ("role", JsonValue::String(roles[index].clone())),
+                ("structural_sha256", JsonValue::String(sha256(structural.as_bytes()))),
+                ("content_sha256", JsonValue::String(sha256(content.as_bytes()))),
+            ])
+        })
+        .collect::<Vec<_>>();
+    let system = JsonValue::Array(
+        messages
+            .iter()
+            .filter(|message| {
+                matches!(message.get("role").and_then(JsonValue::as_str), Some("system") | Some("developer"))
+            })
+            .cloned()
+            .collect(),
+    );
+    let system_prompt_sha256 = if system.as_array().is_some_and(|items| items.is_empty()) {
+        JsonValue::Null
+    } else {
+        JsonValue::String(sha256(
+            system
+                .to_json_string()
+                .expect("system messages encode")
+                .as_bytes(),
+        ))
+    };
+    let tools = object
+        .get("tools")
+        .and_then(JsonValue::as_array)
+        .unwrap_or(&[]);
+    let tool_names = tools
+        .iter()
+        .map(|tool| {
+            tool.get("function")
+                .and_then(|function| function.get("name"))
+                .or_else(|| tool.get("name"))
+                .and_then(JsonValue::as_str)
+                .unwrap_or("<unnamed>")
+                .to_owned()
+        })
+        .collect::<Vec<_>>();
+    let tool_json = JsonValue::Array(tools.to_vec())
+        .to_json_string()
+        .expect("tools encode");
+    let known = [
+        "model", "messages", "tools", "reasoning", "reasoning_effort", "temperature", "seed",
+        "max_tokens", "max_completion_tokens", "tool_choice", "parallel_tool_calls", "stream",
+        "stream_options", "provider",
+    ];
+    let other = JsonValue::Object(
+        object
+            .iter()
+            .filter(|(name, _)| !known.contains(&name.as_str()))
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect(),
+    );
+    let canonical_payload = payload
+        .to_json_string()
+        .map_err(|error| error.to_string())?;
+    Ok(JsonValue::object([
+        ("ordinal", JsonValue::from(ordinal as u64)),
+        (
+            "canonical_request_sha256",
+            JsonValue::String(sha256(canonical_payload.as_bytes())),
+        ),
+        (
+            "model",
+            object.get("model").cloned().unwrap_or(JsonValue::Null),
+        ),
+        ("message_count", JsonValue::from(messages.len() as u64)),
+        ("message_roles", strings(roles)),
+        ("messages", JsonValue::Array(message_records)),
+        ("system_prompt_sha256", system_prompt_sha256),
+        (
+            "assistant_reasoning_content",
+            if assistant_messages.is_empty() {
+                JsonValue::Null
+            } else {
+                JsonValue::Bool(
+                    assistant_messages
+                        .iter()
+                        .all(|message| message.get("reasoning_content").is_some()),
+                )
+            },
+        ),
+        ("tool_count", JsonValue::from(tool_names.len() as u64)),
+        ("tool_names", strings(tool_names)),
+        ("tool_schema_sha256", JsonValue::String(sha256(tool_json.as_bytes()))),
+        (
+            "reasoning",
+            object
+                .get("reasoning")
+                .cloned()
+                .or_else(|| object.get("reasoning_effort").cloned())
+                .unwrap_or(JsonValue::Null),
+        ),
+        ("temperature", wire_field(&payload, "temperature")),
+        ("seed", wire_field(&payload, "seed")),
+        ("max_tokens", wire_field(&payload, "max_tokens")),
+        (
+            "max_completion_tokens",
+            wire_field(&payload, "max_completion_tokens"),
+        ),
+        ("tool_choice", wire_field(&payload, "tool_choice")),
+        (
+            "parallel_tool_calls",
+            wire_field(&payload, "parallel_tool_calls"),
+        ),
+        ("stream", wire_field(&payload, "stream")),
+        ("stream_options", wire_field(&payload, "stream_options")),
+        (
+            "provider_routing",
+            object.get("provider").cloned().unwrap_or(JsonValue::Null),
+        ),
+        ("other_model_affecting_top_level_fields", other),
+        ("canonical_payload", payload),
+    ]))
+}
+
+fn write_wire_evidence(
+    args: &Args,
+    capture: &OpenRouterRequestCapture,
+) -> Result<JsonValue, String> {
+    let requests = capture
+        .payloads()
+        .into_iter()
+        .enumerate()
+        .map(|(index, bytes)| {
+            let source = std::str::from_utf8(&bytes)
+                .map_err(|_| "OpenRouter serialized a non-UTF-8 JSON payload".to_owned())?;
+            let payload = JsonValue::parse(source)
+                .map_err(|_| "OpenRouter serialized invalid JSON payload".to_owned())?;
+            wire_request_record(payload, index + 1, &args.attempt_path_replacements)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let private = JsonValue::object([
+        ("schema_version", JsonValue::from("tea-pi-wire-request-evidence/v1")),
+        ("requests", JsonValue::Array(requests.clone())),
+        (
+            "returned_route",
+            JsonValue::object([
+                ("model", JsonValue::Null),
+                ("provider", JsonValue::Null),
+                ("provenance", JsonValue::Null),
+            ]),
+        ),
+    ]);
+    fs::create_dir_all(&args.evidence_dir).map_err(|error| error.to_string())?;
+    fs::write(
+        args.evidence_dir.join("wire-requests.json"),
+        format!(
+            "{}\n",
+            private
+                .to_json_string_pretty()
+                .map_err(|error| error.to_string())?
+        ),
+    )
+    .map_err(|error| error.to_string())?;
+    let summaries: Vec<JsonValue> = requests
+        .into_iter()
+        .map(|request| {
+            let mut object = request.as_object().expect("wire record is object").clone();
+            object.remove("canonical_payload");
+            JsonValue::Object(object)
+        })
+        .collect();
+    Ok(JsonValue::object([
+        ("source", JsonValue::from("direct-final-openrouter-boundary")),
+        ("request_count", JsonValue::from(summaries.len() as u64)),
+        ("requests", JsonValue::Array(summaries)),
+        ("routing_policy", args.provider_routing.clone()),
+        (
+            "returned_route",
+            JsonValue::object([
+                ("model", JsonValue::Null),
+                ("provider", JsonValue::Null),
+                ("provenance", JsonValue::Null),
+            ]),
+        ),
+    ]))
+}
+
 /// Export curated durable lineage next to the session log without copying
 /// provider payloads, secrets, or unbounded model/tool transcripts.
 fn write_jit_evidence(
@@ -541,6 +855,7 @@ struct ResultJsonInput<'a> {
     agent_ms: u64,
     final_text: String,
     trace: Vec<JsonValue>,
+    wire_evidence: JsonValue,
     candidate_count: u64,
     candidate_id: Option<String>,
     changed_surfaces: Vec<String>,
@@ -889,6 +1204,8 @@ fn result_json(input: ResultJsonInput<'_>) -> JsonValue {
                 ),
                 ("returned_model", JsonValue::Null),
                 ("returned_provider", JsonValue::Null),
+                ("returned_model_provenance", JsonValue::Null),
+                ("returned_provider_provenance", JsonValue::Null),
                 (
                     "thinking_level",
                     JsonValue::from(thinking_name(input.args.thinking)),
@@ -924,6 +1241,68 @@ fn result_json(input: ResultJsonInput<'_>) -> JsonValue {
                     JsonValue::from(sha256(surface_json.as_bytes())),
                 ),
                 (
+                    "prompt_tool_surface_sha256",
+                    JsonValue::from(sha256(
+                        JsonValue::Array(
+                            input
+                                .surface
+                                .tools
+                                .iter()
+                                .map(|tool| {
+                                    JsonValue::object([
+                                        ("name", JsonValue::String(tool.name.clone())),
+                                        ("description", JsonValue::String(tool.description.clone())),
+                                    ])
+                                })
+                                .collect(),
+                        )
+                        .to_json_string()
+                        .expect("prompt surface encodes")
+                        .as_bytes(),
+                    )),
+                ),
+                (
+                    "wire_tool_surface_sha256",
+                    input
+                        .wire_evidence
+                        .get("requests")
+                        .and_then(JsonValue::as_array)
+                        .and_then(|requests| requests.first())
+                        .and_then(|request| request.get("tool_schema_sha256"))
+                        .cloned()
+                        .unwrap_or(JsonValue::Null),
+                ),
+                (
+                    "execution_surface_sha256",
+                    JsonValue::from(sha256(
+                        JsonValue::Array(
+                            input
+                                .surface
+                                .tools
+                                .iter()
+                                .map(|tool| {
+                                    JsonValue::object([
+                                        ("name", JsonValue::String(tool.name.clone())),
+                                        (
+                                            "execution_mode",
+                                            JsonValue::String(
+                                                match tool.execution_mode {
+                                                    ToolExecutionMode::Sequential => "sequential",
+                                                    ToolExecutionMode::Parallel => "parallel",
+                                                }
+                                                .into(),
+                                            ),
+                                        ),
+                                    ])
+                                })
+                                .collect(),
+                        )
+                        .to_json_string()
+                        .expect("execution surface encodes")
+                        .as_bytes(),
+                    )),
+                ),
+                (
                     "active_tools",
                     JsonValue::Array(
                         input
@@ -933,6 +1312,27 @@ fn result_json(input: ResultJsonInput<'_>) -> JsonValue {
                             .map(|tool| JsonValue::from(tool.name.clone()))
                             .collect(),
                     ),
+                ),
+                (
+                    "authority",
+                    JsonValue::object([
+                        (
+                            "tools",
+                            JsonValue::Array(
+                                input
+                                    .surface
+                                    .tools
+                                    .iter()
+                                    .map(|tool| JsonValue::String(tool.name.clone()))
+                                    .collect(),
+                            ),
+                        ),
+                        ("shell", JsonValue::Bool(true)),
+                        (
+                            "secret_boundary",
+                            JsonValue::from("explicit shootout shell allowlist"),
+                        ),
+                    ]),
                 ),
                 ("research_tools", JsonValue::Array(Vec::new())),
                 ("subagents", JsonValue::Bool(false)),
@@ -949,6 +1349,71 @@ fn result_json(input: ResultJsonInput<'_>) -> JsonValue {
                 ("agent_ms", JsonValue::from(input.agent_ms)),
                 ("candidate_validation_ms", JsonValue::from(0_u64)),
                 ("rollover_ms", JsonValue::from(0_u64)),
+            ]),
+        ),
+        ("wire", input.wire_evidence),
+        (
+            "effective_policy",
+            JsonValue::object([
+                (
+                    "controlled",
+                    JsonValue::object([
+                        ("automatic_compaction", JsonValue::Bool(false)),
+                        ("compaction_threshold", JsonValue::Null),
+                        (
+                            "provider_retry",
+                            JsonValue::object([
+                                ("enabled", JsonValue::Bool(true)),
+                                ("max_retries", JsonValue::from(0_u64)),
+                            ]),
+                        ),
+                        ("request_timeout_seconds", JsonValue::from(300_u64)),
+                        ("idle_timeout_seconds", JsonValue::from(60_u64)),
+                        (
+                            "outer_attempt_timeout_seconds",
+                            JsonValue::from(input.args.outer_timeout_seconds),
+                        ),
+                        (
+                            "model_reasoning",
+                            JsonValue::from(thinking_name(input.args.thinking)),
+                        ),
+                        ("output_token_ceiling", optional_u64(input.args.max_output_tokens)),
+                        ("provider_routing", input.args.provider_routing.clone()),
+                        (
+                            "sampling",
+                            JsonValue::object([
+                                ("temperature", JsonValue::Null),
+                                ("seed", JsonValue::Null),
+                            ]),
+                        ),
+                    ]),
+                ),
+                (
+                    "native",
+                    JsonValue::object([(
+                        "tool_execution",
+                        JsonValue::Array(
+                            input
+                                .surface
+                                .tools
+                                .iter()
+                                .map(|tool| {
+                                    JsonValue::object([
+                                        ("name", JsonValue::String(tool.name.clone())),
+                                        (
+                                            "execution_mode",
+                                            JsonValue::from(match tool.execution_mode {
+                                                ToolExecutionMode::Sequential => "sequential",
+                                                ToolExecutionMode::Parallel => "parallel",
+                                            }),
+                                        ),
+                                    ])
+                                })
+                                .collect(),
+                        ),
+                    )]),
+                ),
+                ("observability_unknown", JsonValue::Array(Vec::new())),
             ]),
         ),
         (
@@ -1076,12 +1541,15 @@ fn main() -> Result<(), String> {
     }
     let api_key = env::var("OPENROUTER_API_KEY")
         .map_err(|_| "OPENROUTER_API_KEY must be supplied by vault".to_owned())?;
+    let request_capture = OpenRouterRequestCapture::default();
     let provider_config = match args.max_output_tokens {
         Some(maximum) => {
             OpenRouterConfig::new(&api_key, args.model.clone()).with_max_tokens(maximum)
         }
         None => OpenRouterConfig::new(api_key, args.model.clone()),
-    };
+    }
+    .with_provider_routing(args.provider_routing.clone())
+    .with_request_capture(request_capture.clone());
     let provider = Arc::new(OpenRouterProvider::new(provider_config));
     let (configuration, surface) =
         coding_configuration(&args.workspace, args.shell_environment.clone())?;
@@ -1269,6 +1737,7 @@ fn main() -> Result<(), String> {
         activated,
         final_snapshot_id,
     } = events;
+    let wire_evidence = write_wire_evidence(&args, &request_capture)?;
     let provider_error = provider
         .last_error_report()
         .map(|report| match report.status_code {
@@ -1343,6 +1812,7 @@ fn main() -> Result<(), String> {
         agent_ms,
         final_text,
         trace,
+        wire_evidence,
         candidate_count,
         candidate_id,
         changed_surfaces,

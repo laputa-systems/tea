@@ -22,6 +22,9 @@ def _run_metadata() -> dict:
         "thinking_level": DEFAULT_THINKING,
         "max_output_tokens": None,
         "timeout_seconds": 900,
+        "provider_routing": {"require_parameters": True},
+        "toolchain_manifest_sha256": "toolchain",
+        "run_class": "smoke-diagnostic",
         "condition_order": ["pi-static", "tea-static"],
     }
 
@@ -36,6 +39,11 @@ def _record(baseline: str, attempt_id: str, *, model_turns: int, tool_calls: int
     value["usage"]["generation"] = generation
     value["usage"]["prompt_total"] = value["usage"]["input"]
     value["usage"]["all_tokens"] = generation
+    if baseline == "pi-static":
+        value["trace"] = [
+            {"type": "turn_start"},
+            {"type": "tool_execution_start", "tool_name": "bash", "tool_call_id": "pi-call", "arguments_sha256": "arguments", "category": "validation"},
+        ]
     return {
         "baseline_id": baseline,
         "attempt_id": attempt_id,
@@ -44,6 +52,7 @@ def _record(baseline: str, attempt_id: str, *, model_turns: int, tool_calls: int
         "process": {"peak_rss_bytes": None},
         "timings": {"total_attempt_ms": 1},
         "patch_sha256": "patch",
+        "initial_workspace_state": {"commit": "base", "tree_sha256": "tree"},
     }
 
 
@@ -129,8 +138,9 @@ class CompareTest(unittest.TestCase):
         tea_turns = pair["tea"]["trace"]["turn_evidence"]
         self.assertEqual(tea_turns["source"], "tea-durable-session")
         self.assertEqual(tea_turns["turns"][0]["categories"], {"upstream_or_dependency": 1})
+        self.assertEqual(pair["pi"]["trace"]["turn_evidence"]["turns"][0]["categories"], {"validation": 1})
 
-    def test_surface_or_model_mismatch_is_not_comparable(self) -> None:
+    def test_model_mismatch_is_not_comparable(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
             _summary(directory)
@@ -140,6 +150,61 @@ class CompareTest(unittest.TestCase):
             analysis = compare_run(directory)
         self.assertFalse(analysis["comparable"])
         self.assertTrue(any("model identity" in reason for reason in analysis["comparability_reasons"]))
+
+    def test_native_prompt_and_schema_difference_remain_comparable(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            _summary(directory)
+            summary = json.loads((directory / "summary.json").read_text())
+            tea = summary["attempts"][1]["adapter_result"]
+            tea["surface"]["system_prompt_sha256"] = "tea-native-prompt"
+            tea["surface"]["tool_surface_sha256"] = "tea-native-tools"
+            tea["wire"]["requests"][0]["system_prompt_sha256"] = "tea-native-prompt"
+            tea["wire"]["requests"][0]["tool_schema_sha256"] = "tea-native-tools"
+            (directory / "summary.json").write_text(json.dumps(summary))
+            analysis = compare_run(directory)
+        self.assertTrue(analysis["comparable"])
+        self.assertTrue(analysis["comparability_checks"]["native_harness_surface_differences"])
+
+    def test_shell_authority_difference_is_a_controlled_condition_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            _summary(directory)
+            summary = json.loads((directory / "summary.json").read_text())
+            summary["attempts"][1]["adapter_result"]["surface"]["authority"]["secret_boundary"] = "different-boundary"
+            (directory / "summary.json").write_text(json.dumps(summary))
+            analysis = compare_run(directory)
+        self.assertFalse(analysis["comparable"])
+        self.assertTrue(any("shell authority" in reason for reason in analysis["comparability_reasons"]))
+
+    def test_wire_mutations_fail_the_correct_integrity_check(self) -> None:
+        mutations = {
+            "pi_tools_empty": lambda pi, tea: pi["wire"]["requests"][0].update({"tool_count": 0, "tool_names": []}),
+            "tea_temperature_zero": lambda pi, tea: tea["wire"]["requests"][0]["temperature"].update({"present": True, "value": 0}),
+            "routing_mismatch": lambda pi, tea: tea["wire"]["requests"][0].update({"provider_routing": {"require_parameters": False}}),
+            "reasoning_content_missing": lambda pi, tea: pi["wire"]["requests"][0].update({"assistant_reasoning_content": False}),
+            "extra_tool": lambda pi, tea: tea["wire"]["requests"][0].update({"tool_count": 5, "tool_names": ["read", "bash", "edit", "find", "web"]}),
+        }
+        for name, mutate in mutations.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as temporary:
+                directory = Path(temporary)
+                _summary(directory)
+                summary = json.loads((directory / "summary.json").read_text())
+                pi, tea = summary["attempts"][0]["adapter_result"], summary["attempts"][1]["adapter_result"]
+                mutate(pi, tea)
+                (directory / "summary.json").write_text(json.dumps(summary))
+                analysis = compare_run(directory)
+                self.assertFalse(analysis["comparable"])
+                self.assertTrue(analysis["comparability_checks"]["wire_shape_bugs"] or analysis["comparability_checks"]["controlled_condition_mismatches"])
+
+    def test_unlinked_durable_requests_are_marked_incomplete_not_positionally_paired(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            _summary(directory)
+            analysis = compare_run(directory)
+        tea_turns = analysis["pairs"][0]["tea"]["trace"]["turn_evidence"]
+        self.assertFalse(tea_turns["complete"])
+        self.assertTrue(all(turn["provider_request"] is None for turn in tea_turns["turns"]))
 
     def test_repeated_pairs_report_median_and_worst_case(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

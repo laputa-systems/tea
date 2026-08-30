@@ -91,12 +91,22 @@ pub(super) fn build_payload(
             .as_object_mut()
             .expect("OpenRouter payload is an object");
         object.insert("tools".to_owned(), JsonValue::Array(tools));
-        // Require OpenRouter to select an endpoint that honors every supplied tool parameter;
-        // otherwise an endpoint may silently ignore the tool schema and fall back to prose.
+        // Require OpenRouter to select an endpoint that honors every supplied
+        // tool parameter unless a controlled embedding explicitly supplies a
+        // different routing object. The shootout uses that override on both
+        // harnesses; ordinary Tea operation keeps this established default.
         object.insert(
             "provider".to_owned(),
-            json_value!({"require_parameters": true}),
+            config
+                .provider_routing
+                .clone()
+                .unwrap_or_else(|| json_value!({"require_parameters": true})),
         );
+    } else if let Some(provider_routing) = &config.provider_routing {
+        payload
+            .as_object_mut()
+            .expect("OpenRouter payload is an object")
+            .insert("provider".to_owned(), provider_routing.clone());
     }
     to_bytes(&payload).map_err(|_| "cannot serialize OpenRouter request".to_owned())
 }

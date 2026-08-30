@@ -1,5 +1,46 @@
 # Tea static token-efficiency mission
 
+## Measurement hardening notice
+
+The historical numbers and conclusions below predate the current shootout
+hardening and are not a basis for a strict Tea-versus-Pi efficiency claim.
+They remain useful as leads about accounting and runtime behavior only.
+
+Current measurements use `tea-coding-eval-result/v3`, retain the sanitized
+final provider payload in each attempt's `surface/wire-requests.json`, and
+derive normalized wire facts from that artifact. The retained request witness,
+not a reconstructed prompt/tool surface or summary alone, establishes the
+model-facing request. Credentials are removed before it is persisted.
+
+The comparison distinguishes three kinds of facts:
+
+- Controlled model fields, wire shape, and observed provider routes must agree;
+  a mismatch blocks a strict efficiency conclusion.
+- Native prompt/tool-schema/execution differences are reported as harness
+  results. They are not silently hidden or treated as parity gates.
+- Unobserved fields remain unknown. In particular, missing route headers or
+  adapter timeout visibility prevent a strict conclusion rather than being
+  guessed into equivalence.
+
+Run `make pi-shootout-static` for the three-repeat smoke workflow, or
+`make pi-shootout-static-serious` for seven counterbalanced repeats. The
+provider-free `python3 -m evals.pi_shootout compare --run-dir <run>` output
+contains paired deltas and deterministic descriptive bootstrap intervals. It
+does not turn provider-default sampling into causal proof.
+
+Repeats are isolated parallel lanes by default: two requested repeats run in
+parallel, but the Pi/Tea condition order remains sequential within each lane.
+Each lane has its own worktree, evidence, dependencies, tool npm cache, HOME,
+and TMPDIR; only synchronized setup-cache consumption is shared. Set
+`PI_SHOOTOUT_PARALLEL_REPEATS=1` when a serialized lane schedule is required.
+
+The medium Express case uses a checked-in production-only dependency lock:
+cache preparation is explicit, while attempts use a per-attempt
+`npm ci --offline` tree outside the Git workspace. This removes ambient npm
+resolution from both the model condition and the fast validator.
+
+---
+
 You are a coding agent working on `tea`. Your single objective is to make the
 static Tea coding harness (`tea-static`) match or beat the Pi static harness on
 token efficiency while retaining correctness and the closed coding-tool
@@ -143,12 +184,13 @@ converter. These changes are covered by provider tests.
 
 The surfaces are still intentionally not byte-identical: Tea's safety-oriented
 tool schemas and concise builtin prompt differ from Pi's builtins. The analyzer
-continues to mark such pairs non-comparable rather than hiding that confounder;
-the shared contract is the exact ordered capability set (`read`, `bash`, `edit`,
-`find`), task/workspace/validator, model/provider, reasoning level, output
-ceiling, shell authority, and timeout. A future efficiency result must either
-control those remaining presentation differences or report them as a causal
-uncertainty.
+reports those native differences as measured harness results rather than hiding
+them or treating them as parity gates. The shared contract is the exact ordered
+capability set (`read`, `bash`, `edit`, `find`), task/workspace/validator,
+model/provider, reasoning level, output ceiling, shell authority, and timeout.
+A future efficiency result must report those presentation differences as a
+causal uncertainty, while direct wire-policy, route, or request-shape failures
+block a strict conclusion.
 
 ## Reusable comparison procedure
 

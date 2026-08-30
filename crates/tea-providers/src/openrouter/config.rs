@@ -2,7 +2,40 @@
 
 use super::super::retry::RetryPolicy;
 use super::transport::COMPLETIONS_URL;
-use std::{fmt, time::Duration};
+use std::{fmt, sync::{Arc, Mutex}, time::Duration};
+use tea_protocol::JsonValue;
+
+/// A deliberately narrow inspection seam for a request that is about to cross
+/// the OpenRouter HTTP boundary.
+///
+/// The provider never enables this by itself. Hosts that own private evidence
+/// can opt in, then persist or inspect the exact JSON bytes separately from
+/// credentials and HTTP headers. Keeping this at the payload/send boundary is
+/// important: callers must not reconstruct a request from higher-level model
+/// state after the fact.
+#[derive(Clone, Default)]
+pub struct OpenRouterRequestCapture {
+    payloads: Arc<Mutex<Vec<Vec<u8>>>>,
+}
+
+impl OpenRouterRequestCapture {
+    /// Record one exact serialized request payload before HTTP headers are added.
+    pub fn observe(&self, payload: &[u8]) {
+        self.payloads
+            .lock()
+            .expect("OpenRouter request capture mutex poisoned")
+            .push(payload.to_vec());
+    }
+
+    /// Return a stable snapshot without consuming evidence needed by another
+    /// post-run observer.
+    pub fn payloads(&self) -> Vec<Vec<u8>> {
+        self.payloads
+            .lock()
+            .expect("OpenRouter request capture mutex poisoned")
+            .clone()
+    }
+}
 
 /// Error raised when explicit OpenRouter configuration violates an adapter invariant.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -45,7 +78,7 @@ impl std::error::Error for OpenRouterConfigError {}
 ///
 /// The API key is supplied directly by the embedding. This adapter never reads an environment
 /// variable, a home-directory credential, or a provider configuration file.
-#[derive(Clone, Eq, PartialEq)]
+#[derive(Clone)]
 pub struct OpenRouterConfig {
     pub(super) api_key: String,
     pub(super) model: String,
@@ -57,6 +90,12 @@ pub struct OpenRouterConfig {
     pub(super) request_timeout: Duration,
     pub(super) stall_timeout: Duration,
     pub(super) retry_policy: RetryPolicy,
+    // An explicit policy is optional so regular Tea/OpenRouter operation keeps
+    // its established `require_parameters` behavior. The shootout supplies a
+    // controlled policy to both native harnesses instead of changing that
+    // production default.
+    pub(super) provider_routing: Option<JsonValue>,
+    pub(super) request_capture: Option<OpenRouterRequestCapture>,
 }
 
 impl OpenRouterConfig {
@@ -70,6 +109,8 @@ impl OpenRouterConfig {
             request_timeout: Duration::from_secs(300),
             stall_timeout: Duration::from_secs(60),
             retry_policy: RetryPolicy::standard(),
+            provider_routing: None,
+            request_capture: None,
         }
     }
 
@@ -109,6 +150,20 @@ impl OpenRouterConfig {
     /// Replace the bounded backoff policy used for replay-safe transport attempts.
     pub fn with_retry_policy(mut self, retry_policy: RetryPolicy) -> Self {
         self.retry_policy = retry_policy;
+        self
+    }
+
+    /// Override the OpenRouter routing object for this explicit provider
+    /// instance. This is used by controlled evaluations; normal callers may
+    /// leave it unset and retain the adapter's existing tool-routing default.
+    pub fn with_provider_routing(mut self, provider_routing: JsonValue) -> Self {
+        self.provider_routing = Some(provider_routing);
+        self
+    }
+
+    /// Observe exact serialized payloads at the final pre-HTTP boundary.
+    pub fn with_request_capture(mut self, request_capture: OpenRouterRequestCapture) -> Self {
+        self.request_capture = Some(request_capture);
         self
     }
 
@@ -173,6 +228,8 @@ impl fmt::Debug for OpenRouterConfig {
             .field("request_timeout", &self.request_timeout)
             .field("stall_timeout", &self.stall_timeout)
             .field("retry_policy", &self.retry_policy)
+            .field("provider_routing", &self.provider_routing)
+            .field("request_capture", &self.request_capture.as_ref().map(|_| "enabled"))
             .finish()
     }
 }

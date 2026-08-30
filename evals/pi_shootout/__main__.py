@@ -25,6 +25,11 @@ def parser() -> argparse.ArgumentParser:
         item.add_argument("--max-output-tokens", default="unlimited", help="must be unlimited for the fixed v0 experiment")
         item.add_argument("--timeout-seconds", type=int, default=900)
         item.add_argument("--repeats", type=int, default=1)
+        item.add_argument(
+            "--parallel-repeats",
+            type=int,
+            help="independent repeat lanes to run concurrently; defaults to --repeats",
+        )
         item.add_argument("--seed", type=int, default=20260823)
         item.add_argument("--cache-root", type=Path, default=Path("/tmp/tea-pi-shootout-cache"))
         item.add_argument("--workspace-root", type=Path, default=Path("/tmp/tea-pi-shootout-workspaces"))
@@ -42,7 +47,22 @@ def parser() -> argparse.ArgumentParser:
 
 def _config(args: argparse.Namespace) -> Config:
     maximum = None if args.max_output_tokens == "unlimited" else int(args.max_output_tokens)
-    return Config(args.task, args.provider, args.model, args.thinking, maximum, args.repeats, args.seed, args.cache_root, args.workspace_root, args.out, timeout_seconds=args.timeout_seconds, keep_worktrees=getattr(args, "keep_worktrees", False), static_only=getattr(args, "static_only", False))
+    return Config(
+        args.task,
+        args.provider,
+        args.model,
+        args.thinking,
+        maximum,
+        args.repeats,
+        args.seed,
+        args.cache_root,
+        args.workspace_root,
+        args.out,
+        timeout_seconds=args.timeout_seconds,
+        keep_worktrees=getattr(args, "keep_worktrees", False),
+        static_only=getattr(args, "static_only", False),
+        parallel_repeats=getattr(args, "parallel_repeats", None),
+    )
 
 
 def main(argv: list[str] | None = None) -> int:

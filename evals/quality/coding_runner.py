@@ -17,6 +17,7 @@ from pathlib import Path
 import signal
 import subprocess
 import sys
+import tempfile
 from typing import Any, Iterable
 
 from .coding_cases import (
@@ -24,6 +25,7 @@ from .coding_cases import (
     dependency_cache_path,
     load_cases,
     materialize_clean_worktree,
+    provision_validator_dependencies,
     remove_worktree,
     run_validator,
 )
@@ -269,13 +271,14 @@ def _resolve_env_file(env_file: Path) -> Path:
 
 
 def prepare_cache(*, cache_root: Path, case_ids: Iterable[str] | None = None) -> dict[str, Any]:
-    """Populate exact bare repositories before any offline scoring attempt."""
+    """Populate bare repositories and validator tarballs before offline scoring."""
     selected = set(case_ids or ())
     cases = [case for case in load_cases() if not selected or case["id"] in selected]
     missing = selected - {case["id"] for case in cases}
     if missing:
         raise CodingRunError(f"unknown coding case(s): {', '.join(sorted(missing))}")
     cached: list[str] = []
+    dependency_caches: dict[str, dict[str, Any]] = {}
     for case in cases:
         # Materialization owns the cache protocol. This private import avoids
         # duplicating its repository/commit allowlist at the CLI boundary.
@@ -283,8 +286,23 @@ def prepare_cache(*, cache_root: Path, case_ids: Iterable[str] | None = None) ->
 
         cache_bare_repository(case["baseline"]["repository"], case["baseline"]["commit"], cache_root, populate=True)
         cache_bare_repository(case["baseline"]["repository"], case["baseline"]["fix_commit"], cache_root, populate=True)
+        if case.get("validator_dependencies") is not None:
+            # Network access is permitted only in this explicit preparation
+            # command. The temporary module tree is discarded; scoring creates
+            # a fresh offline tree per attempt from this content cache.
+            with tempfile.TemporaryDirectory(prefix=f"tea-quality-{case['id']}-") as temporary:
+                prepared = provision_validator_dependencies(
+                    case, cache_root, Path(temporary) / "dependencies", populate_cache=True
+                )
+            dependency_caches[case["id"]] = {key: value for key, value in prepared.items() if key != "node_path"}
         cached.append(case["id"])
-    return {"schema_version": CODING_SCHEMA, "operation": "prepare-cache", "cases": cached, "cache_root": str(cache_root)}
+    return {
+        "schema_version": CODING_SCHEMA,
+        "operation": "prepare-cache",
+        "cases": cached,
+        "dependency_caches": dependency_caches,
+        "cache_root": str(cache_root),
+    }
 
 
 def run_coding_cases(

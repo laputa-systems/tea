@@ -22,9 +22,9 @@ def summary(*, pi: bool = False, static: bool = False, jit: bool = False, decisi
 
 
 class ReportTest(unittest.TestCase):
-    def test_static_report_has_surface_parity_and_results(self) -> None:
+    def test_static_report_has_native_surfaces_and_results(self) -> None:
         text = static_report(summary())
-        self.assertIn("Harness-surface parity", text)
+        self.assertIn("Native harness surfaces", text)
         self.assertIn("Generation tokens", text)
 
     def test_evolution_report_classifies_positive_flip(self) -> None:
