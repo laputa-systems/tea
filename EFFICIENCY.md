@@ -109,32 +109,65 @@ failure and is retained as a non-comparable attempt. The durable report is
 `evals/pi_shootout/reports` output from the run; treat the raw provider usage
 and adapter source as authoritative when the report fields disagree.
 
+The latest passing pair reports Tea at `35,154` uncached generation tokens
+versus Pi at `32,376` (`+2,778`, or `+8.6%`). Tea used 28 model turns and 34
+tool calls versus Pi's 24 and 32. The comparison command records the observed
+Tea work categories and marks the pair non-comparable until the differing
+model-facing prompt/tool surfaces are deliberately controlled.
+
+## Reusable comparison procedure
+
+The comparison work is checked in as a provider-free command. After any
+static-only run, invoke:
+
+```sh
+python3 -m evals.pi_shootout compare \
+  --run-dir /tmp/tea-pi-shootout/runs/<run-id>
+```
+
+This writes `reports/comparison.json` (machine-readable) and
+`reports/comparison.md` (reviewable). It validates the shared task, baseline,
+validator, model, provider, thinking level, output ceiling, timeout, and active
+tool identity before comparing attempts. It consumes adapter-normalized `usage`
+and `counts` directly and reports Tea-minus-Pi deltas plus median/min/max
+deltas across repeated pairs. Provider-request `null` remains unknown; it is
+never inferred from model turns.
+
+For turn attribution, the analyzer reads Tea's retained durable session when
+available. Each turn includes stop reason, provider usage, tool names, tool
+result errors, and a category (`inspection`, `edit`, `validation`,
+`upstream_or_dependency`, `repository_state`, or `shell`) with argument
+digests rather than raw commands. Pi's trace is marked partial if it lacks
+those fields. The report has separate **Evidence**, **Hypotheses**, and
+**Unknowns** sections, so observed extra work is not mistaken for a causal
+runtime effect. Do not hand-reconstruct token totals or declare a regression
+from one unseeded attempt.
+
 ## Friction points found
 
 Treat these as evidence-backed leads, not permission to guess at a fix.
 
-1. **Usage accounting is asymmetric.** Pi's reporter subtracts cache reads
-   before computing `input` and `generation`; Tea currently does not. Add
-   explicit, tested fields for raw prompt tokens, uncached input, cache reads,
-   cache writes, output, and all-token totals. Make the comparison use one
-   definition on both adapters. Preserve provider-reported cost separately;
-   the captured Tea cost was `provider-reported` while Pi's was a
-   `catalog-estimate`, so those dollar totals cannot be ranked.
+1. **Resolved: usage accounting is now symmetric.** Both reporters publish
+   raw prompt total, uncached input, output, uncached generation, all-token
+   total, cache reads, and cache writes under the formulas above. Preserve
+   provider-reported cost separately; the captured Tea cost was
+   `provider-reported` while Pi's was a `catalog-estimate`, so those dollar
+   totals cannot be ranked.
 
-2. **Tea replays a growing context across many provider requests.** The Tea
-   session recorded 24 settled provider requests. Raw prompt usage grew from
-   `1,844` to `18,654` tokens per request, with cache reads growing from zero
-   to `17,920`. This is the largest likely runtime cost after accounting is
-   normalized. Inspect context projection, request construction, cache-friendly
-   ordering, and stop/continuation behavior before changing the model prompt.
+2. **Tea replays a growing context across many provider requests.** In the
+   latest passing static pair, the Tea session recorded 28 settled requests;
+   raw prompt usage grew from `1,844` to `14,367` tokens per request, with
+   cache reads growing from zero to `13,568`. This is the largest likely
+   runtime cost after accounting is normalized. Inspect context projection,
+   request construction, cache-friendly ordering, and stop/continuation
+   behavior before changing the model prompt.
 
-3. **Telemetry counts do not line up.** Tea's result reports 14 turns and 22
-   tool executions, while its durable session contains 24 provider requests
-   and 31 `tool_started` records. Pi's result reports one user message and 38
-   tool calls, while its trace contains 38 model turn boundaries. Establish a
-   single meaning for user turns, model requests, tool calls, and retries, and
-   expose provider-request counts. Add regression tests so a report cannot
-   silently compare unlike counters.
+3. **Resolved: telemetry meanings now line up.** `turns` means durable user
+   messages, `model_turns` means model-loop turns, `tool_calls` means assistant
+   tool-call blocks, and `retries` means attempts with an explicit retry reason.
+   Tea exposes exact durable provider requests; Pi leaves that field null
+   because its SDK does not expose wire-request count. The reusable `compare`
+   command consumes these fields without inference.
 
 4. **The tool surfaces are closed but not identical.** Both runs expose the
    same ordered names (`read`, `bash`, `edit`, `find`), but their system-prompt
@@ -144,12 +177,13 @@ Treat these as evidence-backed leads, not permission to guess at a fix.
    tokenized request bytes; do not add tools or weaken capability boundaries
    merely to make hashes match.
 
-5. **The model did extra exploratory work under Tea.** In this attempt Tea
-   issued repeated dependency/source-history checks, several test-environment
-   probes, and added a `History.md` changelog entry; Pi changed only the source
-   and test files. The extra scope is observable, but it may be model behavior
-   caused by prompt/tool semantics rather than a kernel defect. Measure it
-   across repeated runs before hard-coding a policy.
+5. **The model did extra exploratory work under Tea.** In the latest passing
+   attempt, the durable session records five upstream/dependency probes, six
+   validation turns, and twelve other shell turns; Pi's adapter trace does not
+   retain equivalent command arguments. The extra scope is observable, but it
+   may be model behavior caused by prompt/tool semantics rather than a kernel
+   defect. Use `python3 -m evals.pi_shootout compare` across repeated runs
+   before hard-coding a policy.
 
 6. **Reasoning and provider fields are not symmetric.** Tea reported `9,317`
    reasoning tokens; Pi reported no reasoning value. Treat Pi's null as
@@ -157,6 +191,10 @@ Treat these as evidence-backed leads, not permission to guess at a fix.
    fields.
 
 ## Required work sequence
+
+The accounting and telemetry normalization in steps 1–3 is complete in the
+current tree. Verify it with `make pi-shootout-check` and the `compare` command;
+do not reopen those fixes unless a regression test fails.
 
 1. Read the existing shootout contract, adapters, OpenRouter usage parser,
    report schema, and focused tests. Identify the exact request boundary and

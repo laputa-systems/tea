@@ -24,6 +24,26 @@ OpenRouter, `deepseek/deepseek-v4-flash-0731`, high thinking, no output-token
 ceiling, and the same 900-second attempt timeout. The model ID is fixed for
 this v0 run and is not silently substituted.
 
+## Reusable static comparison
+
+After a run, use the provider-free comparison command instead of inspecting
+the raw trace by hand:
+
+```sh
+python3 -m evals.pi_shootout compare \
+  --run-dir /tmp/tea-pi-shootout/runs/<run-id>
+```
+
+It writes `reports/comparison.json` and `reports/comparison.md`. The analyzer
+consumes normalized `usage` and `counts` directly, checks shared task/model/
+provider/validator identity, reports Tea-minus-Pi deltas and repeated-run
+median/min/max values, and summarizes per-turn work categories. When retained,
+Tea's durable `harness/session.tea/session.jsonl` supplies request usage, stop
+reasons, tool names, and redacted argument digests. Pi's adapter trace is
+treated as partial evidence when it does not expose the same fields. The
+output separates evidence, hypotheses, and unknowns; a single run is never
+presented as causal proof.
+
 Both adapters receive the repository's closed `read`, `bash`, `edit`, `find`
 coding-bundle contract. Their implementations remain intentionally different;
 the shared bundle records the comparable model-facing surface.

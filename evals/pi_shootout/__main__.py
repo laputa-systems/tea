@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 
+from .compare import ComparisonError, compare_run, write_comparison
 from .runner import Config, DEFAULT_MODEL, DEFAULT_THINKING, ShootoutError, plan, run
 
 
@@ -32,6 +33,10 @@ def parser() -> argparse.ArgumentParser:
             item.add_argument("--keep-worktrees", action="store_true")
         item.add_argument("--static-only", action="store_true", help="run only pi-static and tea-static")
     sub.add_parser("check", help="run only Python provider-free shootout tests")
+    compare = sub.add_parser("compare", help="compare persisted pi-static and tea-static evidence")
+    compare.add_argument("--run-dir", type=Path, required=True)
+    compare.add_argument("--output", type=Path)
+    compare.add_argument("--markdown", type=Path)
     return command
 
 
@@ -52,10 +57,18 @@ def main(argv: list[str] | None = None) -> int:
             for report in result["reports"]:
                 print(f"report: {report}")
             return 0
+        if args.command == "compare":
+            analysis = compare_run(args.run_dir.resolve())
+            output = args.output or args.run_dir / "reports" / "comparison.json"
+            markdown = args.markdown or args.run_dir / "reports" / "comparison.md"
+            write_comparison(analysis, output, markdown)
+            print(f"comparison: {output}")
+            print(f"comparison report: {markdown}")
+            return 0
         if args.command == "check":
-            command = [sys.executable, "-m", "unittest", "evals.pi_shootout.test_contract", "evals.pi_shootout.test_report"]
+            command = [sys.executable, "-m", "unittest", "evals.pi_shootout.test_contract", "evals.pi_shootout.test_report", "evals.pi_shootout.test_compare"]
             return subprocess.run(command, cwd=Path(__file__).resolve().parents[2], check=False).returncode
-    except (ShootoutError, OSError, ValueError) as error:
+    except (ComparisonError, ShootoutError, OSError, ValueError) as error:
         print(f"pi-shootout error: {error}", file=sys.stderr)
         return 2
     return 2

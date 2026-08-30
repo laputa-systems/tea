@@ -4,6 +4,32 @@ The shootout should execute **three conditions** from fresh copies of the same p
 2. `tea-static`
 3. `tea-jit`
 
+## Reusable comparison workflow
+
+The static efficiency comparison is already implemented as a provider-free
+command. Do not ask an agent to rediscover token or turn accounting from raw
+JSONL:
+
+```sh
+vault OPENROUTER_API_KEY -- make pi-shootout-static PI_SHOOTOUT_REPEATS=3
+python3 -m evals.pi_shootout compare \
+  --run-dir /tmp/tea-pi-shootout/runs/<run-id>
+```
+
+The second command emits `reports/comparison.json` and
+`reports/comparison.md`. It validates the shared task/model/provider/validator
+identity, consumes normalized adapter usage and counters directly, computes
+Tea-minus-Pi deltas and repeated-run median/min/max values, and summarizes
+per-turn work categories. Tea's durable session evidence contributes request
+usage, stop reasons, tool names, and redacted argument digests; missing Pi
+fields remain unknown rather than being inferred. The report separates
+evidence, hypotheses, and unknowns and fails closed when terminal status,
+validator, or model-facing surface identity is inconsistent.
+
+The only active coding tools in every condition are `read`, `bash`, `edit`, and
+`find` (the closed bundle; no extra tools). `tea-jit` remains a separate
+evolution condition and is not part of the static efficiency comparison.
+
 It should then emit two first-class reports:
 
 * `static.md`: Pi static versus Tea static.
@@ -389,6 +415,7 @@ The normalized result must have this semantic shape:
 
   "counts": {
     "turns": 0,
+    "model_turns": 0,
     "provider_requests": null,
     "tool_calls": 0,
     "retries": 0,
@@ -397,8 +424,10 @@ The normalized result must have this semantic shape:
 
   "usage": {
     "input": 0,
+    "prompt_total": 0,
     "output": 0,
     "generation": 0,
+    "all_tokens": 0,
     "reasoning": null,
     "cache_read": 0,
     "cache_write": 0
@@ -431,28 +460,19 @@ The exact JSON formatting may differ, but do not omit the semantic fields.
 
 ## Token semantics
 
-The primary token count is:
+For OpenRouter, `prompt_tokens` includes cached prompt tokens. Both adapters
+must publish these normalized quantities directly:
 
 ```text
-generation = input + output
+prompt_total        = prompt_tokens
+input               = max(prompt_total - cache_read - cache_write, 0)
+generation          = input + output
+all_tokens          = prompt_total + output
 ```
 
-Do not define the primary total as:
-
-```text
-input + output + cache_read + cache_write
-```
-
-Report these independently:
-
-```text
-input
-output
-generation
-reasoning
-cache_read
-cache_write
-```
+Report `input`, `prompt_total`, `output`, `generation`, `all_tokens`,
+`reasoning`, `cache_read`, and `cache_write` independently. Never recompute
+generation in the report or add cache reads a second time.
 
 Unknown fields must remain `null` where distinguishable from zero.
 
@@ -595,7 +615,7 @@ no discovered skills
 no discovered prompt templates
 no discovered custom providers
 no task-provided subagent tools
-active model-facing tools are exactly edit/find/bash/read
+active model-facing tools are exactly read/bash/edit/find
 ```
 
 If a repository resource is discovered unexpectedly, fail the adapter as an infrastructure/configuration error rather than silently including it.
@@ -646,12 +666,18 @@ Use Pi’s session statistics and message usage to populate:
 
 ```text
 input
+prompt_total
 output
+generation
+all_tokens
+reasoning
 cache_read
 cache_write
 cost estimate
 tool calls
 turns
+model turns
+provider requests where exact
 ```
 
 Capture the returned model/provider metadata from assistant messages where available.
@@ -903,7 +929,7 @@ Configure:
 
 ```text
 pinned default Luau coding bundle
-edit/find/bash/read
+read/bash/edit/find
 OpenRouter provider
 same model
 same thinking level
@@ -1236,7 +1262,9 @@ attempts/
 reports/
 ├── static.md
 ├── evolution.md
-└── surface-diff.md
+├── surface-diff.md
+├── comparison.json
+└── comparison.md
 ```
 
 Bound retained stdout/stderr.
@@ -1775,7 +1803,7 @@ Keep the durable session and artifact store as Tea’s authoritative evidence wh
 
 ---
 
-# 28. Future-facing result without future machinery
+# 28. Future-facing result and reusable comparison
 
 The generated:
 
@@ -1804,9 +1832,16 @@ candidate hypothesis
 candidate outcome
 ```
 
-Do not implement the later analyzer or optimizer now.
+The provider-free comparison analyzer is available as:
 
-Do not add placeholder classes for future agents.
+```sh
+python3 -m evals.pi_shootout compare --run-dir <out>/runs/<run-id>
+```
+
+It consumes `summary.json` and normalized adapter results, reads retained Tea
+session evidence when available, and emits `reports/comparison.json` plus
+`reports/comparison.md`. It is an evidence/reporting tool, not an optimizer;
+do not add automatic tuning or future-agent placeholder classes.
 
 The schema itself is sufficient scaffolding.
 
@@ -1839,6 +1874,8 @@ Test:
 * output-path safety;
 * bounded logs;
 * oracle commit absent from worktree.
+* reusable comparison deltas, identity mismatch, durable turn categories, and
+  repeated-run median/min/max aggregation.
 
 ## TypeScript
 
@@ -1892,7 +1929,7 @@ The implementation is complete only when:
 * The known fix commit is absent from attempt object databases.
 * Every condition uses the same external validator.
 * Every condition uses the same requested model and thinking level.
-* Both Pi and Tea have `edit/find/bash/read`.
+* Both Pi and Tea have `read/bash/edit/find`.
 * Neither Pi nor Tea has a web-search tool.
 * Both can run `curl` through bash.
 * Provider keys are absent from coding-tool child environments.

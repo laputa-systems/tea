@@ -127,7 +127,7 @@ pi-shootout-static-plan:
 	PYTHONDONTWRITEBYTECODE=1 python3 -m evals.pi_shootout plan $(PI_SHOOTOUT_ARGS) --static-only
 
 pi-shootout-check:
-	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest evals.pi_shootout.test_contract evals.pi_shootout.test_report
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest evals.pi_shootout.test_contract evals.pi_shootout.test_report evals.pi_shootout.test_compare
 	npm --prefix evals/pi_shootout/sdk ci
 	npm --prefix evals/pi_shootout/sdk run check
 	npm --prefix evals/pi_shootout/sdk test
