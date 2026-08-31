@@ -5,10 +5,13 @@
 
 #![allow(dead_code)]
 
+use super::{PROVIDER_ID, REASONING_DETAILS_CONTEXT_KIND};
 use super::accounting::{OpenRouterCostSource, OpenRouterCostTurn};
 use crate::json::{JsonValue, from_bytes};
 use crate::scheduler::ModelStreamEvent;
-use crate::state::{AgentToolCall, SerializedJson, StopReason, ToolCallId, Usage};
+use crate::state::{
+    AgentToolCall, OpaqueProviderContextItem, SerializedJson, StopReason, ToolCallId, Usage,
+};
 use std::collections::VecDeque;
 
 pub(super) struct ParsedResponse {
@@ -378,6 +381,11 @@ fn parse_response_inner(bytes: &[u8], allow_partial_sse: bool) -> Result<ParsedR
     {
         events.push(ModelStreamEvent::TextDelta(content.to_owned()));
     }
+    if let Some(details) = message.get("reasoning_details").and_then(JsonValue::as_array)
+        && let Some(event) = reasoning_details_context_event(details)?
+    {
+        events.push(event);
+    }
     let mut has_tool_calls = false;
     if let Some(calls) = message.get("tool_calls").and_then(JsonValue::as_array) {
         for (index, call) in calls.iter().enumerate() {
@@ -475,6 +483,141 @@ fn parse_usage(usage: &JsonValue) -> Usage {
     }
 }
 
+/// Retain OpenRouter's structured reasoning continuation exactly where the
+/// core can durably associate it with the originating assistant turn. The
+/// regular transcript and tools never receive this provider-private field;
+/// `OpenAiContextHook` replays it only when building a later OpenRouter turn.
+fn reasoning_details_context_event(details: &[JsonValue]) -> Result<Option<ModelStreamEvent>, String> {
+    let mut retained = Vec::new();
+    for detail in details {
+        append_reasoning_detail(&mut retained, detail);
+    }
+    if retained.is_empty() {
+        return Ok(None);
+    }
+    let payload = JsonValue::Array(retained)
+        .to_json_string()
+        .map_err(|_| "OpenRouter reasoning details could not be encoded".to_owned())?;
+    let item = OpaqueProviderContextItem::new(
+        PROVIDER_ID,
+        REASONING_DETAILS_CONTEXT_KIND,
+        None,
+        payload,
+    )
+    .map_err(|_| "OpenRouter reasoning details exceeded the durable continuation boundary".to_owned())?;
+    Ok(Some(ModelStreamEvent::OpaqueProviderContext(item)))
+}
+
+/// Apply the same valid-detail and streaming-merge rules as the pinned Pi
+/// adapter. OpenRouter can split a single summary or text detail across SSE
+/// chunks; retaining each fragment would alter the next model request.
+fn append_reasoning_detail(details: &mut Vec<JsonValue>, detail: &JsonValue) {
+    if !valid_reasoning_detail(detail) {
+        return;
+    }
+    if let Some(last) = details.last_mut()
+        && merge_reasoning_detail(last, detail)
+    {
+        return;
+    }
+    details.push(detail.clone());
+}
+
+fn valid_reasoning_detail(detail: &JsonValue) -> bool {
+    let Some(object) = detail.as_object() else {
+        return false;
+    };
+    if !optional_nullable_string(object, "id")
+        || !optional_string(object, "format")
+        || !optional_number(object, "index")
+    {
+        return false;
+    }
+    match object.get("type").and_then(JsonValue::as_str) {
+        Some("reasoning.summary") => object.get("summary").and_then(JsonValue::as_str).is_some(),
+        Some("reasoning.encrypted") => object.get("data").and_then(JsonValue::as_str).is_some(),
+        Some("reasoning.text") => {
+            object.get("text").and_then(JsonValue::as_str).is_some()
+                && optional_nullable_string(object, "signature")
+        }
+        _ => false,
+    }
+}
+
+fn optional_nullable_string(
+    object: &std::collections::BTreeMap<String, JsonValue>,
+    name: &str,
+) -> bool {
+    match object.get(name) {
+        None | Some(JsonValue::Null) => true,
+        Some(value) => value.as_str().is_some(),
+    }
+}
+
+fn optional_string(object: &std::collections::BTreeMap<String, JsonValue>, name: &str) -> bool {
+    object.get(name).is_none_or(|value| value.as_str().is_some())
+}
+
+fn optional_number(object: &std::collections::BTreeMap<String, JsonValue>, name: &str) -> bool {
+    object.get(name).is_none_or(|value| value.as_f64().is_some())
+}
+
+fn merge_reasoning_detail(last: &mut JsonValue, detail: &JsonValue) -> bool {
+    let Some(detail_object) = detail.as_object() else {
+        return false;
+    };
+    let Some(detail_type) = detail_object.get("type").and_then(JsonValue::as_str) else {
+        return false;
+    };
+    let content_field = match detail_type {
+        "reasoning.text" => "text",
+        "reasoning.summary" => "summary",
+        _ => return false,
+    };
+    let Some(suffix) = detail_object.get(content_field).and_then(JsonValue::as_str) else {
+        return false;
+    };
+    let Some(last_object) = last.as_object_mut() else {
+        return false;
+    };
+    if last_object
+        .get("type")
+        .and_then(JsonValue::as_str)
+        != Some(detail_type)
+    {
+        return false;
+    }
+    let Some(JsonValue::String(current)) = last_object.get_mut(content_field) else {
+        return false;
+    };
+    current.push_str(suffix);
+    for field in ["id", "index"] {
+        if last_object.get(field).is_none_or(|value| matches!(value, JsonValue::Null))
+            && let Some(value) = detail_object.get(field)
+        {
+            last_object.insert(field.to_owned(), value.clone());
+        }
+    }
+    if last_object
+        .get("format")
+        .and_then(JsonValue::as_str)
+        .is_none_or(str::is_empty)
+        && let Some(value) = detail_object.get("format")
+    {
+        last_object.insert("format".to_owned(), value.clone());
+    }
+    if detail_type == "reasoning.text"
+        && !last_object
+            .get("signature")
+            .and_then(JsonValue::as_str)
+            .is_some_and(|value| !value.is_empty())
+        && let Some(value) = detail_object.get("signature")
+    {
+        last_object.insert("signature".to_owned(), value.clone());
+    }
+    true
+}
+
 #[derive(Default)]
 struct StreamingToolCall {
     id: Option<String>,
@@ -502,6 +645,7 @@ fn parse_sse_response(bytes: &[u8], allow_partial: bool) -> Result<ParsedRespons
 pub(super) struct StreamingSseDecoder {
     buffered: Vec<u8>,
     tool_calls: Vec<Option<StreamingToolCall>>,
+    reasoning_details: Vec<JsonValue>,
     finish_reason: Option<String>,
     usage: JsonValue,
     usage_bytes: Option<Vec<u8>>,
@@ -523,6 +667,7 @@ impl StreamingSseDecoder {
         Self {
             buffered: Vec::new(),
             tool_calls: Vec::new(),
+            reasoning_details: Vec::new(),
             finish_reason: None,
             usage: JsonValue::Null,
             usage_bytes: None,
@@ -561,6 +706,9 @@ impl StreamingSseDecoder {
         }
         if allow_partial && !self.saw_done && self.finish_reason.is_none() {
             self.finish_reason = Some("length".to_owned());
+        }
+        if let Some(event) = reasoning_details_context_event(&self.reasoning_details)? {
+            events.push_back(event);
         }
         let mut has_tool_calls = false;
         for (index, call) in self.tool_calls.into_iter().flatten().enumerate() {
@@ -680,6 +828,11 @@ impl StreamingSseDecoder {
             && !content.is_empty()
         {
             events.push_back(ModelStreamEvent::TextDelta(content.to_owned()));
+        }
+        if let Some(details) = delta.get("reasoning_details").and_then(JsonValue::as_array) {
+            for detail in details {
+                append_reasoning_detail(&mut self.reasoning_details, detail);
+            }
         }
         if let Some(calls) = delta.get("tool_calls").and_then(JsonValue::as_array) {
             for (position, call) in calls.iter().enumerate() {

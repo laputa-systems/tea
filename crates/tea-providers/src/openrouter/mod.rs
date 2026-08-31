@@ -11,6 +11,11 @@ mod payload;
 mod response;
 mod transport;
 
+/// Stable provider identity for private OpenRouter continuation records.
+pub(crate) const PROVIDER_ID: &str = "openrouter";
+/// Opaque continuation payload that holds OpenAI-compatible reasoning details.
+pub(crate) const REASONING_DETAILS_CONTEXT_KIND: &str = "reasoning_details";
+
 use super::retry::{RetryableError, retry_with_backoff};
 use crate::scheduler::{
     AdapterRequestObservation, CancellationToken, CancellationWait, ModelEventFuture,
@@ -20,7 +25,9 @@ use crate::state::{StopReason, Usage};
 use crate::transport_runtime::client as http_client;
 use accounting::{Accounting, add_usage};
 pub use accounting::{OpenRouterCostReport, OpenRouterCostSource, OpenRouterCostTurn};
-pub use config::{OpenRouterConfig, OpenRouterConfigError, OpenRouterRequestCapture};
+pub use config::{
+    OpenRouterConfig, OpenRouterConfigError, OpenRouterRequestCapture, OpenRouterReturnedRoute,
+};
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
 use std::pin::Pin;
@@ -528,6 +535,9 @@ impl OpenRouterEventStream {
                 }) => {
                     self.response_headers_received = true;
                     self.status_code = Some(status_code);
+                    if let Some(capture) = &self.provider.config.request_capture {
+                        capture.observe_response_headers(&headers);
+                    }
                     self.response_headers = headers;
                 }
                 Poll::Ready(StreamEvent::Chunk(bytes)) => {
@@ -1104,6 +1114,51 @@ data: [DONE]
     }
 
     #[test]
+    fn preserves_streamed_reasoning_details_for_openrouter_replay() {
+        let bytes = br#"data: {"id":"gen_reasoning","choices":[{"delta":{"reasoning_details":[{"type":"reasoning.text","text":"inspect ","format":"unknown","index":0}]},"finish_reason":null}]}
+
+data: {"id":"gen_reasoning","choices":[{"delta":{"reasoning_details":[{"type":"reasoning.text","text":"the router","format":"unknown","index":0}]},"finish_reason":"stop"}]}
+
+data: [DONE]
+
+"#;
+        let parsed = parse_response(bytes).expect("SSE response parses");
+        let details = parsed.events.iter().find_map(|event| match event {
+            ModelStreamEvent::OpaqueProviderContext(item)
+                if item.provider() == "openrouter" && item.kind() == "reasoning_details" =>
+            {
+                Some(item.payload())
+            }
+            _ => None,
+        });
+        let details = JsonValue::parse(details.expect("reasoning details are retained"))
+            .expect("details JSON");
+        assert_eq!(
+            details
+                .as_array()
+                .and_then(|items| items.first())
+                .and_then(|item| item.get("text"))
+                .and_then(JsonValue::as_str),
+            Some("inspect the router")
+        );
+    }
+
+    #[test]
+    fn drops_streamed_reasoning_details_with_null_format_or_index() {
+        let bytes = br#"data: {"id":"gen_reasoning","choices":[{"delta":{"reasoning_details":[{"type":"reasoning.text","text":"ignored","format":null,"index":null}]},"finish_reason":"stop"}]}
+
+data: [DONE]
+
+"#;
+        let parsed = parse_response(bytes).expect("SSE response parses");
+        assert!(parsed.events.iter().all(|event| !matches!(
+            event,
+            ModelStreamEvent::OpaqueProviderContext(item)
+                if item.provider() == "openrouter" && item.kind() == "reasoning_details"
+        )));
+    }
+
+    #[test]
     fn streaming_sse_decoder_exposes_each_delta_before_body_settlement() {
         let mut decoder = StreamingSseDecoder::new();
         let first = decoder
@@ -1214,7 +1269,7 @@ data: [DONE]
             socket
                 .write_all(
                     format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nX-OpenRouter-Provider: DeepSeek\r\nX-OpenRouter-Model: test-model\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                         first.len() + second.len()
                     )
                     .as_bytes(),
@@ -1315,6 +1370,9 @@ data: [DONE]
                 .expect("first event should arrive"),
             Some(ModelStreamEvent::TextDelta("first ".into()))
         );
+        let route = capture.returned_route();
+        assert_eq!(route.provider.as_deref(), Some("DeepSeek"));
+        assert_eq!(route.model.as_deref(), Some("test-model"));
         first_delta_received
             .recv_timeout(Duration::from_secs(1))
             .expect("mock server should send the first SSE record");
@@ -1620,6 +1678,21 @@ data: [DONE]
         assert!(payload.get("max_tokens").is_none());
         assert!(payload.get("temperature").is_none());
         assert!(payload.get("seed").is_none());
+    }
+
+    #[test]
+    fn disables_provider_storage_for_chat_completions() {
+        let config = OpenRouterConfig::try_new("key", "deepseek/deepseek-v4-flash-0731").unwrap();
+        let payload = build_payload(
+            &config,
+            &ModelRequest {
+                context: "[]".into(),
+                ..ModelRequest::default()
+            },
+        )
+        .unwrap();
+        let payload = JsonValue::parse(std::str::from_utf8(&payload).unwrap()).unwrap();
+        assert_eq!(payload.get("store").and_then(JsonValue::as_bool), Some(false));
     }
 
     #[test]

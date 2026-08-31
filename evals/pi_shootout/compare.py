@@ -18,10 +18,19 @@ import random
 import statistics
 from typing import Any
 
-from .contract import ContractError, validate_result
+from .contract import (
+    LEGACY_RESULT_SCHEMA,
+    RESULT_SCHEMA,
+    ContractError,
+    validate_enriched_v3_result,
+    validate_legacy_v3_result,
+    validate_result,
+)
 
 
-ANALYSIS_SCHEMA = "tea-pi-shootout-analysis/v1"
+# v2 adds the explicit, scoped repeated-run parity verdict. Keep readers from
+# treating an older delta-only analysis as if it had evaluated the gate.
+ANALYSIS_SCHEMA = "tea-pi-shootout-analysis/v2"
 STATIC_BASELINES = ("pi-static", "tea-static")
 EXPECTED_TOOLS = ("read", "bash", "edit", "find")
 IDENTITY_FIELDS = (
@@ -45,10 +54,56 @@ USAGE_FIELDS = (
     "cache_write",
 )
 COUNT_FIELDS = ("turns", "model_turns", "provider_requests", "tool_calls", "retries", "compactions")
+# A three-repeat static run is the smallest diagnostic evidence class allowed
+# to support the per-run parity gate. The named serious workflow still uses
+# seven repeats; this field prevents a single lucky pair from being labeled a
+# token-efficiency success in either workflow.
+MINIMUM_EFFICIENCY_GATE_REPEATS = 3
+CURRENT_V4_CONTRACT = "current-v4"
+ENRICHED_V3_COMPATIBILITY = "enriched-v3-post-edit-validation/v1"
+LEGACY_V3_COMPATIBILITY = "legacy-v3-no-post-edit-validation/v1"
+LEGACY_V3_POST_EDIT_UNKNOWN = (
+    "legacy v3 artifacts predate post-edit validation evidence; their disabled "
+    "comparison projection cannot support a strict efficiency conclusion"
+)
 
 
 class ComparisonError(ValueError):
     """The persisted run cannot be analyzed as a shootout artifact."""
+
+
+def _disabled_post_edit_validation_gate() -> dict[str, Any]:
+    """The explicit compare-only projection for wholly legacy v3 artifacts."""
+    return {
+        "mode": "none",
+        "applies_after": None,
+        "qualifies_with": None,
+        "resets_after": None,
+        "same_batch_rule": None,
+        "command_profile": None,
+        "completion_reminder_limit": 0,
+        "block_reason_sha256": None,
+        "reminder_sha256": None,
+    }
+
+
+def _comparison_contract_profile(run: dict[str, Any]) -> str:
+    """Choose an unambiguous persisted-result reader from run metadata.
+
+    Fresh runners emit v4. The enriched v3 reader exists only for the two
+    complete pre-v4 artifacts, while the legacy v3 reader applies only when
+    the run itself has no post-edit condition metadata at all.
+    """
+    schema = run.get("result_schema")
+    if schema == RESULT_SCHEMA:
+        if "post_edit_validation_gate" not in run:
+            raise ComparisonError("v4 run metadata must contain post-edit validation gate mode")
+        return CURRENT_V4_CONTRACT
+    if schema != LEGACY_RESULT_SCHEMA:
+        raise ComparisonError(
+            f"run metadata result_schema must be {RESULT_SCHEMA!r} or {LEGACY_RESULT_SCHEMA!r}"
+        )
+    return ENRICHED_V3_COMPATIBILITY if "post_edit_validation_gate" in run else LEGACY_V3_COMPATIBILITY
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -250,13 +305,20 @@ def _trace_turns(result: dict[str, Any]) -> dict[str, Any]:
     return {"source": "adapter-trace", "complete": False, "provider_request_count": None, "request_usage": None, "turns": turns}
 
 
-def _attempt_view(run_dir: Path, record: dict[str, Any]) -> dict[str, Any]:
+def _attempt_view(run_dir: Path, record: dict[str, Any], *, contract_profile: str) -> dict[str, Any]:
     baseline = record.get("baseline_id")
     result = record.get("adapter_result")
     if baseline not in STATIC_BASELINES or not isinstance(result, dict):
         raise ComparisonError("static comparison requires pi-static and tea-static adapter results")
     try:
-        validate_result(result, attempt_id=record.get("attempt_id"), baseline_id=baseline)
+        validator = {
+            CURRENT_V4_CONTRACT: validate_result,
+            ENRICHED_V3_COMPATIBILITY: validate_enriched_v3_result,
+            LEGACY_V3_COMPATIBILITY: validate_legacy_v3_result,
+        }.get(contract_profile)
+        if validator is None:
+            raise ComparisonError(f"unknown persisted result contract profile {contract_profile!r}")
+        validator(result, attempt_id=record.get("attempt_id"), baseline_id=baseline)
     except ContractError as error:
         raise ComparisonError(f"{baseline} result is invalid: {error}") from error
     attempt_id = result["attempt_id"]
@@ -268,18 +330,31 @@ def _attempt_view(run_dir: Path, record: dict[str, Any]) -> dict[str, Any]:
     event_counts = Counter(event.get("type") for event in trace if isinstance(event, dict))
     turns = session if session is not None else _trace_turns(result)
     tool_name_counts = Counter(call["name"] for turn in turns["turns"] for call in turn["tool_calls"])
+    surface = result["surface"]
+    effective_policy = result["effective_policy"]
+    if contract_profile == LEGACY_V3_COMPATIBILITY:
+        legacy_gate = _disabled_post_edit_validation_gate()
+        surface = {**surface, "post_edit_validation_gate": legacy_gate}
+        effective_policy = {
+            **effective_policy,
+            "controlled": {
+                **effective_policy["controlled"],
+                "post_edit_validation_gate": legacy_gate,
+            },
+        }
     return {
         "baseline_id": baseline,
         "attempt_id": attempt_id,
         "repeat": _repeat(attempt_id),
+        "artifact_contract": contract_profile,
         "terminal": result["terminal"],
         "validator_passed": bool(record.get("validator", {}).get("passed")),
         "counts": {name: result["counts"].get(name) for name in COUNT_FIELDS},
         "usage": {name: result["usage"].get(name) for name in (*USAGE_FIELDS, "reasoning")},
         "model": result["model"],
-        "surface": {name: result["surface"].get(name) for name in ("active_tools", "authority", "workspace_normalized_system_prompt_sha256", "system_prompt_sha256", "tool_surface_sha256", "prompt_tool_surface_sha256", "wire_tool_surface_sha256", "execution_surface_sha256", "system_prompt_bytes")},
+        "surface": {name: surface.get(name) for name in ("active_tools", "authority", "workspace_normalized_system_prompt_sha256", "system_prompt_sha256", "tool_surface_sha256", "prompt_tool_surface_sha256", "wire_tool_surface_sha256", "execution_surface_sha256", "system_prompt_bytes", "pre_edit_tool_gate", "post_edit_validation_gate")},
         "wire": result["wire"],
-        "effective_policy": result["effective_policy"],
+        "effective_policy": effective_policy,
         "initial_workspace_state": record.get("initial_workspace_state"),
         "trace": {"event_counts": dict(event_counts), "turn_evidence": turns, "tool_name_counts": dict(tool_name_counts)},
     }
@@ -323,6 +398,53 @@ def _aggregate(pairs: list[dict[str, Any]]) -> dict[str, Any]:
                 "bootstrap_mean_ci95": _bootstrap_mean_ci(values),
             }
     return result
+
+
+def _efficiency_gate(
+    pairs: list[dict[str, Any]],
+    aggregate: dict[str, Any],
+    *,
+    strict_efficiency_conclusion: bool,
+) -> dict[str, Any]:
+    """State the scoped static parity gate without turning a report into a claim.
+
+    The gate is deliberately derived from normalized Tea-minus-Pi generation
+    deltas already retained by the paired analyzer. It requires the same
+    comparability evidence as a strict conclusion, at least three complete
+    pairs, and both the median and worst observed delta to be non-positive.
+    """
+    generation = aggregate["usage"]["generation"]
+    repeats_observed = len(pairs)
+    reasons: list[str] = []
+    if repeats_observed < MINIMUM_EFFICIENCY_GATE_REPEATS:
+        reasons.append(
+            f"requires at least {MINIMUM_EFFICIENCY_GATE_REPEATS} complete paired repeats; observed {repeats_observed}"
+        )
+    if not strict_efficiency_conclusion:
+        reasons.append("controlled evidence is incomplete or non-comparable")
+    if generation["samples"] != repeats_observed:
+        reasons.append("normalized generation is missing for one or more complete pairs")
+    median = generation["median"]
+    worst_case = generation["max"]
+    if not isinstance(median, (int, float)) or not isinstance(worst_case, (int, float)):
+        reasons.append("normalized generation is unavailable")
+    else:
+        if median > 0:
+            reasons.append("median Tea-minus-Pi uncached generation is greater than zero")
+        if worst_case > 0:
+            reasons.append("worst-case Tea-minus-Pi uncached generation is greater than zero")
+    return {
+        "scope": "this static paired run only; it is not a cross-task benchmark claim",
+        "passed": not reasons,
+        "minimum_repeats": MINIMUM_EFFICIENCY_GATE_REPEATS,
+        "repeats_observed": repeats_observed,
+        "generation_delta": {
+            "median": median,
+            "worst_case": worst_case,
+            "samples": generation["samples"],
+        },
+        "reasons": reasons,
+    }
 
 
 def _bootstrap_mean_ci(values: list[int | float]) -> dict[str, float] | None:
@@ -392,11 +514,15 @@ def _policy_checks(pair: dict[str, Any], checks: dict[str, list[str]]) -> None:
     pi, tea = pair["pi"], pair["tea"]
     pi_controlled = pi["effective_policy"].get("controlled", {})
     tea_controlled = tea["effective_policy"].get("controlled", {})
-    for name in ("automatic_compaction", "compaction_threshold", "provider_retry", "request_timeout_seconds", "idle_timeout_seconds", "outer_attempt_timeout_seconds", "model_reasoning", "output_token_ceiling", "provider_routing", "sampling"):
-        left, right = pi_controlled.get(name), tea_controlled.get(name)
-        if left is None or right is None:
+    for name in ("automatic_compaction", "compaction_threshold", "provider_retry", "request_timeout_seconds", "idle_timeout_seconds", "outer_attempt_timeout_seconds", "model_reasoning", "output_token_ceiling", "provider_routing", "sampling", "pre_edit_tool_gate", "post_edit_validation_gate"):
+        # Nullable fields carry a controlled value too: `null` means, for
+        # example, disabled compaction or an unlimited output ceiling. Unknown
+        # observation is represented by an omitted field and, separately, by
+        # `observability_unknown`; treating equal nulls as unknown prevented
+        # strict conclusions even when the adapters agreed.
+        if name not in pi_controlled or name not in tea_controlled:
             checks["observability_unknown"].append(f"repeat {pair['repeat']} effective policy {name} is not observable for both adapters")
-        elif left != right:
+        elif pi_controlled[name] != tea_controlled[name]:
             checks["controlled_condition_mismatches"].append(f"repeat {pair['repeat']} effective policy {name} differs")
     for baseline, view in (("pi-static", pi), ("tea-static", tea)):
         unknown = view["effective_policy"].get("observability_unknown", [])
@@ -426,6 +552,14 @@ def _surface_checks(pair: dict[str, Any], checks: dict[str, list[str]]) -> None:
     for name in ("shell_curl_available", "shell_environment_sha256"):
         if pi["surface"].get(name) != tea["surface"].get(name):
             checks["controlled_condition_mismatches"].append(f"repeat {pair['repeat']} shell environment field {name} differs")
+    if pi["surface"].get("pre_edit_tool_gate") != tea["surface"].get("pre_edit_tool_gate"):
+        checks["controlled_condition_mismatches"].append(
+            f"repeat {pair['repeat']} surface pre-edit tool gate differs"
+        )
+    if pi["surface"].get("post_edit_validation_gate") != tea["surface"].get("post_edit_validation_gate"):
+        checks["controlled_condition_mismatches"].append(
+            f"repeat {pair['repeat']} surface post-edit validation gate differs"
+        )
 
 
 def compare_run(run_dir: Path) -> dict[str, Any]:
@@ -435,7 +569,12 @@ def compare_run(run_dir: Path) -> dict[str, Any]:
     run = summary.get("run")
     if not isinstance(attempts, list) or not isinstance(run, dict):
         raise ComparisonError("summary.json must contain run and attempts")
-    views = [_attempt_view(run_dir, record) for record in attempts if isinstance(record, dict) and record.get("baseline_id") in STATIC_BASELINES]
+    contract_profile = _comparison_contract_profile(run)
+    views = [
+        _attempt_view(run_dir, record, contract_profile=contract_profile)
+        for record in attempts
+        if isinstance(record, dict) and record.get("baseline_id") in STATIC_BASELINES
+    ]
     by_repeat: dict[int, dict[str, dict[str, Any]]] = {}
     for view in views:
         by_repeat.setdefault(view["repeat"], {})[view["baseline_id"]] = view
@@ -459,7 +598,15 @@ def compare_run(run_dir: Path) -> dict[str, Any]:
     for field in IDENTITY_FIELDS:
         if field not in run:
             checks["controlled_condition_mismatches"].append(f"run metadata is missing identity field {field}")
-    for field in ("provider_routing", "toolchain_manifest_sha256"):
+    controlled_run_fields = [
+        "provider_routing",
+        "toolchain_manifest_sha256",
+        "pre_edit_tool_gate",
+        "source_local_targets",
+    ]
+    if contract_profile != LEGACY_V3_COMPATIBILITY:
+        controlled_run_fields.append("post_edit_validation_gate")
+    for field in controlled_run_fields:
         if field not in run:
             checks["controlled_condition_mismatches"].append(f"run metadata is missing controlled field {field}")
     for record in attempts:
@@ -480,6 +627,33 @@ def compare_run(run_dir: Path) -> dict[str, Any]:
                 checks["controlled_condition_mismatches"].append(f"{record['baseline_id']} model identity field {name} differs from run metadata")
         if result.get("wire", {}).get("routing_policy") != run.get("provider_routing"):
             checks["controlled_condition_mismatches"].append(f"{record['baseline_id']} routing policy differs from run metadata")
+        pre_edit_tool_gate = result.get("effective_policy", {}).get("controlled", {}).get("pre_edit_tool_gate")
+        if not isinstance(pre_edit_tool_gate, dict) or pre_edit_tool_gate.get("mode") != run.get("pre_edit_tool_gate"):
+            checks["controlled_condition_mismatches"].append(
+                f"{record['baseline_id']} pre-edit tool gate differs from run metadata"
+            )
+        elif pre_edit_tool_gate.get("source_local_targets") != run.get("source_local_targets"):
+            checks["controlled_condition_mismatches"].append(
+                f"{record['baseline_id']} source-local targets differ from run metadata"
+            )
+        if contract_profile != LEGACY_V3_COMPATIBILITY:
+            post_edit_validation_gate = result.get("effective_policy", {}).get("controlled", {}).get("post_edit_validation_gate")
+            if (
+                not isinstance(post_edit_validation_gate, dict)
+                or post_edit_validation_gate.get("mode") != run.get("post_edit_validation_gate")
+            ):
+                checks["controlled_condition_mismatches"].append(
+                    f"{record['baseline_id']} post-edit validation gate differs from run metadata"
+                )
+    if (
+        run.get("post_edit_validation_gate") == "unmasked-evidence-v1"
+        and run.get("pre_edit_tool_gate") != "source-local-v1"
+    ):
+        checks["controlled_condition_mismatches"].append(
+            "post-edit validation gate requires source-local pre-edit run metadata"
+        )
+    if contract_profile == LEGACY_V3_COMPATIBILITY:
+        checks["observability_unknown"].append(LEGACY_V3_POST_EDIT_UNKNOWN)
     if not pairs:
         checks["controlled_condition_mismatches"].append("no complete static pair is available")
     for pair in pairs:
@@ -540,6 +714,12 @@ def compare_run(run_dir: Path) -> dict[str, Any]:
     unknowns.extend(checks["observability_unknown"])
     comparable = not checks["controlled_condition_mismatches"] and not checks["wire_shape_bugs"] and not checks["route_mismatches"]
     strict_efficiency_conclusion = comparable and not checks["observability_unknown"]
+    aggregate = _aggregate(pairs)
+    efficiency_gate = _efficiency_gate(
+        pairs,
+        aggregate,
+        strict_efficiency_conclusion=strict_efficiency_conclusion,
+    )
     return {
         "schema_version": ANALYSIS_SCHEMA,
         "run": {field: run.get(field) for field in IDENTITY_FIELDS if field in run}
@@ -549,6 +729,13 @@ def compare_run(run_dir: Path) -> dict[str, Any]:
             "run_class": run.get("run_class"),
             "parallel_repeats": run.get("parallel_repeats"),
             "provider_routing": run.get("provider_routing"),
+            "pre_edit_tool_gate": run.get("pre_edit_tool_gate"),
+            "post_edit_validation_gate": (
+                "none"
+                if contract_profile == LEGACY_V3_COMPATIBILITY
+                else run.get("post_edit_validation_gate")
+            ),
+            "source_local_targets": run.get("source_local_targets"),
             "toolchain_manifest_sha256": run.get("toolchain_manifest_sha256"),
             "validator_dependency_lockfile_sha256": run.get("validator_dependency_lockfile_sha256"),
         },
@@ -556,8 +743,18 @@ def compare_run(run_dir: Path) -> dict[str, Any]:
         "strict_efficiency_conclusion": strict_efficiency_conclusion,
         "comparability_checks": checks,
         "comparability_reasons": [*checks["controlled_condition_mismatches"], *checks["wire_shape_bugs"], *checks["route_mismatches"]],
+        "artifact_compatibility": {
+            "profile": contract_profile,
+            "input_result_schema": run.get("result_schema"),
+            "legacy_migration": (
+                LEGACY_V3_COMPATIBILITY
+                if contract_profile == LEGACY_V3_COMPATIBILITY
+                else None
+            ),
+        },
         "pairs": pairs,
-        "aggregate_delta_tea_minus_pi": _aggregate(pairs),
+        "aggregate_delta_tea_minus_pi": aggregate,
+        "efficiency_gate": efficiency_gate,
         "evidence": evidence,
         "hypotheses": hypotheses,
         "unknowns": unknowns,
@@ -573,11 +770,20 @@ def _display(value: Any) -> str:
 
 
 def render_markdown(analysis: dict[str, Any]) -> str:
+    efficiency_gate = analysis["efficiency_gate"]
+    generation_gate = efficiency_gate["generation_delta"]
     lines = [
         f"# Shootout comparison — {analysis['run'].get('run_id', 'unknown')}",
         "",
         f"- Comparable: **{'yes' if analysis['comparable'] else 'no'}**",
         f"- Strict efficiency conclusion supported: **{'yes' if analysis['strict_efficiency_conclusion'] else 'no'}**",
+        f"- Static paired efficiency gate: **{'yes' if efficiency_gate['passed'] else 'no'}** "
+        f"(repeats: {efficiency_gate['repeats_observed']}/{efficiency_gate['minimum_repeats']}; "
+        f"generation median/worst: {_display(generation_gate['median'])}/{_display(generation_gate['worst_case'])})",
+        f"- Pre-edit tool gate: `{analysis['run'].get('pre_edit_tool_gate', 'unknown')}`",
+        f"- Post-edit validation gate: `{analysis['run'].get('post_edit_validation_gate', 'unknown')}`",
+        f"- Artifact compatibility: `{analysis['artifact_compatibility']['profile']}`",
+        f"- Source-local targets: `{', '.join(analysis['run'].get('source_local_targets') or []) or 'none'}`",
         f"- Schema: `{analysis['schema_version']}`",
         "",
         "## Per-repeat deltas (Tea − Pi)",
@@ -602,6 +808,11 @@ def render_markdown(analysis: dict[str, Any]) -> str:
             interval = value["bootstrap_mean_ci95"]
             interval_text = "—" if interval is None else f"{interval['low']} to {interval['high']}"
             lines.append(f"| {field} | {_display(value['median'])} | {_display(value['min'])} | {_display(value['max'])} | {value['samples']} | {_display(value['paired_observations'])} | {interval_text} |")
+    lines.extend(["", "## Static paired efficiency gate", "", f"Scope: {efficiency_gate['scope']}", ""])
+    if efficiency_gate["reasons"]:
+        lines.extend(f"- {reason}" for reason in efficiency_gate["reasons"])
+    else:
+        lines.append("- Every observed static pair is validator-passing and comparable; median and worst-case normalized uncached generation are no greater for Tea.")
     lines.extend(["", "## Turn evidence", ""])
     for pair in analysis["pairs"]:
         for baseline in STATIC_BASELINES:

@@ -2773,7 +2773,7 @@ fn jsonl_rejects_an_oversized_complete_line_without_repairing_it() {
     .expect("session creates");
     drop(session);
     let path = directory.join("session.jsonl");
-    let mut oversized = vec![b' '; 1_048_577];
+    let mut oversized = vec![b' '; 2_097_153];
     oversized.push(b'\n');
     std::fs::OpenOptions::new()
         .append(true)
@@ -2787,7 +2787,7 @@ fn jsonl_rejects_an_oversized_complete_line_without_repairing_it() {
     assert!(matches!(
         error,
         SessionError::Format { line: 2, ref message, .. }
-            if message == "session line exceeds the 1048576-byte line limit"
+            if message == "session line exceeds the 2097152-byte line limit"
     ));
     assert!(
         std::fs::read(&path)
@@ -2812,7 +2812,7 @@ fn jsonl_rejects_an_oversized_mutation_before_it_reaches_the_log() {
     )
     .expect("session creates");
     let prefix = std::fs::read(directory.join("session.jsonl")).expect("header reads");
-    let oversized_content = "x".repeat(1_048_576);
+    let oversized_content = "x".repeat(2_097_152);
 
     assert!(matches!(
         session.append_entry(
@@ -2823,7 +2823,7 @@ fn jsonl_rejects_an_oversized_mutation_before_it_reaches_the_log() {
             ),
         ),
         Err(SessionError::InvalidInput { ref message })
-            if message == "session line exceeds the 1048576-byte line limit"
+            if message == "session line exceeds the 2097152-byte line limit"
     ));
     assert_eq!(
         std::fs::read(directory.join("session.jsonl")).expect("session file reads"),
@@ -4361,6 +4361,56 @@ fn jsonl_reopen_retains_redacted_opaque_provider_context_with_its_assistant_turn
         "encrypted-provider-state"
     );
     assert!(!format!("{:?}", assistant.opaque_context[0]).contains("encrypted-provider-state"));
+    drop(reopened);
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+#[test]
+fn jsonl_reopen_retains_a_large_bounded_provider_reasoning_record() {
+    let directory = temporary_session_directory("large-opaque-provider-context");
+    let payload = "r".repeat(90_000);
+    let mut session = JsonlSession::create(
+        &directory,
+        SessionHeader::new(
+            SessionId::new("large-opaque-provider-context").expect("valid session ID"),
+            "workspace-test",
+            Metadata::new(),
+        ),
+        DurabilityMode::Strict,
+    )
+    .expect("session creates");
+    session
+        .append_entry(
+            &LaneId::main(),
+            ProvisionedEntry {
+                id: EntryId::new("large-opaque-provider-context-assistant")
+                    .expect("valid assistant entry ID"),
+                body: SessionEntry::AssistantMessage(AssistantMessageEntry {
+                    content: String::new(),
+                    tool_calls: Vec::new(),
+                    stop_reason: Some("stop".into()),
+                    error_message: None,
+                    opaque_context: vec![OpaqueProviderContextEntry {
+                        provider: "openrouter".into(),
+                        kind: "reasoning_details".into(),
+                        item_id: None,
+                        payload: payload.clone(),
+                    }],
+                    metadata: Metadata::new(),
+                }),
+            },
+        )
+        .expect("large assistant entry commits");
+    drop(session);
+
+    let reopened = JsonlSession::open(&directory, DurabilityMode::Strict)
+        .expect("session with large provider state reopens");
+    let snapshot = reopened.snapshot().expect("snapshot");
+    let assistant = match &snapshot.entries()[0].body {
+        SessionEntry::AssistantMessage(entry) => entry,
+        other => panic!("expected assistant entry, got {other:?}"),
+    };
+    assert_eq!(assistant.opaque_context[0].payload, payload);
     drop(reopened);
     let _ = std::fs::remove_dir_all(&directory);
 }

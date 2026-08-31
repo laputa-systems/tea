@@ -67,6 +67,92 @@ counterbalanced: each lane runs its selected Pi/Tea order sequentially, while
 independent lanes may run in parallel. Setup caches may be shared, but no
 working tree or `node_modules` directory is shared between attempts.
 
+The runner supports controller-recognized early stopping only for Tea-only
+diagnostic attempts. An operator writes an atomic, attempt-keyed stop request
+through `python3 -m evals.pi_shootout stop`; the controller polls it, uses the
+ordinary process-group cleanup, and records an `exclusion.json` witness. An
+excluded lane remains outside `attempts`, reports, pairs, and efficiency gates.
+Raw signals and malformed requests are ordinary infrastructure failures, and
+paired runs cannot accept the stop protocol.
+
+For safe Tea-only prompt diagnostics on macOS, the runner optionally selects
+`macos-seatbelt-v1` or `macos-seatbelt-v2`. Both wrap only each Tea `bash`
+child and its descendants in a profile that permits workspace/private attempt
+paths and fixed toolchain read roots while blocking other data paths and
+outbound network access. V2 additionally blocks reads and writes beneath the
+workspace `.git` directory, making history commands fail without restricting
+ordinary workspace listing or source work. The networked provider adapter
+stays outside that profile. This is not a complete attempt sandbox and it narrows Tea’s shell
+authority, so the runner rejects it for a paired Pi/Tea comparison unless an
+identical Pi policy is implemented and recorded.
+
+For a separate Tea-only invalid-edit diagnostic, the runner can select
+`--edit-recovery-projection canonical-v1`. After the core has rejected the
+known top-level `path`/`edits` edit envelope, Tea retains the raw call and
+schema error durably and projects one canonical-envelope reminder onto only
+the latest matching tool result in the cloned next provider context. It never
+accepts, normalizes, or rewrites the rejected arguments. Because this changes
+model-visible continuation context and token use, it is prohibited in a paired
+comparison until Pi has an identical policy. Tea records the mode, correction
+hash, hook identity, and distinct host profile for forensic attribution.
+
+Static prompt composition is likewise explicit. `--static-prompt-profile`
+selects `builtin-v1` (the paired default) or one of the Tea-only diagnostic
+profiles `no-history-v1`, `prefix-guard-v1`, and `prefix-guard-focused-v1`.
+The no-history profile replaces only the generic Bash section’s Git/history
+invitation with workspace-local build and validation guidance. The prefix-guard profile retains that
+replacement and appends an explicit RegExp mount-prefix semantic guard derived
+from the observed task failure. Its focused variant additionally requires an
+`index.js`-only guard at the existing trim boundary and forbids repro-file and
+matching-internal edits; both are task-specific diagnostics that cannot enter
+a paired comparison. These profiles keep the resolved `read`, `bash`, `edit`,
+`find` tool definitions, order, and authority intact. Tea retains the profile,
+projected Bash-section hash, full system-prompt hash, and resulting durable
+host profile with the attempt.
+
+The optional fresh-static `--pre-edit-tool-gate direct-edit-v1` condition makes
+the initial workflow state explicit after prompt-only screens choose extended
+exploration. Until a prior successful `edit` result is present, both adapters
+block `bash` and `find` as the same model-visible policy error while leaving
+`read` and `edit` available; then both reopen the blocked tools for focused
+validation. It never rewrites model arguments, and a same-batch edit does not
+unlock a sibling shell call. Pi and Tea retain the same mode, blocked-tool
+order, unlock rule, same-batch rule, and block-reason hash in their result
+surfaces. It is static-only (never JIT); comparison rejects a disagreement
+between adapters or with the recorded run mode.
+
+The stricter `--pre-edit-tool-gate source-local-v1` condition is available
+only to a fresh paired static run (`pi-static` and `tea-static` together); it
+never enters `tea-jit` or a Tea-only diagnostic. Before a successful
+target-local `edit`, it permits only `read` and `edit` calls whose declared
+paths are listed in the task's checked-in
+`source_local_v1` metadata (`tea-coding-eval-source-local/v1`). Each target
+must occur literally in the task prompt and be a regular file in the runner's
+clean baseline worktree. It blocks `bash`, `find`, and non-target `read` or
+`edit` calls with the same generic model-visible reason in both adapters.
+A successful unlock must join the durable/public tool-result call ID to an
+admitted target-local edit call; a same-batch result cannot unlock siblings.
+The ordered target list is retained in each adapter policy object and run
+metadata, and comparison treats any disagreement as non-comparable.
+
+`--post-edit-validation-gate unmasked-evidence-v1` is a separate shared
+fresh-static workflow condition. It is valid only for the paired Pi/Tea static
+run with `--pre-edit-tool-gate source-local-v1`; it is rejected for Tea-only
+and JIT configurations. After every successful declared-target native `edit`,
+only a later direct foreground `bash` child with the content-free
+`"exited-zero"` process witness qualifies as validation evidence. Generic
+tool success is neither recorded as nor sufficient for that witness. Pipeline
+and status-suppression wrappers do not qualify, same-batch calls are too early,
+and any later successful native `edit` result (including a non-target edit
+after the source-local prerequisite) resets the requirement. Bash filesystem
+effects do not reset it. A terminal attempt with missing evidence receives at
+most one completion reminder. The adapters retain one identical policy object in both
+result policy surfaces and a content-free result-root `validation_evidence`
+witness. This does not identify, invoke, or expose the host validator, and it
+does not establish that the selected workspace-local check was the right test.
+The comparison only controls the shared workflow policy and run metadata; it
+does not treat outcome evidence as native-harness parity.
+
 The provider credential crosses only the final live adapter boundary:
 
 ```sh
@@ -83,28 +169,39 @@ Timeout policy is task-specific in the Makefile and CLI. Set
 `PI_SHOOTOUT_TIMEOUT_SECONDS=0` or `--timeout-seconds 0` only for an explicit
 uncapped diagnostic: the runner then waits without imposing an outer wall
 clock, while individual model-generated shell commands may still run without
-end. Tea's shootout adapter also derives its OpenRouter request timeout from
-this budget; the runner then allows `tea-static` a 15-second finalization
+end. Both static adapters derive their request and stream-idle timeouts from
+this budget and use the 24-hour transport guard for an uncapped diagnostic.
+The runner then allows both static adapters a 15-second finalization
 grace for a terminal adapter result and direct-request witness before forced
 cleanup. The zero-budget diagnostic uses a 24-hour transport guard because the
-HTTP client requires a finite deadline. Its stream idle timeout is derived from
-the same budget, so the evaluator does not impose a shorter body-idle cutoff
-while the provider is still delivering a response. Retryable
-pre-output transport/status failures use Tea's three-retry bounded,
-cancellation-aware provider policy; output-bearing failures remain terminal
-because replay would make delivery ambiguous. Such a diagnostic is useful for
-calibrating the finite hard-case ceiling but is not a scored efficiency result.
+HTTP clients require a finite deadline, so neither evaluator imposes a shorter
+body-idle cutoff while the provider is still delivering a response. Paired
+static attempts do not replay retryable pre-output transport/status failures:
+both Pi and Tea use zero provider retries. Output-bearing failures remain
+terminal because replay would make delivery ambiguous. Such a diagnostic is
+useful for calibrating the finite hard-case ceiling but is not a scored
+efficiency result.
 
 ## Normalized result contract
 
-Both adapters emit `tea-coding-eval-result/v3`. The result keeps the following
+Fresh adapters emit `tea-coding-eval-result/v4`. The result keeps the following
 semantic groups even when an adapter cannot observe a value (unknown is `null`,
 not a manufactured zero):
 
 ```text
 terminal, final_text, runtime, model, surface, timings, counts, usage,
-cost, harness, trace
+cost, effective_policy, harness, validation_evidence, trace
 ```
+
+The comparison reader has a narrow, read-only v3 compatibility path. A v3 run
+with complete post-edit policy and validation-evidence roots is an enriched-v3
+artifact and retains its normal comparison scope. A v3 run that lacks the run
+post-edit mode and lacks all three result roots is a genuine legacy artifact;
+comparison projects only the disabled policy into its in-memory view and marks
+the unavailable witness as unknown, so it cannot support a strict efficiency
+conclusion. It never rewrites persisted evidence. A partial v3 shape, a mixed
+v3/v4 pair, or a fresh v4 result missing any required root is rejected rather
+than defaulted.
 
 Shared counters have one meaning: `turns` is durable user messages,
 `model_turns` is model-loop turns, and `tool_calls` is assistant-emitted tool
@@ -150,6 +247,11 @@ attempt paths normalized. Numeric model controls such as
 `max_tokens`/`max_completion_tokens` remain visible so an unlimited run cannot
 hide an adapter-imposed ceiling. The result's wire hashes are derived from
 this retained witness, not from a reconstructed prompt or a summary.
+Each adapter also retains only the case-insensitive
+`x-openrouter-provider` and `x-openrouter-model` response values, with fixed
+`OpenRouter response header` provenance; it never persists arbitrary response
+headers. If either adapter does not receive those headers, the route remains
+unobserved and blocks a strict conclusion.
 
 Reports distinguish:
 
@@ -157,11 +259,13 @@ Reports distinguish:
   wire-shape mismatches, which block a strict conclusion;
 - native prompt, tool-schema, and execution differences, which are measured
   harness results rather than silently treated as parity; and
-- unobserved fields, such as missing route headers or Pi timeout visibility,
-  which remain unknown rather than being guessed into equivalence.
+- unobserved fields, such as missing route headers or an adapter timeout
+  policy that cannot be observed, which remain unknown rather than being
+  guessed into equivalence.
 
-The live static adapters set the same explicit zero temperature and seed;
-provider-default sampling is not part of the static condition.
+The live static adapters set the same explicit zero temperature, seed, and
+`store: false` retention policy; provider-default sampling is not part of the
+static condition.
 
 ## Adapter boundaries
 
@@ -176,7 +280,22 @@ events before prompting, and disposes the session on every path. The observer
 captures the public provider payload and removes any converter default output
 ceiling because the shootout contract is unlimited.
 The observer also applies the static condition's shared temperature `0` and
-seed `20260829` at the final request boundary.
+seed `20260829` at the final request boundary. Its in-memory settings pin
+both provider-request and HTTP-idle timeouts to the task budget (or the
+documented diagnostic guard), so those controls are reported rather than
+inferred.
+
+For the optional fresh-static `direct-edit-v1` condition, that same hidden
+observer blocks only `bash` and `find` until it observes a prior successful
+`edit` result. It leaves the four public tool definitions and static authority
+unchanged, applies the same-batch rule before any tool executes, and records
+the exact policy object in both result surfaces.
+
+For the paired-only fresh-static `source-local-v1` condition, the hidden
+observer additionally admits pre-edit `read` and `edit` only when their exact
+paths are in task-owned `source_local_v1` metadata. It copies rather than
+rewrites public tool arguments, and unlocks only when the result carries the
+same ID as an admitted target-local edit call.
 
 ### Tea
 
@@ -186,12 +305,42 @@ JSONL session, the pinned Luau coding builtins, and the same OpenRouter
 configuration. Static-only guidance is evaluation-scoped and is not added to
 JIT. Static mode also selects a non-model-readable artifact policy so durable
 recovery readers stay host-only and cannot expand the four-tool wire surface.
-Static Tea sends the same explicit temperature and seed through its OpenRouter
-configuration; JIT leaves provider sampling at its normal default.
+Static Tea sends the same explicit temperature, seed, and `store: false`
+retention policy through its OpenRouter configuration; JIT leaves provider
+sampling at its normal default.
+
+`OpenRouterRequestCapture` records the same two whitelisted returned-route
+headers as Pi when OpenRouter supplies them, without retaining raw HTTP
+headers. The report preserves a missing route as unknown rather than deriving
+one from the requested model or routing policy.
+
+For reasoning/tool sequences, `crates/tea-providers/src/openrouter/response.rs`
+retains OpenRouter `reasoning_details` as provider-private continuation state,
+and `crates/tea-providers/src/openai.rs` replays that state on the next Chat
+Completions request. The normal payload path still supplies the empty
+`reasoning_content` marker required by DeepSeek compatibility. Neither field
+is exposed to transcript rendering or coding tools. A single retained
+continuation item is bounded at 1 MiB and the corresponding JSONL entry at
+2 MiB: this accommodates the unlimited high-reasoning evaluation condition
+while retaining a finite durable-state boundary.
 
 Tea preserves provider-neutral core behavior: tool execution, durable session
 reopen, effect attribution, and provider request capture remain in the core
 runtime and adapter layers rather than in the report script.
+
+For the optional fresh-static `direct-edit-v1` condition,
+`PreEditToolGateHook` derives its state from the durable context and blocks
+only `bash` and `find` until a prior successful `edit` result. The paired Pi
+observer uses the same model-visible block reason, blocked-tool order, unlock
+condition, and same-batch rule. The condition is static-only and comparison
+requires its full policy evidence to agree across adapters and run metadata;
+it does not imply resumable-session equivalence.
+
+For paired-only fresh-static `source-local-v1`, `PreEditToolGateHook` derives
+the same state from durable assistant/tool-result pairs: it parses the earlier
+edit arguments, admits only declared target paths, and requires the successful
+result's exact tool-call ID. This keeps a rehydrated Tea context from treating
+unrelated edit-result text as a source-local unlock.
 
 ## JIT evolution condition
 
@@ -270,11 +419,16 @@ python3 -m evals.pi_shootout compare \
   --run-dir /tmp/tea-pi-shootout/runs/<run-id>
 ```
 
-The analyzer writes `reports/comparison.json` and
-`reports/comparison.md`. It validates shared identity, consumes normalized
+The analyzer writes `reports/comparison.json` (`tea-pi-shootout-analysis/v2`)
+and `reports/comparison.md`. It validates shared identity, consumes normalized
 fields, reports paired Tea-minus-Pi deltas with median/min/max and descriptive
 bootstrap intervals, and includes durable Tea turn categories where
 available. It never reconstructs token totals or turns from an unlike trace.
+Its scoped `efficiency_gate` can pass only with at least three complete,
+strictly comparable paired repeats, every validator passing, and both the
+median and worst Tea-minus-Pi normalized uncached-generation deltas at or
+below zero. The gate describes that one run; it is not a cross-task benchmark
+claim and does not remove the hard-case requirement.
 
 ## Reading a result
 
@@ -290,6 +444,9 @@ Use this order:
    match.
 5. Inspect native surface differences and durable turn categories as causal
    uncertainties, not as proof that the runtime caused an observed behavior.
+6. Read the analyzer's `efficiency_gate` separately from comparability: it
+   rejects one- or two-pair runs and any run whose median or worst normalized
+   uncached-generation delta is positive.
 
 Never declare a regression or win from one attempt. For repeated
 static runs, report the paired outcome classes (`both pass`, one-sided pass,

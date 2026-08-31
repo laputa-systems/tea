@@ -19,7 +19,11 @@
   },
   "task": {
     "prompt": "Fix incorrect middleware execution with unanchored RegExps in the router. When a route uses a RegExp without the '^' anchor, the path matching can incorrectly slice the URL, causing downstream middleware to receive malformed paths. Update the router's `handle` method in `lib/router/index.js` to correctly extract the path from the unanchored match so that it doesn't leave remnants of the match in the req.url for downstream routes.",
-    "expected_behavior": "Unanchored regexes should not cause incorrect URL slicing for downstream middleware."
+    "expected_behavior": "Unanchored regexes should not cause incorrect URL slicing for downstream middleware.",
+    "source_local_v1": {
+      "schema_version": "tea-coding-eval-source-local/v1",
+      "targets": ["lib/router/index.js"]
+    }
   },
   "setup": {
     "clean_worktree": true,

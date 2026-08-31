@@ -19,7 +19,11 @@
   },
   "task": {
     "prompt": "When the `json escape` setting is enabled, calling `res.json(undefined)` causes a crash because `JSON.stringify(undefined)` returns `undefined`, which the router tries to call `.replace()` on. Fix the handling of undefined when `json escape` is enabled in `lib/response.js`.",
-    "expected_behavior": "res.json(undefined) should not crash when json escape is enabled, and should produce an empty response body."
+    "expected_behavior": "res.json(undefined) should not crash when json escape is enabled, and should produce an empty response body.",
+    "source_local_v1": {
+      "schema_version": "tea-coding-eval-source-local/v1",
+      "targets": ["lib/response.js"]
+    }
   },
   "setup": {
     "clean_worktree": true,

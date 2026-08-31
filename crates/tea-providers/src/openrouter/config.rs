@@ -10,17 +10,39 @@ use std::{
 };
 use tea_protocol::JsonValue;
 
-/// A deliberately narrow inspection seam for a request that is about to cross
-/// the OpenRouter HTTP boundary.
+/// The two safe route identifiers OpenRouter can return in response headers.
+///
+/// This deliberately excludes every other response header, including values
+/// that may be request- or account-specific. A missing field is an honest
+/// absence of observation, not a default route inference.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct OpenRouterReturnedRoute {
+    /// OpenRouter's returned model identifier, when its response exposed one.
+    pub model: Option<String>,
+    /// OpenRouter's selected upstream provider, when its response exposed one.
+    pub provider: Option<String>,
+}
+
+impl OpenRouterReturnedRoute {
+    /// Whether OpenRouter exposed either whitelisted route identifier.
+    pub fn is_observed(&self) -> bool {
+        self.model.is_some() || self.provider.is_some()
+    }
+}
+
+/// A deliberately narrow inspection seam for an OpenRouter request and its
+/// whitelisted returned route.
 ///
 /// The provider never enables this by itself. Hosts that own private evidence
-/// can opt in, then persist or inspect the exact JSON bytes separately from
-/// credentials and HTTP headers. Keeping this at the payload/send boundary is
-/// important: callers must not reconstruct a request from higher-level model
-/// state after the fact.
+/// can opt in, then persist or inspect exact JSON request bytes and only the
+/// `x-openrouter-provider` / `x-openrouter-model` response values. Credentials
+/// and all other HTTP headers remain outside this boundary. Keeping the request
+/// capture at the payload/send boundary is important: callers must not
+/// reconstruct a request from higher-level model state after the fact.
 #[derive(Clone, Default)]
 pub struct OpenRouterRequestCapture {
     payloads: Arc<Mutex<Vec<Vec<u8>>>>,
+    returned_route: Arc<Mutex<OpenRouterReturnedRoute>>,
 }
 
 impl OpenRouterRequestCapture {
@@ -36,6 +58,41 @@ impl OpenRouterRequestCapture {
     /// post-run observer.
     pub fn payloads(&self) -> Vec<Vec<u8>> {
         self.payloads
+            .lock()
+            .expect("OpenRouter request capture mutex poisoned")
+            .clone()
+    }
+
+    /// Record the latest whitelisted OpenRouter route headers, if present.
+    ///
+    /// This mirrors Pi's response observation: a response with either route
+    /// header replaces the prior observed route, while a response without both
+    /// leaves the prior observation intact.
+    pub fn observe_response_headers(&self, headers: &[(String, String)]) {
+        let mut provider = None;
+        let mut model = None;
+        for (name, value) in headers {
+            if name.eq_ignore_ascii_case("x-openrouter-provider") {
+                provider = Some(value.clone());
+            }
+            if name.eq_ignore_ascii_case("x-openrouter-model") {
+                model = Some(value.clone());
+            }
+        }
+        if provider.is_some() || model.is_some() {
+            *self
+                .returned_route
+                .lock()
+                .expect("OpenRouter request capture mutex poisoned") = OpenRouterReturnedRoute {
+                model,
+                provider,
+            };
+        }
+    }
+
+    /// Return the latest whitelisted route observation without consuming it.
+    pub fn returned_route(&self) -> OpenRouterReturnedRoute {
+        self.returned_route
             .lock()
             .expect("OpenRouter request capture mutex poisoned")
             .clone()

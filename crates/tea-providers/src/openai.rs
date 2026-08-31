@@ -5,6 +5,12 @@ use crate::hooks::{AfterToolCall, AgentLoopTurnUpdate, BeforeToolCall, ContextEn
 use crate::json::JsonValue;
 use crate::state::AgentMessage;
 
+// `OpenAiContextHook` is compiled for multiple OpenAI-compatible providers,
+// including builds that omit OpenRouter. Keep its private continuation labels
+// here rather than coupling the generic converter to an optional module.
+const OPENROUTER_CONTEXT_PROVIDER: &str = "openrouter";
+const OPENROUTER_REASONING_DETAILS_CONTEXT_KIND: &str = "reasoning_details";
+
 /// Convert the core transcript into an OpenAI Chat Completions message array.
 ///
 /// OpenRouter and other OpenAI-compatible adapters consume this host-produced context shape. The
@@ -35,6 +41,10 @@ impl HookSet for OpenAiContextHook {
         let mut messages = context
             .messages
             .iter()
+            // OpenAI-compatible providers reject an assistant history entry
+            // with neither visible content nor a tool call. Reasoning details
+            // alone are private continuation state, not visible content.
+            .filter(|message| openai_message_has_visible_content_or_tool_call(message))
             .map(openai_message)
             .collect::<Result<Vec<_>, _>>()?;
         // Host messages are deliberately not `AgentMessage::User` values.
@@ -64,6 +74,15 @@ impl HookSet for OpenAiContextHook {
     }
 }
 
+fn openai_message_has_visible_content_or_tool_call(message: &AgentMessage) -> bool {
+    match message {
+        AgentMessage::Assistant {
+            content, tool_calls, ..
+        } => !content.trim().is_empty() || !tool_calls.is_empty(),
+        _ => true,
+    }
+}
+
 fn openai_message(message: &AgentMessage) -> Result<JsonValue, HookError> {
     match message {
         AgentMessage::User { content, .. } => Ok(JsonValue::object([
@@ -73,6 +92,7 @@ fn openai_message(message: &AgentMessage) -> Result<JsonValue, HookError> {
         AgentMessage::Assistant {
             content,
             tool_calls,
+            opaque_context,
             ..
         } => {
             let calls = tool_calls
@@ -107,6 +127,9 @@ fn openai_message(message: &AgentMessage) -> Result<JsonValue, HookError> {
             // avoids spending context tokens on a field with no semantic value.
             if !calls.is_empty() {
                 fields.push(("tool_calls", JsonValue::Array(calls)));
+            }
+            if let Some(details) = openrouter_reasoning_details(opaque_context) {
+                fields.push(("reasoning_details", details));
             }
             Ok(JsonValue::object(fields))
         }
@@ -143,10 +166,74 @@ fn openai_message(message: &AgentMessage) -> Result<JsonValue, HookError> {
     }
 }
 
+/// Recover the OpenRouter continuation data that was captured by the adapter
+/// beside an assistant message. It stays invisible to transcript renderers and
+/// tools, but OpenRouter requires it to continue a reasoning/tool sequence.
+fn openrouter_reasoning_details(
+    opaque_context: &[crate::state::OpaqueProviderContextItem],
+) -> Option<JsonValue> {
+    // Match Pi's continuation recovery: each persisted signature is an
+    // all-or-nothing JSON array, and the first valid one wins. This keeps a
+    // stale or corrupt provider-private record from changing the next wire
+    // request or turning a recoverable transcript into a hook error.
+    opaque_context.iter().find_map(|item| {
+        if item.provider() != OPENROUTER_CONTEXT_PROVIDER
+            || item.kind() != OPENROUTER_REASONING_DETAILS_CONTEXT_KIND
+        {
+            return None;
+        }
+        let parsed = JsonValue::parse(item.payload()).ok()?;
+        let entries = parsed.as_array()?;
+        (!entries.is_empty() && entries.iter().all(valid_openai_reasoning_detail))
+            .then(|| JsonValue::Array(entries.to_vec()))
+    })
+}
+
+fn valid_openai_reasoning_detail(detail: &JsonValue) -> bool {
+    let Some(object) = detail.as_object() else {
+        return false;
+    };
+    if !optional_nullable_string(object, "id")
+        || !optional_string(object, "format")
+        || !optional_number(object, "index")
+    {
+        return false;
+    }
+    match object.get("type").and_then(JsonValue::as_str) {
+        Some("reasoning.summary") => object.get("summary").and_then(JsonValue::as_str).is_some(),
+        Some("reasoning.encrypted") => object.get("data").and_then(JsonValue::as_str).is_some(),
+        Some("reasoning.text") => {
+            object.get("text").and_then(JsonValue::as_str).is_some()
+                && optional_nullable_string(object, "signature")
+        }
+        _ => false,
+    }
+}
+
+fn optional_nullable_string(
+    object: &std::collections::BTreeMap<String, JsonValue>,
+    name: &str,
+) -> bool {
+    match object.get(name) {
+        None | Some(JsonValue::Null) => true,
+        Some(value) => value.as_str().is_some(),
+    }
+}
+
+fn optional_string(object: &std::collections::BTreeMap<String, JsonValue>, name: &str) -> bool {
+    object.get(name).is_none_or(|value| value.as_str().is_some())
+}
+
+fn optional_number(object: &std::collections::BTreeMap<String, JsonValue>, name: &str) -> bool {
+    object.get(name).is_none_or(|value| value.as_f64().is_some())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::{MessageId, SerializedJson, ToolCallId};
+    use crate::state::{
+        AgentToolCall, MessageId, OpaqueProviderContextItem, SerializedJson, ToolCallId,
+    };
     use crate::tool::{FailureSignature, ToolFailure};
 
     #[test]
@@ -190,6 +277,109 @@ mod tests {
         };
         let projected = openai_message(&message).expect("projection");
         assert!(projected.get("tool_calls").is_none());
+    }
+
+    #[test]
+    fn assistant_projection_replays_openrouter_reasoning_details() {
+        let details = r#"[{"type":"reasoning.text","text":"inspect the router","format":"unknown","index":0}]"#;
+        let message = AgentMessage::Assistant {
+            id: MessageId(1),
+            content: String::new(),
+            tool_calls: vec![AgentToolCall {
+                id: ToolCallId::new("call-1").expect("fixture call ID"),
+                name: "read".into(),
+                arguments: SerializedJson::new(r#"{"path":"lib/router/index.js"}"#),
+            }],
+            stop_reason: Some(crate::state::StopReason::ToolUse),
+            error_message: None,
+            opaque_context: vec![
+                OpaqueProviderContextItem::new(
+                    "openrouter",
+                    "reasoning_details",
+                    None,
+                    details,
+                )
+                .expect("bounded OpenRouter reasoning details"),
+            ],
+        };
+
+        let projected = openai_message(&message).expect("projection");
+        assert_eq!(
+            projected.get("reasoning_details"),
+            Some(&JsonValue::parse(details).expect("details JSON")),
+        );
+    }
+
+    #[test]
+    fn assistant_projection_uses_the_first_valid_openrouter_reasoning_record() {
+        let invalid = r#"[{"type":"reasoning.text","text":"wrong","format":null,"index":0}]"#;
+        let valid = r#"[{"type":"reasoning.text","text":"right","format":"unknown","index":0}]"#;
+        let message = AgentMessage::Assistant {
+            id: MessageId(1),
+            content: String::new(),
+            tool_calls: vec![AgentToolCall {
+                id: ToolCallId::new("call-1").expect("fixture call ID"),
+                name: "read".into(),
+                arguments: SerializedJson::new(r#"{"path":"lib/router/index.js"}"#),
+            }],
+            stop_reason: Some(crate::state::StopReason::ToolUse),
+            error_message: None,
+            opaque_context: vec![
+                OpaqueProviderContextItem::new(
+                    "openrouter",
+                    "reasoning_details",
+                    None,
+                    invalid,
+                )
+                .expect("bounded invalid fixture"),
+                OpaqueProviderContextItem::new(
+                    "openrouter",
+                    "reasoning_details",
+                    None,
+                    valid,
+                )
+                .expect("bounded valid fixture"),
+            ],
+        };
+
+        let projected = openai_message(&message).expect("projection");
+        assert_eq!(
+            projected.get("reasoning_details"),
+            Some(&JsonValue::parse(valid).expect("valid details JSON")),
+        );
+    }
+
+    #[test]
+    fn context_omits_empty_assistant_messages_even_with_private_reasoning() {
+        let details = r#"[{"type":"reasoning.text","text":"aborted","format":"unknown","index":0}]"#;
+        let context = ContextEnvelope {
+            version: 1,
+            messages: vec![AgentMessage::Assistant {
+                id: MessageId(1),
+                content: String::new(),
+                tool_calls: Vec::new(),
+                stop_reason: Some(crate::state::StopReason::Stop),
+                error_message: None,
+                opaque_context: vec![
+                    OpaqueProviderContextItem::new(
+                        "openrouter",
+                        "reasoning_details",
+                        None,
+                        details,
+                    )
+                    .expect("bounded OpenRouter reasoning details"),
+                ],
+            }],
+            host_messages: Vec::new(),
+        };
+
+        let encoded = OpenAiContextHook
+            .convert_to_llm(context)
+            .expect("context conversion");
+        assert_eq!(
+            JsonValue::parse(&encoded).expect("encoded context"),
+            JsonValue::Array(Vec::new()),
+        );
     }
 
     #[test]

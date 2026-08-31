@@ -99,6 +99,7 @@ def static_report(summary: dict[str, Any]) -> str:
         f"- Run class: `{run.get('run_class', 'unclassified')}`",
         f"- Toolchain manifest: `{run.get('toolchain_manifest_sha256', 'unrecorded')}`",
         f"- Validator dependency lock: `{run.get('validator_dependency_lockfile_sha256', 'unrecorded')}`",
+        f"- Source-local targets: `{', '.join(run.get('source_local_targets', [])) or 'none'}`",
         f"- Condition order: `{', '.join(run['condition_order'])}`",
         "",
         "## Native harness surfaces",

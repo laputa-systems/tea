@@ -77,6 +77,9 @@ pub(super) fn build_payload(
     let mut payload = json_value!({
         "model": config.model.clone(),
         "messages": chat_messages,
+        // Match the Pi shootout's explicit retention policy so the captured
+        // OpenRouter request has the same storage semantics as its comparator.
+        "store": false,
         "stream": true,
         "stream_options": json_value!({"include_usage": true}),
     });

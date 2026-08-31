@@ -5,10 +5,11 @@ use std::fmt;
 
 /// Maximum retained size of one provider-private continuation item.
 ///
-/// The core never interprets this material.  A finite limit keeps a malformed
-/// provider response from turning opaque continuation state into an unbounded
-/// durable side channel.
-pub const MAX_OPAQUE_PROVIDER_CONTEXT_BYTES: usize = 65_536;
+/// The core never interprets this material. One MiB accommodates a complete
+/// high-reasoning continuation under the harness's unlimited-output contract;
+/// the finite limit still prevents a malformed provider response from turning
+/// opaque state into an unbounded durable side channel.
+pub const MAX_OPAQUE_PROVIDER_CONTEXT_BYTES: usize = 1_048_576;
 /// Maximum UTF-8 byte length of a provider identity on an opaque item.
 pub const MAX_OPAQUE_PROVIDER_CONTEXT_PROVIDER_BYTES: usize = 64;
 /// Maximum UTF-8 byte length of a provider-defined opaque item kind.
@@ -246,6 +247,26 @@ mod tests {
         assert!(matches!(
             OpaqueProviderContextItem::new("codex", "reasoning\n", None, "cipher"),
             Err(OpaqueProviderContextError::UnsafeKind)
+        ));
+    }
+
+    #[test]
+    fn opaque_context_allows_a_large_reasoning_record_but_keeps_a_finite_boundary() {
+        assert!(OpaqueProviderContextItem::new(
+            "openrouter",
+            "reasoning_details",
+            None,
+            "r".repeat(90_000),
+        )
+        .is_ok());
+        assert!(matches!(
+            OpaqueProviderContextItem::new(
+                "openrouter",
+                "reasoning_details",
+                None,
+                "r".repeat(MAX_OPAQUE_PROVIDER_CONTEXT_BYTES + 1),
+            ),
+            Err(OpaqueProviderContextError::PayloadTooLarge { .. })
         ));
     }
 }

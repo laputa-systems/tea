@@ -9,7 +9,7 @@ use std::env;
 use std::future::Future;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::Poll;
 use std::thread;
@@ -17,26 +17,33 @@ use std::time::{Duration, Instant};
 
 use tea_core::agent::AgentConfiguration;
 use tea_core::coding::{
-    CodingHost, CommandEnvironment, PROCESS_CAPABILITY_V1, WORKSPACE_MUTATE_CAPABILITY_V1,
+    CodingHost, CodingOperations, CommandEnvironment, CommandOutput, EditTransaction,
+    EditTransactionOutcome, EntryMetadata, FileSnapshot, LocalCodingOperations, OperationFuture,
+    SearchResult, PROCESS_CAPABILITY_V1, WORKSPACE_MUTATE_CAPABILITY_V1,
     WORKSPACE_READ_CAPABILITY_V1, WORKSPACE_SEARCH_CAPABILITY_V1,
 };
+use tea_core::error::HookError;
 use tea_core::event::AgentEventKind;
 use tea_core::harness::extension::{
-    ExtensionCapabilityBindings, ExtensionEngine, ExtensionLimits, ExtensionMemoryCollector,
-    ExtensionToolLimits,
+    ExtensionCapability, ExtensionCapabilityBindings, ExtensionCapabilityFuture,
+    ExtensionCapabilityRequest, ExtensionEngine, ExtensionLimits,
+    ExtensionMemoryCollector, ExtensionPromptSection, ExtensionToolLimits,
 };
 use tea_core::harness::{
     HarnessActor, HarnessRepository, HarnessResolver, HarnessResourceLimits, HarnessSnapshotSpec,
     ModelHarnessProfile, SELF_EXTENSION_MODE_METADATA_KEY, SelfExtensionMode,
     ToolPresentationDescriptor,
 };
-use tea_core::hooks::HookSet;
+use tea_core::hooks::{
+    AfterToolCall, AgentLoopTurnUpdate, BeforeToolCall, ContextEnvelope, HookFuture, HookSet,
+};
 use tea_core::runtime::{
     HarnessEvent, HarnessIdentity, RuntimePolicyIdentities, RuntimeServices, SessionSupervisor,
     SessionSupervisorInput, TeaEvent,
 };
-use tea_core::state::{ModelDescriptor, ThinkingLevel};
-use tea_core::tool::{ToolExecutionMode, ToolRegistry};
+use tea_core::scheduler::CancellationToken;
+use tea_core::state::{AgentMessage, ModelDescriptor, ThinkingLevel};
+use tea_core::tool::{AgentToolResult, ToolCall, ToolExecutionMode, ToolRegistry, ToolUpdateSink};
 use tea_luau::{LuauExtensionEngine, builtins};
 use tea_protocol::{JsonNumber, JsonValue};
 use tea_providers::openai::OpenAiContextHook;
@@ -49,12 +56,27 @@ use tea_session::{
     ThinkingChangedEntry,
 };
 
-const RESULT_SCHEMA: &str = "tea-coding-eval-result/v3";
+const RESULT_SCHEMA: &str = "tea-coding-eval-result/v4";
 const REQUIRED_MODEL: &str = "deepseek/deepseek-v4-flash-0731";
 const REQUIRED_THINKING: &str = "high";
 const SHOOTOUT_TEMPERATURE: f64 = 0.0;
 const SHOOTOUT_SEED: u64 = 20260829;
-const SHOOTOUT_PROVIDER_MAX_RETRIES: u32 = 3;
+// Paired static runs use zero replay retries. This constant controls both the
+// executable OpenRouter retry policy and the emitted controlled-policy witness.
+const SHOOTOUT_PROVIDER_MAX_RETRIES: u32 = 0;
+
+/// The exact controlled-policy witness emitted with each paired shootout
+/// result. Keep it coupled to the executable provider policy below.
+fn shootout_provider_retry_evidence() -> JsonValue {
+    JsonValue::object([
+        ("enabled", JsonValue::Bool(true)),
+        (
+            "max_retries",
+            JsonValue::from(u64::from(SHOOTOUT_PROVIDER_MAX_RETRIES)),
+        ),
+    ])
+}
+
 /// Keep the provider request from expiring before the outer shootout budget.
 /// A zero outer budget is an uncapped diagnostic, but the HTTP transport still
 /// needs a finite deadline to avoid an OS-level socket hanging forever.
@@ -64,7 +86,889 @@ const DIAGNOSTIC_REQUEST_TIMEOUT_SECONDS: u64 = 86_400;
 /// static agent's next action after it has identified a bounded code fix. It
 /// does not change the closed capability set or any core runtime policy.
 const STATIC_CODING_GUIDELINES: &str = "You are an expert coding assistant operating inside Tea, a coding agent harness. You help users by reading files, executing bounded commands, and editing code.\n\nGuidelines:\n- Work directly toward the requested code change. Do not finish after inspection when the requested code change is still unmade. A code-change task is not complete with an empty diff.\n- Treat the stated task as the specification. Do not inspect Git history, branches, tags, reflogs, remotes, or upstream references. Do not repeat an inspection that did not change the repair decision.\n- When a task names a source file, inspect it and then make the smallest safe edit before giving a long explanation. If the next response would only restate the same hypothesis, edit or run the focused check instead.\n- After inspecting the named target and its immediate dependencies, form the smallest root-cause hypothesis, make the edit, and run a focused reproduction or validator.\n- Be concise in responses and show file paths clearly.\n- Use `read` to inspect known files instead of using `bash` with cat or sed.\n- Use `find` for workspace discovery; never search from `/`, inspect home/cache directories, or inspect outside the workspace.\n- Keep bash commands bounded and workspace-local; do not run network, package-install, or upstream/repository-history probes.\n- Honor the requested null/undefined semantics; when an optional nullish value should be ignored, guard it before validation or calculation.\n- Batch independent inspections in one tool turn when practical.\n- Use `edit` for precise changes, then run the relevant validator and stop once the fix is verified.\n- For targeted edits, use `files[].edits[]` with exact `oldText` and `newText`; batch independent edits in one call.\n- Keep edit matches small and unique; do not repeat unchanged probes.\n- Once the relevant check passes, finish without further exploratory inspection.";
+const STATIC_BASH_GIT_HISTORY_INVITATION: &str = "Git, builds, and ordinary directory inspection.";
+const STATIC_BASH_NO_HISTORY_GUIDANCE: &str = "workspace-local builds, and focused local validation. Use `find` for workspace discovery.";
+/// Task-specific diagnostic guidance, not a general coding policy. It is
+/// intentionally available only through the evidence-marked Tea-only profile
+/// so a successful screen cannot be mistaken for a paired Pi/Tea result.
+const STATIC_PREFIX_GUARD_DIAGNOSTIC_GUIDANCE: &str = "Routing tasks: a RegExp substring match is not a mount prefix. Only trim a `layerPath` that equals the start of `path`; otherwise continue to the next layer unchanged. Put the guard at the existing trim boundary; do not expand `layerPath` or modify matching internals.";
+/// A more prescriptive follow-up screen after `prefix-guard-v1` established
+/// that the semantic reminder alone still allowed long repro-file loops.
+/// This remains task-specific Tea-only diagnostic guidance, never a paired
+/// candidate or a replacement for the generic static coding prompt.
+const STATIC_PREFIX_GUARD_FOCUSED_DIAGNOSTIC_GUIDANCE: &str = "Routing-task diagnostic: after reading `lib/router/index.js`, edit only that file. In `trim_prefix`, before the existing path-separator validation, reject a `layerPath` that is not a prefix of `path`; then run the focused validator. Do not create reproduction files or modify matching internals.";
+const EDIT_RECOVERY_PROJECTION_HINT: &str = "The preceding edit was rejected before execution. Reissue it with one top-level `files` array; each `files[]` entry contains `path` and exactly one of `edits` or `content`. Do not use top-level `path` or `edits`.";
+const EDIT_RECOVERY_PROJECTION_IDENTITY: &str = "tea-eval-edit-recovery-projection-canonical-v1";
+const PRE_EDIT_TOOL_GATE_BLOCK_REASON: &str = "Pre-edit direct workflow policy: before a successful edit result, bash and find are unavailable. Read the named source and make the smallest edit to the named target; after a successful edit, use bash or find only for focused validation.";
+const SOURCE_LOCAL_PRE_EDIT_TOOL_GATE_BLOCK_REASON: &str = "Pre-edit source-local workflow policy: before a successful edit to a declared task target, only read and edit calls whose paths are declared task targets are available. Bash, find, and non-target read/edit calls are unavailable; after a successful target-local edit, use other tools only for focused validation.";
+const POST_EDIT_VALIDATION_BLOCK_REASON: &str = "Validation evidence requires a direct foreground command whose exit status is visible. Avoid pipelines and status-suppression wrappers; choose an appropriate workspace-local check.";
+const POST_EDIT_VALIDATION_REMINDER: &str = "Before finalizing, run an appropriate workspace-local check after the most recent successful edit. Run it directly so its exit status is visible; avoid pipelines and status-suppression wrappers. Choose the check from the task and workspace, address any failure, then finish.";
+const PRE_EDIT_TOOL_GATE_IDENTITY_PREFIX: &str = "pre-edit-direct-workflow-policy-v1";
 const JIT_ADDENDUM: &str = "Task-local harness adaptation is available but optional.\n\nFirst inspect the task and repository using the normal coding tools. Use NoChange unless you have concrete evidence that one bounded harness change is likely to improve this task.\n\nYou may stage at most one task-local harness candidate. It may alter only currently supported prompt, tool-presentation, hook, context, memory-selection, failure-policy, or compaction-policy surfaces. It cannot grant new authority, change the provider or model, access hidden validators, use subagents, or add a web-research tool.\n\nA candidate must include observed task or failure evidence, a root-cause hypothesis, expected effect, regression risk, and the harness surfaces changed. If it activates, continue solving the same task under the new immutable harness revision. All adaptation time and model usage count toward the task result.";
+
+/// Evaluation-only recovery projection for the known invalid Tea edit envelope.
+///
+/// The core has already rejected and durably retained the raw model call when
+/// this runs. The cloned model context gains a concise retry hint only for the
+/// immediate recovery request; no arguments are accepted or rewritten.
+#[derive(Clone, Copy, Debug, Default)]
+struct EditRecoveryProjectionHook;
+
+impl HookSet for EditRecoveryProjectionHook {
+    fn identity(&self) -> Digest {
+        Digest::from_bytes(EDIT_RECOVERY_PROJECTION_IDENTITY)
+    }
+
+    fn before_tool_call(&self, call: &ToolCall) -> Result<BeforeToolCall, HookError> {
+        HookSet::before_tool_call(&OpenAiContextHook, call)
+    }
+
+    fn after_tool_call(
+        &self,
+        call: &ToolCall,
+        result: &AgentToolResult,
+    ) -> Result<AfterToolCall, HookError> {
+        HookSet::after_tool_call(&OpenAiContextHook, call, result)
+    }
+
+    fn transform_context(&self, context: ContextEnvelope) -> Result<ContextEnvelope, HookError> {
+        let context = HookSet::transform_context(&OpenAiContextHook, context)?;
+        Ok(project_invalid_edit_recovery(context))
+    }
+
+    fn convert_to_llm(&self, context: ContextEnvelope) -> Result<String, HookError> {
+        HookSet::convert_to_llm(&OpenAiContextHook, context)
+    }
+
+    fn should_stop_after_turn(&self, context: &ContextEnvelope) -> Result<bool, HookError> {
+        HookSet::should_stop_after_turn(&OpenAiContextHook, context)
+    }
+
+    fn prepare_next_turn(
+        &self,
+        context: ContextEnvelope,
+    ) -> Result<AgentLoopTurnUpdate, HookError> {
+        HookSet::prepare_next_turn(&OpenAiContextHook, context)
+    }
+}
+
+/// Static paired workflow gate used after prompt-only screens repeatedly chose
+/// unbounded exploration over a named, source-local repair.
+///
+/// The gate never rewrites tool arguments. Its pre-edit state is derived from
+/// durable context on every decision. `source-local-v1` additionally permits
+/// `read` and `edit` only for paths explicitly declared by the versioned task
+/// metadata until a successful result is correlated to one admitted edit ID.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PreEditToolGate {
+    mode: PreEditToolGateMode,
+    source_local_targets: Vec<String>,
+}
+
+impl PreEditToolGate {
+    fn from_task(mode: PreEditToolGateMode, task: &JsonValue, prompt: &str, workspace: &Path) -> Result<Self, String> {
+        let source_local_targets = match mode {
+            PreEditToolGateMode::SourceLocalV1 => source_local_task_targets(task, prompt, workspace)?,
+            PreEditToolGateMode::None | PreEditToolGateMode::DirectEditV1 => Vec::new(),
+        };
+        Ok(Self { mode, source_local_targets })
+    }
+
+    #[cfg(test)]
+    fn disabled() -> Self {
+        Self {
+            mode: PreEditToolGateMode::None,
+            source_local_targets: Vec::new(),
+        }
+    }
+
+    #[cfg(test)]
+    fn direct_edit_v1() -> Self {
+        Self {
+            mode: PreEditToolGateMode::DirectEditV1,
+            source_local_targets: Vec::new(),
+        }
+    }
+
+    fn source_local_target_set(&self) -> BTreeSet<&str> {
+        self.source_local_targets.iter().map(String::as_str).collect()
+    }
+
+    fn policy_identity(&self) -> String {
+        self.surface()
+            .to_json_string()
+            .expect("pre-edit policy surface encodes")
+    }
+
+    fn surface(&self) -> JsonValue {
+        let mode = self.mode;
+        JsonValue::object([
+            ("mode", JsonValue::from(mode.name())),
+            (
+                "blocked_tools",
+                JsonValue::Array(
+                    mode.blocked_tools()
+                        .iter()
+                        .map(|tool| JsonValue::from(*tool))
+                        .collect(),
+                ),
+            ),
+            (
+                "target_restricted_tools",
+                JsonValue::Array(
+                    mode.target_restricted_tools()
+                        .iter()
+                        .map(|tool| JsonValue::from(*tool))
+                        .collect(),
+                ),
+            ),
+            (
+                "source_local_targets",
+                JsonValue::Array(
+                    self.source_local_targets
+                        .iter()
+                        .cloned()
+                        .map(JsonValue::from)
+                        .collect(),
+                ),
+            ),
+            (
+                "unlocks_after",
+                mode.unlocks_after()
+                    .map(JsonValue::from)
+                    .unwrap_or(JsonValue::Null),
+            ),
+            (
+                "same_batch_rule",
+                mode.same_batch_rule()
+                    .map(JsonValue::from)
+                    .unwrap_or(JsonValue::Null),
+            ),
+            (
+                "block_reason_sha256",
+                mode.block_reason_sha256()
+                    .map(JsonValue::from)
+                    .unwrap_or(JsonValue::Null),
+            ),
+        ])
+    }
+}
+
+/// The optional paired-static post-edit sidecar. It never identifies a test,
+/// invokes a validator, changes tool presentation, or interprets command
+/// output. Its narrow evidence claim is limited to an unmasked foreground
+/// `bash` result after a declared target edit has settled successfully.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PostEditValidationGateMode {
+    None,
+    UnmaskedEvidenceV1,
+}
+
+impl PostEditValidationGateMode {
+    fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "none" => Ok(Self::None),
+            "unmasked-evidence-v1" => Ok(Self::UnmaskedEvidenceV1),
+            _ => Err("--post-edit-validation-gate must be none or unmasked-evidence-v1".into()),
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::UnmaskedEvidenceV1 => "unmasked-evidence-v1",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PostEditValidationGate {
+    mode: PostEditValidationGateMode,
+    source_local_targets: BTreeSet<String>,
+}
+
+impl PostEditValidationGate {
+    fn from_pre_edit(mode: PostEditValidationGateMode, pre_edit: &PreEditToolGate) -> Result<Self, String> {
+        if mode == PostEditValidationGateMode::UnmaskedEvidenceV1
+            && pre_edit.mode != PreEditToolGateMode::SourceLocalV1
+        {
+            return Err("unmasked-evidence-v1 requires --pre-edit-tool-gate source-local-v1".into());
+        }
+        let source_local_targets: BTreeSet<String> =
+            pre_edit.source_local_targets.iter().cloned().collect();
+        if mode == PostEditValidationGateMode::UnmaskedEvidenceV1 && source_local_targets.is_empty() {
+            return Err("unmasked-evidence-v1 requires declared source-local targets".into());
+        }
+        Ok(Self { mode, source_local_targets })
+    }
+
+    #[cfg(test)]
+    fn disabled() -> Self {
+        Self { mode: PostEditValidationGateMode::None, source_local_targets: BTreeSet::new() }
+    }
+
+    fn enabled(&self) -> bool {
+        self.mode == PostEditValidationGateMode::UnmaskedEvidenceV1
+    }
+
+    fn policy_identity(&self) -> String {
+        self.surface().to_json_string().expect("post-edit policy surface encodes")
+    }
+
+    fn surface(&self) -> JsonValue {
+        if !self.enabled() {
+            return JsonValue::object([
+                ("mode", JsonValue::from("none")),
+                ("applies_after", JsonValue::Null),
+                ("qualifies_with", JsonValue::Null),
+                ("resets_after", JsonValue::Null),
+                ("same_batch_rule", JsonValue::Null),
+                ("command_profile", JsonValue::Null),
+                ("completion_reminder_limit", JsonValue::from(0_u64)),
+                ("block_reason_sha256", JsonValue::Null),
+                ("reminder_sha256", JsonValue::Null),
+            ]);
+        }
+        JsonValue::object([
+            ("mode", JsonValue::from(self.mode.name())),
+            ("applies_after", JsonValue::from("prior-successful-declared-target-edit-result")),
+            ("qualifies_with", JsonValue::from("prior-successful-unmasked-direct-foreground-bash-result")),
+            ("resets_after", JsonValue::from("later-successful-edit-result")),
+            ("same_batch_rule", JsonValue::from("evidence-requires-prior-successful-bash-result")),
+            ("command_profile", JsonValue::from("unmasked-direct-foreground-bash/v1")),
+            ("completion_reminder_limit", JsonValue::from(1_u64)),
+            ("block_reason_sha256", JsonValue::from(sha256(POST_EDIT_VALIDATION_BLOCK_REASON.as_bytes()))),
+            ("reminder_sha256", JsonValue::from(sha256(POST_EDIT_VALIDATION_REMINDER.as_bytes()))),
+        ])
+    }
+
+    fn target_edit(&self, arguments: &JsonValue) -> bool {
+        arguments
+            .get("files")
+            .and_then(JsonValue::as_array)
+            .is_some_and(|files| {
+                !files.is_empty()
+                    && files.iter().all(|file| {
+                        file.get("path")
+                            .and_then(JsonValue::as_str)
+                            .is_some_and(|path| self.source_local_targets.contains(path))
+                    })
+            })
+    }
+
+    fn validation_violation(
+        &self,
+        call: &ToolCall,
+        context: &ContextEnvelope,
+        exit_status_observations: &BTreeMap<String, bool>,
+    ) -> Option<&'static str> {
+        if !self.enabled()
+            || call.name != "bash"
+            || !validation_evidence_from_context(self, context, exit_status_observations).pending()
+        {
+            return None;
+        }
+        let arguments = JsonValue::parse(call.arguments.as_str()).ok();
+        let command = arguments
+            .as_ref()
+            .and_then(|arguments| arguments.get("command"))
+            .and_then(JsonValue::as_str);
+        (!direct_foreground_shell_v1(command)).then_some(POST_EDIT_VALIDATION_BLOCK_REASON)
+    }
+}
+
+/// `unmasked-direct-foreground-bash/v1` is intentionally syntactic and
+/// conservative. It does not look for test names, expected output, package
+/// scripts, or validator conventions; it only rejects syntax that can mask or
+/// redirect the outer command's exit status.
+fn direct_foreground_shell_v1(command: Option<&str>) -> bool {
+    let Some(command) = command.filter(|command| !command.trim().is_empty()) else {
+        return false;
+    };
+    if command.contains('\0') || command.contains('\n') || command.contains('\r') {
+        return false;
+    }
+    if command.chars().any(|character| matches!(character, ';' | '&' | '|' | '$' | '`' | '(' | ')' | '<' | '>' | '\'' | '"' | '\\')) {
+        return false;
+    }
+    !command.split_whitespace().any(|word| {
+        let evaluator = word.rsplit('/').next().unwrap_or(word).to_ascii_lowercase();
+        matches!(evaluator.as_str(), "sh" | "bash" | "zsh" | "dash" | "fish" | "." | "source" | "eval" | "exec")
+    })
+}
+
+/// The adapter records only the trusted process receipt boolean, keyed by the
+/// core-owned call ID. It never stores a command, stdout, stderr, validator
+/// identity, or nonzero status value. A missing in-memory receipt is
+/// deliberately non-qualifying after a fresh static run is interrupted.
+#[derive(Clone, Default)]
+struct DirectExitStatusWitness {
+    outcomes: Arc<Mutex<BTreeMap<String, bool>>>,
+}
+
+impl DirectExitStatusWitness {
+    fn record(&self, tool_call_id: String, exit_zero: bool) {
+        self.outcomes
+            .lock()
+            .expect("exit witness outcome map is not poisoned")
+            .insert(tool_call_id, exit_zero);
+    }
+
+    fn take(&self, tool_call_id: &str) -> Option<bool> {
+        self.outcomes
+            .lock()
+            .expect("exit witness outcome map is not poisoned")
+            .remove(tool_call_id)
+    }
+}
+
+/// Results observed by the post-tool hook. The durable reducer still derives
+/// edit ordering and candidate identity from assistant/result pairs; this
+/// sidecar contributes only the explicit process-zero fact, and lost state is
+/// conservatively treated as missing evidence.
+#[derive(Clone, Default)]
+struct ExitStatusObservations {
+    outcomes: Arc<Mutex<BTreeMap<String, bool>>>,
+}
+
+impl ExitStatusObservations {
+    fn record(&self, tool_call_id: String, exit_zero: bool) {
+        self.outcomes
+            .lock()
+            .expect("exit observation map is not poisoned")
+            .insert(tool_call_id, exit_zero);
+    }
+
+    fn snapshot(&self) -> BTreeMap<String, bool> {
+        self.outcomes
+            .lock()
+            .expect("exit observation map is not poisoned")
+            .clone()
+    }
+}
+
+/// Wrap only the already-granted process capability. The decorator leaves the
+/// response and capability authority unchanged while binding its typed process
+/// receipt to the immutable tool-call ID supplied by the core.
+#[derive(Clone)]
+struct ExitWitnessProcessCapability {
+    delegate: Arc<dyn ExtensionCapability>,
+    witness: DirectExitStatusWitness,
+}
+
+impl ExitWitnessProcessCapability {
+    fn new(delegate: Arc<dyn ExtensionCapability>, witness: DirectExitStatusWitness) -> Self {
+        Self { delegate, witness }
+    }
+}
+
+impl ExtensionCapability for ExitWitnessProcessCapability {
+    fn invoke(
+        &self,
+        request: ExtensionCapabilityRequest,
+        cancellation: CancellationToken,
+    ) -> ExtensionCapabilityFuture {
+        let delegate = Arc::clone(&self.delegate);
+        let witness = self.witness.clone();
+        Box::pin(async move {
+            let tool_call_id = request.call_id.to_string();
+            let response = delegate.invoke(request, cancellation).await?;
+            let exit_zero = response.value.get("termination").and_then(JsonValue::as_str) == Some("exited")
+                && matches!(response.value.get("exitCode"), Some(JsonValue::Number(JsonNumber::Signed(0))) | Some(JsonValue::Number(JsonNumber::Unsigned(0))));
+            witness.record(tool_call_id, exit_zero);
+            Ok(response)
+        })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ValidationCandidate {
+    generation: u64,
+    call_id_sha256: String,
+    arguments_sha256: String,
+    eligible: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ValidationTransition {
+    transition: &'static str,
+    generation: u64,
+    qualifying_call_id_sha256: Option<String>,
+    qualifying_arguments_sha256: Option<String>,
+    process_exit: Option<&'static str>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ValidationEvidence {
+    enabled: bool,
+    generation: u64,
+    qualifying: Option<ValidationCandidate>,
+    candidate_failures: u64,
+    masked_call_blocks: u64,
+    reminders_issued: u64,
+    transitions: Vec<ValidationTransition>,
+    admitted_edit_targets: BTreeMap<String, bool>,
+    bash_candidates: BTreeMap<String, ValidationCandidate>,
+}
+
+impl ValidationEvidence {
+    fn disabled() -> Self {
+        Self {
+            enabled: false,
+            generation: 0,
+            qualifying: None,
+            candidate_failures: 0,
+            masked_call_blocks: 0,
+            reminders_issued: 0,
+            transitions: Vec::new(),
+            admitted_edit_targets: BTreeMap::new(),
+            bash_candidates: BTreeMap::new(),
+        }
+    }
+
+    fn enabled() -> Self {
+        Self { enabled: true, ..Self::disabled() }
+    }
+
+    fn pending(&self) -> bool {
+        self.enabled && self.generation > 0 && self.qualifying.is_none()
+    }
+
+    fn observe_assistant(&mut self, gate: &PostEditValidationGate, calls: Vec<(&str, &str, &JsonValue)>) {
+        let batch_has_edit = calls.iter().any(|(_, name, _)| *name == "edit");
+        for (id, name, arguments) in calls {
+            if name == "edit" {
+                self.admitted_edit_targets.insert(id.to_owned(), gate.target_edit(arguments));
+                continue;
+            }
+            if name != "bash" || !self.pending() {
+                continue;
+            }
+            let command = arguments.get("command").and_then(JsonValue::as_str);
+            if !direct_foreground_shell_v1(command) {
+                self.masked_call_blocks = self.masked_call_blocks.saturating_add(1);
+                self.transitions.push(ValidationTransition {
+                    transition: "masked-bash-blocked", generation: self.generation,
+                    qualifying_call_id_sha256: None, qualifying_arguments_sha256: None, process_exit: None,
+                });
+                continue;
+            }
+            self.bash_candidates.insert(id.to_owned(), ValidationCandidate {
+                generation: self.generation,
+                call_id_sha256: sha256(id.as_bytes()),
+                arguments_sha256: sha256(arguments.to_json_string().expect("tool arguments encode").as_bytes()),
+                eligible: !batch_has_edit,
+            });
+        }
+    }
+
+    fn observe_result(
+        &mut self,
+        tool_call_id: &str,
+        tool_name: &str,
+        is_error: bool,
+        process_exit_zero: bool,
+    ) {
+        if tool_name == "edit" {
+            let declared_target = self.admitted_edit_targets.remove(tool_call_id).unwrap_or(false);
+            if !is_error && (declared_target || self.generation > 0) {
+                self.generation = self.generation.saturating_add(1);
+                self.qualifying = None;
+                self.transitions.push(ValidationTransition {
+                    transition: "edit-pending", generation: self.generation,
+                    qualifying_call_id_sha256: None, qualifying_arguments_sha256: None, process_exit: None,
+                });
+            }
+            return;
+        }
+        if tool_name != "bash" {
+            return;
+        }
+        let Some(candidate) = self.bash_candidates.remove(tool_call_id) else {
+            return;
+        };
+        if !candidate.eligible || candidate.generation != self.generation || !self.pending() {
+            return;
+        }
+        if is_error || !process_exit_zero {
+            self.candidate_failures = self.candidate_failures.saturating_add(1);
+            self.transitions.push(ValidationTransition {
+                transition: "candidate-failed", generation: self.generation,
+                qualifying_call_id_sha256: None, qualifying_arguments_sha256: None, process_exit: None,
+            });
+            return;
+        }
+        self.qualifying = Some(candidate.clone());
+        self.transitions.push(ValidationTransition {
+            transition: "evidence-satisfied", generation: self.generation,
+            qualifying_call_id_sha256: Some(candidate.call_id_sha256),
+            qualifying_arguments_sha256: Some(candidate.arguments_sha256),
+            process_exit: Some("exited-zero"),
+        });
+    }
+
+    fn issue_reminder(&mut self) -> bool {
+        if !self.pending() || self.reminders_issued != 0 {
+            return false;
+        }
+        self.reminders_issued = 1;
+        self.transitions.push(ValidationTransition {
+            transition: "completion-reminder-issued", generation: self.generation,
+            qualifying_call_id_sha256: None, qualifying_arguments_sha256: None, process_exit: None,
+        });
+        true
+    }
+
+    fn mark_missing(&mut self) {
+        if !self.pending() || self.reminders_issued != 1 {
+            return;
+        }
+        self.transitions.push(ValidationTransition {
+            transition: "evidence-missing", generation: self.generation,
+            qualifying_call_id_sha256: None, qualifying_arguments_sha256: None, process_exit: None,
+        });
+    }
+
+    fn json(&self) -> JsonValue {
+        let (state, generation, qualifying_call_id_sha256, qualifying_arguments_sha256, candidate_failures, masked_call_blocks, reminders_issued) =
+            if !self.enabled || self.generation == 0 {
+                ("not_required", JsonValue::Null, JsonValue::Null, JsonValue::Null, 0_u64, 0_u64, 0_u64)
+            } else if let Some(candidate) = &self.qualifying {
+                ("satisfied", JsonValue::from(self.generation), JsonValue::from(candidate.call_id_sha256.clone()), JsonValue::from(candidate.arguments_sha256.clone()), self.candidate_failures, self.masked_call_blocks, self.reminders_issued)
+            } else {
+                ("missing", JsonValue::from(self.generation), JsonValue::Null, JsonValue::Null, self.candidate_failures, self.masked_call_blocks, self.reminders_issued)
+            };
+        let transitions = JsonValue::Array(self.transitions.iter().map(ValidationTransition::json).collect());
+        JsonValue::object([
+            ("state", JsonValue::from(state)),
+            ("edit_generation", generation),
+            ("qualifying_call_id_sha256", qualifying_call_id_sha256),
+            ("qualifying_arguments_sha256", qualifying_arguments_sha256),
+            (
+                "qualifying_process_exit",
+                if self.qualifying.is_some() {
+                    JsonValue::from("exited-zero")
+                } else {
+                    JsonValue::Null
+                },
+            ),
+            ("candidate_failures", JsonValue::from(candidate_failures)),
+            ("masked_call_blocks", JsonValue::from(masked_call_blocks)),
+            ("reminders_issued", JsonValue::from(reminders_issued)),
+            ("transitions_sha256", JsonValue::from(sha256(transitions.to_json_string().expect("validation transitions encode").as_bytes()))),
+        ])
+    }
+
+    fn trace(&self) -> Vec<JsonValue> {
+        self.transitions.iter().map(|transition| {
+            let mut value = transition.json();
+            value.as_object_mut().expect("transition is an object").insert("type".into(), JsonValue::from("post_edit_validation_transition"));
+            value
+        }).collect()
+    }
+}
+
+impl ValidationTransition {
+    fn json(&self) -> JsonValue {
+        JsonValue::object([
+            ("transition", JsonValue::from(self.transition)),
+            ("generation", JsonValue::from(self.generation)),
+            ("qualifying_call_id_sha256", self.qualifying_call_id_sha256.clone().map(JsonValue::from).unwrap_or(JsonValue::Null)),
+            ("qualifying_arguments_sha256", self.qualifying_arguments_sha256.clone().map(JsonValue::from).unwrap_or(JsonValue::Null)),
+            ("process_exit", self.process_exit.map(JsonValue::from).unwrap_or(JsonValue::Null)),
+        ])
+    }
+}
+
+fn validation_evidence_from_context(
+    gate: &PostEditValidationGate,
+    context: &ContextEnvelope,
+    exit_status_observations: &BTreeMap<String, bool>,
+) -> ValidationEvidence {
+    if !gate.enabled() {
+        return ValidationEvidence::disabled();
+    }
+    let mut evidence = ValidationEvidence::enabled();
+    for message in &context.messages {
+        match message {
+            AgentMessage::Assistant { tool_calls, .. } => {
+                let parsed = tool_calls.iter().map(|call| {
+                    let arguments = JsonValue::parse(call.arguments.as_str()).unwrap_or(JsonValue::Null);
+                    (call.id.to_string(), call.name.as_str(), arguments)
+                }).collect::<Vec<_>>();
+                evidence.observe_assistant(gate, parsed.iter().map(|(id, name, arguments)| (id.as_str(), *name, arguments)).collect());
+            }
+            AgentMessage::ToolResult { tool_call_id, tool_name, is_error, .. } => {
+                let tool_call_id = tool_call_id.to_string();
+                let exit_zero = exit_status_observations.get(&tool_call_id).copied().unwrap_or(false);
+                evidence.observe_result(&tool_call_id, tool_name, *is_error, exit_zero);
+            }
+            _ => {}
+        }
+    }
+    evidence
+}
+
+fn validation_evidence_from_snapshot(
+    gate: &PostEditValidationGate,
+    snapshot: &SessionSnapshot,
+    exit_status_observations: &BTreeMap<String, bool>,
+) -> ValidationEvidence {
+    if !gate.enabled() {
+        return ValidationEvidence::disabled();
+    }
+    let mut evidence = ValidationEvidence::enabled();
+    for entry in snapshot.entries() {
+        match &entry.body {
+            SessionEntry::AssistantMessage(message) => {
+                evidence.observe_assistant(gate, message.tool_calls.iter().map(|call| (call.id.as_str(), call.name.as_str(), &call.arguments)).collect());
+            }
+            SessionEntry::ToolResult(result) => {
+                let exit_zero = exit_status_observations
+                    .get(&result.tool_call_id)
+                    .copied()
+                    .unwrap_or(false);
+                evidence.observe_result(&result.tool_call_id, &result.tool_name, result.is_error, exit_zero);
+            }
+            _ => {}
+        }
+    }
+    evidence
+}
+
+struct PreEditToolGateHook {
+    edit_recovery_projection: EditRecoveryProjectionMode,
+    gate: PreEditToolGate,
+    post_edit_validation_gate: PostEditValidationGate,
+    direct_exit_status_witness: DirectExitStatusWitness,
+    exit_status_observations: ExitStatusObservations,
+}
+
+impl HookSet for PreEditToolGateHook {
+    fn identity(&self) -> Digest {
+        Digest::from_bytes(format!(
+            "{PRE_EDIT_TOOL_GATE_IDENTITY_PREFIX}:{}:post-edit={}:edit-recovery={}",
+            self.gate.policy_identity(),
+            self.post_edit_validation_gate.policy_identity(),
+            self.edit_recovery_projection.name(),
+        ))
+    }
+
+    fn before_tool_call(&self, call: &ToolCall) -> Result<BeforeToolCall, HookError> {
+        // The runtime uses the asynchronous form below because it carries the
+        // durable context needed for the state-derived decision.
+        HookSet::before_tool_call(&OpenAiContextHook, call)
+    }
+
+    fn before_tool_call_async<'a>(
+        &'a self,
+        call: &'a ToolCall,
+        context: ContextEnvelope,
+        cancellation: CancellationToken,
+    ) -> HookFuture<'a, BeforeToolCall> {
+        Box::pin(async move {
+            if let Some(reason) = pre_edit_tool_gate_violation(&self.gate, call, &context) {
+                return Ok(BeforeToolCall::Block {
+                    reason: reason.to_owned(),
+                });
+            }
+            let exit_status_observations = self.exit_status_observations.snapshot();
+            if let Some(reason) = self.post_edit_validation_gate.validation_violation(
+                call,
+                &context,
+                &exit_status_observations,
+            ) {
+                return Ok(BeforeToolCall::Block {
+                    reason: reason.to_owned(),
+                });
+            }
+            HookSet::before_tool_call_async(&OpenAiContextHook, call, context, cancellation).await
+        })
+    }
+
+    fn after_tool_call(
+        &self,
+        call: &ToolCall,
+        result: &AgentToolResult,
+    ) -> Result<AfterToolCall, HookError> {
+        if call.name == "bash" {
+            let exit_zero = self
+                .direct_exit_status_witness
+                .take(&call.id.to_string())
+                .unwrap_or(false);
+            self.exit_status_observations
+                .record(call.id.to_string(), !result.is_error && exit_zero);
+        }
+        HookSet::after_tool_call(&OpenAiContextHook, call, result)
+    }
+
+    fn transform_context(&self, context: ContextEnvelope) -> Result<ContextEnvelope, HookError> {
+        let context = HookSet::transform_context(&OpenAiContextHook, context)?;
+        Ok(match self.edit_recovery_projection {
+            EditRecoveryProjectionMode::None => context,
+            EditRecoveryProjectionMode::CanonicalV1 => project_invalid_edit_recovery(context),
+        })
+    }
+
+    fn convert_to_llm(&self, context: ContextEnvelope) -> Result<String, HookError> {
+        HookSet::convert_to_llm(&OpenAiContextHook, context)
+    }
+
+    fn should_stop_after_turn(&self, context: &ContextEnvelope) -> Result<bool, HookError> {
+        HookSet::should_stop_after_turn(&OpenAiContextHook, context)
+    }
+
+    fn prepare_next_turn(
+        &self,
+        context: ContextEnvelope,
+    ) -> Result<AgentLoopTurnUpdate, HookError> {
+        HookSet::prepare_next_turn(&OpenAiContextHook, context)
+    }
+}
+
+fn project_invalid_edit_recovery(mut context: ContextEnvelope) -> ContextEnvelope {
+    let trailing_start = context
+        .messages
+        .iter()
+        .rposition(|message| matches!(message, AgentMessage::Assistant { .. }))
+        .map_or(0, |index| index.saturating_add(1));
+    // A tool batch can contain several rejected edit calls. Keep raw evidence
+    // for each one, but attach the correction once to the latest matching
+    // result so the next provider request has one unambiguous retry target.
+    for message in context.messages[trailing_start..].iter_mut().rev() {
+        let AgentMessage::ToolResult {
+            tool_name,
+            content,
+            is_error,
+            ..
+        } = message
+        else {
+            continue;
+        };
+        if *is_error
+            && tool_name == "edit"
+            && is_recoverable_malformed_edit_error(content)
+        {
+            if !content.contains(EDIT_RECOVERY_PROJECTION_HINT) {
+                content.push_str("\n\n");
+                content.push_str(EDIT_RECOVERY_PROJECTION_HINT);
+            }
+            break;
+        }
+    }
+    context
+}
+
+fn is_recoverable_malformed_edit_error(content: &str) -> bool {
+    [
+        "Validation failed for tool \"edit\":",
+        "files: must have required properties files",
+        "path: must not have additional properties",
+        "edits: must not have additional properties",
+    ]
+    .into_iter()
+    .all(|marker| content.contains(marker))
+}
+
+fn pre_edit_tool_gate_violation(
+    gate: &PreEditToolGate,
+    call: &ToolCall,
+    context: &ContextEnvelope,
+) -> Option<&'static str> {
+    let target_edit_succeeded = match gate.mode {
+        PreEditToolGateMode::SourceLocalV1 => successful_target_local_edit_result(context, gate),
+        PreEditToolGateMode::None | PreEditToolGateMode::DirectEditV1 => successful_edit_result(context),
+    };
+    if target_edit_succeeded {
+        return None;
+    }
+    match gate.mode {
+        PreEditToolGateMode::None => None,
+        PreEditToolGateMode::DirectEditV1 if matches!(call.name.as_str(), "bash" | "find") => {
+            Some(PRE_EDIT_TOOL_GATE_BLOCK_REASON)
+        }
+        PreEditToolGateMode::DirectEditV1 => None,
+        PreEditToolGateMode::SourceLocalV1 if matches!(call.name.as_str(), "bash" | "find") => {
+            Some(SOURCE_LOCAL_PRE_EDIT_TOOL_GATE_BLOCK_REASON)
+        }
+        PreEditToolGateMode::SourceLocalV1 if call.name == "read" && !call_is_target_read(call, gate) => {
+            Some(SOURCE_LOCAL_PRE_EDIT_TOOL_GATE_BLOCK_REASON)
+        }
+        PreEditToolGateMode::SourceLocalV1 if call.name == "edit" && !call_is_target_edit(call, gate) => {
+            Some(SOURCE_LOCAL_PRE_EDIT_TOOL_GATE_BLOCK_REASON)
+        }
+        PreEditToolGateMode::SourceLocalV1 => None,
+    }
+}
+
+fn successful_edit_result(context: &ContextEnvelope) -> bool {
+    context.messages.iter().any(|message| {
+        matches!(
+            message,
+            AgentMessage::ToolResult {
+                tool_name,
+                is_error,
+                ..
+            } if tool_name == "edit" && !*is_error
+        )
+    })
+}
+
+/// A source-local unlock requires both durable halves of the same permitted
+/// edit: an assistant call whose exact parsed paths are declared targets and a
+/// later successful result carrying that call's ID. This avoids inferring
+/// target locality from untrusted result text or a different edit in history.
+fn successful_target_local_edit_result(context: &ContextEnvelope, gate: &PreEditToolGate) -> bool {
+    let mut admitted_target_edit_ids = BTreeSet::new();
+    for message in &context.messages {
+        match message {
+            AgentMessage::Assistant { tool_calls, .. } => {
+                for call in tool_calls {
+                    let admitted = ToolCall {
+                        id: call.id.clone(),
+                        name: call.name.clone(),
+                        arguments: call.arguments.clone(),
+                    };
+                    if admitted.name == "edit" && call_is_target_edit(&admitted, gate) {
+                        admitted_target_edit_ids.insert(admitted.id);
+                    }
+                }
+            }
+            AgentMessage::ToolResult {
+                tool_call_id,
+                tool_name,
+                is_error,
+                ..
+            } if tool_name == "edit" && !*is_error && admitted_target_edit_ids.contains(tool_call_id) => {
+                return true;
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+fn call_is_target_read(call: &ToolCall, gate: &PreEditToolGate) -> bool {
+    JsonValue::parse(call.arguments.as_str())
+        .ok()
+        .and_then(|arguments| arguments.get("path").and_then(JsonValue::as_str).map(str::to_owned))
+        .is_some_and(|path| gate.source_local_target_set().contains(path.as_str()))
+}
+
+fn call_is_target_edit(call: &ToolCall, gate: &PreEditToolGate) -> bool {
+    let Ok(arguments) = JsonValue::parse(call.arguments.as_str()) else {
+        return false;
+    };
+    let Some(files) = arguments.get("files").and_then(JsonValue::as_array) else {
+        return false;
+    };
+    !files.is_empty()
+        && files.iter().all(|file| {
+            file.get("path")
+                .and_then(JsonValue::as_str)
+                .is_some_and(|path| gate.source_local_target_set().contains(path))
+        })
+}
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum HarnessMode {
@@ -94,6 +998,85 @@ impl HarnessMode {
     }
 }
 
+/// The explicit static-only profile for model-visible builtin prompt sections.
+///
+/// This leaves the resolved tool definitions and capabilities unchanged. A
+/// non-default profile is evidence-bearing so a screen cannot silently reuse
+/// the contradictory generic Bash guidance that prompted history probes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StaticPromptProfile {
+    BuiltinV1,
+    NoHistoryV1,
+    PrefixGuardV1,
+    PrefixGuardFocusedV1,
+}
+
+impl StaticPromptProfile {
+    fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "builtin-v1" => Ok(Self::BuiltinV1),
+            "no-history-v1" => Ok(Self::NoHistoryV1),
+            "prefix-guard-v1" => Ok(Self::PrefixGuardV1),
+            "prefix-guard-focused-v1" => Ok(Self::PrefixGuardFocusedV1),
+            _ => Err(
+                "--static-prompt-profile must be builtin-v1, no-history-v1, prefix-guard-v1, or prefix-guard-focused-v1".into(),
+            ),
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::BuiltinV1 => "builtin-v1",
+            Self::NoHistoryV1 => "no-history-v1",
+            Self::PrefixGuardV1 => "prefix-guard-v1",
+            Self::PrefixGuardFocusedV1 => "prefix-guard-focused-v1",
+        }
+    }
+
+    fn uses_no_history_bash_projection(self) -> bool {
+        matches!(
+            self,
+            Self::NoHistoryV1 | Self::PrefixGuardV1 | Self::PrefixGuardFocusedV1
+        )
+    }
+
+    fn additional_static_guidance(self) -> Option<&'static str> {
+        match self {
+            Self::PrefixGuardV1 => Some(STATIC_PREFIX_GUARD_DIAGNOSTIC_GUIDANCE),
+            Self::PrefixGuardFocusedV1 => Some(STATIC_PREFIX_GUARD_FOCUSED_DIAGNOSTIC_GUIDANCE),
+            Self::BuiltinV1 | Self::NoHistoryV1 => None,
+        }
+    }
+
+    fn project_prompt_sections(
+        self,
+        extension_id: &str,
+        mut sections: Vec<ExtensionPromptSection>,
+    ) -> Result<Vec<ExtensionPromptSection>, String> {
+        if !self.uses_no_history_bash_projection() || extension_id != "bash" {
+            return Ok(sections);
+        }
+        let section = sections
+            .iter_mut()
+            .find(|section| section.id == "bash")
+            .ok_or_else(|| "bash builtin must declare its bash prompt section".to_owned())?;
+        if section
+            .content
+            .matches(STATIC_BASH_GIT_HISTORY_INVITATION)
+            .count()
+            != 1
+        {
+            return Err("bash builtin prompt no longer contains its expected Git-history invitation".into());
+        }
+        section.content = section.content.replacen(
+            STATIC_BASH_GIT_HISTORY_INVITATION,
+            STATIC_BASH_NO_HISTORY_GUIDANCE,
+            1,
+        );
+        Ok(sections)
+    }
+}
+
 struct Args {
     model: String,
     task_json: PathBuf,
@@ -104,10 +1087,15 @@ struct Args {
     attempt_id: String,
     baseline_id: String,
     harness_mode: HarnessMode,
+    static_prompt_profile: StaticPromptProfile,
     thinking: ThinkingLevel,
     max_output_tokens: Option<u64>,
     outer_timeout_seconds: u64,
     provider_routing: JsonValue,
+    tool_child_sandbox: Option<ToolChildSandbox>,
+    edit_recovery_projection: EditRecoveryProjectionMode,
+    pre_edit_tool_gate: PreEditToolGateMode,
+    post_edit_validation_gate: PostEditValidationGateMode,
     shell_environment: CommandEnvironment,
     shell_environment_json: JsonValue,
     attempt_path_replacements: Vec<(String, String)>,
@@ -152,10 +1140,15 @@ impl Args {
             "--attempt-id",
             "--baseline-id",
             "--harness-mode",
+            "--static-prompt-profile",
             "--thinking-level",
             "--max-output-tokens",
             "--outer-timeout-seconds",
             "--provider-routing-json",
+            "--tool-child-sandbox",
+            "--edit-recovery-projection",
+            "--pre-edit-tool-gate",
+            "--post-edit-validation-gate",
         ];
         if values
             .keys()
@@ -183,6 +1176,66 @@ impl Args {
         ) {
             return Err("baseline ID must agree with harness mode".into());
         }
+        let static_prompt_profile = values
+            .get("--static-prompt-profile")
+            .map(String::as_str)
+            .map(StaticPromptProfile::parse)
+            .transpose()?
+            .unwrap_or(StaticPromptProfile::BuiltinV1);
+        if static_prompt_profile != StaticPromptProfile::BuiltinV1
+            && harness_mode != HarnessMode::Static
+        {
+            return Err("non-default static prompt profile is available only to tea-static".into());
+        }
+        let tool_child_sandbox_mode = values
+            .get("--tool-child-sandbox")
+            .map(String::as_str)
+            .map(ToolChildSandboxMode::parse)
+            .transpose()?
+            .unwrap_or(ToolChildSandboxMode::None);
+        if tool_child_sandbox_mode != ToolChildSandboxMode::None
+            && harness_mode != HarnessMode::Static
+        {
+            return Err("tool-child sandbox is available only to tea-static".into());
+        }
+        let edit_recovery_projection = values
+            .get("--edit-recovery-projection")
+            .map(String::as_str)
+            .map(EditRecoveryProjectionMode::parse)
+            .transpose()?
+            .unwrap_or(EditRecoveryProjectionMode::None);
+        if edit_recovery_projection != EditRecoveryProjectionMode::None
+            && harness_mode != HarnessMode::Static
+        {
+            return Err("edit recovery projection is available only to tea-static".into());
+        }
+        let pre_edit_tool_gate = values
+            .get("--pre-edit-tool-gate")
+            .map(String::as_str)
+            .map(PreEditToolGateMode::parse)
+            .transpose()?
+            .unwrap_or(PreEditToolGateMode::None);
+        if pre_edit_tool_gate != PreEditToolGateMode::None
+            && harness_mode != HarnessMode::Static
+        {
+            return Err("pre-edit tool gate is available only to tea-static".into());
+        }
+        let post_edit_validation_gate = values
+            .get("--post-edit-validation-gate")
+            .map(String::as_str)
+            .map(PostEditValidationGateMode::parse)
+            .transpose()?
+            .unwrap_or(PostEditValidationGateMode::None);
+        if post_edit_validation_gate != PostEditValidationGateMode::None
+            && harness_mode != HarnessMode::Static
+        {
+            return Err("post-edit validation gate is available only to tea-static".into());
+        }
+        if post_edit_validation_gate == PostEditValidationGateMode::UnmaskedEvidenceV1
+            && pre_edit_tool_gate != PreEditToolGateMode::SourceLocalV1
+        {
+            return Err("unmasked-evidence-v1 requires --pre-edit-tool-gate source-local-v1".into());
+        }
         let maximum = take("--max-output-tokens")?;
         if maximum != "unlimited" {
             return Err("tea shootout requires unlimited max output tokens".into());
@@ -197,8 +1250,27 @@ impl Args {
         if !provider_routing.is_object() {
             return Err("--provider-routing-json must be an object".into());
         }
+        let workspace = PathBuf::from(take("--workspace")?);
+        let sandbox_attempt_paths = shell
+            .iter()
+            .filter_map(|(name, value)| match name.as_str() {
+                "HOME" | "TMPDIR" | "npm_config_cache" | "NODE_PATH" => {
+                    Some(PathBuf::from(value))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let tool_child_sandbox = match tool_child_sandbox_mode {
+            ToolChildSandboxMode::None => None,
+            mode @ (ToolChildSandboxMode::MacosSeatbeltV1 | ToolChildSandboxMode::MacosSeatbeltV2) => Some(
+                ToolChildSandbox::macos_seatbelt(mode, &workspace, &sandbox_attempt_paths)?,
+            ),
+        };
         let attempt_path_replacements =
-            std::iter::once((take("--workspace")?, "{WORKSPACE}".to_owned()))
+            std::iter::once((
+                workspace.to_string_lossy().into_owned(),
+                "{WORKSPACE}".to_owned(),
+            ))
                 .chain(
                     shell
                         .iter()
@@ -232,17 +1304,22 @@ impl Args {
         Ok(Self {
             model,
             task_json: PathBuf::from(take("--task-json")?),
-            workspace: PathBuf::from(take("--workspace")?),
+            workspace,
             capabilities_json: PathBuf::from(take("--capabilities-json")?),
             result_json: PathBuf::from(take("--result-json")?),
             evidence_dir: PathBuf::from(take("--evidence-dir")?),
             attempt_id: take("--attempt-id")?,
             baseline_id,
             harness_mode,
+            static_prompt_profile,
             thinking: ThinkingLevel::High,
             max_output_tokens,
             outer_timeout_seconds,
             provider_routing,
+            tool_child_sandbox,
+            edit_recovery_projection,
+            pre_edit_tool_gate,
+            post_edit_validation_gate,
             shell_environment,
             shell_environment_json: JsonValue::Object(normalized_shell),
             attempt_path_replacements,
@@ -253,6 +1330,64 @@ impl Args {
 fn read_json(path: &Path, label: &str) -> Result<JsonValue, String> {
     let source = fs::read_to_string(path).map_err(|_| format!("cannot read evaluation {label}"))?;
     JsonValue::parse(&source).map_err(|_| format!("evaluation {label} is not JSON"))
+}
+
+/// Validate the task-owned source-local declaration before the model sees the
+/// prompt. The runner separately proves the checkout is clean immediately
+/// before launch; this adapter confirms its locally supplied task and regular
+/// workspace paths still agree with that witness.
+fn source_local_task_targets(
+    task: &JsonValue,
+    prompt: &str,
+    workspace: &Path,
+) -> Result<Vec<String>, String> {
+    let metadata = task
+        .get("source_local_v1")
+        .and_then(JsonValue::as_object)
+        .ok_or_else(|| "source-local-v1 requires versioned task metadata".to_owned())?;
+    if metadata
+        .get("schema_version")
+        .and_then(JsonValue::as_str)
+        != Some("tea-coding-eval-source-local/v1")
+    {
+        return Err("source-local-v1 task metadata schema is unsupported".into());
+    }
+    let targets = metadata
+        .get("targets")
+        .and_then(JsonValue::as_array)
+        .filter(|targets| !targets.is_empty())
+        .ok_or_else(|| "source-local-v1 task targets are invalid".to_owned())?;
+    let mut unique = BTreeSet::new();
+    let mut parsed = Vec::with_capacity(targets.len());
+    for target in targets {
+        let target = target
+            .as_str()
+            .filter(|target| safe_source_local_target(target))
+            .ok_or_else(|| "source-local-v1 task targets are invalid".to_owned())?;
+        if !unique.insert(target) {
+            return Err("source-local-v1 task targets must be unique".into());
+        }
+        if !prompt.contains(target) {
+            return Err("source-local-v1 task target must occur literally in the prompt".into());
+        }
+        let entry = fs::symlink_metadata(workspace.join(target))
+            .map_err(|_| format!("source-local-v1 target is not a regular workspace file: {target}"))?;
+        if entry.file_type().is_symlink() || !entry.file_type().is_file() {
+            return Err(format!("source-local-v1 target is not a regular workspace file: {target}"));
+        }
+        parsed.push(target.to_owned());
+    }
+    Ok(parsed)
+}
+
+fn safe_source_local_target(target: &str) -> bool {
+    !target.is_empty()
+        && !target.contains('\0')
+        && !target.starts_with('/')
+        && !target.contains('\\')
+        && target
+            .split('/')
+            .all(|component| !component.is_empty() && component != "." && component != "..")
 }
 
 fn request_timeout_seconds(outer_timeout_seconds: u64) -> u64 {
@@ -410,6 +1545,10 @@ fn model_profile(model: &ModelDescriptor) -> Result<ModelHarnessProfile, String>
 fn host_profile_digest(configuration: &AgentConfiguration) -> Digest {
     let mut writer = CanonicalHashWriter::new("tea-pi-shootout-host-profile", 1, 1);
     writer.string("system_prompt", &configuration.system_prompt);
+    // A context hook can change the next provider request without changing a
+    // prompt-visible tool definition. Bind that executable policy to the
+    // durable host profile so diagnostic recovery runs remain distinguishable.
+    writer.string("hook_identity", &configuration.hooks.identity().to_hex());
     let definitions = configuration.tools.definitions();
     writer.u64("tool_count", definitions.len() as u64);
     for tool in definitions {
@@ -777,6 +1916,22 @@ fn wire_request_record(
     ]))
 }
 
+fn returned_route_evidence(capture: &OpenRouterRequestCapture) -> JsonValue {
+    let route = capture.returned_route();
+    let provenance = route
+        .is_observed()
+        .then(|| JsonValue::from("OpenRouter response header"))
+        .unwrap_or(JsonValue::Null);
+    JsonValue::object([
+        ("model", route.model.map(JsonValue::String).unwrap_or(JsonValue::Null)),
+        (
+            "provider",
+            route.provider.map(JsonValue::String).unwrap_or(JsonValue::Null),
+        ),
+        ("provenance", provenance),
+    ])
+}
+
 fn write_wire_evidence(
     args: &Args,
     capture: &OpenRouterRequestCapture,
@@ -793,20 +1948,14 @@ fn write_wire_evidence(
             wire_request_record(payload, index + 1, &args.attempt_path_replacements)
         })
         .collect::<Result<Vec<_>, _>>()?;
+    let returned_route = returned_route_evidence(capture);
     let private = JsonValue::object([
         (
             "schema_version",
             JsonValue::from("tea-pi-wire-request-evidence/v1"),
         ),
         ("requests", JsonValue::Array(requests.clone())),
-        (
-            "returned_route",
-            JsonValue::object([
-                ("model", JsonValue::Null),
-                ("provider", JsonValue::Null),
-                ("provenance", JsonValue::Null),
-            ]),
-        ),
+        ("returned_route", returned_route.clone()),
     ]);
     fs::create_dir_all(&args.evidence_dir).map_err(|error| error.to_string())?;
     fs::write(
@@ -835,14 +1984,7 @@ fn write_wire_evidence(
         ("request_count", JsonValue::from(summaries.len() as u64)),
         ("requests", JsonValue::Array(summaries)),
         ("routing_policy", args.provider_routing.clone()),
-        (
-            "returned_route",
-            JsonValue::object([
-                ("model", JsonValue::Null),
-                ("provider", JsonValue::Null),
-                ("provenance", JsonValue::Null),
-            ]),
-        ),
+        ("returned_route", returned_route),
     ]))
 }
 
@@ -948,6 +2090,9 @@ fn write_jit_evidence(
 
 struct ResultJsonInput<'a> {
     args: &'a Args,
+    pre_edit_tool_gate: &'a PreEditToolGate,
+    post_edit_validation_gate: &'a PostEditValidationGate,
+    validation_evidence: &'a ValidationEvidence,
     provider: &'a OpenRouterProvider,
     surface: &'a CodingSurface,
     snapshot: &'a tea_core::harness::HarnessSnapshotV1,
@@ -1099,6 +2244,376 @@ fn prompt_total_tokens(prompt_tokens: Option<u64>) -> Option<u64> {
     prompt_tokens
 }
 
+/// An explicit direct-edit workflow policy.
+///
+/// `direct-edit-v1` makes the pre-edit state explicit without mutating model
+/// arguments: the named target can be read and edited, while exploratory
+/// `bash`/`find` calls are returned as ordinary blocked tool results. A
+/// successful durable `edit` result reopens those tools for validation. Calls
+/// batched with that edit remain blocked because only a *prior* successful
+/// result changes the durable context-derived state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PreEditToolGateMode {
+    None,
+    DirectEditV1,
+    SourceLocalV1,
+}
+
+impl PreEditToolGateMode {
+    fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "none" => Ok(Self::None),
+            "direct-edit-v1" => Ok(Self::DirectEditV1),
+            "source-local-v1" => Ok(Self::SourceLocalV1),
+            _ => Err("--pre-edit-tool-gate must be none, direct-edit-v1, or source-local-v1".into()),
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::DirectEditV1 => "direct-edit-v1",
+            Self::SourceLocalV1 => "source-local-v1",
+        }
+    }
+
+    fn block_reason_sha256(self) -> Option<String> {
+        match self {
+            Self::None => None,
+            Self::DirectEditV1 => Some(sha256(PRE_EDIT_TOOL_GATE_BLOCK_REASON.as_bytes())),
+            Self::SourceLocalV1 => Some(sha256(SOURCE_LOCAL_PRE_EDIT_TOOL_GATE_BLOCK_REASON.as_bytes())),
+        }
+    }
+
+    fn blocked_tools(self) -> &'static [&'static str] {
+        match self {
+            Self::None => &[],
+            Self::DirectEditV1 => &["bash", "find"],
+            Self::SourceLocalV1 => &["bash", "find"],
+        }
+    }
+
+    fn target_restricted_tools(self) -> &'static [&'static str] {
+        match self {
+            Self::None | Self::DirectEditV1 => &[],
+            Self::SourceLocalV1 => &["read", "edit"],
+        }
+    }
+
+    fn unlocks_after(self) -> Option<&'static str> {
+        match self {
+            Self::None => None,
+            Self::DirectEditV1 => Some("prior-successful-edit-result"),
+            Self::SourceLocalV1 => Some("prior-successful-target-local-edit-result"),
+        }
+    }
+
+    fn same_batch_rule(self) -> Option<&'static str> {
+        match self {
+            Self::None => None,
+            Self::DirectEditV1 => Some("block-until-prior-successful-edit-result"),
+            Self::SourceLocalV1 => Some("block-until-prior-successful-target-local-edit-result"),
+        }
+    }
+}
+
+/// The explicit model-context recovery mode available only to Tea-only diagnostics.
+///
+/// This changes only the immediate next model context after one precisely
+/// identified rejected edit. It never accepts or normalizes model arguments.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EditRecoveryProjectionMode {
+    None,
+    CanonicalV1,
+}
+
+impl EditRecoveryProjectionMode {
+    fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "none" => Ok(Self::None),
+            "canonical-v1" => Ok(Self::CanonicalV1),
+            _ => Err("--edit-recovery-projection must be none or canonical-v1".into()),
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::CanonicalV1 => "canonical-v1",
+        }
+    }
+
+    fn context_hook(
+        self,
+        pre_edit_tool_gate: PreEditToolGate,
+        post_edit_validation_gate: PostEditValidationGate,
+        direct_exit_status_witness: DirectExitStatusWitness,
+        exit_status_observations: ExitStatusObservations,
+    ) -> Arc<dyn HookSet> {
+        match (self, pre_edit_tool_gate.mode, post_edit_validation_gate.mode) {
+            (Self::None, PreEditToolGateMode::None, PostEditValidationGateMode::None) => Arc::new(OpenAiContextHook),
+            (Self::CanonicalV1, PreEditToolGateMode::None, PostEditValidationGateMode::None) => Arc::new(EditRecoveryProjectionHook),
+            (edit_recovery_projection, _, _) => {
+                Arc::new(PreEditToolGateHook {
+                    edit_recovery_projection,
+                    gate: pre_edit_tool_gate,
+                    post_edit_validation_gate,
+                    direct_exit_status_witness,
+                    exit_status_observations,
+                })
+            }
+        }
+    }
+
+    fn correction_sha256(self) -> Option<String> {
+        match self {
+            Self::None => None,
+            Self::CanonicalV1 => Some(sha256(EDIT_RECOVERY_PROJECTION_HINT.as_bytes())),
+        }
+    }
+}
+
+/// The explicit shell-isolation mode available only to Tea-only diagnostics.
+///
+/// The paired shootout must not select this Tea-only policy: it would narrow
+/// Tea's shell authority without an identical Pi policy. This mode exists to
+/// keep exploratory parallel screens from granting model-issued shell commands
+/// ambient host filesystem or network authority.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ToolChildSandboxMode {
+    None,
+    MacosSeatbeltV1,
+    /// V2 preserves V1's filesystem/network boundary and also blocks
+    /// model-issued shell reads and writes of workspace repository data.
+    MacosSeatbeltV2,
+}
+
+impl ToolChildSandboxMode {
+    fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "none" => Ok(Self::None),
+            "macos-seatbelt-v1" => Ok(Self::MacosSeatbeltV1),
+            "macos-seatbelt-v2" => Ok(Self::MacosSeatbeltV2),
+            _ => Err(
+                "--tool-child-sandbox must be none, macos-seatbelt-v1, or macos-seatbelt-v2"
+                    .into(),
+            ),
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::MacosSeatbeltV1 => "macos-seatbelt-v1",
+            Self::MacosSeatbeltV2 => "macos-seatbelt-v2",
+        }
+    }
+}
+
+/// The concrete, invocation-local profile used for one shell child.
+///
+/// Seatbelt applies to the inner shell and all of its descendants. The
+/// provider adapter remains outside it so OpenRouter transport retains its
+/// independent credential/network boundary.
+#[derive(Clone, Debug)]
+struct ToolChildSandbox {
+    mode: ToolChildSandboxMode,
+    profile: String,
+    profile_sha256: String,
+}
+
+impl ToolChildSandbox {
+    fn macos_seatbelt(
+        mode: ToolChildSandboxMode,
+        workspace: &Path,
+        attempt_paths: &[PathBuf],
+    ) -> Result<Self, String> {
+        if !matches!(
+            mode,
+            ToolChildSandboxMode::MacosSeatbeltV1 | ToolChildSandboxMode::MacosSeatbeltV2
+        ) {
+            return Err("only a macos Seatbelt mode can build a Seatbelt profile".into());
+        }
+        if !cfg!(target_os = "macos") {
+            return Err(format!("{} requires macOS", mode.name()));
+        }
+        if !Path::new("/usr/bin/sandbox-exec").is_file() {
+            return Err(format!("{} requires /usr/bin/sandbox-exec", mode.name()));
+        }
+        let canonical_workspace = workspace.canonicalize().map_err(|error| {
+            format!(
+                "{} cannot canonicalize workspace {}: {error}",
+                mode.name(),
+                workspace.display()
+            )
+        })?;
+        let mut allowed_paths = BTreeSet::new();
+        allowed_paths.insert(canonical_workspace.clone());
+        for path in attempt_paths {
+            let canonical = path.canonicalize().map_err(|error| {
+                format!(
+                    "{} cannot canonicalize allowed path {}: {error}",
+                    mode.name(),
+                    path.display()
+                )
+            })?;
+            allowed_paths.insert(canonical);
+        }
+        let profile = macos_seatbelt_profile(mode, &canonical_workspace, &allowed_paths)?;
+        Ok(Self {
+            mode,
+            profile_sha256: sha256(profile.as_bytes()),
+            profile,
+        })
+    }
+
+    fn wrapped_command(&self, command: &str) -> String {
+        // The outer trusted bash receives only a constant exec form plus
+        // shell-quoted literals. It never evaluates model-supplied command
+        // text itself; Seatbelt is established before the inner bash parses it.
+        format!(
+            "exec /usr/bin/sandbox-exec -p {} /bin/bash -c {}",
+            shell_literal(&self.profile),
+            shell_literal(command),
+        )
+    }
+}
+
+const SEATBELT_TOOL_CHILD_SYSTEM_READ_ROOTS: &[&str] = &[
+    "/System",
+    "/usr",
+    "/bin",
+    "/sbin",
+    "/dev",
+    "/opt/homebrew",
+    "/usr/local",
+];
+
+fn macos_seatbelt_profile(
+    mode: ToolChildSandboxMode,
+    workspace: &Path,
+    allowed_paths: &BTreeSet<PathBuf>,
+) -> Result<String, String> {
+    let system_rules = SEATBELT_TOOL_CHILD_SYSTEM_READ_ROOTS
+        .iter()
+        .map(|path| seatbelt_subpath_rule(Path::new(path)))
+        .collect::<Result<Vec<_>, _>>()?;
+    let attempt_rules = allowed_paths
+        .iter()
+        .map(|path| seatbelt_subpath_rule(path))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut read_rules = system_rules;
+    read_rules.extend(attempt_rules.iter().cloned());
+    // Keep the narrower deny rules after the workspace allow rules. Seatbelt
+    // gives this later, more-specific rule precedence, so V2 removes only
+    // repository data rather than broadening or changing source access.
+    let repository_metadata_denies = if mode == ToolChildSandboxMode::MacosSeatbeltV2 {
+        let git_metadata = seatbelt_subpath_rule(&workspace.join(".git"))?;
+        format!(
+            "\n(deny file-read* {git_metadata})\n(deny file-write* {git_metadata})"
+        )
+    } else {
+        String::new()
+    };
+    Ok(format!(
+        "(version 1)\n(deny default)\n(import \"system.sb\")\n(allow process-exec)\n(allow process-fork)\n(allow file-read* {})\n(allow file-write* {})\n(allow file-read-metadata (subpath \"/\"))\n(deny network-outbound){repository_metadata_denies}",
+        read_rules.join(" "),
+        attempt_rules.join(" "),
+    ))
+}
+
+fn seatbelt_subpath_rule(path: &Path) -> Result<String, String> {
+    let path = path
+        .to_str()
+        .ok_or_else(|| format!("macos-seatbelt-v1 path is not UTF-8: {}", path.display()))?;
+    Ok(format!("(subpath \"{}\")", path.replace('\\', "\\\\").replace('"', "\\\"")))
+}
+
+fn shell_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+/// Decorates only process operations with a direct Seatbelt child boundary.
+///
+/// Workspace read/edit/find retain their existing canonical-path authority and
+/// delegate unchanged. This is deliberately an evaluation adapter wrapper,
+/// not a default coding-profile policy.
+#[derive(Clone)]
+struct SeatbeltToolChildOperations {
+    delegate: Arc<dyn CodingOperations>,
+    sandbox: ToolChildSandbox,
+}
+
+impl SeatbeltToolChildOperations {
+    fn new(delegate: Arc<dyn CodingOperations>, sandbox: ToolChildSandbox) -> Self {
+        Self { delegate, sandbox }
+    }
+}
+
+impl CodingOperations for SeatbeltToolChildOperations {
+    fn read_file<'a>(&'a self, path: &'a Path) -> OperationFuture<'a, Vec<u8>> {
+        self.delegate.read_file(path)
+    }
+
+    fn read_file_snapshots<'a>(
+        &'a self,
+        paths: &'a [PathBuf],
+        max_total_bytes: usize,
+    ) -> OperationFuture<'a, Vec<FileSnapshot>> {
+        self.delegate.read_file_snapshots(paths, max_total_bytes)
+    }
+
+    fn commit_edit_transaction<'a>(
+        &'a self,
+        transaction: &'a EditTransaction,
+        cancellation: CancellationToken,
+    ) -> OperationFuture<'a, EditTransactionOutcome> {
+        self.delegate
+            .commit_edit_transaction(transaction, cancellation)
+    }
+
+    fn metadata<'a>(&'a self, path: &'a Path) -> OperationFuture<'a, EntryMetadata> {
+        self.delegate.metadata(path)
+    }
+
+    fn find_files<'a>(
+        &'a self,
+        root: &'a Path,
+        pattern: &'a str,
+        max_results: usize,
+        max_output_bytes: usize,
+        cancellation: CancellationToken,
+    ) -> OperationFuture<'a, SearchResult> {
+        self.delegate
+            .find_files(root, pattern, max_results, max_output_bytes, cancellation)
+    }
+
+    fn execute_command<'a>(
+        &'a self,
+        command: &'a str,
+        cwd: &'a Path,
+        timeout: Duration,
+        environment: &'a CommandEnvironment,
+        cancellation: CancellationToken,
+        updates: ToolUpdateSink,
+    ) -> OperationFuture<'a, CommandOutput> {
+        let delegate = Arc::clone(&self.delegate);
+        let wrapped = self.sandbox.wrapped_command(command);
+        Box::pin(async move {
+            delegate
+                .execute_command(
+                    &wrapped,
+                    cwd,
+                    timeout,
+                    environment,
+                    cancellation,
+                    updates,
+                )
+                .await
+        })
+    }
+}
+
 /// The resolved, provider-visible coding surface used by one evaluation run.
 ///
 /// This is derived from the checked-in Luau builtins rather than a Rust tool
@@ -1107,24 +2622,73 @@ fn prompt_total_tokens(prompt_tokens: Option<u64>) -> Option<u64> {
 struct CodingSurface {
     system_prompt: String,
     tools: Vec<tea_core::tool::ToolDefinition>,
+    hook_identity: Digest,
+    static_bash_prompt_sha256: String,
+    exit_status_observations: ExitStatusObservations,
 }
 
+#[cfg(test)]
 fn coding_configuration(
     workspace: &Path,
     environment: CommandEnvironment,
     include_static_guidelines: bool,
+    static_prompt_profile: StaticPromptProfile,
+    tool_child_sandbox: Option<ToolChildSandbox>,
+    edit_recovery_projection: EditRecoveryProjectionMode,
+    pre_edit_tool_gate: PreEditToolGate,
 ) -> Result<(AgentConfiguration, CodingSurface), String> {
+    coding_configuration_with_post_edit_validation(
+        workspace,
+        environment,
+        include_static_guidelines,
+        static_prompt_profile,
+        tool_child_sandbox,
+        edit_recovery_projection,
+        pre_edit_tool_gate,
+        PostEditValidationGate::disabled(),
+    )
+}
+
+fn coding_configuration_with_post_edit_validation(
+    workspace: &Path,
+    environment: CommandEnvironment,
+    include_static_guidelines: bool,
+    static_prompt_profile: StaticPromptProfile,
+    tool_child_sandbox: Option<ToolChildSandbox>,
+    edit_recovery_projection: EditRecoveryProjectionMode,
+    pre_edit_tool_gate: PreEditToolGate,
+    post_edit_validation_gate: PostEditValidationGate,
+) -> Result<(AgentConfiguration, CodingSurface), String> {
+    if static_prompt_profile != StaticPromptProfile::BuiltinV1 && !include_static_guidelines {
+        return Err("non-default static prompt profile requires static coding guidelines".into());
+    }
     let limits = ExtensionLimits {
         max_source_bytes: 64 * 1024,
         max_memory_bytes: 1024 * 1024,
         max_interrupt_checks: 10_000,
     };
     let engine = LuauExtensionEngine;
-    let host = CodingHost::new(workspace)
+    let operations: Arc<dyn CodingOperations> = match tool_child_sandbox {
+        Some(sandbox) => Arc::new(SeatbeltToolChildOperations::new(
+            Arc::new(LocalCodingOperations),
+            sandbox,
+        )),
+        None => Arc::new(LocalCodingOperations),
+    };
+    let host = CodingHost::with_operations(workspace, operations)
         .map_err(|error| error.to_string())?
         .with_environment(environment);
     let mut prompt_sections = Vec::new();
+    let mut static_bash_prompt_sha256 = None;
     let mut tools = ToolRegistry::default();
+    let direct_exit_status_witness = DirectExitStatusWitness::default();
+    let exit_status_observations = ExitStatusObservations::default();
+    let hooks = edit_recovery_projection.context_hook(
+        pre_edit_tool_gate,
+        post_edit_validation_gate.clone(),
+        direct_exit_status_witness.clone(),
+        exit_status_observations.clone(),
+    );
     for source in [
         builtins::read(limits),
         builtins::bash(limits),
@@ -1142,7 +2706,17 @@ fn coding_configuration(
             WORKSPACE_READ_CAPABILITY_V1 => host.read_capability(),
             WORKSPACE_SEARCH_CAPABILITY_V1 => host.search_capability(),
             WORKSPACE_MUTATE_CAPABILITY_V1 => host.mutate_capability(),
-            PROCESS_CAPABILITY_V1 => host.process_capability(),
+            PROCESS_CAPABILITY_V1 => {
+                let process = host.process_capability();
+                if post_edit_validation_gate.enabled() {
+                    Arc::new(ExitWitnessProcessCapability::new(
+                        process,
+                        direct_exit_status_witness.clone(),
+                    ))
+                } else {
+                    process
+                }
+            }
             capability => return Err(format!("unsupported builtin capability {capability}")),
         };
         let mut bindings = ExtensionCapabilityBindings::new();
@@ -1163,12 +2737,21 @@ fn coding_configuration(
             .resolve(
                 &source,
                 bindings,
-                Arc::new(OpenAiContextHook) as Arc<dyn HookSet>,
+                Arc::clone(&hooks),
                 0,
                 Arc::new(ExtensionMemoryCollector::default()),
             )
             .map_err(|error| error.to_string())?;
-        prompt_sections.extend(descriptor.prompt_sections);
+        let source_prompt_sections = static_prompt_profile
+            .project_prompt_sections(&source.extension_id, descriptor.prompt_sections)?;
+        if source.extension_id == "bash" {
+            let bash_prompt = source_prompt_sections
+                .iter()
+                .find(|section| section.id == "bash")
+                .ok_or_else(|| "bash builtin must declare its bash prompt section".to_owned())?;
+            static_bash_prompt_sha256 = Some(sha256(bash_prompt.content.as_bytes()));
+        }
+        prompt_sections.extend(source_prompt_sections);
         for name in resolved
             .tools
             .names()
@@ -1184,9 +2767,14 @@ fn coding_configuration(
             );
         }
     }
-    let prompt_guidelines = include_static_guidelines
-        .then_some(STATIC_CODING_GUIDELINES)
-        .unwrap_or("");
+    let prompt_guidelines = if include_static_guidelines {
+        static_prompt_profile
+            .additional_static_guidance()
+            .map(|guidance| format!("{STATIC_CODING_GUIDELINES}\n\n{guidance}"))
+            .unwrap_or_else(|| STATIC_CODING_GUIDELINES.to_owned())
+    } else {
+        String::new()
+    };
     let separator = if prompt_guidelines.is_empty() { "" } else { "\n\n" };
     let system_prompt = format!(
         "{}{}{}\n\nCurrent working directory: {}",
@@ -1205,9 +2793,13 @@ fn coding_configuration(
     let surface = CodingSurface {
         system_prompt: system_prompt.clone(),
         tools: tools.definitions(),
+        hook_identity: hooks.identity(),
+        static_bash_prompt_sha256: static_bash_prompt_sha256
+            .ok_or_else(|| "static coding surface must include the bash prompt section".to_owned())?,
+        exit_status_observations,
     };
     Ok((
-        AgentConfiguration::new(system_prompt, tools, Arc::new(OpenAiContextHook)),
+        AgentConfiguration::new(system_prompt, tools, hooks),
         surface,
     ))
 }
@@ -1267,6 +2859,11 @@ fn result_json(input: ResultJsonInput<'_>) -> JsonValue {
         .shell_environment_json
         .to_json_string()
         .expect("shell environment encodes");
+    let tool_child_sandbox = input.args.tool_child_sandbox.as_ref();
+    let static_prompt_profile = input.args.static_prompt_profile;
+    let edit_recovery_projection = input.args.edit_recovery_projection;
+    let pre_edit_tool_gate = input.pre_edit_tool_gate;
+    let post_edit_validation_gate = input.post_edit_validation_gate;
     let cost = input.provider.cost_report();
     let mut counts = session_counts(input.session_snapshot);
     // Pi defines this field from completed compaction lifecycle events. The
@@ -1462,6 +3059,63 @@ fn result_json(input: ResultJsonInput<'_>) -> JsonValue {
                     "shell_environment_sha256",
                     JsonValue::from(sha256(environment_json.as_bytes())),
                 ),
+                (
+                    "static_prompt_profile",
+                    JsonValue::object([
+                        ("mode", JsonValue::from(static_prompt_profile.name())),
+                        (
+                            "bash_prompt_sha256",
+                            JsonValue::from(input.surface.static_bash_prompt_sha256.clone()),
+                        ),
+                    ]),
+                ),
+                (
+                    "tool_child_sandbox",
+                    JsonValue::object([
+                        (
+                            "mode",
+                            JsonValue::from(
+                                tool_child_sandbox
+                                    .map(|sandbox| sandbox.mode.name())
+                                    .unwrap_or(ToolChildSandboxMode::None.name()),
+                            ),
+                        ),
+                        (
+                            "profile_sha256",
+                            tool_child_sandbox
+                                .map(|sandbox| JsonValue::from(sandbox.profile_sha256.clone()))
+                                .unwrap_or(JsonValue::Null),
+                        ),
+                    ]),
+                ),
+                (
+                    "edit_recovery_projection",
+                    JsonValue::object([
+                        (
+                            "mode",
+                            JsonValue::from(edit_recovery_projection.name()),
+                        ),
+                        (
+                            "hook_identity_blake3",
+                            JsonValue::from(input.surface.hook_identity.to_hex()),
+                        ),
+                        (
+                            "correction_sha256",
+                            edit_recovery_projection
+                                .correction_sha256()
+                                .map(JsonValue::from)
+                                .unwrap_or(JsonValue::Null),
+                        ),
+                    ]),
+                ),
+                (
+                    "pre_edit_tool_gate",
+                    pre_edit_tool_gate.surface(),
+                ),
+                (
+                    "post_edit_validation_gate",
+                    post_edit_validation_gate.surface(),
+                ),
             ]),
         ),
         (
@@ -1481,16 +3135,7 @@ fn result_json(input: ResultJsonInput<'_>) -> JsonValue {
                     JsonValue::object([
                         ("automatic_compaction", JsonValue::Bool(false)),
                         ("compaction_threshold", JsonValue::Null),
-                        (
-                            "provider_retry",
-                            JsonValue::object([
-                                ("enabled", JsonValue::Bool(true)),
-                                (
-                                    "max_retries",
-                                    JsonValue::from(u64::from(SHOOTOUT_PROVIDER_MAX_RETRIES)),
-                                ),
-                            ]),
-                        ),
+                        ("provider_retry", shootout_provider_retry_evidence()),
                         (
                             "request_timeout_seconds",
                             JsonValue::from(request_timeout_seconds(
@@ -1516,6 +3161,11 @@ fn result_json(input: ResultJsonInput<'_>) -> JsonValue {
                             optional_u64(input.args.max_output_tokens),
                         ),
                         ("provider_routing", input.args.provider_routing.clone()),
+                        ("pre_edit_tool_gate", pre_edit_tool_gate.surface()),
+                        (
+                            "post_edit_validation_gate",
+                            post_edit_validation_gate.surface(),
+                        ),
                         (
                             "sampling",
                             JsonValue::object([
@@ -1653,7 +3303,17 @@ fn result_json(input: ResultJsonInput<'_>) -> JsonValue {
                 ),
             ]),
         ),
-        ("trace", JsonValue::Array(input.trace)),
+        ("validation_evidence", input.validation_evidence.json()),
+        (
+            "trace",
+            JsonValue::Array(
+                input
+                    .trace
+                    .into_iter()
+                    .chain(input.validation_evidence.trace())
+                    .collect(),
+            ),
+        ),
     ])
 }
 
@@ -1679,6 +3339,16 @@ fn main() -> Result<(), String> {
     if actual != ["read", "bash", "edit", "find"] {
         return Err("active tool list must be read/bash/edit/find".into());
     }
+    let pre_edit_tool_gate = PreEditToolGate::from_task(
+        args.pre_edit_tool_gate,
+        &task,
+        prompt,
+        &args.workspace,
+    )?;
+    let post_edit_validation_gate = PostEditValidationGate::from_pre_edit(
+        args.post_edit_validation_gate,
+        &pre_edit_tool_gate,
+    )?;
     let api_key = env::var("OPENROUTER_API_KEY")
         .map_err(|_| "OPENROUTER_API_KEY must be supplied by vault".to_owned())?;
     let request_capture = OpenRouterRequestCapture::default();
@@ -1713,10 +3383,15 @@ fn main() -> Result<(), String> {
         provider_config
     };
     let provider = Arc::new(OpenRouterProvider::new(provider_config));
-    let (configuration, surface) = coding_configuration(
+    let (configuration, surface) = coding_configuration_with_post_edit_validation(
         &args.workspace,
         args.shell_environment.clone(),
         args.harness_mode == HarnessMode::Static,
+        args.static_prompt_profile,
+        args.tool_child_sandbox.clone(),
+        args.edit_recovery_projection,
+        pre_edit_tool_gate.clone(),
+        post_edit_validation_gate.clone(),
     )?;
     let model = ModelDescriptor {
         provider: "openrouter".into(),
@@ -1879,8 +3554,9 @@ fn main() -> Result<(), String> {
     let outer_deadline = (args.harness_mode == HarnessMode::Static
         && args.outer_timeout_seconds != 0)
         .then(|| Duration::from_secs(args.outer_timeout_seconds));
+    let outer_deadline_at = outer_deadline.map(|duration| started + duration);
     let deadline_harness = Arc::clone(&harness);
-    let (outcome, outer_deadline_fired) = smol::block_on(settle_with_outer_deadline(
+    let (mut outcome, mut outer_deadline_fired) = smol::block_on(settle_with_outer_deadline(
         outer_deadline,
         async {
             if args.harness_mode == HarnessMode::Jit {
@@ -1893,12 +3569,66 @@ fn main() -> Result<(), String> {
             let _ = deadline_harness.abort_root();
         },
     ));
+    let mut post_edit_reminder_issued = false;
+    let mut post_edit_evidence_missing = false;
+    if !outer_deadline_fired
+        && args.harness_mode == HarnessMode::Static
+        && matches!(&outcome, Ok(operation) if operation.is_completed())
+    {
+        let durable = harness.snapshot().map_err(|error| error.to_string())?;
+        let evidence = validation_evidence_from_snapshot(
+            &post_edit_validation_gate,
+            &durable,
+            &surface.exit_status_observations.snapshot(),
+        );
+        if evidence.pending() {
+            // This is one normal root prompt, not an extension continuation:
+            // its user/model turn is durable and counted exactly like Pi's.
+            post_edit_reminder_issued = true;
+            let remaining_deadline = outer_deadline_at
+                .map(|deadline| deadline.saturating_duration_since(Instant::now()));
+            let deadline_harness = Arc::clone(&harness);
+            let (continuation, continuation_timed_out) = smol::block_on(
+                settle_with_outer_deadline(
+                    remaining_deadline,
+                    harness.run_root_prompt(POST_EDIT_VALIDATION_REMINDER),
+                    move || {
+                        let _ = deadline_harness.abort_root();
+                    },
+                ),
+            );
+            outcome = continuation;
+            outer_deadline_fired = continuation_timed_out;
+            if !outer_deadline_fired
+                && matches!(&outcome, Ok(operation) if operation.is_completed())
+            {
+                let durable = harness.snapshot().map_err(|error| error.to_string())?;
+                post_edit_evidence_missing = validation_evidence_from_snapshot(
+                    &post_edit_validation_gate,
+                    &durable,
+                    &surface.exit_status_observations.snapshot(),
+                )
+                .pending();
+            }
+        }
+    }
     let agent_ms = started.elapsed().as_millis() as u64;
     collecting.store(false, Ordering::Release);
     let events = collector
         .join()
         .map_err(|_| "event collector thread panicked".to_owned())?;
     let durable = harness.snapshot().map_err(|error| error.to_string())?;
+    let mut validation_evidence = validation_evidence_from_snapshot(
+        &post_edit_validation_gate,
+        &durable,
+        &surface.exit_status_observations.snapshot(),
+    );
+    if post_edit_reminder_issued {
+        let _ = validation_evidence.issue_reminder();
+    }
+    if post_edit_evidence_missing {
+        validation_evidence.mark_missing();
+    }
     let final_text = durable
         .entries()
         .iter()
@@ -1925,6 +3655,8 @@ fn main() -> Result<(), String> {
         });
     let terminal = if outer_deadline_fired {
         ("failed", Some("outer_timeout"))
+    } else if post_edit_evidence_missing {
+        ("failed", Some("post_edit_validation_evidence_missing"))
     } else {
         match &outcome {
         Ok(operation) if operation.is_completed() => ("completed", None),
@@ -1986,6 +3718,9 @@ fn main() -> Result<(), String> {
     )?;
     let result = result_json(ResultJsonInput {
         args: &args,
+        pre_edit_tool_gate: &pre_edit_tool_gate,
+        post_edit_validation_gate: &post_edit_validation_gate,
+        validation_evidence: &validation_evidence,
         provider: &provider,
         surface: &surface,
         snapshot: &snapshot,
@@ -2015,27 +3750,664 @@ fn main() -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
 
+    use tea_core::coding::{CodingOperations, CommandTermination, LocalCodingOperations};
+    use tea_core::effect::RunProvenance;
     use tea_core::event::{AgentEvent, AgentEventKind, EventSequence};
+    use tea_core::harness::extension::{
+        ExtensionCapability, ExtensionCapabilityFuture, ExtensionCapabilityRequest,
+        ExtensionCapabilityResponse,
+    };
+    use tea_core::hooks::{ContextEnvelope, HookSet};
     use tea_core::runtime::TeaEvent;
-    use tea_core::scheduler::AdapterRequestObservation;
-    use tea_core::state::{RunId, TurnId};
-    use tea_core::tool::ToolRegistry;
+    use tea_core::scheduler::{AdapterRequestObservation, CancellationToken};
+    use tea_core::state::{
+        AgentMessage, AgentToolCall, MessageId, RunId, SerializedJson, ToolCallId, TurnId,
+    };
+    use tea_core::tool::{AgentToolResult, ToolCall, ToolRegistry, ToolUpdateSink};
+    use tea_protocol::JsonValue;
     use tea_session::LaneId;
 
     use super::{
-        AgentConfiguration, CommandEnvironment, HarnessMode, ModelDescriptor, OpenAiContextHook,
-        OpenRouterConfig, OpenRouterProvider, REQUIRED_MODEL, RuntimeServices,
-        coding_configuration, model_profile, prompt_total_tokens, request_timeout_seconds, sha256,
-        snapshot_spec, uncached_input_tokens,
+        AgentConfiguration, CommandEnvironment, EditRecoveryProjectionMode, HarnessMode, ModelDescriptor, OpenAiContextHook,
+        OpenRouterConfig, OpenRouterProvider, OpenRouterRequestCapture, REQUIRED_MODEL, RuntimeServices,
+        DirectExitStatusWitness, ExitStatusObservations, ExitWitnessProcessCapability,
+        POST_EDIT_VALIDATION_BLOCK_REASON, PostEditValidationGate, PostEditValidationGateMode,
+        PRE_EDIT_TOOL_GATE_BLOCK_REASON, SOURCE_LOCAL_PRE_EDIT_TOOL_GATE_BLOCK_REASON,
+        PreEditToolGate, PreEditToolGateHook, PreEditToolGateMode, ValidationEvidence,
+        direct_foreground_shell_v1,
+        pre_edit_tool_gate_violation,
+        SeatbeltToolChildOperations, ToolChildSandbox, ToolChildSandboxMode,
+        StaticPromptProfile, coding_configuration, model_profile, prompt_total_tokens, request_timeout_seconds, sha256,
+        source_local_task_targets,
+        shootout_provider_retry_evidence, snapshot_spec, uncached_input_tokens,
     };
+
+    #[derive(Clone)]
+    struct FixedProcessReceiptCapability {
+        value: JsonValue,
+    }
+
+    impl ExtensionCapability for FixedProcessReceiptCapability {
+        fn invoke(
+            &self,
+            _request: ExtensionCapabilityRequest,
+            _cancellation: CancellationToken,
+        ) -> ExtensionCapabilityFuture {
+            let value = self.value.clone();
+            Box::pin(async move { Ok(ExtensionCapabilityResponse { value }) })
+        }
+    }
     #[test]
     fn requested_deepseek_model_is_pinned() {
         assert_eq!(REQUIRED_MODEL, "deepseek/deepseek-v4-flash-0731");
         assert_ne!(REQUIRED_MODEL, "poolside/laguna-s-2.1:free");
         assert_eq!(HarnessMode::parse("jit").unwrap().name(), "jit");
+        assert_eq!(
+            StaticPromptProfile::parse("no-history-v1").unwrap().name(),
+            "no-history-v1"
+        );
+        assert_eq!(
+            StaticPromptProfile::parse("prefix-guard-v1").unwrap().name(),
+            "prefix-guard-v1"
+        );
+        assert_eq!(
+            StaticPromptProfile::parse("prefix-guard-focused-v1")
+                .unwrap()
+                .name(),
+            "prefix-guard-focused-v1"
+        );
+        assert_eq!(
+            PreEditToolGateMode::parse("direct-edit-v1").unwrap().name(),
+            "direct-edit-v1"
+        );
+        assert!(StaticPromptProfile::parse("hidden-fallback").is_err());
+    }
+
+    #[test]
+    fn emitted_controlled_provider_retry_disables_preoutput_replay_for_paired_shootouts() {
+        assert_eq!(
+            shootout_provider_retry_evidence(),
+            JsonValue::object([
+                ("enabled", JsonValue::Bool(true)),
+                ("max_retries", JsonValue::from(0_u64)),
+            ]),
+        );
+    }
+
+    #[test]
+    fn direct_edit_gate_blocks_pre_edit_exploration_and_reopens_after_successful_edit() {
+        let direct_gate = PreEditToolGate::direct_edit_v1();
+        let make_call = |id: &str, name: &str| ToolCall {
+            id: ToolCallId::new(id).expect("fixture call ID"),
+            name: name.into(),
+            arguments: SerializedJson::new("{}"),
+        };
+        let before_edit = ContextEnvelope {
+            version: 1,
+            messages: Vec::new(),
+            host_messages: Vec::new(),
+        };
+        assert_eq!(
+            pre_edit_tool_gate_violation(
+                &direct_gate,
+                &make_call("call-bash", "bash"),
+                &before_edit,
+            ),
+            Some(PRE_EDIT_TOOL_GATE_BLOCK_REASON)
+        );
+        assert_eq!(
+            pre_edit_tool_gate_violation(
+                &direct_gate,
+                &make_call("call-find", "find"),
+                &before_edit,
+            ),
+            Some(PRE_EDIT_TOOL_GATE_BLOCK_REASON)
+        );
+        assert_eq!(
+            pre_edit_tool_gate_violation(
+                &direct_gate,
+                &make_call("call-read", "read"),
+                &before_edit,
+            ),
+            None
+        );
+
+        let after_failed_edit = ContextEnvelope {
+            version: 1,
+            messages: vec![AgentMessage::ToolResult {
+                id: MessageId(1),
+                tool_call_id: ToolCallId::new("call-failed-edit").expect("fixture call ID"),
+                tool_name: "edit".into(),
+                content: "invalid arguments".into(),
+                details: None,
+                usage: Box::new(None),
+                added_tool_names: Vec::new(),
+                terminate: false,
+                is_error: true,
+                failure: None,
+            }],
+            host_messages: Vec::new(),
+        };
+        assert_eq!(
+            pre_edit_tool_gate_violation(
+                &direct_gate,
+                &make_call("call-after-failed-edit", "find"),
+                &after_failed_edit,
+            ),
+            Some(PRE_EDIT_TOOL_GATE_BLOCK_REASON),
+            "a failed edit does not unlock exploration"
+        );
+
+        let same_batch_as_edit = ContextEnvelope {
+            version: 1,
+            messages: vec![AgentMessage::Assistant {
+                id: MessageId(2),
+                content: String::new(),
+                tool_calls: vec![AgentToolCall {
+                    id: ToolCallId::new("call-batched-edit").expect("fixture call ID"),
+                    name: "edit".into(),
+                    arguments: SerializedJson::new("{\"files\":[]}"),
+                }],
+                stop_reason: None,
+                error_message: None,
+                opaque_context: Vec::new(),
+            }],
+            host_messages: Vec::new(),
+        };
+        assert_eq!(
+            pre_edit_tool_gate_violation(
+                &direct_gate,
+                &make_call("call-batched-bash", "bash"),
+                &same_batch_as_edit,
+            ),
+            Some(PRE_EDIT_TOOL_GATE_BLOCK_REASON),
+            "an edit call does not unlock another call in its own batch"
+        );
+        assert_eq!(
+            pre_edit_tool_gate_violation(
+                &direct_gate,
+                &make_call("call-edit", "edit"),
+                &before_edit,
+            ),
+            None
+        );
+
+        let after_edit = ContextEnvelope {
+            version: 1,
+            messages: vec![AgentMessage::ToolResult {
+                id: MessageId(1),
+                tool_call_id: ToolCallId::new("call-successful-edit").expect("fixture call ID"),
+                tool_name: "edit".into(),
+                content: "updated lib/router/index.js".into(),
+                details: None,
+                usage: Box::new(None),
+                added_tool_names: Vec::new(),
+                terminate: false,
+                is_error: false,
+                failure: None,
+            }],
+            host_messages: Vec::new(),
+        };
+        assert_eq!(
+            pre_edit_tool_gate_violation(
+                &direct_gate,
+                &make_call("call-validate", "bash"),
+                &after_edit,
+            ),
+            None,
+            "post-edit validation remains available"
+        );
+    }
+
+    #[test]
+    fn direct_edit_gate_surface_is_stable_for_shared_policy_evidence() {
+        assert_eq!(
+            PRE_EDIT_TOOL_GATE_BLOCK_REASON,
+            "Pre-edit direct workflow policy: before a successful edit result, bash and find are unavailable. Read the named source and make the smallest edit to the named target; after a successful edit, use bash or find only for focused validation.",
+        );
+        assert_eq!(
+            PreEditToolGate::direct_edit_v1().surface(),
+            JsonValue::object([
+                ("mode", JsonValue::from("direct-edit-v1")),
+                (
+                    "blocked_tools",
+                    JsonValue::Array(vec![JsonValue::from("bash"), JsonValue::from("find")]),
+                ),
+                ("target_restricted_tools", JsonValue::Array(Vec::new())),
+                ("source_local_targets", JsonValue::Array(Vec::new())),
+                (
+                    "unlocks_after",
+                    JsonValue::from("prior-successful-edit-result"),
+                ),
+                (
+                    "same_batch_rule",
+                    JsonValue::from("block-until-prior-successful-edit-result"),
+                ),
+                (
+                    "block_reason_sha256",
+                    JsonValue::from(
+                        "952f707b9dc5b44deb555174c3cf546d00c9ab75c2b28664fe327508edcd42f4",
+                    ),
+                ),
+            ]),
+        );
+        assert_eq!(
+            PreEditToolGate::disabled().surface(),
+            JsonValue::object([
+                ("mode", JsonValue::from("none")),
+                ("blocked_tools", JsonValue::Array(Vec::new())),
+                ("target_restricted_tools", JsonValue::Array(Vec::new())),
+                ("source_local_targets", JsonValue::Array(Vec::new())),
+                ("unlocks_after", JsonValue::Null),
+                ("same_batch_rule", JsonValue::Null),
+                ("block_reason_sha256", JsonValue::Null),
+            ]),
+        );
+    }
+
+    #[test]
+    fn post_edit_validation_requires_an_explicit_exit_zero_receipt_and_resets_for_later_edits() {
+        let gate = PostEditValidationGate {
+            mode: PostEditValidationGateMode::UnmaskedEvidenceV1,
+            source_local_targets: std::collections::BTreeSet::from(["lib/response.js".into()]),
+        };
+        for command in ["npm test", "node scripts/check.js", "cargo test -p crate"] {
+            assert!(direct_foreground_shell_v1(Some(command)), "{command}");
+        }
+        for command in [
+            "",
+            "npm test; true",
+            "npm test | tail",
+            "npm test && true",
+            "npm test > out",
+            "npm test $(pwd)",
+            "npm test 'x'",
+            "npm test \u{005c}",
+            "bash check.sh",
+            "env sh check.sh",
+            "npm test\ntrue",
+        ] {
+            assert!(!direct_foreground_shell_v1(Some(command)), "{command}");
+        }
+
+        let target_edit = JsonValue::parse(r#"{"files":[{"path":"lib/response.js","edits":[]}]}"#).expect("target arguments");
+        let other_edit = JsonValue::parse(r#"{"files":[{"path":"test/response.js","edits":[]}]}"#).expect("other arguments");
+        let direct_bash = JsonValue::parse(r#"{"command":"npm test"}"#).expect("bash arguments");
+        let masked_bash = JsonValue::parse(r#"{"command":"npm test | tail"}"#).expect("masked arguments");
+        let mut evidence = ValidationEvidence::enabled();
+        evidence.observe_assistant(&gate, vec![("target-edit", "edit", &target_edit)]);
+        evidence.observe_result("target-edit", "edit", false, false);
+        assert!(evidence.pending());
+        evidence.observe_assistant(&gate, vec![("masked", "bash", &masked_bash)]);
+        evidence.observe_assistant(&gate, vec![("unwitnessed", "bash", &direct_bash)]);
+        evidence.observe_result("unwitnessed", "bash", false, false);
+        assert!(evidence.pending(), "a non-error tool result alone is not evidence");
+
+        evidence.observe_assistant(&gate, vec![
+            ("same-batch-edit", "edit", &target_edit),
+            ("same-batch-bash", "bash", &direct_bash),
+        ]);
+        evidence.observe_result("same-batch-bash", "bash", false, true);
+        evidence.observe_result("same-batch-edit", "edit", false, false);
+        assert_eq!(evidence.generation, 2);
+        assert!(evidence.qualifying.is_none());
+
+        let mut reversed_same_batch = ValidationEvidence::enabled();
+        reversed_same_batch.observe_assistant(&gate, vec![("initial-target-edit", "edit", &target_edit)]);
+        reversed_same_batch.observe_result("initial-target-edit", "edit", false, false);
+        // A batch-wide scan must reject this bash even though its event appears
+        // before a later failed edit in the assistant's call order.
+        reversed_same_batch.observe_assistant(&gate, vec![
+            ("reversed-bash", "bash", &direct_bash),
+            ("reversed-failed-edit", "edit", &target_edit),
+        ]);
+        reversed_same_batch.observe_result("reversed-failed-edit", "edit", true, false);
+        reversed_same_batch.observe_result("reversed-bash", "bash", false, true);
+        assert!(reversed_same_batch.pending());
+        assert!(reversed_same_batch.qualifying.is_none());
+
+        evidence.observe_assistant(&gate, vec![("qualified", "bash", &direct_bash)]);
+        evidence.observe_result("qualified", "bash", false, true);
+        assert!(!evidence.pending());
+        assert_eq!(
+            evidence.json().get("qualifying_process_exit").and_then(JsonValue::as_str),
+            Some("exited-zero"),
+        );
+
+        // After source-local's first declared target result, a successful
+        // native non-target edit is allowed and invalidates older evidence.
+        evidence.observe_assistant(&gate, vec![("later-native-edit", "edit", &other_edit)]);
+        evidence.observe_result("later-native-edit", "edit", false, false);
+        assert_eq!(evidence.generation, 3);
+        assert!(evidence.qualifying.is_none());
+        assert!(evidence.issue_reminder());
+        assert!(!evidence.issue_reminder());
+        evidence.mark_missing();
+        let exported = evidence.json().to_json_string().expect("evidence encodes");
+        assert!(exported.contains("\"state\":\"missing\""));
+        assert!(!exported.contains("npm test"));
+        assert_eq!(POST_EDIT_VALIDATION_BLOCK_REASON, "Validation evidence requires a direct foreground command whose exit status is visible. Avoid pipelines and status-suppression wrappers; choose an appropriate workspace-local check.");
+    }
+
+    #[test]
+    fn process_receipt_decorator_binds_the_exact_call_id_and_requires_exited_zero() {
+        let witness = DirectExitStatusWitness::default();
+        let observations = ExitStatusObservations::default();
+        let hook = PreEditToolGateHook {
+            edit_recovery_projection: EditRecoveryProjectionMode::None,
+            gate: PreEditToolGate::disabled(),
+            post_edit_validation_gate: PostEditValidationGate::disabled(),
+            direct_exit_status_witness: witness.clone(),
+            exit_status_observations: observations.clone(),
+        };
+        let request = |call_id: &str| ExtensionCapabilityRequest {
+            call_id: ToolCallId::new(call_id).expect("fixture capability call ID"),
+            tool_name: "bash".into(),
+            provenance: RunProvenance::default(),
+            capability: "process".into(),
+            method: "execute".into(),
+            arguments: JsonValue::Null,
+            updates: ToolUpdateSink::disabled(),
+        };
+        let tool_call = |call_id: &str| ToolCall {
+            id: ToolCallId::new(call_id).expect("fixture tool call ID"),
+            name: "bash".into(),
+            arguments: SerializedJson::new("{}"),
+        };
+        let tool_result = |call_id: &str| AgentToolResult {
+            tool_call_id: ToolCallId::new(call_id).expect("fixture result call ID"),
+            content: String::new(),
+            details: None,
+            usage: None,
+            added_tool_names: Vec::new(),
+            terminate: false,
+            is_error: false,
+            failure: None,
+        };
+        let invoke = |call_id: &str, value: JsonValue| {
+            let decorator = ExitWitnessProcessCapability::new(
+                Arc::new(FixedProcessReceiptCapability { value }),
+                witness.clone(),
+            );
+            smol::block_on(decorator.invoke(request(call_id), CancellationToken::new()))
+                .expect("fixture process capability succeeds");
+        };
+
+        invoke(
+            "receipt-zero",
+            JsonValue::object([
+                ("termination", JsonValue::from("exited")),
+                ("exitCode", JsonValue::from(0_u64)),
+            ]),
+        );
+        // A different after-tool call cannot consume the receipt belonging to
+        // `receipt-zero`; the key is the core-supplied call ID, not command or
+        // completion order.
+        hook.after_tool_call(&tool_call("other-call"), &tool_result("other-call"))
+            .expect("after-tool hook observes missing receipt");
+        hook.after_tool_call(&tool_call("receipt-zero"), &tool_result("receipt-zero"))
+            .expect("after-tool hook observes exact zero receipt");
+        invoke(
+            "receipt-nonzero",
+            JsonValue::object([
+                ("termination", JsonValue::from("exited")),
+                ("exitCode", JsonValue::from(1_u64)),
+            ]),
+        );
+        hook.after_tool_call(&tool_call("receipt-nonzero"), &tool_result("receipt-nonzero"))
+            .expect("after-tool hook observes nonzero receipt");
+        invoke(
+            "receipt-not-exited",
+            JsonValue::object([
+                ("termination", JsonValue::from("killed")),
+                ("exitCode", JsonValue::from(0_u64)),
+            ]),
+        );
+        hook.after_tool_call(&tool_call("receipt-not-exited"), &tool_result("receipt-not-exited"))
+            .expect("after-tool hook observes non-exited receipt");
+
+        let observed = observations.snapshot();
+        assert_eq!(observed.get("other-call"), Some(&false));
+        assert_eq!(observed.get("receipt-zero"), Some(&true));
+        assert_eq!(observed.get("receipt-nonzero"), Some(&false));
+        assert_eq!(observed.get("receipt-not-exited"), Some(&false));
+
+        let gate = PostEditValidationGate {
+            mode: PostEditValidationGateMode::UnmaskedEvidenceV1,
+            source_local_targets: std::collections::BTreeSet::from(["lib/response.js".into()]),
+        };
+        let target_edit = JsonValue::parse(r#"{"files":[{"path":"lib/response.js","edits":[]}]}"#)
+            .expect("target arguments");
+        let direct_bash = JsonValue::parse(r#"{"command":"npm test"}"#).expect("bash arguments");
+        for (call_id, expected_qualification) in [
+            ("receipt-zero", true),
+            ("receipt-nonzero", false),
+            ("receipt-not-exited", false),
+        ] {
+            let mut evidence = ValidationEvidence::enabled();
+            evidence.observe_assistant(&gate, vec![("target-edit", "edit", &target_edit)]);
+            evidence.observe_result("target-edit", "edit", false, false);
+            evidence.observe_assistant(&gate, vec![(call_id, "bash", &direct_bash)]);
+            evidence.observe_result(
+                call_id,
+                "bash",
+                false,
+                observed.get(call_id).copied().unwrap_or(false),
+            );
+            assert_eq!(!evidence.pending(), expected_qualification, "{call_id}");
+            assert_eq!(
+                evidence
+                    .json()
+                    .get("qualifying_process_exit")
+                    .and_then(JsonValue::as_str),
+                expected_qualification.then_some("exited-zero"),
+                "{call_id}",
+            );
+        }
+    }
+
+    #[test]
+    fn source_local_gate_limits_pre_edit_paths_and_correlates_the_target_edit_result() {
+        let gate = PreEditToolGate {
+            mode: PreEditToolGateMode::SourceLocalV1,
+            source_local_targets: vec!["lib/response.js".into()],
+        };
+        let call = |id: &str, name: &str, arguments: &str| ToolCall {
+            id: ToolCallId::new(id).expect("fixture call ID"),
+            name: name.into(),
+            arguments: SerializedJson::new(arguments),
+        };
+        let before_edit = ContextEnvelope {
+            version: 1,
+            messages: Vec::new(),
+            host_messages: Vec::new(),
+        };
+        assert_eq!(
+            pre_edit_tool_gate_violation(
+                &gate,
+                &call("target-read", "read", r#"{"path":"lib/response.js"}"#),
+                &before_edit,
+            ),
+            None,
+        );
+        assert_eq!(
+            pre_edit_tool_gate_violation(
+                &gate,
+                &call("other-read", "read", r#"{"path":"test/response.js"}"#),
+                &before_edit,
+            ),
+            Some(SOURCE_LOCAL_PRE_EDIT_TOOL_GATE_BLOCK_REASON),
+        );
+        assert_eq!(
+            pre_edit_tool_gate_violation(
+                &gate,
+                &call("other-edit", "edit", r#"{"files":[{"path":"test/response.js","edits":[]}]}"#),
+                &before_edit,
+            ),
+            Some(SOURCE_LOCAL_PRE_EDIT_TOOL_GATE_BLOCK_REASON),
+        );
+        assert_eq!(
+            pre_edit_tool_gate_violation(&gate, &call("pre-edit-bash", "bash", "{}"), &before_edit),
+            Some(SOURCE_LOCAL_PRE_EDIT_TOOL_GATE_BLOCK_REASON),
+        );
+
+        let target_edit_id = ToolCallId::new("target-edit").expect("fixture call ID");
+        let same_batch = ContextEnvelope {
+            version: 1,
+            messages: vec![AgentMessage::Assistant {
+                id: MessageId(1),
+                content: String::new(),
+                tool_calls: vec![AgentToolCall {
+                    id: target_edit_id.clone(),
+                    name: "edit".into(),
+                    arguments: SerializedJson::new(r#"{"files":[{"path":"lib/response.js","edits":[]}]}"#),
+                }],
+                stop_reason: None,
+                error_message: None,
+                opaque_context: Vec::new(),
+            }],
+            host_messages: Vec::new(),
+        };
+        assert_eq!(
+            pre_edit_tool_gate_violation(&gate, &call("same-batch-bash", "bash", "{}"), &same_batch),
+            Some(SOURCE_LOCAL_PRE_EDIT_TOOL_GATE_BLOCK_REASON),
+            "an admitted edit call must not unlock a sibling in its own batch",
+        );
+
+        let mismatched_result = ContextEnvelope {
+            version: 1,
+            messages: vec![
+                same_batch.messages[0].clone(),
+                AgentMessage::ToolResult {
+                    id: MessageId(2),
+                    tool_call_id: ToolCallId::new("other-edit").expect("fixture call ID"),
+                    tool_name: "edit".into(),
+                    content: "updated another path".into(),
+                    details: None,
+                    usage: Box::new(None),
+                    added_tool_names: Vec::new(),
+                    terminate: false,
+                    is_error: false,
+                    failure: None,
+                },
+            ],
+            host_messages: Vec::new(),
+        };
+        assert_eq!(
+            pre_edit_tool_gate_violation(&gate, &call("mismatched-bash", "bash", "{}"), &mismatched_result),
+            Some(SOURCE_LOCAL_PRE_EDIT_TOOL_GATE_BLOCK_REASON),
+        );
+
+        let successful_target_edit = ContextEnvelope {
+            version: 1,
+            messages: vec![
+                same_batch.messages[0].clone(),
+                AgentMessage::ToolResult {
+                    id: MessageId(2),
+                    tool_call_id: target_edit_id,
+                    tool_name: "edit".into(),
+                    content: "updated declared target".into(),
+                    details: None,
+                    usage: Box::new(None),
+                    added_tool_names: Vec::new(),
+                    terminate: false,
+                    is_error: false,
+                    failure: None,
+                },
+            ],
+            host_messages: Vec::new(),
+        };
+        assert_eq!(
+            pre_edit_tool_gate_violation(&gate, &call("post-edit-bash", "bash", "{}"), &successful_target_edit),
+            None,
+        );
+    }
+
+    #[test]
+    fn source_local_task_metadata_requires_a_literal_regular_workspace_target() {
+        let workspace = std::env::temp_dir().join(format!(
+            "tea-eval-source-local-task-metadata-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(workspace.join("lib")).expect("temporary source directory");
+        std::fs::write(workspace.join("lib/response.js"), "module.exports = {};")
+            .expect("temporary source target");
+        let task = JsonValue::parse(
+            r#"{"source_local_v1":{"schema_version":"tea-coding-eval-source-local/v1","targets":["lib/response.js"]}}"#,
+        )
+        .expect("fixture task JSON");
+        let prompt = "Repair lib/response.js without unrelated changes.";
+        assert_eq!(
+            source_local_task_targets(&task, prompt, &workspace).expect("valid source-local task"),
+            vec!["lib/response.js"],
+        );
+        assert!(source_local_task_targets(&task, "Repair the response behavior.", &workspace).is_err());
+        std::fs::remove_dir_all(&workspace).expect("temporary workspace cleanup");
+    }
+
+    #[test]
+    fn direct_edit_gate_composes_with_invalid_edit_recovery_without_changing_tools() {
+        let workspace = std::env::temp_dir().join(format!(
+            "tea-eval-direct-edit-gate-recovery-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&workspace).expect("temporary workspace");
+        let (recovery, recovery_surface) = coding_configuration(
+            &workspace,
+            CommandEnvironment::empty(),
+            true,
+            StaticPromptProfile::PrefixGuardFocusedV1,
+            None,
+            EditRecoveryProjectionMode::CanonicalV1,
+            PreEditToolGate::disabled(),
+        )
+        .expect("recovery coding configuration");
+        let (combined, combined_surface) = coding_configuration(
+            &workspace,
+            CommandEnvironment::empty(),
+            true,
+            StaticPromptProfile::PrefixGuardFocusedV1,
+            None,
+            EditRecoveryProjectionMode::CanonicalV1,
+            PreEditToolGate::direct_edit_v1(),
+        )
+        .expect("combined coding configuration");
+        std::fs::remove_dir_all(&workspace).expect("temporary workspace cleanup");
+
+        assert_eq!(recovery_surface.system_prompt, combined_surface.system_prompt);
+        assert_eq!(recovery_surface.tools, combined_surface.tools);
+        assert_ne!(recovery.hooks.identity(), combined.hooks.identity());
+
+        let malformed_error = "[tool error status: invalid_arguments]\nValidation failed for tool \"edit\":\n  - files: must have required properties files\n  - path: must not have additional properties\n  - edits: must not have additional properties";
+        let context = ContextEnvelope {
+            version: 1,
+            messages: vec![AgentMessage::ToolResult {
+                id: MessageId(1),
+                tool_call_id: ToolCallId::new("call-combined-malformed-edit")
+                    .expect("fixture call ID"),
+                tool_name: "edit".into(),
+                content: malformed_error.into(),
+                details: None,
+                usage: Box::new(None),
+                added_tool_names: Vec::new(),
+                terminate: false,
+                is_error: true,
+                failure: None,
+            }],
+            host_messages: Vec::new(),
+        };
+        let projected = HookSet::transform_context(combined.hooks.as_ref(), context)
+            .expect("combined recovery context projection");
+        let AgentMessage::ToolResult { content, .. } = &projected.messages[0] else {
+            panic!("combined projection retains the malformed edit result");
+        };
+        assert!(content.starts_with(malformed_error));
+        assert!(content.contains("one top-level `files` array"));
     }
     #[test]
     fn surface_fingerprints_use_real_sha256() {
@@ -2060,6 +4432,25 @@ mod tests {
     fn shootout_request_timeout_matches_outer_budget_and_keeps_diagnostic_guard() {
         assert_eq!(request_timeout_seconds(1_800), 1_800);
         assert_eq!(request_timeout_seconds(0), 86_400);
+    }
+
+    #[test]
+    fn wire_route_evidence_uses_only_the_observed_openrouter_route() {
+        let capture = OpenRouterRequestCapture::default();
+        capture.observe_response_headers(&[
+            ("X-OpenRouter-Provider".into(), "DeepSeek".into()),
+            ("x-openrouter-model".into(), "test-model".into()),
+            ("authorization".into(), "must-not-be-retained".into()),
+        ]);
+
+        assert_eq!(
+            super::returned_route_evidence(&capture),
+            JsonValue::object([
+                ("model", JsonValue::from("test-model")),
+                ("provider", JsonValue::from("DeepSeek")),
+                ("provenance", JsonValue::from("OpenRouter response header")),
+            ]),
+        );
     }
 
     #[test]
@@ -2111,6 +4502,10 @@ mod tests {
             &workspace,
             CommandEnvironment::empty(),
             true,
+            StaticPromptProfile::BuiltinV1,
+            None,
+            EditRecoveryProjectionMode::None,
+            PreEditToolGate::disabled(),
         )
         .expect("static coding configuration");
         std::fs::remove_dir_all(&workspace).expect("temporary workspace cleanup");
@@ -2130,6 +4525,449 @@ mod tests {
         assert!(configuration.system_prompt.contains(
             "When a task names a source file, inspect it and then make the smallest safe edit before giving a long explanation."
         ));
+    }
+
+    #[test]
+    fn no_history_static_prompt_profile_removes_the_bash_git_invitation_without_changing_tools() {
+        let workspace = std::env::temp_dir().join(format!(
+            "tea-eval-static-prompt-profile-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&workspace).expect("temporary workspace");
+        let (builtin, builtin_surface) = coding_configuration(
+            &workspace,
+            CommandEnvironment::empty(),
+            true,
+            StaticPromptProfile::BuiltinV1,
+            None,
+            EditRecoveryProjectionMode::None,
+            PreEditToolGate::disabled(),
+        )
+        .expect("builtin static coding configuration");
+        let (no_history, no_history_surface) = coding_configuration(
+            &workspace,
+            CommandEnvironment::empty(),
+            true,
+            StaticPromptProfile::NoHistoryV1,
+            None,
+            EditRecoveryProjectionMode::None,
+            PreEditToolGate::disabled(),
+        )
+        .expect("no-history static coding configuration");
+        std::fs::remove_dir_all(&workspace).expect("temporary workspace cleanup");
+
+        assert_eq!(builtin_surface.tools, no_history_surface.tools);
+        assert_eq!(builtin.hooks.identity(), no_history.hooks.identity());
+        assert!(builtin.system_prompt.contains("Git, builds, and ordinary directory inspection."));
+        assert!(!no_history.system_prompt.contains("Git, builds, and ordinary directory inspection."));
+        assert!(no_history.system_prompt.contains(
+            "workspace-local builds, and focused local validation. Use `find` for workspace discovery."
+        ));
+        assert_ne!(builtin_surface.system_prompt, no_history_surface.system_prompt);
+        assert_ne!(
+            super::host_profile_digest(&builtin),
+            super::host_profile_digest(&no_history),
+            "the model-visible static prompt profile must be durable"
+        );
+    }
+
+    #[test]
+    fn prefix_guard_static_prompt_profile_adds_only_the_diagnostic_guard_guidance() {
+        let workspace = std::env::temp_dir().join(format!(
+            "tea-eval-prefix-guard-static-prompt-profile-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&workspace).expect("temporary workspace");
+        let (no_history, no_history_surface) = coding_configuration(
+            &workspace,
+            CommandEnvironment::empty(),
+            true,
+            StaticPromptProfile::NoHistoryV1,
+            None,
+            EditRecoveryProjectionMode::None,
+            PreEditToolGate::disabled(),
+        )
+        .expect("no-history static coding configuration");
+        let (prefix_guard, prefix_guard_surface) = coding_configuration(
+            &workspace,
+            CommandEnvironment::empty(),
+            true,
+            StaticPromptProfile::PrefixGuardV1,
+            None,
+            EditRecoveryProjectionMode::None,
+            PreEditToolGate::disabled(),
+        )
+        .expect("prefix-guard static coding configuration");
+        std::fs::remove_dir_all(&workspace).expect("temporary workspace cleanup");
+
+        assert_eq!(no_history_surface.tools, prefix_guard_surface.tools);
+        assert_eq!(
+            no_history_surface.static_bash_prompt_sha256,
+            prefix_guard_surface.static_bash_prompt_sha256,
+            "the candidate must retain the no-history Bash projection"
+        );
+        assert_eq!(no_history.hooks.identity(), prefix_guard.hooks.identity());
+        assert!(!no_history.system_prompt.contains("Routing tasks: a RegExp substring match"));
+        assert!(prefix_guard.system_prompt.contains(
+            "Routing tasks: a RegExp substring match is not a mount prefix. Only trim a `layerPath` that equals the start of `path`; otherwise continue to the next layer unchanged. Put the guard at the existing trim boundary; do not expand `layerPath` or modify matching internals."
+        ));
+        assert_ne!(no_history_surface.system_prompt, prefix_guard_surface.system_prompt);
+        assert_ne!(
+            super::host_profile_digest(&no_history),
+            super::host_profile_digest(&prefix_guard),
+            "the model-visible prefix-guard diagnostic must be durable"
+        );
+    }
+
+    #[test]
+    fn focused_prefix_guard_profile_requires_the_target_only_guard_and_validator() {
+        let workspace = std::env::temp_dir().join(format!(
+            "tea-eval-focused-prefix-guard-static-prompt-profile-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&workspace).expect("temporary workspace");
+        let (no_history, no_history_surface) = coding_configuration(
+            &workspace,
+            CommandEnvironment::empty(),
+            true,
+            StaticPromptProfile::NoHistoryV1,
+            None,
+            EditRecoveryProjectionMode::None,
+            PreEditToolGate::disabled(),
+        )
+        .expect("no-history static coding configuration");
+        let (focused, focused_surface) = coding_configuration(
+            &workspace,
+            CommandEnvironment::empty(),
+            true,
+            StaticPromptProfile::PrefixGuardFocusedV1,
+            None,
+            EditRecoveryProjectionMode::None,
+            PreEditToolGate::disabled(),
+        )
+        .expect("focused prefix-guard static coding configuration");
+        std::fs::remove_dir_all(&workspace).expect("temporary workspace cleanup");
+
+        assert_eq!(
+            focused_surface.static_bash_prompt_sha256,
+            no_history_surface.static_bash_prompt_sha256
+        );
+        assert_eq!(focused.hooks.identity(), no_history.hooks.identity());
+        assert!(focused.system_prompt.contains(
+            "Routing-task diagnostic: after reading `lib/router/index.js`, edit only that file. In `trim_prefix`, before the existing path-separator validation, reject a `layerPath` that is not a prefix of `path`; then run the focused validator. Do not create reproduction files or modify matching internals."
+        ));
+        assert_eq!(
+            focused_surface.tools.iter().map(|tool| tool.name.as_str()).collect::<Vec<_>>(),
+            vec!["read", "bash", "edit", "find"]
+        );
+    }
+
+    #[test]
+    fn edit_recovery_projection_adds_one_canonical_hint_only_to_the_trailing_malformed_edit_error() {
+        let malformed_error = "[tool error status: invalid_arguments]\nValidation failed for tool \"edit\":\n  - files: must have required properties files\n  - path: must not have additional properties\n  - edits: must not have additional properties\n\nReceived arguments:\n{\"path\":\"lib/router/index.js\",\"edits\":[]}";
+        let context = ContextEnvelope {
+            version: 1,
+            messages: vec![AgentMessage::ToolResult {
+                id: MessageId(1),
+                tool_call_id: ToolCallId::new("call-malformed-edit").expect("fixture call ID"),
+                tool_name: "edit".into(),
+                content: malformed_error.into(),
+                details: None,
+                usage: Box::new(None),
+                added_tool_names: Vec::new(),
+                terminate: false,
+                is_error: true,
+                // Rehydrated durable context has no typed failure; matching
+                // must rely on the retained schema-error shape instead.
+                failure: None,
+            }],
+            host_messages: Vec::new(),
+        };
+        let original = context.clone();
+
+        let projected = super::project_invalid_edit_recovery(context);
+        let AgentMessage::ToolResult { content, .. } = &projected.messages[0] else {
+            panic!("projected message remains a tool result");
+        };
+        assert!(content.starts_with(malformed_error), "{content}");
+        assert_eq!(content.matches("one top-level `files` array").count(), 1, "{content}");
+        let AgentMessage::ToolResult { content, .. } = &original.messages[0] else {
+            panic!("canonical message remains a tool result");
+        };
+        assert_eq!(content, malformed_error);
+    }
+
+    #[test]
+    fn edit_recovery_projection_targets_only_the_latest_trailing_error() {
+        let malformed_error = "[tool error status: invalid_arguments]\nValidation failed for tool \"edit\":\n  - files: must have required properties files\n  - path: must not have additional properties\n  - edits: must not have additional properties";
+        let context = ContextEnvelope {
+            version: 1,
+            messages: vec![
+                AgentMessage::ToolResult {
+                    id: MessageId(1),
+                    tool_call_id: ToolCallId::new("call-historical-malformed-edit")
+                        .expect("fixture call ID"),
+                    tool_name: "edit".into(),
+                    content: malformed_error.into(),
+                    details: None,
+                    usage: Box::new(None),
+                    added_tool_names: Vec::new(),
+                    terminate: false,
+                    is_error: true,
+                    failure: None,
+                },
+                AgentMessage::Assistant {
+                    id: MessageId(2),
+                    content: String::new(),
+                    tool_calls: Vec::new(),
+                    stop_reason: None,
+                    error_message: None,
+                    opaque_context: Vec::new(),
+                },
+                AgentMessage::ToolResult {
+                    id: MessageId(3),
+                    tool_call_id: ToolCallId::new("call-earlier-trailing-malformed-edit")
+                        .expect("fixture call ID"),
+                    tool_name: "edit".into(),
+                    content: malformed_error.into(),
+                    details: None,
+                    usage: Box::new(None),
+                    added_tool_names: Vec::new(),
+                    terminate: false,
+                    is_error: true,
+                    failure: None,
+                },
+                AgentMessage::ToolResult {
+                    id: MessageId(4),
+                    tool_call_id: ToolCallId::new("call-non-error-malformed-edit")
+                        .expect("fixture call ID"),
+                    tool_name: "edit".into(),
+                    content: malformed_error.into(),
+                    details: None,
+                    usage: Box::new(None),
+                    added_tool_names: Vec::new(),
+                    terminate: false,
+                    is_error: false,
+                    failure: None,
+                },
+                AgentMessage::ToolResult {
+                    id: MessageId(5),
+                    tool_call_id: ToolCallId::new("call-current-malformed-edit")
+                        .expect("fixture call ID"),
+                    tool_name: "edit".into(),
+                    content: malformed_error.into(),
+                    details: None,
+                    usage: Box::new(None),
+                    added_tool_names: Vec::new(),
+                    terminate: false,
+                    is_error: true,
+                    failure: None,
+                },
+            ],
+            host_messages: Vec::new(),
+        };
+
+        let projected = super::project_invalid_edit_recovery(context);
+        for index in [0, 2, 3] {
+            let AgentMessage::ToolResult { content, .. } = &projected.messages[index] else {
+                panic!("fixture message remains a tool result");
+            };
+            assert!(!content.contains(super::EDIT_RECOVERY_PROJECTION_HINT), "{content}");
+        }
+        let AgentMessage::ToolResult { content, .. } = &projected.messages[4] else {
+            panic!("latest fixture message remains a tool result");
+        };
+        assert_eq!(
+            content.matches("one top-level `files` array").count(),
+            1,
+            "{content}"
+        );
+    }
+
+    #[test]
+    fn edit_recovery_projection_preserves_static_surface_and_serializes_the_error_retry_hint() {
+        let workspace = std::env::temp_dir().join(format!(
+            "tea-eval-edit-recovery-surface-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&workspace).expect("temporary workspace");
+        let (standard, standard_surface) = coding_configuration(
+            &workspace,
+            CommandEnvironment::empty(),
+            true,
+            StaticPromptProfile::BuiltinV1,
+            None,
+            EditRecoveryProjectionMode::None,
+            PreEditToolGate::disabled(),
+        )
+        .expect("standard static coding configuration");
+        let (recovery, recovery_surface) = coding_configuration(
+            &workspace,
+            CommandEnvironment::empty(),
+            true,
+            StaticPromptProfile::BuiltinV1,
+            None,
+            EditRecoveryProjectionMode::CanonicalV1,
+            PreEditToolGate::disabled(),
+        )
+        .expect("recovery static coding configuration");
+        std::fs::remove_dir_all(&workspace).expect("temporary workspace cleanup");
+
+        assert_eq!(standard_surface.system_prompt, recovery_surface.system_prompt);
+        assert_eq!(standard_surface.tools, recovery_surface.tools);
+        assert_ne!(standard_surface.hook_identity, recovery_surface.hook_identity);
+        assert_ne!(standard.hooks.identity(), recovery.hooks.identity());
+        assert_ne!(
+            super::host_profile_digest(&standard),
+            super::host_profile_digest(&recovery),
+            "a model-visible recovery policy needs a distinct durable profile"
+        );
+
+        let call_id = ToolCallId::new("call-current-malformed-edit").expect("fixture call ID");
+        let malformed_error = "[tool error status: invalid_arguments]\nValidation failed for tool \"edit\":\n  - files: must have required properties files\n  - path: must not have additional properties\n  - edits: must not have additional properties";
+        let context = ContextEnvelope {
+            version: 1,
+            messages: vec![
+                AgentMessage::Assistant {
+                    id: MessageId(1),
+                    content: String::new(),
+                    tool_calls: vec![AgentToolCall {
+                        id: call_id.clone(),
+                        name: "edit".into(),
+                        arguments: SerializedJson::new("{\"path\":\"lib/router/index.js\",\"edits\":[]}"),
+                    }],
+                    stop_reason: None,
+                    error_message: None,
+                    opaque_context: Vec::new(),
+                },
+                AgentMessage::ToolResult {
+                    id: MessageId(2),
+                    tool_call_id: call_id,
+                    tool_name: "edit".into(),
+                    content: malformed_error.into(),
+                    details: None,
+                    usage: Box::new(None),
+                    added_tool_names: Vec::new(),
+                    terminate: false,
+                    is_error: true,
+                    failure: None,
+                },
+            ],
+            host_messages: Vec::new(),
+        };
+        let wire = HookSet::convert_to_llm(
+            &super::EditRecoveryProjectionHook,
+            HookSet::transform_context(&super::EditRecoveryProjectionHook, context)
+                .expect("recovery context projection"),
+        )
+        .expect("OpenAI-compatible context conversion");
+        let wire = JsonValue::parse(&wire).expect("serialized provider context");
+        let tool_message = wire
+            .as_array()
+            .and_then(|messages| messages.get(1))
+            .expect("tool message follows the assistant")
+            .as_object()
+            .expect("tool message object");
+        let content = tool_message
+            .get("content")
+            .and_then(JsonValue::as_str)
+            .expect("tool message content");
+        assert!(content.starts_with(malformed_error), "{content}");
+        assert_eq!(content.matches("one top-level `files` array").count(), 1, "{content}");
+        assert_eq!(tool_message.get("is_error"), Some(&JsonValue::Bool(true)));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn seatbelt_tool_child_sandbox_allows_workspace_and_blocks_external_access() {
+        let workspace = std::env::temp_dir().join(format!(
+            "tea-eval-seatbelt-workspace-{}",
+            std::process::id()
+        ));
+        let external_marker = std::env::temp_dir().join(format!(
+            "tea-eval-seatbelt-external-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&workspace).expect("temporary workspace");
+        let sandbox = ToolChildSandbox::macos_seatbelt(
+            ToolChildSandboxMode::MacosSeatbeltV1,
+            &workspace,
+            &[],
+        )
+            .expect("macOS Seatbelt sandbox configuration");
+        let operations = SeatbeltToolChildOperations::new(
+            Arc::new(LocalCodingOperations),
+            sandbox,
+        );
+        let command = format!(
+            "printf workspace > marker; touch {external}; printf ' outside=%s' \"$?\"; test -r /etc/hosts; printf ' hosts=%s' \"$?\"; ln -s /etc/hosts outside-link; test -r outside-link; printf ' symlink=%s' \"$?\"; /bin/bash -c 'test -r /etc/hosts'; printf ' child=%s' \"$?\"",
+            external = external_marker.display(),
+        );
+        let output = smol::block_on(operations.execute_command(
+            &command,
+            &workspace,
+            Duration::from_secs(5),
+            &CommandEnvironment::empty(),
+            CancellationToken::new(),
+            ToolUpdateSink::disabled(),
+        ))
+        .expect("sandboxed command settles");
+
+        let external_exists = external_marker.exists();
+        if external_exists {
+            fs::remove_file(&external_marker).expect("remove escaped test marker");
+        }
+        assert_eq!(output.termination, CommandTermination::Exited { code: 0 });
+        assert_eq!(fs::read(workspace.join("marker")).expect("workspace marker"), b"workspace");
+        let text = String::from_utf8(output.stdout).expect("command output is UTF-8");
+        assert!(text.contains("outside=1"), "{text}");
+        assert!(text.contains("hosts=1"), "{text}");
+        assert!(text.contains("symlink=1"), "{text}");
+        assert!(text.contains("child=1"), "{text}");
+        assert!(!external_exists, "sandboxed command wrote outside its workspace");
+        fs::remove_dir_all(&workspace).expect("temporary workspace cleanup");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn seatbelt_v2_blocks_git_data_without_blocking_workspace_listing_or_source_work() {
+        let workspace = std::env::temp_dir().join(format!(
+            "tea-eval-seatbelt-v2-workspace-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(workspace.join(".git")).expect("temporary Git metadata directory");
+        fs::write(workspace.join(".git/HEAD"), "ref: refs/heads/main\n")
+            .expect("temporary Git metadata");
+        fs::write(workspace.join("source.js"), "module.exports = 1;\n")
+            .expect("temporary source file");
+        let sandbox = ToolChildSandbox::macos_seatbelt(
+            ToolChildSandboxMode::MacosSeatbeltV2,
+            &workspace,
+            &[],
+        )
+        .expect("macOS Seatbelt v2 sandbox configuration");
+        let operations = SeatbeltToolChildOperations::new(
+            Arc::new(LocalCodingOperations),
+            sandbox,
+        );
+        let output = smol::block_on(operations.execute_command(
+            "ls -la > /dev/null 2>&1; printf ' list=%s' \"$?\"; test -r source.js; printf ' source=%s' \"$?\"; cat .git/HEAD > /dev/null 2>&1; printf ' git-read=%s' \"$?\"; printf blocked > .git/probe; printf ' git-write=%s' \"$?\"",
+            &workspace,
+            Duration::from_secs(5),
+            &CommandEnvironment::empty(),
+            CancellationToken::new(),
+            ToolUpdateSink::disabled(),
+        ))
+        .expect("sandboxed command settles");
+
+        assert_eq!(output.termination, CommandTermination::Exited { code: 0 });
+        let text = String::from_utf8(output.stdout).expect("command output is UTF-8");
+        assert!(text.contains("list=0"), "{text}");
+        assert!(text.contains("source=0"), "{text}");
+        assert!(text.contains("git-read=1"), "{text}");
+        assert!(text.contains("git-write=1"), "{text}");
+        assert!(!workspace.join(".git/probe").exists());
+        fs::remove_dir_all(&workspace).expect("temporary workspace cleanup");
     }
 
     #[test]

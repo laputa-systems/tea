@@ -9,7 +9,7 @@ The historical numbers and conclusions below predate the current shootout
 hardening and are not a basis for a strict Tea-versus-Pi efficiency claim.
 They remain useful as leads about accounting and runtime behavior only.
 
-Current measurements use `tea-coding-eval-result/v3`, retain the sanitized
+Current measurements use `tea-coding-eval-result/v4`, retain the sanitized
 final provider payload in each attempt's `surface/wire-requests.json`, and
 derive normalized wire facts from that artifact. The retained request witness,
 not a reconstructed prompt/tool surface or summary alone, establishes the
@@ -22,8 +22,8 @@ The comparison distinguishes three kinds of facts:
 - Native prompt/tool-schema/execution differences are reported as harness
   results. They are not silently hidden or treated as parity gates.
 - Unobserved fields remain unknown. In particular, missing route headers or
-  adapter timeout visibility prevent a strict conclusion rather than being
-  guessed into equivalence.
+  an adapter timeout policy that cannot be observed prevent a strict
+  conclusion rather than being guessed into equivalence.
 
 Run `make pi-shootout-static` for the three-repeat smoke workflow, or
 `make pi-shootout-static-serious` for seven counterbalanced repeats. The
@@ -33,8 +33,10 @@ Tea-only target `make pi-shootout-tea-static` accepts
 `PI_SHOOTOUT_TASK=express-4205-hard` for a single-baseline hard-case run; it
 writes Tea evidence and `reports/tea-static.md` but intentionally cannot emit a
 paired comparison. The
-live static adapters use temperature `0` and seed `20260829`; the analyzer
-still reports unknown route and timeout fields instead of inferring them.
+live static adapters use temperature `0` and seed `20260829`. Both record
+their finite timeout controls explicitly and retain only OpenRouter's returned
+model/provider headers when present; the analyzer still reports a missing route
+as unknown instead of inferring it.
 
 Repeats are isolated parallel lanes by default: two requested repeats run in
 parallel, but the Pi/Tea condition order remains sequential within each lane.
@@ -49,13 +51,55 @@ the hard case to 1,800 seconds. For calibration only, set
 `PI_SHOOTOUT_TIMEOUT_SECONDS=0` to remove the runner's outer wall clock; this
 is not a scored result because a model-generated shell command can wait
 indefinitely. Tea's shootout OpenRouter request timeout follows the finite
-budget, while the runner reserves a 15-second finalization grace for
-`tea-static` to retain a terminal result and request witness before forced
+budget, while the runner reserves a 15-second finalization grace for both
+static adapters to retain a terminal result and request witness before forced
 cleanup. Zero-budget
 diagnostics use a 24-hour transport guard. Cache
 preparation is explicit, while attempts use a per-attempt
 `npm ci --offline` tree outside the Git workspace. This removes ambient npm
 resolution from both the model condition and the fast validator.
+
+## Current handoff — 2026-08-31
+
+**Status: no strict Tea-versus-Pi efficiency conclusion.** The generic shared
+static workflow conditions have been exercised under serialized provider load,
+but none produced three comparable, validator-passing pairs. Do not pool those
+runs or use a partial pair as a performance claim.
+
+The last order-balanced plain-condition batch is retained only as a diagnostic:
+
+`/private/tmp/tea-eff-paired-plain-v4-replication-results/runs/20260831T181102Z-8dddb8b44510`
+
+- `r1-pi-static` completed with uncached generation `144670`; its validator
+  failed.
+- `r1-tea-static` emitted `outer_timeout` with uncached generation `163897`;
+  its validator failed.
+- `r2-tea-static` exited before producing `adapter-result.json`, so the runner
+  stopped without `summary.json`. The provider-free comparator correctly
+  refuses this incomplete run.
+- Source changes landed after this batch began. Because later Pi subprocesses
+  resolve source at launch, this batch is diagnostic-only even apart from its
+  incomplete result.
+
+The current tree hardens the evidence boundary rather than claiming an
+efficiency fix: both adapters emit schema v4, retry evidence is tied to Pi's
+effective runtime settings, static finalization grace is documented as shared,
+and raw controller interrupts now settle both direct and cooperative parallel
+worker-owned attempts before re-raising.
+
+Provider-free verification completed for this handoff:
+
+- `env PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s evals -t . -p 'test_*.py'` — 136 passed.
+- `node --test test/*.test.ts` in `evals/pi_shootout/sdk` — 20 passed.
+- `./node_modules/.bin/tsc --noEmit` in `evals/pi_shootout/sdk` — passed.
+- `git diff --check` — clean.
+
+The remaining formal action is one fresh, code-stable, serialized (`--parallel-repeats 1`)
+three-pair plain static replication using the pinned hard-case contract. Run the
+comparator only after the evaluator writes a complete `summary.json`; it must
+still establish three comparable, validator-passing pairs and the median/worst
+uncached-generation gate. Until then, the correct conclusion is
+**inconclusive**, not a win or a regression.
 
 ---
 
@@ -253,10 +297,11 @@ historical and must not be pooled with it.
 
 The OpenRouter wire audit also found a real context mismatch in Tea. The live
 static condition now sets `temperature: 0` and seed `20260829` on both adapters,
-while reasoning runs now replay the empty
-`reasoning_content` field required by Pi's DeepSeek/OpenRouter compatibility
-profile. Empty assistant `tool_calls` arrays are omitted to match Pi's message
-converter. These changes are covered by provider tests.
+while reasoning runs now retain and replay OpenRouter `reasoning_details`
+alongside the empty `reasoning_content` field required by Pi's
+DeepSeek/OpenRouter compatibility profile. Empty assistant `tool_calls` arrays
+are omitted to match Pi's message converter. These changes are covered by
+provider tests.
 
 The surfaces are still intentionally not byte-identical: Tea's safety-oriented
 tool schemas and concise builtin prompt differ from Pi's builtins. The analyzer

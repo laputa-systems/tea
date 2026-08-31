@@ -45,7 +45,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 static NEXT_EXPORT_DIRECTORY: AtomicU64 = AtomicU64::new(1);
 static NEXT_SESSION_DIRECTORY: AtomicU64 = AtomicU64::new(1);
 static NEXT_HEAD_CACHE_FILE: AtomicU64 = AtomicU64::new(1);
-const MAX_SESSION_LINE_BYTES: usize = 1_048_576;
+// One durable entry can include a full one-MiB provider continuation plus its
+// envelope and visible assistant/tool state. Keep this finite and larger than
+// the matching core continuation boundary below.
+const MAX_SESSION_LINE_BYTES: usize = 2_097_152;
 
 /// Deterministic append-stage interruption used only by the storage matrix.
 ///
@@ -2996,7 +2999,8 @@ fn decode_assistant_tool_call(value: &JsonValue) -> Result<AssistantToolCall, St
     })
 }
 
-const MAX_OPAQUE_PROVIDER_CONTEXT_BYTES: usize = 65_536;
+// Keep this synchronized with tea-core's public durable continuation bound.
+const MAX_OPAQUE_PROVIDER_CONTEXT_BYTES: usize = 1_048_576;
 const MAX_OPAQUE_PROVIDER_CONTEXT_PROVIDER_BYTES: usize = 64;
 const MAX_OPAQUE_PROVIDER_CONTEXT_KIND_BYTES: usize = 64;
 const MAX_OPAQUE_PROVIDER_CONTEXT_ITEM_ID_BYTES: usize = 512;

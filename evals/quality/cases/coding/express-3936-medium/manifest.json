@@ -18,8 +18,12 @@
     "fix_summary": "Fix behavior of null/undefined as maxAge in res.cookie"
   },
   "task": {
-    "prompt": "Fix the behavior of `null` and `undefined` when passed as `maxAge` in `res.cookie`. Currently, if `maxAge` is present in the options but null or undefined, the calculation `Date.now() + opts.maxAge` can result in `NaN` or incorrect values. Ensure that `maxAge` is parsed and validated as a real number before using it to calculate `opts.expires` and updating `opts.maxAge`.",
-    "expected_behavior": "res.cookie should safely ignore or parse maxAge if null/undefined without crashing or producing NaN dates."
+    "prompt": "Fix the behavior of `null` and `undefined` when passed as `maxAge` in `res.cookie`. Currently, if `maxAge` is present in the options but null or undefined, the calculation `Date.now() + opts.maxAge` can result in `NaN` or incorrect values. In `lib/response.js`, ensure that `maxAge` is parsed and validated as a real number before using it to calculate `opts.expires` and updating `opts.maxAge`.",
+    "expected_behavior": "res.cookie should safely ignore or parse maxAge if null/undefined without crashing or producing NaN dates.",
+    "source_local_v1": {
+      "schema_version": "tea-coding-eval-source-local/v1",
+      "targets": ["lib/response.js"]
+    }
   },
   "setup": {
     "clean_worktree": true,

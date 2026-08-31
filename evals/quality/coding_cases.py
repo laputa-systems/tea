@@ -36,16 +36,19 @@ EXPECTED = {
         "commit": "9dd0e7afdb6d022e18add1e009c4e3a66258c1fa",
         "fix_commit": "f275e87dff1aaef86080e6931888de4968585fd8",
         "source_path": "tasks/curated/easy.json",
+        "source_local_targets": ["lib/response.js"],
     },
     "express-3936-medium": {
         "commit": "1cc816993832eba829a2f556f7c08e27e6371301",
         "fix_commit": "5855339455a7f60774bef4166829e742a5056fa8",
         "source_path": "tasks/curated/medium.json",
+        "source_local_targets": ["lib/response.js"],
     },
     "express-4205-hard": {
         "commit": "bdc2c973a468d83f3af7d57d862f74ca97e71322",
         "fix_commit": "99a369f3d51bafcf0c09657250067249f19d04f5",
         "source_path": "tasks/curated/hard.json",
+        "source_local_targets": ["lib/router/index.js"],
     },
 }
 SHA1 = re.compile(r"^[0-9a-f]{40}$")
@@ -131,8 +134,30 @@ def validate_case(case: dict[str, Any], source: str = "case") -> dict[str, Any]:
     task = case.get("task")
     if not isinstance(task, dict):
         raise CodingCaseError(f"{source}: task must be an object")
-    _string(task.get("prompt"), f"{source}.task.prompt")
+    prompt = _string(task.get("prompt"), f"{source}.task.prompt")
     _string(task.get("expected_behavior"), f"{source}.task.expected_behavior")
+    source_local = task.get("source_local_v1")
+    if not isinstance(source_local, dict):
+        raise CodingCaseError(f"{source}: task.source_local_v1 must be an object")
+    if source_local.get("schema_version") != "tea-coding-eval-source-local/v1":
+        raise CodingCaseError(f"{source}: task.source_local_v1 has an unsupported schema version")
+    source_local_targets = source_local.get("targets")
+    if (
+        not isinstance(source_local_targets, list)
+        or not source_local_targets
+        or any(not isinstance(target, str) for target in source_local_targets)
+    ):
+        raise CodingCaseError(f"{source}: task.source_local_v1 targets must be a non-empty array")
+    if source_local_targets != expected["source_local_targets"]:
+        raise CodingCaseError(f"{source}: task.source_local_v1 targets do not match the curated task")
+    if len(set(source_local_targets)) != len(source_local_targets):
+        raise CodingCaseError(f"{source}: task.source_local_v1 targets must be unique")
+    for index, target in enumerate(source_local_targets):
+        path = _relative(target, f"{source}.task.source_local_v1.targets[{index}]")
+        if path.as_posix() not in prompt:
+            raise CodingCaseError(
+                f"{source}: source-local target {path.as_posix()!r} must occur literally in the task prompt"
+            )
     setup = case.get("setup")
     if not isinstance(setup, dict) or setup.get("clean_worktree") is not True:
         raise CodingCaseError(f"{source}: setup.clean_worktree must be true")
