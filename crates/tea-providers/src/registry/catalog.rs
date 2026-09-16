@@ -33,6 +33,11 @@ static OPENROUTER_MODELS: &[ModelDescriptor] = &[
         context_window: Some(1_048_576),
     },
     ModelDescriptor {
+        id: "deepseek/deepseek-v4.1-flash",
+        display_name: "DeepSeek V4.1 Flash",
+        context_window: Some(1_048_576),
+    },
+    ModelDescriptor {
         id: "inclusionai/ling-3.0-tiny:free",
         display_name: "InclusionAI Ling 3.0 Tiny (Free)",
         context_window: Some(262_144),

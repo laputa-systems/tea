@@ -65,6 +65,13 @@ mod tests {
         );
         assert_eq!(
             provider
+                .model("deepseek/deepseek-v4.1-flash")
+                .expect("checked-in model")
+                .context_window,
+            Some(1_048_576)
+        );
+        assert_eq!(
+            provider
                 .model("inclusionai/ling-3.0-tiny:free")
                 .expect("checked-in model")
                 .context_window,
