@@ -1067,6 +1067,26 @@ impl RunHandle {
                 return Ok(false);
             }
         }
+        // Snapshot before the compactor yields. This generation is the CAS
+        // precondition for the later replacement commit. The split is taken
+        // here so an unhelpful compaction can be declined before any lifecycle
+        // record or provider request is spent on it.
+        let mut context = crate::compaction::snapshot_context(agent);
+        let (prefix_messages, retained_messages, split_turn_prefix) =
+            automatic_compaction_split(&context.messages, policy.recent_tokens);
+        let mut source_messages = prefix_messages.clone();
+        source_messages.extend(split_turn_prefix.iter().cloned());
+        if source_messages.is_empty() {
+            // The retained suffix is the whole transcript, so no summary could
+            // shrink the request: every message would have to be handed to the
+            // compactor to change anything, and the policy keeps all of them.
+            // A host compactor signals exactly this by returning the retained
+            // suffix unchanged, which the checkpoint validator reads as an empty
+            // checkpoint and rejects — a fatal run error for a compaction that
+            // was never possible. Declining keeps the turn alive; the threshold
+            // is reconsidered once the transcript outgrows the retained suffix.
+            return Ok(false);
+        }
         let (count, limit_reached) = {
             let mut policy_state = self.policy.lock().expect("run policy mutex poisoned");
             if policy_state.automatic_compactions >= policy.max_compactions_per_run {
@@ -1111,13 +1131,6 @@ impl RunHandle {
         )
         .await?;
 
-        // Snapshot before the compactor yields. This generation is the CAS
-        // precondition for the later replacement commit.
-        let mut context = crate::compaction::snapshot_context(agent);
-        let (prefix_messages, retained_messages, split_turn_prefix) =
-            automatic_compaction_split(&context.messages, policy.recent_tokens);
-        let mut source_messages = prefix_messages.clone();
-        source_messages.extend(split_turn_prefix.iter().cloned());
         let overflow_retry_ordinal = retry_provider_request.then(|| {
             self.policy
                 .lock()

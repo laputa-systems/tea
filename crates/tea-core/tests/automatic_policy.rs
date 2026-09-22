@@ -298,6 +298,40 @@ fn idle_agent_can_replace_automatic_policy_without_rebuilding_history() {
     assert_eq!(agent.automatic_compaction(), configured);
 }
 
+
+/// Mirrors the terminal host's `ProviderCompactor`: when the core's split leaves
+/// nothing to summarize it returns the retained suffix unchanged. The core must
+/// never treat that no-op as an empty checkpoint and fail the run.
+struct NothingToSummarizeCompactor {
+    calls: Mutex<Vec<AutomaticCompactionRequest>>,
+}
+
+impl Compactor for NothingToSummarizeCompactor {
+    fn compact<'a>(
+        &'a self,
+        context: CompactionContext,
+        _cancellation: CancellationToken,
+    ) -> CompactionFuture<'a> {
+        Box::pin(std::future::ready(Ok(CompactionResult::new(
+            context.messages,
+        ))))
+    }
+
+    fn compact_automatic<'a>(
+        &'a self,
+        _context: CompactionContext,
+        request: AutomaticCompactionRequest,
+        _cancellation: CancellationToken,
+    ) -> CompactionFuture<'a> {
+        let retained = request.retained_messages.clone();
+        self.calls
+            .lock()
+            .expect("compactor mutex poisoned")
+            .push(request);
+        Box::pin(std::future::ready(Ok(CompactionResult::new(retained))))
+    }
+}
+
 #[test]
 fn threshold_compacts_once_before_the_next_provider_request() {
     smol::block_on(async {
@@ -351,6 +385,64 @@ fn threshold_compacts_once_before_the_next_provider_request() {
         Ok::<(), CoreError>(())
     })
     .expect("threshold compaction succeeds");
+}
+
+#[test]
+fn a_threshold_compaction_with_nothing_to_compact_is_skipped_rather_than_failed() {
+    smol::block_on(async {
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let provider = Arc::new(RecordingProvider::new(
+            vec![
+                ModelStream {
+                    events: vec![
+                        ModelStreamEvent::Usage(Usage {
+                            input_tokens: Some(100),
+                            ..Usage::default()
+                        }),
+                        ModelStreamEvent::ToolCall(tool_call("call-nothing-to-compact")),
+                        ModelStreamEvent::End(StopReason::ToolUse),
+                    ],
+                },
+                ModelStream {
+                    events: vec![
+                        ModelStreamEvent::TextDelta("done".into()),
+                        ModelStreamEvent::End(StopReason::Stop),
+                    ],
+                },
+            ],
+            Arc::clone(&order),
+        ));
+        // The retained suffix covers the entire transcript, so a summary could
+        // not shrink the request and compaction has nothing to work on. This is
+        // what a small model context window produces: fixed instructions and a
+        // short conversation both sit inside `recent_tokens`.
+        let compactor = Arc::new(NothingToSummarizeCompactor {
+            calls: Mutex::new(Vec::new()),
+        });
+        let agent = Agent::builder()
+            .model_provider(provider.clone())
+            .tool(Arc::new(OutputTool {
+                outputs: Mutex::new(vec!["x".repeat(300)]),
+            }))
+            .compactor(compactor.clone())
+            .automatic_compaction(policy(90, 10_000, OverflowRecovery::Disabled))?
+            .build();
+
+        agent.start_prompt("start")?.drive().await?;
+
+        assert!(
+            compactor
+                .calls
+                .lock()
+                .expect("compactor mutex poisoned")
+                .is_empty(),
+            "a compaction with an empty source must not reach the compactor"
+        );
+        assert_eq!(provider.requests().len(), 2);
+        assert!(matches!(agent.snapshot().messages.last(), Some(AgentMessage::Assistant { content, .. }) if content == "done"));
+        Ok::<(), CoreError>(())
+    })
+    .expect("a turn with nothing to compact still completes");
 }
 
 #[test]
