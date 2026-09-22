@@ -1,6 +1,5 @@
 //! Explicit local OpenAI-compatible configuration contracts.
 
-use super::LAGUNA_XS_2_1_MODEL;
 use std::fmt;
 use std::time::Duration;
 
@@ -71,7 +70,7 @@ impl fmt::Debug for LocalConfig {
 }
 
 impl LocalConfig {
-    /// Configure a local OpenAI-compatible model with Laguna-compatible defaults.
+    /// Configure a local OpenAI-compatible model with generic defaults.
     pub fn new(base_url: impl Into<String>, model: impl Into<String>) -> Self {
         Self {
             base_url: base_url.into(),
@@ -83,11 +82,6 @@ impl LocalConfig {
             enable_thinking: true,
             request_timeout: Duration::from_secs(300),
         }
-    }
-
-    /// Configure the oMLX Laguna XS 2.1 5-bit endpoint with its known request defaults.
-    pub fn laguna_xs_2_1(base_url: impl Into<String>) -> Self {
-        Self::new(base_url, LAGUNA_XS_2_1_MODEL)
     }
 
     /// Borrow the configured local API root.

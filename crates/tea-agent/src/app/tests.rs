@@ -1681,7 +1681,7 @@ fn local_compactor_summarizes_and_preserves_the_core_retained_suffix() {
     smol::block_on(async {
         let model = ModelDescriptor {
             provider: "local".into(),
-            model: tea_providers::local::LAGUNA_XS_2_1_MODEL.into(),
+            model: "caller/local-model".into(),
             revision: None,
         };
         let compactor = ProviderCompactor::new(
@@ -1744,7 +1744,7 @@ fn cache_friendly_compaction_appends_one_instruction_to_an_exact_source_prefix()
     smol::block_on(async {
         let model = ModelDescriptor {
             provider: "local".into(),
-            model: tea_providers::local::LAGUNA_XS_2_1_MODEL.into(),
+            model: "caller/local-model".into(),
             revision: None,
         };
         let requests = Arc::new(Mutex::new(Vec::new()));
@@ -1835,7 +1835,7 @@ fn cache_friendly_compaction_falls_back_when_a_transform_breaks_the_prefix() {
     smol::block_on(async {
         let model = ModelDescriptor {
             provider: "local".into(),
-            model: tea_providers::local::LAGUNA_XS_2_1_MODEL.into(),
+            model: "caller/local-model".into(),
             revision: None,
         };
         let requests = Arc::new(Mutex::new(Vec::new()));
@@ -1901,42 +1901,6 @@ fn cache_friendly_compaction_falls_back_when_a_transform_breaks_the_prefix() {
 }
 
 #[test]
-fn local_catalog_selection_enables_automatic_compaction() {
-    let tea_home = test_tea_home("local-catalog");
-    let options = CliOptions::parse(
-        [
-            "tea",
-            "--tea-home",
-            tea_home.to_str().expect("UTF-8 test path"),
-        ]
-        .map(OsString::from),
-    )
-    .expect("startup options parse");
-    let mut app = App::new(options);
-    app.assemble_host().expect("host should assemble");
-
-    app.select_model(
-        "local".into(),
-        tea_providers::local::LAGUNA_XS_2_1_MODEL.into(),
-    )
-    .expect("local model selection");
-
-    let policy = &app.automatic_compaction;
-    assert!(policy.enabled);
-    assert_eq!(policy.context_budget.tokens(), 32_768);
-    assert_eq!(policy.reserved_tokens, 8_192);
-    assert_eq!(policy.recent_tokens, 16_384);
-    assert_eq!(policy.overflow_recovery, OverflowRecovery::CompactAndRetry);
-    assert_eq!(policy.max_compactions_per_run, 4);
-    assert_eq!(policy.max_overflow_retries_per_run, 1);
-    assert_eq!(
-        app.state().footer_lines(&app.registry)[1],
-        "ctx ?%/33k (auto)"
-    );
-    let _ = fs::remove_dir_all(tea_home);
-}
-
-#[test]
 fn custom_local_model_enables_automatic_compaction_with_explicit_capacity() {
     let tea_home = test_tea_home("custom-local");
     let options = CliOptions::parse(
@@ -1952,7 +1916,7 @@ fn custom_local_model_enables_automatic_compaction_with_explicit_capacity() {
     .expect("local capacity options parse");
     let mut app = App::new(options);
     app.assemble_host().expect("host should assemble");
-    app.select_model("local".into(), "Qwen3.5-4B-MLX-4bit".into())
+    app.select_model("local".into(), "caller/local-model".into())
         .expect("custom local model selection");
 
     let policy = &app.automatic_compaction;
@@ -1982,7 +1946,7 @@ fn local_provider_is_selectable_without_a_credential() {
 
     app.select_model(
         "local".into(),
-        tea_providers::local::LAGUNA_XS_2_1_MODEL.into(),
+        "caller/local-model".into(),
     )
     .expect("local provider should configure without a key");
 
@@ -1991,7 +1955,7 @@ fn local_provider_is_selectable_without_a_credential() {
             .selected_model
             .as_ref()
             .map(|model| (model.provider.as_str(), model.model.as_str(),)),
-        Some(("local", "Laguna-XS-2.1-5bit"))
+        Some(("local", "caller/local-model"))
     );
     assert!(app.configured_provider.is_some());
     let _ = fs::remove_dir_all(tea_home);
@@ -2008,7 +1972,7 @@ fn local_provider_accepts_an_explicit_api_root() {
             "--provider",
             "local",
             "--model",
-            "Qwen3.5-4B-MLX-4bit",
+            "caller/local-model",
             "--local-base-url",
             "http://127.0.0.1:12345/v1",
         ]
@@ -2017,7 +1981,7 @@ fn local_provider_accepts_an_explicit_api_root() {
     .expect("local endpoint options parse");
     let mut app = App::new(options);
     app.assemble_host().expect("host should assemble");
-    app.select_model("local".into(), "Qwen3.5-4B-MLX-4bit".into())
+    app.select_model("local".into(), "caller/local-model".into())
         .expect("local provider should accept explicit endpoint");
     assert_eq!(
         app.options().local_base_url(),

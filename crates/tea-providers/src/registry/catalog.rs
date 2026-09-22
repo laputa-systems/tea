@@ -65,11 +65,7 @@ static OPENROUTER_MODELS: &[ModelDescriptor] = &[
 ];
 
 #[cfg(feature = "provider-local")]
-static LOCAL_MODELS: &[ModelDescriptor] = &[ModelDescriptor {
-    id: crate::local::LAGUNA_XS_2_1_MODEL,
-    display_name: "Laguna XS 2.1 5-bit (oMLX)",
-    context_window: Some(32_768),
-}];
+static LOCAL_MODELS: &[ModelDescriptor] = &[];
 
 #[cfg(feature = "provider-opencode-zen")]
 static OPENCODE_ZEN_MODELS: &[ModelDescriptor] = &[ModelDescriptor {

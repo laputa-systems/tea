@@ -3,8 +3,7 @@
 //! This adapter is intentionally transport-specific but server-agnostic: the caller supplies a
 //! base URL and model, and the adapter sends one streaming `chat/completions` request through the
 //! shared rustls-backed HTTP boundary. It does not discover a server, read credentials, inspect the home
-//! directory, or select a model from the environment. oMLX is the first supported local server;
-//! its Laguna XS 2.1 endpoint is represented by [`LocalConfig::laguna_xs_2_1`].
+//! directory, or select a model from the environment.
 
 mod config;
 mod payload;
@@ -26,10 +25,8 @@ use tea_http::{
     TransportRequest as Request, TransportStream as HttpStream, TransportStreamEvent as StreamEvent,
 };
 
-/// The model ID exposed by the documented 5-bit Laguna checkpoint.
-pub const LAGUNA_XS_2_1_MODEL: &str = "Laguna-XS-2.1-5bit";
-
-/// Default local OpenAI-compatible API root used by oMLX.
+/// Default local OpenAI-compatible API root used when the caller does not
+/// supply an explicit `--local-base-url` value.
 pub const DEFAULT_BASE_URL: &str = "http://127.0.0.1:8000/v1";
 
 /// A streaming local OpenAI-compatible provider.
@@ -299,9 +296,7 @@ impl ModelProvider for LocalProvider {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        LAGUNA_XS_2_1_MODEL, LocalConfig, LocalProvider, local_payload, parse_local_response,
-    };
+    use super::{LocalConfig, LocalProvider, local_payload, parse_local_response};
     use crate::scheduler::{CancellationToken, ModelProvider, ModelRequest, ModelStreamEvent};
     use crate::state::{ModelDescriptor, ThinkingLevel, Usage};
     use crate::tool::ToolDefinition;
@@ -314,16 +309,16 @@ mod tests {
     use tea_protocol::JsonValue;
 
     #[test]
-    fn laguna_defaults_target_o_mlx_without_ambient_configuration() {
-        let config = LocalConfig::laguna_xs_2_1("http://127.0.0.1:8000/v1");
-        assert_eq!(config.model(), LAGUNA_XS_2_1_MODEL);
+    fn generic_defaults_require_no_ambient_configuration() {
+        let config = LocalConfig::new("http://127.0.0.1:8000/v1", "caller/local-model");
+        assert_eq!(config.model(), "caller/local-model");
         assert!(config.validate().is_ok());
         assert!(format!("{config:?}").contains("enable_thinking: true"));
     }
 
     #[test]
-    fn payload_uses_o_mlx_thinking_and_openai_tool_shapes() {
-        let config = LocalConfig::laguna_xs_2_1("http://127.0.0.1:8000/v1");
+    fn payload_uses_thinking_and_openai_tool_shapes() {
+        let config = LocalConfig::new("http://127.0.0.1:8000/v1", "caller/local-model");
         let payload = local_payload(
             &config,
             crate::scheduler::ModelRequest {
@@ -340,7 +335,7 @@ mod tests {
                 }],
                 model: Some(ModelDescriptor {
                     provider: "local".into(),
-                    model: LAGUNA_XS_2_1_MODEL.into(),
+                    model: "caller/local-model".into(),
                     revision: None,
                 }),
                 thinking_level: ThinkingLevel::High,
@@ -394,7 +389,7 @@ data: [DONE]
                 request.extend_from_slice(&buffer[..read]);
             }
             let body = String::from_utf8_lossy(&request[body_start..body_start + content_length]);
-            assert!(body.contains("\"model\":\"Laguna-XS-2.1-5bit\""));
+            assert!(body.contains("\"model\":\"caller/local-model\""));
             assert!(body.contains("\"enable_thinking\":true"));
             assert!(body.contains("\"stream\":true"));
             assert!(body.contains("\"include_usage\":true"));
@@ -407,7 +402,7 @@ data: [DONE]
                 .expect("mock headers should write");
             stream.write_all(response).expect("mock body should write");
         });
-        let config = LocalConfig::laguna_xs_2_1(format!("http://{address}/v1"))
+        let config = LocalConfig::new(format!("http://{address}/v1"), "caller/local-model")
             .with_request_timeout(std::time::Duration::from_secs(5));
         let provider = LocalProvider::new(config);
         let request = ModelRequest {
@@ -416,7 +411,7 @@ data: [DONE]
             tools: Vec::new(),
             model: Some(ModelDescriptor {
                 provider: "local".into(),
-                model: LAGUNA_XS_2_1_MODEL.into(),
+                model: "caller/local-model".into(),
                 revision: None,
             }),
             thinking_level: ThinkingLevel::High,
@@ -492,7 +487,7 @@ data: [DONE]
                 .expect("terminal SSE records should write");
         });
         let provider = LocalProvider::new(
-            LocalConfig::laguna_xs_2_1(format!("http://{address}/v1"))
+            LocalConfig::new(format!("http://{address}/v1"), "caller/local-model")
                 .with_request_timeout(std::time::Duration::from_secs(5)),
         );
         let cancellation = CancellationToken::new();
@@ -501,7 +496,7 @@ data: [DONE]
                 context: "[]".into(),
                 model: Some(ModelDescriptor {
                     provider: "local".into(),
-                    model: LAGUNA_XS_2_1_MODEL.into(),
+                    model: "caller/local-model".into(),
                     revision: None,
                 }),
                 ..ModelRequest::default()
@@ -544,7 +539,7 @@ data: [DONE]
     }
 
     #[test]
-    fn parses_o_mlx_tool_calls_and_usage() {
+    fn parses_local_tool_calls_and_usage() {
         let response = br#"{
             "choices": [{
                 "finish_reason": "tool_calls",

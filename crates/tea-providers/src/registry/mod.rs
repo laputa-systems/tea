@@ -136,25 +136,32 @@ mod tests {
 
     #[cfg(feature = "provider-local")]
     #[test]
-    fn local_feature_exposes_laguna_and_builds_without_transport() {
+    fn local_feature_exposes_no_checked_in_models_and_builds_custom_models_without_transport() {
         let registry = ProviderRegistry::new();
         let provider = registry.provider("local").expect("compiled provider");
         assert_eq!(provider.display_name, "Local OpenAI-compatible server");
         assert_eq!(provider.configuration, ProviderConfigurationKind::Local);
         assert!(!provider.capabilities.supports_provider_reported_cost());
-        assert_eq!(provider.models[0].context_window, Some(32_768));
+        assert!(provider.models.is_empty());
+        assert!(provider.allows_custom_model());
 
         let selection = registry
-            .resolve_model("local", crate::local::LAGUNA_XS_2_1_MODEL)
-            .expect("Laguna should be in the local catalog");
+            .custom_model("local", "caller/local-model")
+            .expect("local models resolve through the explicit custom-model path");
+        assert!(selection.custom);
         let configured = registry
             .build(
                 selection.into_descriptor(),
-                ProviderConfiguration::Local(crate::local::LocalConfig::laguna_xs_2_1(
-                    crate::local::DEFAULT_BASE_URL,
-                )),
+                ProviderConfiguration::Local(
+                    crate::local::LocalConfig::try_new(
+                        crate::local::DEFAULT_BASE_URL,
+                        "caller/local-model",
+                    )
+                    .expect("valid explicit config"),
+                ),
             )
             .expect("matching local config");
         assert_eq!(configured.descriptor.provider, "local");
+        assert_eq!(configured.descriptor.model, "caller/local-model");
     }
 }

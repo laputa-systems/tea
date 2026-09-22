@@ -19,7 +19,7 @@ opaque caller providers or replay a stream after it has exposed events.
 | Feature | Module | Wire protocol | Intended use |
 | --- | --- | --- | --- |
 | `provider-openrouter` | `tea_providers::openrouter` | OpenRouter Chat Completions SSE plus inline usage/accounting | Opt-in incremental rustls + Graviola HTTPS transport with packet-bound model validation and response-stall timeouts. |
-| `provider-local` | `tea_providers::local` | Caller-selected local OpenAI-compatible Chat Completions SSE endpoint | Opt-in incremental HTTP transport for oMLX and similar local servers; no credentials or endpoint discovery. |
+| `provider-local` | `tea_providers::local` | Caller-selected local OpenAI-compatible Chat Completions SSE endpoint | Opt-in incremental HTTP transport for caller-selected local servers; no credentials or endpoint discovery. |
 | `provider-opencode-zen` | `tea_providers::opencode_zen` | OpenCode Zen Responses API SSE (`https://opencode.ai/zen/v1/responses`) via `input` array | Opt-in incremental rustls + Graviola HTTPS transport for `opencode-zen`/`muse-spark-1.2-contributor-free` (free). Mirrors the real `opencode` TUI provider (`opencode` → `https://opencode.ai/zen/v1`, `OPENCODE_API_KEY`, `openai-compatible` for most models, `responses` for `muse-spark`). Uses `Authorization: Bearer` + `Accept: text/event-stream`, `User-Agent: tea/1.0 opencode-zen`, `x-opencode-client: tea`. |
 | `provider-codex` | `tea_providers::codex` | Direct ChatGPT-subscription Codex Responses SSE | Opt-in ChatGPT OAuth, Tea-owned rotating credentials, honest `originator: tea`, encrypted reasoning continuity, and no OpenAI Platform API key. See [Codex provider](codex-provider.md). |
 
@@ -193,15 +193,14 @@ chunks while body workers yield completed chunks to the caller-polled stream.
 Cancellation does not become a retryable transport error. Immediate mid-read
 interruption remains bounded by the receive timeout.
 
-## Local oMLX and Laguna
+## Local provider
 
-The local adapter accepts an explicit API root and model. Its convenience
-configuration targets the 5-bit `Laguna-XS-2.1-5bit` checkpoint served by oMLX:
+The local adapter accepts an explicit API root and model:
 
 ```rust,no_run
 use tea_providers::local::{LocalConfig, LocalProvider};
 
-let config = LocalConfig::laguna_xs_2_1("http://127.0.0.1:8000/v1");
+let config = LocalConfig::new("http://127.0.0.1:8000/v1", "caller/local-model");
 config.validate()?;
 let provider = LocalProvider::new(config);
 # let _ = provider;
@@ -210,7 +209,7 @@ let provider = LocalProvider::new(config);
 
 The request uses `POST /v1/chat/completions` with `stream: true`, OpenAI
 function tools, `max_tokens`, and
-`chat_template_kwargs: {"enable_thinking": true}` for Laguna. The adapter
+`chat_template_kwargs: {"enable_thinking": true}`. The adapter
 decodes SSE `delta.content` records as they arrive, assembles indexed tool-call
 fragments into complete calls, and maps `finish_reason` plus
 prompt/completion/cache usage fields (requested with
@@ -221,12 +220,11 @@ later context.
 
 ### Local compaction boundary
 
-oMLX does not define a provider-side compaction operation. A host that wants
+The local adapter defines no provider-side compaction operation. A host that wants
 compaction sends an ordinary tool-free summary request through
 `LocalProvider`, then gives the proposed replacement messages to core's
 transactional `Compactor` boundary. This is the same path used for other
 OpenAI-compatible providers and works with the local SSE stream, including its
 final usage event. Automatic compaction requires an explicit effective context
-capacity: the TUI uses the checked-in Laguna capacity or the
-`--local-context-window <tokens>` value for a custom local model. It never
+capacity: pass `--local-context-window <tokens>` for a local model. It never
 infers capacity from an arbitrary model ID.

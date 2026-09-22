@@ -479,7 +479,7 @@ mod tests {
 
         let policy = factory
             .resolve_subagent_policy(
-                &root("local", tea_providers::local::LAGUNA_XS_2_1_MODEL),
+                &root("local", "caller/local-model"),
                 &config,
             )
             .expect("configured provider catalog resolves");
@@ -575,12 +575,12 @@ mod tests {
             loads: AtomicUsize::new(0),
         }));
         let cross_provider = SubagentTuiConfig {
-            provider: Some("local".into()),
-            models: Some(vec!["openai/gpt-5.6-luna".into()]),
+            provider: Some("openrouter".into()),
+            models: Some(vec!["caller/local-model".into()]),
             ..SubagentTuiConfig::default()
         };
         assert!(factory
-            .resolve_subagent_policy(&root("openrouter", "openai/gpt-5.6-luna"), &cross_provider)
+            .resolve_subagent_policy(&root("local", "caller/local-model"), &cross_provider)
             .expect_err("cross-provider model is rejected")
             .to_string()
             .contains("checked-in model"));
@@ -608,7 +608,7 @@ mod tests {
         let factory = factory(Arc::clone(&credentials) as Arc<dyn CredentialSource>);
         assert_eq!(factory.cached_adapter_count(), 0);
 
-        let local = root("local", tea_providers::local::LAGUNA_XS_2_1_MODEL);
+        let local = root("local", "caller/local-model");
         let first_local = factory
             .configured(&local)
             .expect("local adapter builds without credentials");
@@ -694,7 +694,7 @@ mod tests {
             loads: AtomicUsize::new(0),
         }));
         let first = factory
-            .configured(&root("local", tea_providers::local::LAGUNA_XS_2_1_MODEL))
+            .configured(&root("local", "caller/other-local-model"))
             .expect("local adapter builds");
         let second = factory
             .configured(&root("local", "caller/local-model"))
@@ -717,7 +717,7 @@ mod tests {
         let factory = factory(Arc::new(RecordingCredentials {
             loads: AtomicUsize::new(0),
         }));
-        let base = root("local", tea_providers::local::LAGUNA_XS_2_1_MODEL);
+        let base = root("local", "caller/local-model");
         let revised = ModelDescriptor {
             revision: Some("revision-2026-08-23".into()),
             ..base.clone()

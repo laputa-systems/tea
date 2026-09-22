@@ -17,7 +17,7 @@ use tea_protocol::JsonValue;
 const ROWS: u16 = 24;
 const COLUMNS: u16 = 100;
 const LOCAL_PROVIDER: &str = "local";
-const LOCAL_MODEL: &str = tea_providers::local::LAGUNA_XS_2_1_MODEL;
+const LOCAL_MODEL: &str = "pty-local-model";
 const FIXTURE_MODEL: &str = "pty-fixture-model";
 const LIFECYCLE_ROOT_MODEL: &str = "pty-root-subagent-lifecycle";
 const DISABLED_STARTUP_SCREEN_DIGEST: &str =

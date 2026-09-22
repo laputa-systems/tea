@@ -2536,10 +2536,9 @@ mod tests {
                             id: ToolCallId::new("root-spawn-live-child")
                                 .expect("fixture tool call ID"),
                             name: "spawn_agent".into(),
-                            arguments: SerializedJson::new(format!(
-                                r#"{{"task_name":"child","task":"Hold the isolated assignment until cancellation.","model":"{}","context":"task"}}"#,
-                                tea_providers::local::LAGUNA_XS_2_1_MODEL,
-                            )),
+                            arguments: SerializedJson::new(
+                                r#"{"task_name":"child","task":"Hold the isolated assignment until cancellation.","model":"fixture-local-model","context":"task"}"#.to_owned(),
+                            ),
                         }),
                         ModelStreamEvent::End(StopReason::ToolUse),
                     ],
@@ -2629,10 +2628,9 @@ mod tests {
                     ModelStreamEvent::ToolCall(AgentToolCall {
                         id: ToolCallId::new("root-spawn-child").expect("fixture tool call ID"),
                         name: "spawn_agent".into(),
-                        arguments: SerializedJson::new(format!(
-                            r#"{{"task_name":"child","task":"Replace the tracked fixture text, then report completion.","model":"{}","context":"task"}}"#,
-                            tea_providers::local::LAGUNA_XS_2_1_MODEL,
-                        )),
+                        arguments: SerializedJson::new(
+                            r#"{"task_name":"child","task":"Replace the tracked fixture text, then report completion.","model":"fixture-local-model","context":"task"}"#.to_owned(),
+                        ),
                     }),
                     ModelStreamEvent::End(StopReason::ToolUse),
                 ],
@@ -3284,7 +3282,7 @@ data: [DONE]
             )),
             config: SubagentTuiConfig {
                 provider: Some("local".into()),
-                models: Some(vec![tea_providers::local::LAGUNA_XS_2_1_MODEL.into()]),
+                models: Some(vec!["fixture-local-model".into()]),
                 ..SubagentTuiConfig::default()
             },
         };
@@ -4211,7 +4209,7 @@ data: [DONE]
             )),
             config: SubagentTuiConfig {
                 provider: Some("local".into()),
-                models: Some(vec![tea_providers::local::LAGUNA_XS_2_1_MODEL.into()]),
+                models: Some(vec!["fixture-local-model".into()]),
                 ..SubagentTuiConfig::default()
             },
         };
