@@ -7,7 +7,8 @@
 //! keeps the gate at the mechanism boundary; it does not interpret host
 //! provenance or persist a particular format.
 
-use crate::scheduler::ModelRequest;
+use crate::compaction::{CompactionOperation, CompactionReplacement};
+use crate::scheduler::{AdapterRequestObservation, ModelRequest};
 use crate::state::{AgentToolCall, OpaqueProviderContextItem, RunId, StopReason, Usage};
 use crate::tool::{AgentToolResult, ToolCall};
 use std::fmt;
@@ -24,6 +25,9 @@ pub enum EffectKind {
     DurableWrite,
     /// A physical provider request may cross a process boundary.
     ProviderRequest,
+    /// A provider request owned by one compaction transaction may cross a
+    /// process boundary.
+    CompactionProviderRequest,
     /// A registered tool capability may begin an external effect.
     ToolExecution,
     /// A host policy hook may invoke an external capability.
@@ -131,6 +135,15 @@ pub enum EffectSubject {
         /// The request immediately before adapter dispatch.
         request: ModelRequest,
     },
+    /// One exact provider request used only to produce a compaction
+    /// replacement. It has a distinct effect grammar so durable hosts cannot
+    /// mistake its summary response for an ordinary assistant turn.
+    CompactionProviderRequest {
+        /// Immutable compaction operation that owns this physical request.
+        operation: CompactionOperation,
+        /// Exact request immediately before adapter dispatch.
+        request: ModelRequest,
+    },
     /// One schema-valid, policy-allowed tool call immediately before execution.
     ToolExecution {
         /// The effective tool call passed to the capability.
@@ -172,6 +185,12 @@ pub enum DurableWriteRequest {
         /// Complete post-policy result to retain and project.
         result: AgentToolResult,
     },
+    /// A validated context replacement that must become durable before the
+    /// core exposes it through the agent's canonical message state.
+    CompactionReplacement {
+        /// Complete source, operation, and replacement material.
+        replacement: CompactionReplacement,
+    },
 }
 
 impl EffectSubject {
@@ -180,6 +199,7 @@ impl EffectSubject {
         match self {
             Self::DurableWrite { .. } => EffectKind::DurableWrite,
             Self::ProviderRequest { .. } => EffectKind::ProviderRequest,
+            Self::CompactionProviderRequest { .. } => EffectKind::CompactionProviderRequest,
             Self::ToolExecution { .. } => EffectKind::ToolExecution,
             Self::HookInvocation { .. } => EffectKind::HookInvocation,
             Self::Timer { .. } => EffectKind::Timer,
@@ -300,6 +320,32 @@ pub enum ProviderEffectOutcome {
     },
 }
 
+/// Settlement of one provider request owned by a compaction transaction.
+///
+/// This intentionally carries no assistant message or tool calls: a
+/// compactor owns its private summary stream and only the validated
+/// replacement may later enter canonical context through
+/// [`DurableWriteRequest::CompactionReplacement`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CompactionProviderEffectOutcome {
+    /// The summary provider reached a terminal successful response.
+    Succeeded {
+        /// Provider-reported usage, when the adapter supplied it.
+        usage: Option<Usage>,
+        /// Content-safe facts about the exact request sent by the adapter.
+        request_observation: Option<AdapterRequestObservation>,
+    },
+    /// The compaction request was cancelled before a usable replacement was
+    /// available.
+    Cancelled,
+    /// Dispatch or stream processing failed before a usable replacement was
+    /// available.
+    Failed {
+        /// Bounded provider diagnostic.
+        message: String,
+    },
+}
+
 /// Tool effect settlement seen by a gate after `after_tool` policy.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ToolEffectOutcome {
@@ -348,6 +394,8 @@ pub enum EffectOutcome {
     DurableWrite(EffectCompletion),
     /// Result of one physical provider request.
     ProviderRequest(ProviderEffectOutcome),
+    /// Result of one compaction-owned provider request.
+    CompactionProviderRequest(CompactionProviderEffectOutcome),
     /// Result of one tool capability execution.
     ToolExecution(Box<ToolEffectOutcome>),
     /// Result of one host hook invocation.

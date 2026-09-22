@@ -16,6 +16,11 @@ requires exactly one header first and one episode-end record last, with no
 terminal record in between. This makes decoded trace evidence suitable for
 provider-free validation without accepting unrelated Factory records.
 
+When header provenance is present, canonical v1 JSONL always includes the
+`agent_id` key: root-lane traces encode it as `null`. Earlier header records
+that omit that key are incompatible legacy wire data and are rejected without
+rewriting or migration.
+
 `SessionSupervisor` wraps each lane's trace capture in a redactor that replaces model input
 and output, tool input and output, and terminal diagnostics before persistence.
 It retains chronology, event kinds, cache evidence, compaction lifecycle, and
@@ -32,9 +37,11 @@ credentials. This makes a post-run trace able to distinguish a projection rebase
 from a tool, model, or adapter-envelope transition without claiming a provider
 cache hit; provider-reported read/write tokens remain separate evidence.
 
-Externally hosted epochs use the same observer contract. The embedding subscribes
-`tea_core::trace::TraceObserver::new_with_provenance` to `HostedEpoch::agent()` and
-wraps its own `TraceSink` in `RedactingSink` before persistence. The hosted epoch's
+Externally hosted epochs use the same synchronous, non-vetoing observer contract.
+The embedding registers `tea_core::trace::TraceObserver::new_with_provenance` with
+`HostedEpoch::agent()` and wraps its own `TraceSink` in `RedactingSink` before
+persistence. A sink that might block must be isolated behind the host's bounded
+queue. The hosted epoch's
 normalized provenance carries the exact snapshot, revision, model-harness profile,
 and provider-surface identity; Tea still owns no filesystem location or outer
 session record in this mode.
@@ -44,6 +51,21 @@ artifact to the session object store and appends SessionFact::TraceArtifact.
 The fact includes exact byte length plus operation, epoch, core run, revision,
 snapshot, and model-harness profile. Session verification and artifact
 collection treat that artifact as a reachable root.
+
+Trace capture, trace-shape validation, and trace-object publication are
+optional diagnostic retention. If any of those steps is unavailable, the
+supervisor instead appends one `tea.trace-unavailable.v1` custom session fact
+with only schema version, operation/epoch/core-run IDs, and one fixed reason:
+`capture_unavailable`, `invalid_trace`, or `artifact_store_unavailable`. It
+never retains an underlying error or trace/model/tool content, and it does not
+change a completed operation's outcome. Appending either this diagnostic or a
+`SessionFact::TraceArtifact` remains a canonical session write: failure is
+propagated and prevents later semantic settlement.
+
+The one expected omission is cancellation that wins before the core run emits
+its first trace header. That operation's durable aborted outcome is
+authoritative; it records neither a trace artifact nor a trace-unavailable
+diagnostic.
 
 Failure signatures in `tea_core::evolution` cite positive byte spans inside those artifacts.
 EvolutionStore reloads, rehashes, and bounds-checks each citation before it

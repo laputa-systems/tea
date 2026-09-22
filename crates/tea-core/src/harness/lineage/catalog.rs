@@ -13,7 +13,7 @@ use tea_session::{
     ModelHarnessProfileId, NormalizedPath, OperationId,
 };
 
-const CATALOG_SCHEMA_VERSION: u64 = 1;
+const CATALOG_SCHEMA_VERSION: u64 = 2;
 
 impl HarnessRepository {
     /// Encode the complete immutable repository index into canonical JSON.
@@ -210,6 +210,15 @@ impl HarnessRepository {
                         candidate.candidate_id, candidate.draft.proposed_snapshot_id
                     ))
                 })?;
+            let parent_snapshot = repository
+                .snapshots
+                .get(&parent.snapshot_id)
+                .ok_or_else(|| {
+                    invalid(format!(
+                        "catalog candidate {} parent revision {} references missing snapshot {}",
+                        candidate.candidate_id, parent.revision_id, parent.snapshot_id
+                    ))
+                })?;
             let calculated_id = candidate_id(&candidate.draft)?;
             if calculated_id != candidate.candidate_id {
                 return Err(invalid(format!(
@@ -217,8 +226,13 @@ impl HarnessRepository {
                     candidate.candidate_id
                 )));
             }
-            let calculated_validation =
-                validate_candidate(&candidate.draft, parent, snapshot, &repository.trees)?;
+            let calculated_validation = validate_candidate(
+                &candidate.draft,
+                parent,
+                parent_snapshot,
+                snapshot,
+                &repository.trees,
+            )?;
             if calculated_validation != candidate.validation {
                 return Err(invalid(format!(
                     "catalog candidate {} does not match deterministic validation evidence",
@@ -518,11 +532,15 @@ fn encode_bundle(bundle: &PluginBundleRef) -> JsonValue {
                     .collect(),
             ),
         ),
+        ("state_version", optional_string(bundle.state_version.as_deref())),
     ])
 }
 
 fn decode_bundle(value: &JsonValue) -> Result<PluginBundleRef, HarnessLineageError> {
-    let object = required_object(value, &["plugin_id", "tree_id", "requested_capabilities"])?;
+    let object = required_object(
+        value,
+        &["plugin_id", "tree_id", "requested_capabilities", "state_version"],
+    )?;
     let mut requested_capabilities = BTreeSet::new();
     for value in required_array(object, "requested_capabilities")? {
         let capability = value
@@ -539,6 +557,7 @@ fn decode_bundle(value: &JsonValue) -> Result<PluginBundleRef, HarnessLineageErr
         plugin_id: required_string(object, "plugin_id")?.to_owned(),
         tree_id: parse_tree_id(required_string(object, "tree_id")?)?,
         requested_capabilities,
+        state_version: parse_optional_string(required_value(object, "state_version")?)?,
     })
 }
 

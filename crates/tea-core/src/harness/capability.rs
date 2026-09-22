@@ -13,10 +13,12 @@ use std::sync::Arc;
 use tea_core::harness::extension::{
     ExtensionCapability, ExtensionCapabilityBindings, ExtensionCapabilityError,
     ExtensionCapabilityFuture, ExtensionCapabilityRequest, ExtensionCapabilityResponse,
-    ExtensionStateHandle, ExtensionStateUpdate, ExtensionToolLimits,
+    ExtensionStateGeneration, ExtensionStateHandle, ExtensionStateUpdate, ExtensionToolLimits,
 };
 use tea_protocol::JsonValue;
 use tea_session::{CanonicalHashWriter, Digest, HarnessSnapshotId};
+
+const EXTENSION_STATE_CAPABILITY: &str = "extension.state";
 
 /// One host-owned, versioned capability implementation that a particular
 /// plugin may use after its immutable snapshot has been resolved.
@@ -28,6 +30,7 @@ pub struct PluginCapabilityBinding {
     binding_digest: Digest,
     handler_limits: ExtensionToolLimits,
     implementation: Arc<dyn ExtensionCapability>,
+    state_handle: Option<ExtensionStateHandle>,
 }
 
 impl fmt::Debug for PluginCapabilityBinding {
@@ -58,9 +61,59 @@ impl PluginCapabilityBinding {
         handler_limits: ExtensionToolLimits,
         implementation: Arc<dyn ExtensionCapability>,
     ) -> Result<Self, CapabilityBindingError> {
-        let plugin_id = plugin_id.into();
         let capability = capability.into();
-        let capability_version = capability_version.into();
+        if capability == EXTENSION_STATE_CAPABILITY {
+            return Err(CapabilityBindingError::ExtensionStateRequiresDedicatedBinding);
+        }
+        Self::new_inner(
+            plugin_id.into(),
+            capability,
+            capability_version.into(),
+            host_identity,
+            handler_limits,
+            implementation,
+            None,
+        )
+    }
+
+    /// Construct the only host binding allowed to grant `extension.state`.
+    ///
+    /// The catalog retains the late-bound handle separately from its normal
+    /// capability implementation. Epoch resolution then mints a fresh,
+    /// generation-bound capability rather than allowing a catalog-level
+    /// implementation to select a lane or outlive its epoch.
+    pub fn new_extension_state(
+        plugin_id: impl Into<String>,
+        capability_version: impl Into<String>,
+        host_identity: Digest,
+        handler_limits: ExtensionToolLimits,
+        state_handle: ExtensionStateHandle,
+    ) -> Result<Self, CapabilityBindingError> {
+        let plugin_id = plugin_id.into();
+        let implementation = Arc::new(ExtensionStateCapability::new(
+            plugin_id.clone(),
+            state_handle.clone(),
+        )?);
+        Self::new_inner(
+            plugin_id,
+            EXTENSION_STATE_CAPABILITY.into(),
+            capability_version.into(),
+            host_identity,
+            handler_limits,
+            implementation,
+            Some(state_handle),
+        )
+    }
+
+    fn new_inner(
+        plugin_id: String,
+        capability: String,
+        capability_version: String,
+        host_identity: Digest,
+        handler_limits: ExtensionToolLimits,
+        implementation: Arc<dyn ExtensionCapability>,
+        state_handle: Option<ExtensionStateHandle>,
+    ) -> Result<Self, CapabilityBindingError> {
         for (field, value) in [
             ("plugin_id", plugin_id.as_str()),
             ("capability", capability.as_str()),
@@ -83,6 +136,7 @@ impl PluginCapabilityBinding {
             binding_digest,
             handler_limits,
             implementation,
+            state_handle,
         })
     }
 
@@ -212,6 +266,7 @@ impl PluginCapabilityCatalog {
         binding_digest: Digest,
         snapshot_id: &HarnessSnapshotId,
         resource_limits: &crate::harness::HarnessResourceLimits,
+        state_generation: Option<&ExtensionStateGeneration>,
     ) -> Result<ResolvedCapabilityBinding, HarnessError> {
         let binding = self
             .bindings
@@ -241,6 +296,18 @@ impl PluginCapabilityCatalog {
                 "plugin {plugin_id} capability {capability} host handler limits exceed the immutable snapshot resource limits",
             )));
         }
+        let implementation: Arc<dyn ExtensionCapability> = match &binding.state_handle {
+            Some(state_handle) => {
+                let state = state_generation
+                    .map(|generation| state_handle.for_generation(generation.clone()))
+                    .unwrap_or_else(|| state_handle.clone());
+                Arc::new(
+                    ExtensionStateCapability::new(binding.plugin_id.clone(), state)
+                        .map_err(|error| HarnessError::invalid_state(error.to_string()))?,
+                )
+            }
+            None => Arc::clone(&binding.implementation),
+        };
         let mut capabilities = ExtensionCapabilityBindings::new();
         capabilities
             .insert(
@@ -249,7 +316,7 @@ impl PluginCapabilityCatalog {
                     plugin_id: plugin_id.to_owned(),
                     capability: capability.to_owned(),
                     snapshot_id: snapshot_id.clone(),
-                    inner: Arc::clone(&binding.implementation),
+                    inner: implementation,
                 }),
                 binding.handler_limits,
             )
@@ -291,6 +358,8 @@ pub enum CapabilityBindingError {
         /// Plugin identity.
         plugin_id: String,
     },
+    /// `extension.state` must retain an epoch-bound state handle.
+    ExtensionStateRequiresDedicatedBinding,
 }
 
 impl fmt::Display for CapabilityBindingError {
@@ -317,15 +386,19 @@ impl fmt::Display for CapabilityBindingError {
                 formatter,
                 "plugin {plugin_id} already has a fixed tool capability map in this host catalog",
             ),
+            Self::ExtensionStateRequiresDedicatedBinding => write!(
+                formatter,
+                "extension.state must use PluginCapabilityBinding::new_extension_state",
+            ),
         }
     }
 }
 
 impl std::error::Error for CapabilityBindingError {}
 
-/// Generic capability exposing only one extension's append-only state
+/// Generic capability exposing only one extension's whole-value state
 /// namespace. The namespace is fixed by the trusted host at construction;
-/// Luau may request only `get` and `append` under the capability it was
+/// Luau may request only `get` and `replace` under the capability it was
 /// explicitly granted.
 #[derive(Clone, Debug)]
 pub struct ExtensionStateCapability {
@@ -368,32 +441,23 @@ impl ExtensionCapability for ExtensionStateCapability {
                         message: error.to_string(),
                     })
                     .map(|view| ExtensionCapabilityResponse {
-                        value: JsonValue::Object(view.latest),
+                        value: view.value.unwrap_or(JsonValue::Null),
                     }),
-                "append" => {
+                "replace" => {
                     let object = request.arguments.as_object().ok_or_else(|| {
                         ExtensionCapabilityError::InvalidArguments {
-                            message: "extension.state append arguments must be an object".into(),
+                            message: "extension.state replace arguments must be an object".into(),
                         }
                     })?;
-                    let kind = object
-                        .get("kind")
-                        .and_then(JsonValue::as_str)
-                        .ok_or_else(|| ExtensionCapabilityError::InvalidArguments {
-                            message: "extension.state append requires string kind".into(),
-                        })?;
-                    let content = object.get("content").cloned().ok_or_else(|| {
+                    let value = object.get("value").cloned().ok_or_else(|| {
                         ExtensionCapabilityError::InvalidArguments {
-                            message: "extension.state append requires content".into(),
+                            message: "extension.state replace requires value".into(),
                         }
                     })?;
                     state
-                        .append(
+                        .replace(
                             &extension_id,
-                            ExtensionStateUpdate {
-                                kind: kind.to_owned(),
-                                content,
-                            },
+                            ExtensionStateUpdate { value },
                         )
                         .map_err(|error| ExtensionCapabilityError::Execution {
                             message: error.to_string(),
@@ -498,42 +562,45 @@ fn binding_error(error: tea_core::harness::extension::ExtensionError) -> Harness
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::harness::extension::{ExtensionStateStore, ExtensionStateView};
+    use crate::harness::extension::{
+        ExtensionStateGeneration, ExtensionStateStore, ExtensionStateView,
+    };
     use crate::scheduler::CancellationToken;
     use crate::state::ToolCallId;
     use crate::tool::ToolUpdateSink;
     use std::sync::Mutex;
+    use tea_session::{EpochId, HarnessRevisionId, LaneId, OperationId};
 
     #[derive(Default)]
     struct MemoryStateStore {
-        values: Mutex<BTreeMap<(String, String), JsonValue>>,
+        values: Mutex<BTreeMap<String, JsonValue>>,
     }
 
     impl ExtensionStateStore for MemoryStateStore {
         fn read_extension_state(
             &self,
+            _generation: &ExtensionStateGeneration,
             extension_id: &str,
         ) -> Result<ExtensionStateView, crate::harness::extension::ExtensionError> {
-            let latest = self
+            let value = self
                 .values
                 .lock()
                 .expect("fixture state store lock")
-                .iter()
-                .filter(|((owner, _), _)| owner == extension_id)
-                .map(|((_, kind), content)| (kind.clone(), content.clone()))
-                .collect();
-            Ok(ExtensionStateView { latest })
+                .get(extension_id)
+                .cloned();
+            Ok(ExtensionStateView { value })
         }
 
-        fn append_extension_state(
+        fn replace_extension_state(
             &self,
+            _generation: &ExtensionStateGeneration,
             extension_id: &str,
             update: ExtensionStateUpdate,
         ) -> Result<(), crate::harness::extension::ExtensionError> {
             self.values
                 .lock()
                 .expect("fixture state store lock")
-                .insert((extension_id.to_owned(), update.kind), update.content);
+                .insert(extension_id.to_owned(), update.value);
             Ok(())
         }
     }
@@ -551,6 +618,17 @@ mod tests {
         }
     }
 
+    fn state_generation() -> ExtensionStateGeneration {
+        ExtensionStateGeneration::new(
+            LaneId::main(),
+            OperationId::new("extension-state-capability-operation")
+                .expect("fixture operation ID"),
+            EpochId::new("extension-state-capability-epoch").expect("fixture epoch ID"),
+            HarnessRevisionId::new("extension-state-capability-revision")
+                .expect("fixture revision ID"),
+        )
+    }
+
     #[test]
     fn extension_state_capability_is_fixed_to_its_extension_namespace() {
         let handle = ExtensionStateHandle::new();
@@ -558,35 +636,64 @@ mod tests {
         handle
             .attach(Arc::clone(&store) as Arc<dyn ExtensionStateStore>)
             .expect("state store attaches once");
-        let review =
-            ExtensionStateCapability::new("review", handle.clone()).expect("portable extension ID");
-        let other = ExtensionStateCapability::new("other", handle).expect("portable extension ID");
+        let review = ExtensionStateCapability::new(
+            "review",
+            handle.for_generation(state_generation()),
+        )
+        .expect("portable extension ID");
+        let other = ExtensionStateCapability::new(
+            "other",
+            handle.for_generation(state_generation()),
+        )
+        .expect("portable extension ID");
 
-        let appended = smol::block_on(
+        let replaced = smol::block_on(
             review.invoke(
                 request(
-                    "append",
-                    JsonValue::parse(r#"{"kind":"review.state.v1","content":{"phase":"open"}}"#)
+                    "replace",
+                    JsonValue::parse(r#"{"value":{"phase":"open"}}"#)
                         .expect("fixture state JSON"),
                 ),
                 CancellationToken::new(),
             ),
         )
-        .expect("review can append its state");
-        assert_eq!(appended.value, JsonValue::Bool(true));
+        .expect("review can replace its state");
+        assert_eq!(replaced.value, JsonValue::Bool(true));
 
         let review_state = smol::block_on(review.invoke(
             request("get", JsonValue::Object(BTreeMap::new())),
             CancellationToken::new(),
         ))
         .expect("review can read its state");
-        assert!(review_state.value.get("review.state.v1").is_some());
+        assert_eq!(
+            review_state.value,
+            JsonValue::parse(r#"{"phase":"open"}"#).expect("fixture state JSON")
+        );
 
         let other_state = smol::block_on(other.invoke(
             request("get", JsonValue::Object(BTreeMap::new())),
             CancellationToken::new(),
         ))
         .expect("other namespace remains readable");
-        assert_eq!(other_state.value, JsonValue::Object(BTreeMap::new()));
+        assert_eq!(other_state.value, JsonValue::Null);
+    }
+
+    #[test]
+    fn extension_state_capability_rejects_an_unbound_catalog_handle() {
+        let handle = ExtensionStateHandle::new();
+        let store = Arc::new(MemoryStateStore::default());
+        handle
+            .attach(Arc::clone(&store) as Arc<dyn ExtensionStateStore>)
+            .expect("state store attaches once");
+        let capability =
+            ExtensionStateCapability::new("review", handle).expect("portable extension ID");
+
+        let error = smol::block_on(capability.invoke(
+            request("get", JsonValue::Object(BTreeMap::new())),
+            CancellationToken::new(),
+        ))
+        .expect_err("catalog-level state handles must not access a lane");
+
+        assert!(error.to_string().contains("no active epoch generation"));
     }
 }

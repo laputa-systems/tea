@@ -10,8 +10,10 @@ use std::fmt;
 use std::sync::Arc;
 use tea_core::compaction::{
     AutomaticCompactionRequest, CompactionContext, CompactionError, CompactionFuture,
-    CompactionRequestLayout, CompactionResult, CompactionStrategy, Compactor, ProviderContext,
+    CompactionRequestLayout, CompactionRequestPort, CompactionResult, CompactionStrategy,
+    Compactor, ProviderContext,
 };
+use tea_core::effect::CompactionProviderEffectOutcome;
 use tea_core::hooks::{ContextEnvelope, HookSet};
 use tea_core::scheduler::{CancellationToken, ModelProvider, ModelRequest, ModelStreamEvent};
 use tea_core::state::{AgentMessage, MessageId, ModelDescriptor, StopReason, ThinkingLevel, Usage};
@@ -132,6 +134,45 @@ impl Compactor for ProviderCompactor {
         context: CompactionContext,
         cancellation: CancellationToken,
     ) -> CompactionFuture<'a> {
+        self.compact_with_request_port(context, cancellation, None)
+    }
+
+    fn compact_with_requests<'a>(
+        &'a self,
+        context: CompactionContext,
+        cancellation: CancellationToken,
+        requests: &'a dyn CompactionRequestPort,
+    ) -> CompactionFuture<'a> {
+        self.compact_with_request_port(context, cancellation, Some(requests))
+    }
+
+    fn compact_automatic<'a>(
+        &'a self,
+        context: CompactionContext,
+        request: AutomaticCompactionRequest,
+        cancellation: CancellationToken,
+    ) -> CompactionFuture<'a> {
+        self.compact_automatic_with_request_port(context, request, cancellation, None)
+    }
+
+    fn compact_automatic_with_requests<'a>(
+        &'a self,
+        context: CompactionContext,
+        request: AutomaticCompactionRequest,
+        cancellation: CancellationToken,
+        requests: &'a dyn CompactionRequestPort,
+    ) -> CompactionFuture<'a> {
+        self.compact_automatic_with_request_port(context, request, cancellation, Some(requests))
+    }
+}
+
+impl ProviderCompactor {
+    fn compact_with_request_port<'a>(
+        &'a self,
+        context: CompactionContext,
+        cancellation: CancellationToken,
+        requests: Option<&'a dyn CompactionRequestPort>,
+    ) -> CompactionFuture<'a> {
         let configured = self.configured(&context);
         let context_hook = Arc::clone(&self.context_hook);
         let tool_free_requests = self.tool_free_requests;
@@ -151,7 +192,7 @@ impl Compactor for ProviderCompactor {
             let layout = prepared.layout;
             let source_is_active_context_prefix = prepared.source_is_active_context_prefix;
             let (summary, usage, request_observation) =
-                summarize(provider, prepared.request, cancellation).await?;
+                summarize(provider, prepared.request, cancellation, requests).await?;
             let replacement = vec![summary_message(&context.messages, summary)?];
             let result = match usage {
                 Some(usage) => CompactionResult::new(replacement).with_usage(usage),
@@ -165,11 +206,12 @@ impl Compactor for ProviderCompactor {
         })
     }
 
-    fn compact_automatic<'a>(
+    fn compact_automatic_with_request_port<'a>(
         &'a self,
         context: CompactionContext,
         request: AutomaticCompactionRequest,
         cancellation: CancellationToken,
+        requests: Option<&'a dyn CompactionRequestPort>,
     ) -> CompactionFuture<'a> {
         let configured = self.configured(&context);
         let context_hook = Arc::clone(&self.context_hook);
@@ -196,7 +238,7 @@ impl Compactor for ProviderCompactor {
             let layout = prepared.layout;
             let source_is_active_context_prefix = prepared.source_is_active_context_prefix;
             let (summary, usage, request_observation) =
-                summarize(provider, prepared.request, cancellation).await?;
+                summarize(provider, prepared.request, cancellation, requests).await?;
             let retained_messages = request.retained_messages;
             let mut all_messages = messages_to_summarize;
             all_messages.extend(retained_messages.iter().cloned());
@@ -315,6 +357,40 @@ fn convert_messages(
 }
 
 async fn summarize(
+    provider: Arc<dyn ModelProvider>,
+    request: ModelRequest,
+    cancellation: CancellationToken,
+    requests: Option<&dyn CompactionRequestPort>,
+) -> Result<
+    (
+        String,
+        Option<Usage>,
+        Option<tea_core::scheduler::AdapterRequestObservation>,
+    ),
+    CompactionError,
+> {
+    let ticket = match requests {
+        Some(requests) => Some(requests.begin_provider_request(request.clone()).await?),
+        None => None,
+    };
+    let result = summarize_ungated(provider, request, cancellation.clone()).await;
+    if let (Some(requests), Some(ticket)) = (requests, ticket) {
+        let outcome = match &result {
+            Ok((_, usage, request_observation)) => CompactionProviderEffectOutcome::Succeeded {
+                usage: usage.clone(),
+                request_observation: request_observation.clone(),
+            },
+            Err(_) if cancellation.is_cancelled() => CompactionProviderEffectOutcome::Cancelled,
+            Err(error) => CompactionProviderEffectOutcome::Failed {
+                message: error.to_string(),
+            },
+        };
+        requests.settle_provider_request(ticket, outcome).await?;
+    }
+    result
+}
+
+async fn summarize_ungated(
     provider: Arc<dyn ModelProvider>,
     request: ModelRequest,
     cancellation: CancellationToken,

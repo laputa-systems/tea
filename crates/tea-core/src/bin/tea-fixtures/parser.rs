@@ -48,27 +48,11 @@ impl Fixture {
                 Some(JsonValue::Bool(value)) => *value,
                 Some(_) => return Err("host.should_stop_after_turn must be a boolean".into()),
             },
-            hold_agent_end_observer: parse_hold_agent_end_observer(host)?,
             tools,
             streams,
             last_usage,
             last_stop_reason,
         })
-    }
-}
-
-fn parse_hold_agent_end_observer(host: &BTreeMap<String, JsonValue>) -> Result<bool, String> {
-    let Some(observer) = host.get("observer") else {
-        return Ok(false);
-    };
-    let observer = object(observer, "host.observer")?;
-    match observer.get("hold_agent_end") {
-        Some(JsonValue::Bool(true)) => Ok(true),
-        Some(JsonValue::Bool(false)) => {
-            Err("host.observer.hold_agent_end must be true in the v1 fixture adapter".into())
-        }
-        Some(_) => Err("host.observer.hold_agent_end must be a boolean".into()),
-        None => Err("host.observer.hold_agent_end is required".into()),
     }
 }
 

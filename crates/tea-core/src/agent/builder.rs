@@ -171,7 +171,7 @@ impl AgentBuilder {
         self
     }
 
-    /// Add an awaited lifecycle observer in registration order.
+    /// Add a synchronous lifecycle observer in registration order.
     pub fn observer(mut self, observer: Arc<dyn EventObserver>) -> Self {
         self.observers.push(observer);
         self
@@ -245,8 +245,6 @@ impl AgentBuilder {
                 next_observer_id: AtomicU64::new(next_observer_id),
                 subscribers: Mutex::new(Vec::new()),
                 next_subscriber_id: AtomicU64::new(0),
-                lossless_subscribers: Mutex::new(Vec::new()),
-                next_lossless_subscriber_id: AtomicU64::new(0),
                 next_run_id: AtomicU64::new(0),
                 idle_notifier: IdleNotifier::default(),
             }),

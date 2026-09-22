@@ -10,7 +10,7 @@ use super::{
     LuaPolicy, PolicyAfterToolOutput, PolicyContextInput, PolicyContextProjectionPatch,
     PolicyError, PolicyLimits,
 };
-use crate::bundle::{Bundle, BUNDLE_ABI_VERSION};
+use crate::bundle::{Bundle, BUNDLE_ABI_V3_VERSION};
 use crate::bundle_runtime::BundleRuntime;
 use mlua::{Lua, LuaOptions, StdLib, Table, Value, VmState};
 use std::collections::BTreeMap;
@@ -90,7 +90,7 @@ impl LuaPolicy {
             .set_name(POLICY_CHUNK_NAME)
             .eval()
             .map_err(runtime_error)?;
-        let declaration = parse_declaration(&declaration, BUNDLE_ABI_VERSION)?;
+        let declaration = parse_declaration(&declaration, BUNDLE_ABI_V3_VERSION)?;
 
         Ok(Self {
             runtime: Mutex::new(PolicyRuntime {
@@ -107,6 +107,7 @@ impl LuaPolicy {
             prompt_sections: declaration.prompt_sections,
             tools: declaration.tools,
             host_commands: declaration.host_commands,
+            state_version: declaration.state_version,
         })
     }
 
@@ -208,10 +209,11 @@ impl LuaPolicy {
             prompt_sections: declaration.prompt_sections,
             tools: declaration.tools,
             host_commands: declaration.host_commands,
+            state_version: declaration.state_version,
         })
     }
 
-    /// Return deterministic named prompt sections declared by the v1 bundle.
+    /// Return deterministic named prompt sections declared by the v3 bundle.
     pub fn prompt_sections(&self) -> &[super::PolicyPromptSection] {
         &self.prompt_sections
     }
@@ -224,6 +226,11 @@ impl LuaPolicy {
     /// Return immutable host-local command metadata.
     pub fn host_commands(&self) -> &[PolicyHostCommand] {
         &self.host_commands
+    }
+
+    /// Return the immutable whole-state contract declared by this bundle.
+    pub fn state_version(&self) -> Option<&str> {
+        self.state_version.as_deref()
     }
 
     /// Evaluate one constrained terminal command inside the policy VM.
@@ -306,7 +313,7 @@ impl LuaPolicy {
         parse_decision(decision)
     }
 
-    /// Evaluate a v1 post-tool projection. The result table deliberately
+    /// Evaluate a v3 post-tool projection. The result table deliberately
     /// excludes usage and host failure metadata, and the parser accepts only
     /// model-visible replacements.
     pub fn after_tool_call(
@@ -317,7 +324,7 @@ impl LuaPolicy {
         Ok(self.after_tool_output(call, result)?.projection)
     }
 
-    /// Evaluate the complete v1 post-tool output. The projection remains
+    /// Evaluate the complete v3 post-tool output. The projection remains
     /// separate from the optional typed memory proposal so a caller cannot
     /// treat memory as a transcript mutation or let it alter raw evidence.
     pub fn after_tool_output(
@@ -351,7 +358,7 @@ impl LuaPolicy {
         parse_after_tool_output(projection)
     }
 
-    /// Evaluate the optional v1 context policy using only bounded,
+    /// Evaluate the optional v3 context policy using only bounded,
     /// metadata-only branch descriptors. The returned IDs remain opaque until
     /// the Rust harness maps and validates them against its immutable tree.
     pub fn context_projection(
@@ -386,7 +393,7 @@ impl LuaPolicy {
         parse_context_projection(output)
     }
 
-    /// Evaluate every v1 `before_operation` lifecycle callback before
+    /// Evaluate every v3 `before_operation` lifecycle callback before
     /// the harness commits its operation-start record. Keys are bundle-local
     /// stable IDs; the harness namespaces them with the immutable plugin ID
     /// before persistence.
@@ -394,7 +401,7 @@ impl LuaPolicy {
         self.lifecycle_resume_data(ResumeDataPhase::Operation)
     }
 
-    /// Evaluate every v1 `before_epoch` lifecycle callback before the
+    /// Evaluate every v3 `before_epoch` lifecycle callback before the
     /// harness commits its epoch-start record.
     pub fn before_epoch_resume_data(&self) -> Result<BTreeMap<String, JsonValue>, PolicyError> {
         self.lifecycle_resume_data(ResumeDataPhase::Epoch)
@@ -522,7 +529,7 @@ fn extension_command_input_table(
         .set("arguments", input.arguments.as_str())
         .map_err(runtime_error)?;
     table
-        .set("state", extension_state_table(lua, &input.state.latest)?)
+        .set("state", extension_state_value(lua, &input.state.value)?)
         .map_err(runtime_error)?;
     Ok(table)
 }
@@ -551,7 +558,7 @@ fn extension_idle_input_table(lua: &Lua, input: &ExtensionIdleInput) -> Result<T
         .set("elapsed_active_seconds", input.elapsed_active_seconds)
         .map_err(runtime_error)?;
     table
-        .set("state", extension_state_table(lua, &input.state.latest)?)
+        .set("state", extension_state_value(lua, &input.state.value)?)
         .map_err(runtime_error)?;
     let usage = lua.create_table().map_err(runtime_error)?;
     set_optional_u64(&usage, "input_tokens", input.usage.input_tokens)?;
@@ -563,20 +570,15 @@ fn extension_idle_input_table(lua: &Lua, input: &ExtensionIdleInput) -> Result<T
     Ok(table)
 }
 
-fn extension_state_table(
+fn extension_state_value(
     lua: &Lua,
-    values: &BTreeMap<String, JsonValue>,
-) -> Result<Table, PolicyError> {
-    let state = lua.create_table().map_err(runtime_error)?;
-    for (kind, value) in values {
-        state
-            .set(
-                kind.as_str(),
-                json_to_lua(lua, value).map_err(runtime_error)?,
-            )
-            .map_err(runtime_error)?;
-    }
-    Ok(state)
+    value: &Option<JsonValue>,
+) -> Result<Value, PolicyError> {
+    value
+        .as_ref()
+        .map(|value| json_to_lua(lua, value).map_err(runtime_error))
+        .transpose()
+        .map(|value| value.unwrap_or(Value::Nil))
 }
 
 fn set_optional_u64(table: &Table, name: &str, value: Option<u64>) -> Result<(), PolicyError> {

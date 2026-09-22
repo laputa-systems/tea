@@ -1,11 +1,11 @@
 //! Operation orchestration that binds core effects to the session WAL.
 
 use super::artifact::{
-    RetainedToolResult, projection_content, retain_direct_recovery_result_with_projection,
+    RetainedToolResult, retain_direct_recovery_result_with_projection,
     retain_tool_result_with_projection,
 };
 use super::artifact_tools::{STABLE_ARTIFACT_TOOL_NAMES, stable_artifact_tools};
-use super::context::derive_snapshot_context_with_policies;
+use super::context::{derive_default_snapshot_context, derive_snapshot_context_with_policies};
 use super::events::EventHub;
 use super::harness_tool::{STABLE_HARNESS_TOOL_NAME, stable_harness_tools};
 use super::subagents::{
@@ -19,11 +19,25 @@ use super::trace::{DurableTraceRedactor, TraceCaptureSink};
 mod lane;
 mod operation;
 mod recovery;
+mod extension_state;
+mod compaction;
+mod fork;
+mod child_recovery;
+#[cfg(test)]
+mod settlement_tests;
+pub use recovery::{InterruptedEffect, LaneRecoveryReport, RecoveryReport, inspect_recovery};
+pub use fork::SettledTurnFork;
+
+pub use operation::{
+    AcceptedInput, ExtensionCommandAdmission, IdleAuthorization, IdleDriveOutcome,
+    InputCompletion, InputCompletionFuture, InputCompletionHandle, InputOutcome, QueuedInput,
+    InputDisposition, WithdrawnInputs,
+};
 
 use crate::agent::Agent;
 use crate::effect::EffectId;
 use crate::error::CoreError;
-use crate::event::{AgentEvent, EventObserver, ObserverFuture};
+use crate::event::{AgentEvent, EventObserver};
 use crate::harness::{
     AUTHORING_AUTHORIZATION_METADATA_KEY, HarnessActor, HarnessError, HarnessResolver,
     HarnessRevisionReason, HarnessRevisionV1, HarnessSurface, ResolvedHarness,
@@ -36,11 +50,13 @@ use crate::runtime::{
 };
 use crate::scheduler::CancellationToken;
 use crate::tool::truncate_middle;
+use extension_state::extension_state_view;
 use lane::LaneRuntime;
+use operation::{InputCompletionRegistry, ensure_retained_state_version};
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::task::Poll;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -53,11 +69,11 @@ use tea_core::harness::extension::{
     CollectedExtensionMemoryProposal, ExtensionCommandInput, ExtensionCommandResult,
     ExtensionError, ExtensionHostCommandDescription, ExtensionIdleInput, ExtensionMemoryCollector,
     ExtensionMemoryRetention, ExtensionMemoryVisibility, ExtensionOperationOutcome,
-    ExtensionStateStore, ExtensionStateUpdate, ExtensionStateView,
+    ExtensionStateGeneration,
 };
 use tea_core::state::{
-    AgentMessage, AgentSnapshot, AgentToolCall, MessageId, ModelDescriptor,
-    OpaqueProviderContextItem, SerializedJson, StopReason, ThinkingLevel, ToolCallId,
+    AgentMessage, AgentSnapshot, AgentToolCall, ModelDescriptor,
+    SerializedJson, StopReason, ThinkingLevel, ToolCallId,
 };
 use tea_core::tool::{AgentTool, AgentToolResult, ToolCall, ToolFailureDisposition, ToolRegistry};
 use tea_core::trace::TraceObserver;
@@ -65,14 +81,16 @@ use tea_protocol::JsonValue;
 use tea_session::{
     AgentContextMode, AgentId, AgentSpawnedFact, AgentState, AgentTaskFinishedFact, ArtifactStore,
     CanonicalHashWriter, CoreRunId, Digest, EntryId, EpochFinishReason, EpochFinishedRecord,
-    EpochId, EpochStartedRecord, HarnessRevisionChangedEntry, HarnessRevisionId, HarnessSnapshotId,
-    LaneId, LaneMutation, LaneRecord, MemoryRetention, MemoryVisibility, ModelChangedEntry,
-    ModelHarnessProfileId, OperationFinishedRecord, OperationId, OperationKind, OperationOutcome,
-    OperationStartedRecord, PayloadRef, PluginMemoryEntry, ProviderRequestId,
+    EpochId, EpochStartedRecord, ExtensionControlEnqueuedRecord, ExtensionStateValue,
+    HarnessRevisionChangedEntry,
+    HarnessRevisionId, HarnessSnapshotId, LaneId, LaneMutation, LaneRecord, MemoryRetention,
+    MemoryVisibility, ModelChangedEntry, ModelHarnessProfileId, OperationFinishedRecord,
+    OperationId, OperationKind, OperationOutcome, OperationStartedRecord, PayloadRef,
+    PluginMemoryEntry, ProviderRequestId,
     ProviderRequestSettledRecord, ProviderRequestStartedRecord, ProviderSettlementClassification,
     ProvisionedEntry, RecoveryPlan, SchemaFieldMismatch, SessionEntry, SessionFact,
-    SessionSnapshot, SessionWriter, StepAttemptedRecord, StepId, StepKind, SubagentModelRecord,
-    ThinkingChangedEntry, ToolReplayPolicy, ToolResultEntry, ToolSchemaDeviationFact,
+    SessionCommit, SessionCommitItem, SessionSnapshot, SessionWriter, StepAttemptedRecord, StepId,
+    StepKind, SubagentModelRecord, ThinkingChangedEntry, ToolReplayPolicy, ToolResultEntry, ToolSchemaDeviationFact,
     ToolStartedRecord, TraceArtifactFact, Usage, WorkspaceDeltaAppliedFact, WorkspaceDeltaFact,
     WorkspaceDeltaId, WorkspaceLeaseId, derive_subagent_operation_id, reduce_agent_graph,
     reduce_lane,
@@ -235,9 +253,16 @@ pub struct SessionSupervisor<S> {
     coordinator: Mutex<Option<Arc<SubagentCoordinator<S>>>>,
     /// Process-local live-event fanout. It never owns durable state.
     events: Arc<EventHub>,
-    /// Serializes snapshot registration with post-commit publication so a UI
-    /// receives one atomic view and then only events beyond that view.
-    publication: Mutex<()>,
+    /// Serializes transition into process-local closure with input admission
+    /// and live-drive claims. Durable inspection remains available after this
+    /// gate is closed, but no new execution can race a completed close.
+    operation_gate: Mutex<()>,
+    /// Process-local terminal host state. Reopening creates a fresh supervisor
+    /// and therefore requires a fresh explicit authorization to execute.
+    closed: AtomicBool,
+    /// Per-input local completion endpoints. Durable input settlement remains
+    /// authoritative; this registry only wakes callers after that commit.
+    input_completions: Arc<InputCompletionRegistry>,
 }
 
 impl<S> std::fmt::Debug for SessionSupervisor<S> {
@@ -531,6 +556,7 @@ where
         }
         let root_lane_id = LaneId::main();
         let reduction = reduce_lane(snapshot.clone(), root_lane_id.clone())?;
+        validate_runtime_model_selection(&root_services, &reduction)?;
         if let Some(level) = reduction.effective_configuration.thinking_level.as_deref() {
             root_services = root_services.thinking_level(thinking_level_from_name(level)?);
         }
@@ -571,13 +597,18 @@ where
             subagents: subagents.clone(),
             coordinator: Mutex::new(None),
             events: Arc::new(EventHub::default()),
-            publication: Mutex::new(()),
+            operation_gate: Mutex::new(()),
+            closed: AtomicBool::new(false),
+            input_completions: Arc::new(InputCompletionRegistry::default()),
         });
         if let Some(services) = subagents {
             let coordinator = Arc::new(SubagentCoordinator::new(
                 Arc::downgrade(&supervisor),
                 services,
             ));
+            for node in agent_graph.agents.values().filter(|node| node.terminal.is_some()) {
+                coordinator.restore_terminal_visibility(node.spawned.agent_id.clone());
+            }
             *supervisor.coordinator.lock().map_err(|_| {
                 HarnessError::invalid_state("subagent coordinator mutex is poisoned")
             })? = Some(coordinator);
@@ -603,14 +634,15 @@ where
             subagents,
         } = input;
         let snapshot = session.snapshot()?;
+        let root_lane_id = LaneId::main();
+        let reduction = reduce_lane(snapshot.clone(), root_lane_id)?;
+        validate_runtime_model_selection(&root_services, &reduction)?;
         let catalog = latest_harness_catalog(&snapshot).ok_or_else(|| {
             HarnessError::invalid_state(
                 "managed harness reopen requires a committed immutable harness catalog",
             )
         })?;
         resolver.restore_catalog(catalog, Arc::clone(&artifacts))?;
-        let root_lane_id = LaneId::main();
-        let reduction = reduce_lane(snapshot, root_lane_id)?;
         let revision_id = reduction
             .lane_state
             .active_harness_revision
@@ -667,12 +699,11 @@ where
     /// are suppressed; reconnecting callers receive a new snapshot instead
     /// of a replay log.
     pub fn subscribe_events(&self) -> Result<TeaEventSubscription, HarnessError> {
-        let _publication = self
-            .publication
-            .lock()
-            .map_err(|_| HarnessError::invalid_state("harness publication mutex is poisoned"))?;
-        let snapshot = HarnessSnapshotView::from_session(&self.snapshot()?)?;
-        self.events.subscribe(snapshot)
+        self.events.subscribe_with_snapshot(|| {
+            let session = self.snapshot()?;
+            let view = HarnessSnapshotView::from_session(&session)?;
+            Ok(super::events::TeaObservationSnapshot { session, view })
+        })
     }
 
     /// Return whether a caller-visible durable operation currently owns this
@@ -750,66 +781,6 @@ where
             Arc::clone(&self.artifacts),
             self.subagents.clone(),
         ))
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn recover_subagents_for_test(self: &Arc<Self>) -> Result<(), HarnessError> {
-        if let Some(coordinator) = self.subagent_coordinator()? {
-            self.recover_subagents_before_root_resume(&coordinator)
-                .await
-        } else {
-            Ok(())
-        }
-    }
-
-    /// Deterministic crash-prefix injection for recovery tests. Production
-    /// code always calls `complete_subagent_lane_binding` atomically in its
-    /// normal append sequence; this hook stops after the requested durable
-    /// prefix so replay evidence covers every suffix boundary.
-    #[cfg(test)]
-    pub(crate) async fn persist_subagent_prefix_for_test(
-        self: &Arc<Self>,
-        coordinator: &Arc<SubagentCoordinator<S>>,
-        call: crate::tool::ToolCall,
-        provenance: RunProvenance,
-        request: SpawnAgentRequest,
-        configured_entries: usize,
-        append_spawn_fact: bool,
-    ) -> Result<AgentId, HarnessError> {
-        let intent = self.subagent_spawn_intent(&call, &provenance, &request)?;
-        if configured_entries > 3 {
-            return Err(HarnessError::invalid_state(
-                "fixture subagent prefix has at most three configuration entries",
-            ));
-        }
-        let prepared = coordinator
-            .services()
-            .host
-            .prepare(intent.prepare_request())
-            .await
-            .map_err(|error| HarnessError::invalid_state(error.to_string()))?;
-        self.validate_prepared_subagent(&intent, &prepared)?;
-        let mut session = self.session_lock()?;
-        session.append_lane_mutation(LaneMutation::Created {
-            lane_id: intent.lane_id.clone(),
-            base_leaf_id: intent.parent_source_leaf_id.clone(),
-        })?;
-        for entry in self
-            .subagent_lane_binding_entries(&intent, &prepared)?
-            .into_iter()
-            .take(configured_entries)
-        {
-            session.append_entry(&intent.lane_id, entry)?;
-        }
-        if append_spawn_fact {
-            if configured_entries != 3 {
-                return Err(HarnessError::invalid_state(
-                    "fixture spawn fact requires a complete child lane configuration",
-                ));
-            }
-            self.append_subagent_spawn_fact(&mut session, &intent, &prepared)?;
-        }
-        Ok(intent.agent_id)
     }
 
     #[cfg(test)]
@@ -903,50 +874,55 @@ where
     }
 
     #[cfg(test)]
-    pub(crate) async fn persist_subagent_delta_without_terminal_for_test(
-        self: &Arc<Self>,
-        coordinator: &Arc<SubagentCoordinator<S>>,
+    pub(crate) fn append_subagent_open_provider_prefix_for_test(
+        &self,
         agent_id: &AgentId,
-    ) -> Result<(), HarnessError> {
+        epoch_id: &EpochId,
+    ) -> Result<ProviderRequestId, HarnessError> {
         let graph = reduce_agent_graph(&self.snapshot()?)
             .map_err(|error| HarnessError::invalid_state(error.to_string()))?;
-        let node = graph.agents.get(agent_id).cloned().ok_or_else(|| {
-            HarnessError::invalid_state("fixture child delta has no durable spawn node")
+        let node = graph.agents.get(agent_id).ok_or_else(|| {
+            HarnessError::invalid_state("fixture child provider prefix has no durable spawn node")
         })?;
-        self.force_abort_open_subagent_operation(&node)?;
-        let prepared = self.reopen_subagent_prepared(coordinator, &node).await?;
-        self.validate_reopened_subagent(&node, &prepared)?;
-        let WorkspaceFinalization::Delta(delta) = coordinator
-            .services()
-            .host
-            .finalize(FinalizeSubagentRequest {
-                agent_id: agent_id.clone(),
-                workspace: prepared.workspace,
-            })
-            .await
-            .map_err(|error| HarnessError::invalid_state(error.to_string()))?
-        else {
-            return Err(HarnessError::invalid_state(
-                "fixture delta prefix requires a changed child workspace",
-            ));
-        };
-        self.session_lock()?
-            .append_fact(SessionFact::WorkspaceDelta(
-                self.workspace_delta_fact(&node, delta)?,
-            ))?;
-        Ok(())
-    }
-
-    #[cfg(test)]
-    pub(crate) fn provenance_for_test(
-        &self,
-        lane_id: &LaneId,
-        operation_id: &OperationId,
-        epoch_id: &EpochId,
-        identity: &HarnessIdentity,
-    ) -> Result<RunProvenance, HarnessError> {
-        let lane = self.lane(lane_id)?;
-        self.provenance(&lane, operation_id, epoch_id, identity, None)
+        let operation_id = node.operation_id.as_ref().ok_or_else(|| {
+            HarnessError::invalid_state("fixture child provider prefix has no accepted operation")
+        })?;
+        let step_id = StepId::new(durable_identifier(
+            "subagent-provider-step",
+            [agent_id.as_str()],
+        ))
+        .map_err(|error| HarnessError::invalid_state(error.to_string()))?;
+        let request_id = ProviderRequestId::new(durable_identifier(
+            "subagent-provider-request",
+            [agent_id.as_str()],
+        ))
+        .map_err(|error| HarnessError::invalid_state(error.to_string()))?;
+        self.session_lock()?.commit(SessionCommit::new(vec![
+            SessionCommitItem::Record(LaneRecord::StepAttempted(StepAttemptedRecord {
+                id: step_id.clone(),
+                operation_id: operation_id.clone(),
+                epoch_id: epoch_id.clone(),
+                kind: StepKind::Assistant,
+                attempt: 1,
+                result_entry_id: subagent_entry_id(agent_id, "fixture-provider-result")?,
+                reason: None,
+            })),
+            SessionCommitItem::Record(LaneRecord::ProviderRequestStarted(
+                ProviderRequestStartedRecord {
+                    request_id: request_id.clone(),
+                    operation_id: operation_id.clone(),
+                    epoch_id: epoch_id.clone(),
+                    step_id,
+                    physical_attempt: 1,
+                    model_harness_profile: node.spawned.model_harness_profile_id.clone(),
+                    request_surface_digest: Digest::from_bytes(
+                        "fixture-child-open-provider-digest",
+                    ),
+                    idempotency_key: None,
+                },
+            )),
+        ])?)?;
+        Ok(request_id)
     }
 
     #[cfg(test)]
@@ -987,43 +963,9 @@ where
         if let Some(existing) = intent.existing.clone() {
             self.validate_replayed_subagent(&intent, &existing)?;
             if existing.operation_id.is_none() {
-                // The immutable spawn node committed before child operation
-                // acceptance. Replay the original root tool intent to append
-                // that exact assignment/operation suffix; never invent a new
-                // task from volatile coordinator state.
-                let prepared = coordinator
-                    .services()
-                    .host
-                    .reopen(ReopenSubagentRequest {
-                        session_id: intent.session_id.clone(),
-                        agent_id: intent.agent_id.clone(),
-                        workspace_lease_id: existing.spawned.workspace_lease_id.clone(),
-                        model: intent.model.clone(),
-                        thinking: intent.thinking,
-                    })
-                    .await
-                    .map_err(|error| HarnessError::invalid_state(error.to_string()))?;
-                self.validate_prepared_subagent(&intent, &prepared)?;
-                self.ensure_subagent_lane_registered(
-                    intent.lane_id.clone(),
-                    prepared
-                        .runtime_services
-                        .clone()
-                        .thinking_level(intent.thinking),
-                )?;
-                let accepted = self.commit_subagent_operation(&intent, &prepared)?;
-                self.publish_event(TeaEvent::Session(SessionEvent::OperationAccepted {
-                    sequence: accepted.sequence,
-                    lane_id: intent.lane_id.clone(),
-                    operation_id: intent.operation_id.clone(),
-                }))?;
-                self.start_subagent_task(coordinator, &intent, prepared.workspace)?;
-                return Ok(SpawnedAgentHandle {
-                    agent_id: intent.agent_id,
-                    operation_id: intent.operation_id,
-                    task_name: request.task_name,
-                    state: AgentState::Running,
-                });
+                return Err(HarnessError::invalid_state(
+                    "interrupted child assignment requires a new spawn request",
+                ));
             }
             let operation_id = existing
                 .operation_id
@@ -1034,28 +976,9 @@ where
                 AgentState::Running | AgentState::Finalizing { .. }
             ) && !coordinator.has_handle(&existing.spawned.agent_id)
             {
-                // An in-memory handle is intentionally not durable.  On a
-                // restart, or after a task runtime refused a prior handoff,
-                // reacquire the same host lease and make the executor accept
-                // the existing operation before returning a running handle.
-                let prepared = coordinator
-                    .services()
-                    .host
-                    .reopen(super::subagents::ReopenSubagentRequest {
-                        session_id: intent.session_id.clone(),
-                        agent_id: intent.agent_id.clone(),
-                        workspace_lease_id: existing.spawned.workspace_lease_id.clone(),
-                        model: intent.model.clone(),
-                        thinking: intent.thinking,
-                    })
-                    .await
-                    .map_err(|error| HarnessError::invalid_state(error.to_string()))?;
-                self.validate_prepared_subagent(&intent, &prepared)?;
-                self.ensure_subagent_lane_registered(
-                    intent.lane_id.clone(),
-                    prepared.runtime_services.thinking_level(intent.thinking),
-                )?;
-                self.start_recovered_subagent_task(coordinator, &existing, prepared.workspace)?;
+                return Err(HarnessError::invalid_state(
+                    "interrupted child assignment requires a new spawn request",
+                ));
             }
             // This is the crucial replay path: an already committed graph
             // node is authoritative.  In particular, do not reserve capacity
@@ -1066,6 +989,12 @@ where
                 task_name: existing.spawned.task_name,
                 state: existing.state,
             });
+        }
+
+        if self.has_unfinished_subagent_lane_binding(&intent)? {
+            return Err(HarnessError::invalid_state(
+                "interrupted child workspace evidence requires an explicit new spawn request",
+            ));
         }
 
         coordinator.reserve(
@@ -1142,10 +1071,10 @@ where
     ) -> Result<(), HarnessError> {
         match self.lane(&lane_id) {
             Ok(existing) => {
-                // A crash may have left a durable child lane/configuration
-                // prefix before its AgentSpawned fact. Once replay completes
-                // that graph binding, do not trust a service bundle that was
-                // registered while the lane was still graph-unclaimed.
+                // A host may have registered matching lane authority for an
+                // explicit effect reconciliation. Verify that it remains the
+                // child-bound surface; new admission never completes a legacy
+                // partial lane prefix.
                 let snapshot = self.snapshot()?;
                 let reduction = reduce_lane(snapshot, lane_id)?;
                 let configuration = self
@@ -1263,109 +1192,6 @@ where
                 ))
             }
         }
-    }
-
-    /// Resume an already durable child prefix rather than manufacturing a
-    /// fresh epoch. The reduced `RecoveryPlan` decides whether that prefix
-    /// still needs its original assignment, an epoch continuation, tool
-    /// recovery, or only terminal completion.
-    async fn resume_accepted_subagent_with_timeout(
-        &self,
-        lane_id: LaneId,
-        operation_id: OperationId,
-        timeout: Duration,
-        coordinator: &SubagentCoordinator<S>,
-    ) -> Result<DurableOperation, HarnessError> {
-        let lane = self.lane(&lane_id)?;
-        let mut drive = Box::pin(self.resume_lane_runtime(lane));
-        let mut deadline = coordinator.services().tasks.sleep(timeout);
-        let completed = std::future::poll_fn(|context| {
-            if Pin::new(&mut deadline).poll(context).is_ready() {
-                return Poll::Ready(None);
-            }
-            match drive.as_mut().poll(context) {
-                Poll::Ready(result) => Poll::Ready(Some(result)),
-                Poll::Pending => Poll::Pending,
-            }
-        })
-        .await;
-        match completed {
-            Some(result) => result,
-            None => {
-                self.force_finish_child_lane_operation(
-                    &lane_id,
-                    &operation_id,
-                    OperationOutcome::Failed {
-                        code: "subagent_timeout".into(),
-                    },
-                )?;
-                Err(HarnessError::invalid_state(
-                    "subagent child execution exceeded its configured timeout",
-                ))
-            }
-        }
-    }
-
-    /// Reinstall a lost process-local task handle for one durable open child
-    /// operation. The graph facts, not volatile coordinator state, select the
-    /// lane and operation being resumed.
-    fn start_recovered_subagent_task(
-        self: &Arc<Self>,
-        coordinator: &Arc<SubagentCoordinator<S>>,
-        node: &tea_session::AgentGraphNode,
-        workspace: super::subagents::WorkspaceLease,
-    ) -> Result<(), HarnessError> {
-        let operation_id = node.operation_id.clone().ok_or_else(|| {
-            HarnessError::invalid_state("recovered child task has no accepted operation")
-        })?;
-        if coordinator.has_handle(&node.spawned.agent_id) {
-            return Ok(());
-        }
-        let task_supervisor = Arc::downgrade(self);
-        let task_coordinator = Arc::downgrade(coordinator);
-        let task_agent = node.spawned.agent_id.clone();
-        let task_lane = node.spawned.lane_id.clone();
-        let task_workspace = workspace.clone();
-        let task_timeout = coordinator.services().policy.timeout;
-        let task = Box::pin(async move {
-            if let (Some(supervisor), Some(coordinator)) =
-                (task_supervisor.upgrade(), task_coordinator.upgrade())
-            {
-                let _ = supervisor
-                    .resume_accepted_subagent_with_timeout(
-                        task_lane,
-                        operation_id,
-                        task_timeout,
-                        &coordinator,
-                    )
-                    .await;
-                let settled = supervisor
-                    .settle_subagent_task(
-                        &coordinator,
-                        task_agent.clone(),
-                        Some(task_workspace),
-                        false,
-                    )
-                    .await;
-                if settled.is_ok() {
-                    coordinator.task_completed(&task_agent);
-                } else {
-                    coordinator.task_stopped_before_cleanup(&task_agent);
-                }
-            }
-        });
-        let handle = coordinator
-            .services()
-            .tasks
-            .spawn(&format!("tea-subagent-{}", node.spawned.agent_id), task)
-            .map_err(|error| HarnessError::invalid_state(error.to_string()))?;
-        coordinator.install_handle(
-            node.spawned.agent_id.clone(),
-            &node.spawned.parent_operation_id,
-            workspace,
-            handle,
-        );
-        Ok(())
     }
 
     /// Wait for selected children owned by the exact root operation carried in
@@ -2170,6 +1996,7 @@ where
         if current.terminal.is_some() {
             return Ok(false);
         }
+        let mut items = Vec::new();
         let workspace_delta_id = match (current.workspace_delta.as_ref(), delta) {
             (Some(existing), Some(candidate)) if *existing != candidate => {
                 return Err(HarnessError::invalid_state(
@@ -2179,19 +2006,20 @@ where
             (Some(existing), _) => Some(existing.delta_id.clone()),
             (None, Some(candidate)) => {
                 let delta_id = candidate.delta_id.clone();
-                session.append_fact(SessionFact::WorkspaceDelta(candidate))?;
+                items.push(SessionCommitItem::Fact(SessionFact::WorkspaceDelta(candidate)));
                 Some(delta_id)
             }
             (None, None) => None,
         };
-        session.append_fact(SessionFact::AgentTaskFinished(AgentTaskFinishedFact {
+        items.push(SessionCommitItem::Fact(SessionFact::AgentTaskFinished(AgentTaskFinishedFact {
             agent_id: node.spawned.agent_id.clone(),
             operation_id,
             outcome,
             final_entry_id,
             report,
             workspace_delta_id,
-        }))?;
+        })));
+        session.commit(SessionCommit::new(items)?)?;
         Ok(true)
     }
 
@@ -2308,9 +2136,7 @@ where
         snapshot: &SessionSnapshot,
         node: &tea_session::AgentGraphNode,
     ) -> Result<SubagentStatus, HarnessError> {
-        let operation_id = node.operation_id.clone().ok_or_else(|| {
-            HarnessError::invalid_state("subagent observation has no accepted child operation")
-        })?;
+        let operation_id = node.operation_id.clone();
         let workspace_change = node
             .terminal
             .as_ref()
@@ -2340,7 +2166,10 @@ where
             thinking: node.spawned.thinking.clone(),
             state: node.state.clone(),
             context_mode: node.spawned.context_mode,
-            usage: operation_usage(snapshot, &operation_id),
+            usage: operation_id
+                .as_ref()
+                .map(|operation_id| operation_usage(snapshot, operation_id))
+                .unwrap_or_default(),
             workspace_change,
         })
     }
@@ -2568,6 +2397,24 @@ where
         })
     }
 
+    /// Refuse to complete a legacy partial child topology from an old tool
+    /// intent. A durable lane binding proves that workspace preparation
+    /// reached an interrupted child assignment even when the graph fact was
+    /// not committed yet. Retaining that prefix is safer than reusing it as a
+    /// checkpoint for a new task drive.
+    fn has_unfinished_subagent_lane_binding(
+        &self,
+        intent: &SubagentSpawnIntent,
+    ) -> Result<bool, HarnessError> {
+        let snapshot = self.snapshot()?;
+        Ok(snapshot.lane_mutations().iter().any(|stored| {
+            matches!(
+                &stored.mutation,
+                LaneMutation::Created { lane_id, .. } if lane_id == &intent.lane_id
+            )
+        }))
+    }
+
     fn validate_prepared_subagent(
         &self,
         intent: &SubagentSpawnIntent,
@@ -2606,8 +2453,77 @@ where
         intent: &SubagentSpawnIntent,
         prepared: &PreparedSubagent,
     ) -> Result<AcceptedSubagentOperation, HarnessError> {
+        // Lifecycle preparation is deliberately complete before the writer
+        // lock. The durable group below therefore contains only already
+        // validated values and one failing append cannot leak a child lane,
+        // workspace binding, or accepted assignment prefix.
+        let commit = self.prepared_subagent_spawn_commit(intent, prepared)?;
         let mut session = self.session_lock()?;
         let snapshot = session.snapshot()?;
+        self.validate_subagent_spawn_admission(&snapshot, intent)?;
+        let stored = session.commit(commit)?;
+        Ok(AcceptedSubagentOperation {
+            sequence: stored.seq,
+        })
+    }
+
+    fn prepared_subagent_spawn_commit(
+        &self,
+        intent: &SubagentSpawnIntent,
+        prepared: &PreparedSubagent,
+    ) -> Result<SessionCommit, HarnessError> {
+        let assignment = ProvisionedEntry::user(
+            subagent_entry_id(&intent.agent_id, "assignment")?,
+            intent.task.clone(),
+        );
+        let configuration = self.manager.resolve_revision(
+            prepared.harness_identity.revision_id(),
+            &prepared.runtime_services,
+        )?;
+        let mut operation = OperationStartedRecord::new(
+            intent.operation_id.clone(),
+            intent.lane_id.clone(),
+            Some(subagent_entry_id(&intent.agent_id, "harness")?),
+            OperationKind::Subagent {
+                agent_id: intent.agent_id.clone(),
+                parent_operation_id: intent.parent_operation_id.clone(),
+            },
+            vec![assignment.clone()],
+            prepared.harness_identity.revision_id().clone(),
+            prepared.harness_identity.profile_id().clone(),
+        );
+        operation.operation_resume_data = configuration.lifecycle.before_operation()?;
+        let mut items = vec![SessionCommitItem::Lane(LaneMutation::Created {
+            lane_id: intent.lane_id.clone(),
+            base_leaf_id: intent.parent_source_leaf_id.clone(),
+        })];
+        items.extend(
+            self.subagent_lane_binding_entries(intent, prepared)?
+                .into_iter()
+                .map(|entry| SessionCommitItem::Entry {
+                    lane_id: intent.lane_id.clone(),
+                    entry,
+                }),
+        );
+        items.push(SessionCommitItem::Fact(SessionFact::AgentSpawned(
+            self.subagent_spawn_fact(intent, prepared),
+        )));
+        items.push(SessionCommitItem::Record(LaneRecord::OperationStarted(operation)));
+        items.push(SessionCommitItem::Entry {
+            lane_id: intent.lane_id.clone(),
+            entry: assignment,
+        });
+        SessionCommit::new(items).map_err(Into::into)
+    }
+
+    /// Recheck ownership, uniqueness, and durable capacity while holding the
+    /// writer. Workspace preparation can overlap another admitted spawn, but
+    /// only this final revalidation chooses whether its atomic group commits.
+    fn validate_subagent_spawn_admission(
+        &self,
+        snapshot: &SessionSnapshot,
+        intent: &SubagentSpawnIntent,
+    ) -> Result<(), HarnessError> {
         let graph = reduce_agent_graph(&snapshot)
             .map_err(|error| HarnessError::invalid_state(error.to_string()))?;
         if graph.agents.contains_key(&intent.agent_id) {
@@ -2623,20 +2539,61 @@ where
                 "spawn_agent task_name is already owned by this root operation",
             ));
         }
-        self.complete_subagent_lane_binding(&mut session, intent, prepared)?;
-        self.append_subagent_spawn_fact(&mut session, intent, prepared)?;
-        self.append_subagent_operation(&mut session, intent, prepared)
+        if snapshot.lane_mutations().iter().any(|stored| {
+            matches!(
+                &stored.mutation,
+                LaneMutation::Created { lane_id, .. } if lane_id == &intent.lane_id
+            )
+        }) {
+            return Err(HarnessError::invalid_state(
+                "interrupted child workspace evidence requires an explicit new spawn request",
+            ));
+        }
+        let parent = reduce_lane(snapshot.clone(), intent.parent_lane_id.clone())?;
+        if parent.lane_state.active_operation.as_ref() != Some(&intent.parent_operation_id) {
+            return Err(HarnessError::invalid_state(
+                "spawn_agent owner operation is no longer active",
+            ));
+        }
+        let durable_active = graph
+            .agents
+            .values()
+            .filter(|node| {
+                matches!(
+                    node.state,
+                    AgentState::Running | AgentState::Finalizing { .. }
+                )
+            })
+            .count() as u32;
+        let durable_total = graph
+            .agents
+            .values()
+            .filter(|node| node.spawned.parent_operation_id == intent.parent_operation_id)
+            .count() as u32;
+        let policy = graph.policy.as_ref().ok_or_else(|| {
+            HarnessError::invalid_state("spawn_agent requires a durable subagent policy")
+        })?;
+        if durable_active >= policy.max_concurrent {
+            return Err(HarnessError::invalid_state(
+                "subagent concurrent-operation limit is exhausted",
+            ));
+        }
+        if durable_total >= policy.max_total_per_operation {
+            return Err(HarnessError::invalid_state(
+                "subagent total-spawn limit is exhausted for this root operation",
+            ));
+        }
+        Ok(())
     }
 
-    fn append_subagent_spawn_fact(
+    fn subagent_spawn_fact(
         &self,
-        session: &mut S,
         intent: &SubagentSpawnIntent,
         prepared: &PreparedSubagent,
-    ) -> Result<(), HarnessError> {
+    ) -> AgentSpawnedFact {
         let model_record = durable_subagent_model(&intent.model);
         let thinking = thinking_level_name(intent.thinking).to_owned();
-        session.append_fact(SessionFact::AgentSpawned(AgentSpawnedFact {
+        AgentSpawnedFact {
             agent_id: intent.agent_id.clone(),
             parent_lane_id: intent.parent_lane_id.clone(),
             parent_operation_id: intent.parent_operation_id.clone(),
@@ -2651,78 +2608,7 @@ where
             harness_snapshot_id: prepared.harness_identity.snapshot_id().clone(),
             model_harness_profile_id: prepared.harness_identity.profile_id().clone(),
             spawn_tool_call_id: intent.spawn_tool_call_id.clone(),
-        }))?;
-        Ok(())
-    }
-
-    /// Complete the deterministic child topology/configuration prefix before
-    /// the graph fact is appended. Every element has a stable ID, so replay of
-    /// a crash between lane creation and `AgentSpawned` can append only the
-    /// missing suffix and rejects conflicting durable bytes.
-    fn complete_subagent_lane_binding(
-        &self,
-        session: &mut S,
-        intent: &SubagentSpawnIntent,
-        prepared: &PreparedSubagent,
-    ) -> Result<(), HarnessError> {
-        let snapshot = session.snapshot()?;
-        match snapshot
-            .lane_mutations()
-            .iter()
-            .find(|stored| matches!(&stored.mutation, LaneMutation::Created { lane_id, .. } if lane_id == &intent.lane_id))
-            .map(|stored| &stored.mutation)
-        {
-            None => {
-                session.append_lane_mutation(LaneMutation::Created {
-                    lane_id: intent.lane_id.clone(),
-                    base_leaf_id: intent.parent_source_leaf_id.clone(),
-                })?;
-            }
-            Some(LaneMutation::Created { base_leaf_id, .. })
-                if base_leaf_id == &intent.parent_source_leaf_id => {}
-            Some(_) => {
-                return Err(HarnessError::invalid_state(
-                    "subagent durable lane binding disagrees with its parent context",
-                ));
-            }
         }
-        for entry in self.subagent_lane_binding_entries(intent, prepared)? {
-            let current = session
-                .snapshot()?
-                .entries()
-                .iter()
-                .find(|current| current.header.id == entry.id)
-                .cloned();
-            match current {
-                None => {
-                    session.append_entry(&intent.lane_id, entry)?;
-                }
-                Some(current)
-                    if current.lane_id == intent.lane_id && current.body == entry.body => {}
-                Some(_) => {
-                    return Err(HarnessError::invalid_state(
-                        "subagent durable lane configuration conflicts with its original intent",
-                    ));
-                }
-            }
-        }
-        let reduction = reduce_lane(session.snapshot()?, intent.lane_id.clone())?;
-        let expected_model = ModelChangedEntry {
-            provider: intent.model.descriptor.provider.clone(),
-            model: intent.model.descriptor.model.clone(),
-            revision: intent.model.descriptor.revision.clone(),
-        };
-        if reduction.effective_configuration.model.as_ref() != Some(&expected_model)
-            || reduction.effective_configuration.thinking_level.as_deref()
-                != Some(thinking_level_name(intent.thinking))
-            || reduction.effective_configuration.harness_revision.as_ref()
-                != Some(prepared.harness_identity.revision_id())
-        {
-            return Err(HarnessError::invalid_state(
-                "subagent lane configuration does not resolve to its immutable child intent",
-            ));
-        }
-        Ok(())
     }
 
     fn subagent_lane_binding_entries(
@@ -2757,65 +2643,6 @@ where
         ])
     }
 
-    /// Append the accepted child operation and original assignment after a
-    /// durable spawn fact exists. This is independently replayable because
-    /// `OperationStarted` owns the original input and the assignment has a
-    /// deterministic entry ID.
-    fn commit_subagent_operation(
-        &self,
-        intent: &SubagentSpawnIntent,
-        prepared: &PreparedSubagent,
-    ) -> Result<AcceptedSubagentOperation, HarnessError> {
-        let mut session = self.session_lock()?;
-        let snapshot = session.snapshot()?;
-        let graph = reduce_agent_graph(&snapshot)
-            .map_err(|error| HarnessError::invalid_state(error.to_string()))?;
-        let node = graph.agents.get(&intent.agent_id).ok_or_else(|| {
-            HarnessError::invalid_state("subagent operation recovery lost its durable spawn fact")
-        })?;
-        if node.operation_id.is_some() {
-            return Err(HarnessError::invalid_state(
-                "subagent operation became durable while replay was reopening its lease",
-            ));
-        }
-        self.append_subagent_operation(&mut session, intent, prepared)
-    }
-
-    fn append_subagent_operation(
-        &self,
-        session: &mut S,
-        intent: &SubagentSpawnIntent,
-        prepared: &PreparedSubagent,
-    ) -> Result<AcceptedSubagentOperation, HarnessError> {
-        let revision_entry_id = subagent_entry_id(&intent.agent_id, "harness")?;
-        let assignment = ProvisionedEntry::user(
-            subagent_entry_id(&intent.agent_id, "assignment")?,
-            intent.task.clone(),
-        );
-        let configuration = self.manager.resolve_revision(
-            prepared.harness_identity.revision_id(),
-            &prepared.runtime_services,
-        )?;
-        let mut operation = OperationStartedRecord::new(
-            intent.operation_id.clone(),
-            intent.lane_id.clone(),
-            Some(revision_entry_id),
-            OperationKind::Subagent {
-                agent_id: intent.agent_id.clone(),
-                parent_operation_id: intent.parent_operation_id.clone(),
-            },
-            vec![assignment.clone()],
-            prepared.harness_identity.revision_id().clone(),
-            prepared.harness_identity.profile_id().clone(),
-        );
-        operation.operation_resume_data = configuration.lifecycle.before_operation()?;
-        session.append_record(LaneRecord::OperationStarted(operation))?;
-        let stored_assignment = session.append_entry(&intent.lane_id, assignment)?;
-        Ok(AcceptedSubagentOperation {
-            sequence: stored_assignment.header.seq,
-        })
-    }
-
     fn root_lane(&self) -> Result<Arc<LaneRuntime>, HarnessError> {
         self.lane(&self.root_lane_id)
     }
@@ -2827,6 +2654,24 @@ where
             .get(lane_id)
             .cloned()
             .ok_or_else(|| HarnessError::invalid_state(format!("unknown runtime lane {lane_id}")))
+    }
+
+    /// Child lanes retain one bounded assignment as durable evidence. They
+    /// are not general-purpose public lanes: driving one through the generic
+    /// lane APIs would turn an interrupted assignment into a resurrection.
+    fn reject_child_lane_execution(&self, lane_id: &LaneId) -> Result<(), HarnessError> {
+        let graph = reduce_agent_graph(&self.snapshot()?)
+            .map_err(|error| HarnessError::invalid_state(error.to_string()))?;
+        if graph
+            .agents
+            .values()
+            .any(|node| node.spawned.lane_id == *lane_id)
+        {
+            return Err(HarnessError::invalid_state(
+                "durable child lanes cannot be driven directly; create a new root spawn_agent assignment",
+            ));
+        }
+        Ok(())
     }
 
     /// Register one explicit lane-local service bundle before its first drive.
@@ -2894,12 +2739,70 @@ where
         Ok(true)
     }
 
+    /// Request cancellation of the locally owned root drive and wait until its
+    /// claim releases.
+    ///
+    /// This does not create a second executor or finish an unowned recovered
+    /// operation. The host that started the root drive must continue polling
+    /// it until this future resolves. Queued accepted input is deliberately
+    /// untouched and remains queryable for a later explicit host decision.
+    pub async fn cancel_and_join(&self) -> Result<(), HarnessError> {
+        let lane = self.root_lane()?;
+        let _ = self.abort_root()?;
+        self.wait_for_lane_drive_release(&lane).await;
+        Ok(())
+    }
+
+    /// Close this process-local supervisor after cancelling and joining every
+    /// locally owned lane and child task.
+    ///
+    /// Close is idempotent. It prevents later input admission or operation
+    /// claims on this instance while retaining read-only durable inspection and
+    /// queued input projection. Reopening the session creates a new supervisor
+    /// with no inherited execution authorization.
+    pub async fn close(&self) -> Result<(), HarnessError> {
+        let lanes = {
+            let _gate = self.operation_gate_lock()?;
+            self.closed.store(true, Ordering::Release);
+            self.lanes.lock()
+                .map_err(|_| HarnessError::invalid_state("lane map mutex is poisoned"))?
+                .values().cloned().collect::<Vec<_>>()
+        };
+        for lane in &lanes {
+            if lane.active.load(Ordering::Acquire) {
+                lane.abort_requested.store(true, Ordering::Release);
+            }
+            self.abort_lane_runtime(lane)?;
+        }
+        self.cancel_and_join().await?;
+        if let Some(coordinator) = self.subagent_coordinator()? {
+            let owners = reduce_agent_graph(&self.snapshot()?)?.agents.values()
+                .filter(|node| coordinator.has_handle(&node.spawned.agent_id))
+                .map(|node| node.spawned.parent_operation_id.clone()).collect::<BTreeSet<_>>();
+            for owner in owners {
+                self.settle_root_children_before_finish(&owner).await?;
+            }
+        }
+        for lane in lanes {
+            self.wait_for_lane_drive_release(&lane).await;
+        }
+        Ok(())
+    }
+
+    /// Return whether this process-local supervisor has been closed.
+    pub fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::Acquire)
+    }
+
     /// Abort a live non-root lane.
     ///
     /// A coordinator must first make the lane durable and register its
     /// lane-local services; this only interrupts a currently installed agent.
     pub fn abort_lane(&self, lane_id: LaneId) -> Result<bool, HarnessError> {
         let lane = self.lane(&lane_id)?;
+        if lane.active.load(Ordering::Acquire) {
+            lane.abort_requested.store(true, Ordering::Release);
+        }
         self.abort_lane_runtime(&lane)
     }
 
@@ -3023,14 +2926,20 @@ where
             .collect())
     }
 
-    /// Execute one constrained extension command and persist its append-only
-    /// local state update. The command never receives an application handle,
-    /// session writer, path, or another extension's state.
+    /// Admit one constrained extension command.
+    ///
+    /// A command that is explicitly allowed while an operation is live is
+    /// accepted into the runtime-owned durable control queue instead of
+    /// mutating extension state beneath an in-flight request. The next idle
+    /// advancement applies it before user input or automatic continuation.
+    /// Commands accepted while idle execute immediately through the same
+    /// sandboxed extension boundary.
     pub fn dispatch_extension_command(
         &self,
         name: &str,
         arguments: impl Into<String>,
-    ) -> Result<ExtensionCommandDispatch, HarnessError> {
+    ) -> Result<ExtensionCommandAdmission, HarnessError> {
+        let arguments = arguments.into();
         let snapshot = self.snapshot()?;
         let lane = self.root_lane()?;
         let reduction = reduce_lane(snapshot.clone(), lane.lane_id.clone())?;
@@ -3043,33 +2952,144 @@ where
             .ok_or_else(|| {
                 HarnessError::invalid_state(format!("unknown extension command {name}"))
             })?;
-        if lane.active.load(Ordering::Acquire)
-            && !selected.command.description().allowed_while_active
-        {
-            return Err(HarnessError::invalid_state(format!(
-                "extension command {name} is unavailable while a durable operation is active",
-            )));
+        let _state_version = selected.state_version.clone().ok_or_else(|| {
+            HarnessError::invalid_state(format!(
+                "extension command {name} targets extension {} without an immutable state_version contract",
+                selected.extension_id,
+            ))
+        })?;
+        if let Some(operation_id) = reduction.lane_state.active_operation {
+            if !selected.command.description().allowed_while_active {
+                return Err(HarnessError::invalid_state(format!(
+                    "extension command {name} is unavailable while a durable operation is active",
+                )));
+            }
+            // Active commands do not take a lane claim, so serialize their
+            // admission with `close` explicitly. The command callback still
+            // runs later outside this gate at the idle boundary.
+            let _gate = self.operation_gate_lock()?;
+            self.ensure_open()?;
+            let control_id = {
+                let mut session = self.session_lock()?;
+                let current = session.snapshot()?;
+                let current_reduction = reduce_lane(current.clone(), lane.lane_id.clone())?;
+                if current_reduction.lane_state.active_operation.as_ref() != Some(&operation_id) {
+                    return Err(HarnessError::invalid_state(
+                        "extension command changed state while its active operation was being queued; retry the command",
+                    ));
+                }
+                if current_reduction.lane_state.active_harness_revision.as_ref()
+                    != Some(configuration.identity.revision_id())
+                {
+                    return Err(HarnessError::invalid_state(
+                        "extension command harness revision changed while its active operation was being queued; retry the command",
+                    ));
+                }
+                let sequence = current.next_sequence().0.to_string();
+                let control_id = durable_identifier(
+                    "extension-control",
+                    [
+                        current.header().session_id.as_str(),
+                        sequence.as_str(),
+                        operation_id.as_str(),
+                        selected.extension_id.as_str(),
+                        name,
+                        arguments.as_str(),
+                    ],
+                );
+                session.commit(SessionCommit::one(SessionCommitItem::Record(
+                    LaneRecord::ExtensionControlEnqueued(ExtensionControlEnqueuedRecord {
+                        operation_id: operation_id.clone(),
+                        control_id: control_id.clone(),
+                        extension_id: selected.extension_id.clone(),
+                        harness_revision_id: configuration.identity.revision_id().clone(),
+                        command_name: name.to_owned(),
+                        arguments: JsonValue::String(arguments.clone()),
+                    }),
+                )))?;
+                control_id
+            };
+            return Ok(ExtensionCommandAdmission::Queued { control_id });
         }
-        let state = extension_state_view(&snapshot, &lane.lane_id, &selected.extension_id)?;
+        let _claim = self.claim_lane_operation(Arc::clone(&lane))?;
+        let current = self.snapshot()?;
+        let current_reduction = reduce_lane(current.clone(), lane.lane_id.clone())?;
+        if current_reduction.lane_state.active_operation.is_some() {
+            return Err(HarnessError::invalid_state(
+                "extension command became active before it could execute; retry to queue it",
+            ));
+        }
+        let configuration = self.configuration_for_reduction(&lane, &current_reduction)?;
+        let selected = configuration
+            .host_commands()
+            .iter()
+            .find(|command| command.command.description().name == name)
+            .cloned()
+            .ok_or_else(|| {
+                HarnessError::invalid_state(format!("unknown extension command {name}"))
+            })?;
+        let state_version = selected.state_version.clone().ok_or_else(|| {
+            HarnessError::invalid_state(format!(
+                "extension command {name} targets extension {} without an immutable state_version contract",
+                selected.extension_id,
+            ))
+        })?;
+        let observed_state = current_reduction
+            .extension_state
+            .get(&selected.extension_id)
+            .cloned();
+        ensure_retained_state_version(
+            &current_reduction,
+            &selected.extension_id,
+            &state_version,
+        )?;
+        let state = extension_state_view(&current, &lane.lane_id, &selected.extension_id)?;
         let result = selected
             .command
             .invoke(&ExtensionCommandInput {
-                arguments: arguments.into(),
+                arguments,
                 state,
             })
             .map_err(extension_error)?;
-        if lane.active.load(Ordering::Acquire) && result.internal_input.is_some() {
-            return Err(HarnessError::invalid_state(format!(
-                "extension command {name} requested a continuation before the durable operation became idle",
-            )));
-        }
+        let expected_state = result
+            .state
+            .as_ref()
+            .map(|update| ExtensionStateValue {
+                state_version: state_version.clone(),
+                value: update.value.clone(),
+            })
+            .or(observed_state.clone());
         if let Some(update) = result.state.clone() {
-            self.append_extension_state_update(&lane, &selected.extension_id, update)?;
+            self.append_extension_state_update_if_state_matches(
+                &lane,
+                configuration.identity.revision_id(),
+                &selected.extension_id,
+                &state_version,
+                observed_state.as_ref(),
+                update,
+            )?;
         }
-        Ok(ExtensionCommandDispatch {
+        let after = reduce_lane(self.snapshot()?, lane.lane_id.clone())?;
+        if after.lane_state.active_operation.is_some()
+            || after.lane_state.active_harness_revision.as_ref()
+                != Some(configuration.identity.revision_id())
+            || after.extension_state.get(&selected.extension_id) != expected_state.as_ref()
+        {
+            return Err(HarnessError::invalid_state(
+                "extension command changed lane state while its callback was evaluating; retry the command",
+            ));
+        }
+        self.replace_pending_extension_continuation(
+            &lane,
+            result.internal_input.clone().map(|input| ExtensionContinuation {
+                extension_id: selected.extension_id.clone(),
+                input,
+            }),
+        );
+        Ok(ExtensionCommandAdmission::Applied(ExtensionCommandDispatch {
             extension_id: selected.extension_id,
             result,
-        })
+        }))
     }
 
     /// Evaluate every resolved extension's optional idle policy after a
@@ -3077,17 +3097,34 @@ where
     /// must still re-check idle state immediately before starting it.
     pub fn evaluate_idle_extensions(&self) -> Result<Option<ExtensionContinuation>, HarnessError> {
         let lane = self.root_lane()?;
-        if lane.active.load(Ordering::Acquire) {
-            return Err(HarnessError::invalid_state(
-                "extension idle hooks require an idle durable harness",
-            ));
+        let _claim = self.claim_lane_operation(Arc::clone(&lane))?;
+        self.apply_pending_extension_controls(&lane)?;
+        let reduction = reduce_lane(self.snapshot()?, lane.lane_id.clone())?;
+        if !reduction.input_reduction.pending_inputs.is_empty() {
+            return Ok(None);
         }
+        self.evaluate_idle_extensions_claimed(&lane)
+    }
+
+    /// Evaluate idle policy while the caller already owns the lane's local
+    /// drive claim. This keeps the durable idle check intact while allowing
+    /// `drive_next_input` to enforce controls, queued user input, and explicit
+    /// continuation authorization in one serialized decision.
+    pub(super) fn evaluate_idle_extensions_claimed(
+        &self,
+        lane: &LaneRuntime,
+    ) -> Result<Option<ExtensionContinuation>, HarnessError> {
         let snapshot = self.snapshot()?;
         let reduction = reduce_lane(snapshot.clone(), lane.lane_id.clone())?;
         if reduction.lane_state.active_operation.is_some() {
             return Err(HarnessError::invalid_state(
                 "extension idle hooks require no open durable operation",
             ));
+        }
+        if !reduction.pending_extension_controls.is_empty()
+            || !reduction.input_reduction.pending_inputs.is_empty()
+        {
+            return Ok(None);
         }
         let Some((operation_id, outcome, started_at_ms, finished_at_ms)) =
             terminal_operation(&snapshot, &lane.lane_id)
@@ -3109,8 +3146,37 @@ where
             .saturating_sub(started_at_ms)
             .saturating_div(1000);
         let mut continuation = None;
+        let mut callback_snapshot = self.snapshot()?;
         for idle in configuration.idle_hooks() {
-            let state = extension_state_view(&snapshot, &lane.lane_id, &idle.extension_id)?;
+            let callback_reduction = reduce_lane(callback_snapshot.clone(), lane.lane_id.clone())?;
+            if callback_reduction.lane_state.active_operation.is_some()
+                || callback_reduction.lane_state.active_harness_revision.as_ref()
+                    != Some(configuration.identity.revision_id())
+            {
+                return Err(HarnessError::invalid_state(
+                    "extension idle hook changed lane state before it could run; retry the idle drive",
+                ));
+            }
+            let state_version = idle.state_version.clone().ok_or_else(|| {
+                HarnessError::invalid_state(format!(
+                    "extension idle hook for {} has no immutable state_version contract",
+                    idle.extension_id,
+                ))
+            })?;
+            ensure_retained_state_version(
+                &callback_reduction,
+                &idle.extension_id,
+                &state_version,
+            )?;
+            let observed_state = callback_reduction
+                .extension_state
+                .get(&idle.extension_id)
+                .cloned();
+            let state = extension_state_view(
+                &callback_snapshot,
+                &lane.lane_id,
+                &idle.extension_id,
+            )?;
             let result = idle
                 .hook
                 .on_idle(&ExtensionIdleInput {
@@ -3121,8 +3187,34 @@ where
                     state,
                 })
                 .map_err(extension_error)?;
+            let expected_state = result
+                .state
+                .as_ref()
+                .map(|update| ExtensionStateValue {
+                    state_version: state_version.clone(),
+                    value: update.value.clone(),
+                })
+                .or(observed_state.clone());
             if let Some(update) = result.state {
-                self.append_extension_state_update(&lane, &idle.extension_id, update)?;
+                self.append_extension_state_update_if_state_matches(
+                    lane,
+                    configuration.identity.revision_id(),
+                    &idle.extension_id,
+                    &state_version,
+                    observed_state.as_ref(),
+                    update,
+                )?;
+            }
+            callback_snapshot = self.snapshot()?;
+            let after = reduce_lane(callback_snapshot.clone(), lane.lane_id.clone())?;
+            if after.lane_state.active_operation.is_some()
+                || after.lane_state.active_harness_revision.as_ref()
+                    != Some(configuration.identity.revision_id())
+                || after.extension_state.get(&idle.extension_id) != expected_state.as_ref()
+            {
+                return Err(HarnessError::invalid_state(
+                    "extension idle hook changed lane state while its callback was evaluating; retry the idle drive",
+                ));
             }
             if let Some(input) = result.internal_input {
                 if continuation.is_some() {
@@ -3239,17 +3331,9 @@ where
         }
     }
 
-    /// Publish a process-local application event after its durable mutation
-    /// has committed. Writers release the session mutex before taking this
-    /// lock: subscription takes the locks in the opposite order to create an
-    /// atomic reconnect snapshot followed by live events, so holding both
-    /// would deadlock.
+    /// Publish after releasing the writer; EventHub serializes publication
+    /// with snapshot capture and observer registration.
     fn publish_event(&self, event: TeaEvent) -> Result<(), HarnessError> {
-        let Ok(_publication) = self.publication.lock() else {
-            // Publication is observational; a poisoned local event lock must
-            // never invalidate an already durable state transition.
-            return Ok(());
-        };
         self.events.publish(event);
         Ok(())
     }
@@ -3276,6 +3360,15 @@ where
     ) -> Result<DurableOperation, HarnessError> {
         let lane = self.root_lane()?;
         let _claim = self.claim_lane_operation(Arc::clone(&lane))?;
+        self.ensure_recovery_permitted(&lane.lane_id)?;
+        let reduction = reduce_lane(self.snapshot()?, lane.lane_id.clone())?;
+        if !reduction.pending_extension_controls.is_empty()
+            || !reduction.input_reduction.pending_inputs.is_empty()
+        {
+            return Err(HarnessError::invalid_state(
+                "queued controls or accepted user input must drive before an extension continuation",
+            ));
+        }
         let operation =
             self.accept_extension_continuation(&lane, extension_id.into(), input.into())?;
         self.drive_fresh_epoch(&lane, operation).await
@@ -3299,9 +3392,34 @@ where
         input: impl Into<String>,
         authoring_authorized: bool,
     ) -> Result<DurableOperation, HarnessError> {
+        // Unlike the explicit queue API, this legacy convenience method has
+        // no way to return an accepted-input handle. Claim and clear the
+        // recovery gate before accepting so a rejected concurrent/recovery
+        // attempt cannot silently leave a new durable input in the queue.
         let lane = self.root_lane()?;
-        self.run_lane_prompt_with_authoring_authorization(lane, input.into(), authoring_authorized)
-            .await
+        let _claim = self.claim_lane_operation(Arc::clone(&lane))?;
+        self.ensure_recovery_permitted(&lane.lane_id)?;
+        let accepted = self.submit_input_with_authoring_authorization(
+            input.into(),
+            authoring_authorized,
+        )?;
+        match self
+            .drive_next_input_claimed(&lane, IdleAuthorization::UserInputOnly)
+            .await?
+        {
+            IdleDriveOutcome::Inputs {
+                operation,
+                input_ids,
+            } if input_ids.iter().any(|input_id| input_id == accepted.id()) => Ok(operation),
+            IdleDriveOutcome::Inputs { .. } => Err(HarnessError::invalid_state(
+                "root input drive settled an operation without its newly accepted input",
+            )),
+            IdleDriveOutcome::Idle | IdleDriveOutcome::ExtensionContinuation { .. } => Err(
+                HarnessError::invalid_state(
+                    "root input drive did not dispatch its newly accepted input",
+                ),
+            ),
+        }
     }
 
     async fn run_lane_prompt_with_authoring_authorization(
@@ -3320,14 +3438,18 @@ where
         self.drive_fresh_epoch(&lane, operation).await
     }
 
-    /// Drive one already durable non-root lane. Child coordination remains an
-    /// explicit optional layer; this narrow internal entry point keeps the
-    /// operation machine lane-generic and is exercised with scripted lanes.
+    /// Drive one already durable non-root, non-child lane. Child coordination
+    /// remains an explicit optional layer; a retained child assignment cannot
+    /// be driven through this generic public entry point.
     pub async fn run_lane_prompt(
         &self,
         lane_id: LaneId,
         input: impl Into<String>,
     ) -> Result<DurableOperation, HarnessError> {
+        if lane_id == self.root_lane_id {
+            return self.run_root_prompt(input).await;
+        }
+        self.reject_child_lane_execution(&lane_id)?;
         let lane = self.lane(&lane_id)?;
         self.run_lane_prompt_with_authoring_authorization(lane, input.into(), false)
             .await
@@ -3335,102 +3457,33 @@ where
 
     /// Recover the one durable operation currently open on `main`.
     ///
-    /// Recovery is derived exclusively from the session reducer. The harness
-    /// never guesses whether an unrecorded provider request happened: that
-    /// ambiguity is returned as [`HarnessError::RecoveryRequired`] until a
-    /// host-specific reconciliation policy is supplied.
+    /// Recovery is derived exclusively from committed facts. An interrupted
+    /// provider attempt remains unknown while this explicit action authorizes
+    /// a new attempt. Indeterminate non-replayable tools require host evidence.
     pub async fn resume(self: &Arc<Self>) -> Result<DurableOperation, HarnessError> {
+        let lane = self.root_lane()?;
+        let _claim = self.claim_lane_operation(Arc::clone(&lane))?;
+        self.reconcile_committed_child_tool_outcomes(&lane.lane_id)?;
+        self.ensure_recovery_permitted(&lane.lane_id)?;
         if let Some(coordinator) = self.subagent_coordinator()? {
-            self.recover_subagents_before_root_resume(&coordinator)
+            self.reconcile_interrupted_subagents_before_root_continue(&coordinator)
                 .await?;
         }
-        self.resume_lane_runtime(self.root_lane()?).await
+        self.resume_claimed_lane_runtime(lane).await
     }
 
-    /// Rebuild every recoverable child owned by the open root operation before
-    /// a resumed root can execute a `wait_agent` effect. Durable graph facts
-    /// select the required host lease; volatile task handles are recreated
-    /// only after that lease and lane-local services are validated again.
-    async fn recover_subagents_before_root_resume(
+    /// Resume one already registered lane from its reducer-derived obligation.
+    /// Main-lane recovery remains the explicit root continuation path so it
+    /// reconciles retained children before resuming root work. Child recovery
+    /// never drives the retained child lane itself.
+    pub async fn resume_lane(
         self: &Arc<Self>,
-        coordinator: &Arc<SubagentCoordinator<S>>,
-    ) -> Result<(), HarnessError> {
-        let snapshot = self.snapshot()?;
-        let root = reduce_lane(snapshot.clone(), self.root_lane_id.clone())?;
-        let Some(root_operation_id) = root.lane_state.active_operation else {
-            return Ok(());
-        };
-        let graph = reduce_agent_graph(&snapshot)
-            .map_err(|error| HarnessError::invalid_state(error.to_string()))?;
-        let nodes = graph
-            .agents
-            .values()
-            .filter(|node| {
-                node.spawned.parent_lane_id == self.root_lane_id
-                    && node.spawned.parent_operation_id == root_operation_id
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-        for node in nodes {
-            // A terminal fact is durable proof that this child must never be
-            // driven again. Cleanup is idempotent host work keyed by the
-            // deterministic lease; do not demand `reopen` for a worktree a
-            // prior successful cleanup may already have removed.
-            if node.terminal.is_some() {
-                let workspace = super::subagents::WorkspaceLease {
-                    id: node.spawned.workspace_lease_id.clone(),
-                    logical_workspace: snapshot.header().workspace.clone(),
-                };
-                coordinator
-                    .services()
-                    .host
-                    .cleanup(workspace)
-                    .await
-                    .map_err(|_| HarnessError::SubagentRecovery {
-                        agent_id: node.spawned.agent_id.clone(),
-                        stage: SubagentRecoveryStage::CleanupWorkspace,
-                    })?;
-                coordinator.mark_exposable_and_notify(node.spawned.agent_id);
-                continue;
-            }
-            // A spawn fact without operation acceptance is completed by the
-            // root tool replay using its original durable arguments. There is
-            // no assignment payload in the graph fact itself to invent here.
-            let Some(operation_id) = node.operation_id.clone() else {
-                continue;
-            };
-            let prepared = self.reopen_subagent_prepared(coordinator, &node).await?;
-            self.validate_reopened_subagent(&node, &prepared)?;
-            self.ensure_subagent_lane_registered(
-                node.spawned.lane_id.clone(),
-                prepared
-                    .runtime_services
-                    .thinking_level(thinking_level_from_name(&node.spawned.thinking)?),
-            )?;
-            let lane = self.lane(&node.spawned.lane_id)?;
-            let reduction = reduce_lane(self.snapshot()?, node.spawned.lane_id.clone())?;
-            if reduction.lane_state.active_operation.as_ref() == Some(&operation_id) {
-                self.start_recovered_subagent_task(coordinator, &node, prepared.workspace)?;
-            } else {
-                // Child execution is terminal but report/delta finalization is
-                // not. Reopen the same lease and complete that idempotent
-                // durable suffix before the root can observe it.
-                self.settle_subagent_task(
-                    coordinator,
-                    node.spawned.agent_id.clone(),
-                    Some(prepared.workspace),
-                    true,
-                )
-                .await?;
-                let _ = lane;
-            }
+        lane_id: LaneId,
+    ) -> Result<DurableOperation, HarnessError> {
+        if lane_id == self.root_lane_id {
+            return self.resume().await;
         }
-        Ok(())
-    }
-
-    /// Resume one already registered child lane from its reducer-derived
-    /// obligation. The coordinator owns which child lanes are eligible.
-    pub async fn resume_lane(&self, lane_id: LaneId) -> Result<DurableOperation, HarnessError> {
+        self.reject_child_lane_execution(&lane_id)?;
         self.resume_lane_runtime(self.lane(&lane_id)?).await
     }
 
@@ -3439,6 +3492,17 @@ where
         lane: Arc<LaneRuntime>,
     ) -> Result<DurableOperation, HarnessError> {
         let _claim = self.claim_lane_operation(Arc::clone(&lane))?;
+        self.ensure_recovery_permitted(&lane.lane_id)?;
+        self.resume_claimed_lane_runtime(lane).await
+    }
+
+    /// Resume a lane after the caller has acquired its drive claim and passed
+    /// the recovery-permission gate. Root recovery performs its child
+    /// reconciliation while retaining that same claim before entering here.
+    async fn resume_claimed_lane_runtime(
+        &self,
+        lane: Arc<LaneRuntime>,
+    ) -> Result<DurableOperation, HarnessError> {
         // Rehydrate only process-local policy state before inspecting the
         // next durable obligation. This performs no session mutation, so a
         // crash before the next consumer commits can safely invoke the same
@@ -3465,29 +3529,14 @@ where
                         }))?;
                     }
                 }
-                RecoveryPlan::SynthesizeInterruptedToolResult { result_entry_id } => {
-                    // A started workspace mutation is not equivalent to an
-                    // interrupted read-only tool. Appending the generic error
-                    // would let a later model turn retry an effect whose first
-                    // outcome is unknown. Keep the durable prefix open until a
-                    // host explicitly reconciles it instead.
-                    if recovery_tool_start(&snapshot, &result_entry_id)?.tool_name
-                        == "apply_agent_changes"
-                    {
-                        return Err(HarnessError::RecoveryRequired {
-                            plan: RecoveryPlan::SynthesizeInterruptedToolResult { result_entry_id },
-                        });
-                    }
-                    self.append_interrupted_tool_result(&lane, &snapshot, &result_entry_id)?;
+                plan @ RecoveryPlan::ReconcileToolEffect { .. } => {
+                    return Err(HarnessError::RecoveryRequired { plan });
                 }
                 RecoveryPlan::ReplayToolIfStillSafe { tool } => {
                     if !self.replay_is_still_safe(&lane, &tool) {
-                        self.append_interrupted_tool_result(
-                            &lane,
-                            &snapshot,
-                            &tool.result_entry_id,
-                        )?;
-                        continue;
+                        return Err(HarnessError::RecoveryRequired {
+                            plan: RecoveryPlan::ReconcileToolEffect { result_entry_id: tool.result_entry_id },
+                        });
                     }
                     let epoch_id = open_epoch(&snapshot, &operation_id).ok_or_else(|| {
                         HarnessError::invalid_state(
@@ -3495,11 +3544,16 @@ where
                         )
                     })?;
                     let tool_calls = recovery_tool_calls(&snapshot, &tool.assistant_entry_id)?;
-                    let mut replay_tool_starts = BTreeMap::new();
-                    replay_tool_starts.insert(
-                        (tool.assistant_entry_id.clone(), tool.tool_index),
-                        tool.clone(),
-                    );
+                    let replay_tool_starts = snapshot.records().iter().filter_map(|stored| match &stored.record {
+                        LaneRecord::ToolStarted(started)
+                            if started.operation_id == operation_id
+                                && started.assistant_entry_id == tool.assistant_entry_id
+                                && !snapshot.entries().iter().any(|entry| entry.header.id == started.result_entry_id) =>
+                        {
+                            Some(((started.assistant_entry_id.clone(), started.tool_index), started.clone()))
+                        }
+                        _ => None,
+                    }).collect();
                     return self
                         .drive_epoch(
                             &lane,
@@ -3537,8 +3591,9 @@ where
                     self.activate_pending_harness(&lane, &operation_id, &request)?;
                     return self.drive_fresh_epoch(&lane, operation_id).await;
                 }
-                plan @ RecoveryPlan::ReconcileProviderRequest { .. } => {
-                    return Err(HarnessError::RecoveryRequired { plan });
+                RecoveryPlan::ReconcileProviderRequest { request_id }
+                | RecoveryPlan::ProviderRequestNotAdmitted { request_id } => {
+                    self.interrupt_provider_attempt(&operation_id, request_id)?;
                 }
                 RecoveryPlan::StartEpoch { .. } => {
                     return self.drive_fresh_epoch(&lane, operation_id).await;
@@ -3549,6 +3604,12 @@ where
                             "ordinary operation recovery has no open durable epoch",
                         )
                     })?;
+                    if let Some(outcome) = recovery::committed_run_outcome(&snapshot, &lane.lane_id, &epoch_id)? {
+                        if lane.lane_id == self.root_lane_id {
+                            self.settle_root_children_before_finish(&operation_id).await?;
+                        }
+                        return self.finish_operation(&lane, &operation_id, &epoch_id, outcome);
+                    }
                     return self.drive_epoch(&lane, operation_id, epoch_id, None).await;
                 }
             }
@@ -3556,6 +3617,8 @@ where
     }
 
     fn claim_lane_operation(&self, lane: Arc<LaneRuntime>) -> Result<OperationClaim, HarnessError> {
+        let _gate = self.operation_gate_lock()?;
+        self.ensure_open()?;
         lane.active
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .map_err(|_| {
@@ -3585,6 +3648,31 @@ where
             .map_err(|_| HarnessError::invalid_state("durable session mutex is poisoned"))
     }
 
+    fn operation_gate_lock(&self) -> Result<MutexGuard<'_, ()>, HarnessError> {
+        self.operation_gate
+            .lock()
+            .map_err(|_| HarnessError::invalid_state("supervisor operation gate is poisoned"))
+    }
+
+    fn ensure_open(&self) -> Result<(), HarnessError> {
+        if self.closed.load(Ordering::Acquire) {
+            return Err(HarnessError::invalid_state(
+                "supervisor is closed and cannot admit or execute work",
+            ));
+        }
+        Ok(())
+    }
+
+    async fn wait_for_lane_drive_release(&self, lane: &Arc<LaneRuntime>) {
+        loop {
+            let wait = lane.drive_notifier.wait_after_current();
+            if !lane.active.load(Ordering::Acquire) {
+                return;
+            }
+            wait.await;
+        }
+    }
+
     fn accept_prompt(
         &self,
         lane_runtime: &LaneRuntime,
@@ -3592,7 +3680,58 @@ where
         authoring_authorized: bool,
     ) -> Result<OperationId, HarnessError> {
         let lane = lane_runtime.lane_id.clone();
-        let (operation_id, sequence) = {
+        let snapshot = self.snapshot()?;
+        let reduction = reduce_lane(snapshot.clone(), lane.clone())?;
+        if reduction.lane_state.active_operation.is_some() {
+            return Err(HarnessError::RecoveryRequired {
+                plan: reduction.recovery_plan.ok_or_else(|| {
+                    HarnessError::invalid_state(
+                        "lane has an open operation without a recovery plan",
+                    )
+                })?,
+            });
+        }
+        let operation_id = OperationId::new(durable_identifier(
+            "operation",
+            [
+                snapshot.header().session_id.as_str(),
+                &snapshot.last_sequence().0.to_string(),
+                &input,
+            ],
+        ))
+        .map_err(|error| HarnessError::invalid_state(error.to_string()))?;
+        let input_entry_id = EntryId::new(durable_identifier(
+            "entry-user",
+            [operation_id.as_str(), "0"],
+        ))
+        .map_err(|error| HarnessError::invalid_state(error.to_string()))?;
+        let mut input_entry = ProvisionedEntry::user(input_entry_id, input);
+        if authoring_authorized {
+            let SessionEntry::UserMessage(entry) = &mut input_entry.body else {
+                unreachable!("user entry constructor must produce a user message");
+            };
+            entry.metadata.insert(
+                AUTHORING_AUTHORIZATION_METADATA_KEY.into(),
+                JsonValue::Bool(true),
+            );
+        }
+        let expected_configuration = reduction.effective_configuration.clone();
+        let configuration = self.configuration_for_reduction(lane_runtime, &reduction)?;
+        let mut record = OperationStartedRecord::new(
+            operation_id.clone(),
+            lane.clone(),
+            reduction.lane_state.leaf_id.clone(),
+            OperationKind::Run,
+            vec![input_entry.clone()],
+            configuration.identity.revision_id.clone(),
+            configuration.identity.profile_id.clone(),
+        );
+        // Lifecycle callbacks may execute extension code. Compute their exact
+        // durable resume data before acquiring the serialized session writer.
+        record.operation_resume_data = configuration.lifecycle.before_operation()?;
+
+        self.ensure_recovery_permitted(&lane)?;
+        let sequence = {
             let mut session = self.session_lock()?;
             let snapshot = session.snapshot()?;
             let reduction = reduce_lane(snapshot.clone(), lane.clone())?;
@@ -3605,47 +3744,31 @@ where
                     })?,
                 });
             }
-            let operation_id = OperationId::new(durable_identifier(
-                "operation",
-                [
-                    snapshot.header().session_id.as_str(),
-                    &snapshot.last_sequence().0.to_string(),
-                    &input,
-                ],
-            ))
-            .map_err(|error| HarnessError::invalid_state(error.to_string()))?;
-            let input_entry_id = EntryId::new(durable_identifier(
-                "entry-user",
-                [operation_id.as_str(), "0"],
-            ))
-            .map_err(|error| HarnessError::invalid_state(error.to_string()))?;
-            let mut input_entry = ProvisionedEntry::user(input_entry_id, input);
-            if authoring_authorized {
-                let SessionEntry::UserMessage(entry) = &mut input_entry.body else {
-                    unreachable!("user entry constructor must produce a user message");
-                };
-                entry.metadata.insert(
-                    AUTHORING_AUTHORIZATION_METADATA_KEY.into(),
-                    JsonValue::Bool(true),
-                );
+            if reduction.lane_state.leaf_id != record.source_leaf_id {
+                return Err(HarnessError::invalid_state(
+                    "lane leaf changed while operation lifecycle policy was evaluated; retry the prompt",
+                ));
             }
-            let configuration = self.configuration_for_reduction(lane_runtime, &reduction)?;
-            let mut record = OperationStartedRecord::new(
-                operation_id.clone(),
-                lane.clone(),
-                reduction.lane_state.leaf_id,
-                OperationKind::Run,
-                vec![input_entry.clone()],
-                configuration.identity.revision_id.clone(),
-                configuration.identity.profile_id.clone(),
-            );
-            // The capability-free policy result becomes durable in the same
-            // acceptance record. No caller can observe acceptance until this
-            // write succeeds, and no core effect begins before it does.
-            record.operation_resume_data = configuration.lifecycle.before_operation()?;
-            session.append_record(LaneRecord::OperationStarted(record))?;
-            let stored_input = session.append_entry(&lane, input_entry)?;
-            (operation_id, stored_input.header.seq)
+            if reduction.effective_configuration != expected_configuration {
+                return Err(HarnessError::invalid_state(
+                    "lane effective configuration changed while operation lifecycle policy was evaluated; retry the prompt",
+                ));
+            }
+            if reduction.lane_state.active_harness_revision.as_ref()
+                != Some(&record.initial_harness_revision)
+            {
+                return Err(HarnessError::invalid_state(
+                    "lane harness revision changed while operation lifecycle policy was evaluated; retry the prompt",
+                ));
+            }
+            let stored = session.commit(SessionCommit::new(vec![
+                SessionCommitItem::Record(LaneRecord::OperationStarted(record)),
+                SessionCommitItem::Entry {
+                    lane_id: lane.clone(),
+                    entry: input_entry,
+                },
+            ])?)?;
+            stored.seq
         };
         self.publish_event(TeaEvent::Session(SessionEvent::OperationAccepted {
             sequence,
@@ -3670,7 +3793,64 @@ where
             ));
         }
         let lane = lane_runtime.lane_id.clone();
-        let (operation_id, sequence) = {
+        let snapshot = self.snapshot()?;
+        let reduction = reduce_lane(snapshot.clone(), lane.clone())?;
+        if reduction.lane_state.active_operation.is_some() {
+            return Err(HarnessError::RecoveryRequired {
+                plan: reduction.recovery_plan.ok_or_else(|| {
+                    HarnessError::invalid_state(
+                        "lane has an open operation without a recovery plan",
+                    )
+                })?,
+            });
+        }
+        let expected_configuration = reduction.effective_configuration.clone();
+        let configuration = self.configuration_for_reduction(lane_runtime, &reduction)?;
+        let operation_id = OperationId::new(durable_identifier(
+            "extension-operation",
+            [
+                snapshot.header().session_id.as_str(),
+                extension_id.as_str(),
+                &snapshot.last_sequence().0.to_string(),
+                input.as_str(),
+            ],
+        ))
+        .map_err(|error| HarnessError::invalid_state(error.to_string()))?;
+        let entry_id = EntryId::new(durable_identifier(
+            "entry-extension-continuation",
+            [operation_id.as_str(), extension_id.as_str()],
+        ))
+        .map_err(|error| HarnessError::invalid_state(error.to_string()))?;
+        let input_entry = ProvisionedEntry {
+            id: entry_id,
+            body: SessionEntry::PluginMemory(PluginMemoryEntry {
+                plugin_id: extension_id.clone(),
+                kind: "extension.continuation.v1".into(),
+                content: PayloadRef::Inline(JsonValue::object([(
+                    "input",
+                    JsonValue::String(input),
+                )])),
+                provenance: Vec::new(),
+                visibility: MemoryVisibility::ExternalOnly,
+                retention: MemoryRetention::Session,
+            }),
+        };
+        let mut record = OperationStartedRecord::new(
+            operation_id.clone(),
+            lane.clone(),
+            reduction.lane_state.leaf_id.clone(),
+            OperationKind::Other("extension_continuation".into()),
+            vec![input_entry.clone()],
+            configuration.identity.revision_id().clone(),
+            configuration.identity.profile_id().clone(),
+        );
+        // Extension lifecycle callbacks are external policy code. They run
+        // before writer acquisition, then the observed lane/configuration is
+        // verified again below before the atomic acceptance commit.
+        record.operation_resume_data = configuration.lifecycle.before_operation()?;
+
+        self.ensure_recovery_permitted(&lane)?;
+        let sequence = {
             let mut session = self.session_lock()?;
             let snapshot = session.snapshot()?;
             let reduction = reduce_lane(snapshot.clone(), lane.clone())?;
@@ -3683,49 +3863,31 @@ where
                     })?,
                 });
             }
-            let configuration = self.configuration_for_reduction(lane_runtime, &reduction)?;
-            let operation_id = OperationId::new(durable_identifier(
-                "extension-operation",
-                [
-                    snapshot.header().session_id.as_str(),
-                    extension_id.as_str(),
-                    &snapshot.last_sequence().0.to_string(),
-                    input.as_str(),
-                ],
-            ))
-            .map_err(|error| HarnessError::invalid_state(error.to_string()))?;
-            let entry_id = EntryId::new(durable_identifier(
-                "entry-extension-continuation",
-                [operation_id.as_str(), extension_id.as_str()],
-            ))
-            .map_err(|error| HarnessError::invalid_state(error.to_string()))?;
-            let input_entry = ProvisionedEntry {
-                id: entry_id,
-                body: SessionEntry::PluginMemory(PluginMemoryEntry {
-                    plugin_id: extension_id.clone(),
-                    kind: "extension.continuation.v1".into(),
-                    content: PayloadRef::Inline(JsonValue::object([(
-                        "input",
-                        JsonValue::String(input),
-                    )])),
-                    provenance: Vec::new(),
-                    visibility: MemoryVisibility::ExternalOnly,
-                    retention: MemoryRetention::Session,
-                }),
-            };
-            let mut record = OperationStartedRecord::new(
-                operation_id.clone(),
-                lane.clone(),
-                reduction.lane_state.leaf_id,
-                OperationKind::Other("extension_continuation".into()),
-                vec![input_entry.clone()],
-                configuration.identity.revision_id().clone(),
-                configuration.identity.profile_id().clone(),
-            );
-            record.operation_resume_data = configuration.lifecycle.before_operation()?;
-            session.append_record(LaneRecord::OperationStarted(record))?;
-            let stored = session.append_entry(&lane, input_entry)?;
-            (operation_id, stored.header.seq)
+            if reduction.lane_state.leaf_id != record.source_leaf_id {
+                return Err(HarnessError::invalid_state(
+                    "lane leaf changed while extension continuation policy was evaluated; retry the continuation",
+                ));
+            }
+            if reduction.effective_configuration != expected_configuration {
+                return Err(HarnessError::invalid_state(
+                    "lane effective configuration changed while extension continuation policy was evaluated; retry the continuation",
+                ));
+            }
+            if reduction.lane_state.active_harness_revision.as_ref()
+                != Some(&record.initial_harness_revision)
+            {
+                return Err(HarnessError::invalid_state(
+                    "lane harness revision changed while extension continuation policy was evaluated; retry the continuation",
+                ));
+            }
+            let stored = session.commit(SessionCommit::new(vec![
+                SessionCommitItem::Record(LaneRecord::OperationStarted(record)),
+                SessionCommitItem::Entry {
+                    lane_id: lane.clone(),
+                    entry: input_entry,
+                },
+            ])?)?;
+            stored.seq
         };
         self.publish_event(TeaEvent::Session(SessionEvent::OperationAccepted {
             sequence,
@@ -3733,41 +3895,6 @@ where
             operation_id: operation_id.clone(),
         }))?;
         Ok(operation_id)
-    }
-
-    fn append_extension_state_update(
-        &self,
-        lane: &LaneRuntime,
-        extension_id: &str,
-        update: ExtensionStateUpdate,
-    ) -> Result<(), HarnessError> {
-        validate_extension_state_update(extension_id, &update)?;
-        let mut session = self.session_lock()?;
-        let snapshot = session.snapshot()?;
-        let entry_id = EntryId::new(durable_identifier(
-            "entry-extension-state",
-            [
-                extension_id,
-                update.kind.as_str(),
-                &snapshot.next_sequence().0.to_string(),
-            ],
-        ))
-        .map_err(|error| HarnessError::invalid_state(error.to_string()))?;
-        session.append_entry(
-            &lane.lane_id,
-            ProvisionedEntry {
-                id: entry_id,
-                body: SessionEntry::PluginMemory(PluginMemoryEntry {
-                    plugin_id: extension_id.to_owned(),
-                    kind: update.kind,
-                    content: PayloadRef::Inline(update.content),
-                    provenance: Vec::new(),
-                    visibility: MemoryVisibility::ExternalOnly,
-                    retention: MemoryRetention::Session,
-                }),
-            },
-        )?;
-        Ok(())
     }
 
     /// Persist the one-shot idle-decision claim before any extension callback
@@ -3838,7 +3965,7 @@ where
         recovery: Option<RecoveryToolDrive>,
     ) -> Result<DurableOperation, HarnessError> {
         let lane_runtime = Arc::clone(lane);
-        let configuration = self.epoch_configuration(&lane_runtime, &epoch_id)?;
+        let configuration = self.epoch_configuration(&lane_runtime, &operation_id, &epoch_id)?;
         let thinking_level = *lane_runtime
             .thinking_level
             .lock()
@@ -3890,7 +4017,7 @@ where
             last_assistant_entry: recovery_assistant_entry,
             replay_tool_starts,
         })));
-        let gate: Arc<dyn EffectGate> = Arc::new(DurableEffectGate { runtime });
+        let gate: Arc<dyn EffectGate> = Arc::new(DurableEffectGate { runtime: Arc::clone(&runtime) });
         let agent = runtime_services.build_agent_with_tools(
             &configuration,
             gate,
@@ -3924,6 +4051,8 @@ where
         let _agent_events = agent.subscribe(Arc::new(HarnessAgentEventObserver {
             events: Arc::clone(&self.events),
             lane_id: lane_runtime.lane_id.clone(),
+            operation_id: operation_id.clone(),
+            epoch_id: epoch_id.clone(),
         }));
         let run = match recovery {
             Some(recovery) => {
@@ -3931,8 +4060,11 @@ where
                 agent.start_recover_tool_calls(recovery.tool_calls)?
             }
             None => {
+                let continue_length = matches!(messages.last(), Some(AgentMessage::Assistant {
+                    stop_reason: Some(StopReason::Length), tool_calls, ..
+                }) if tool_calls.is_empty());
                 agent.restore_messages(messages)?;
-                if internal_input.is_some() {
+                if internal_input.is_some() || continue_length {
                     agent.start_internal()?
                 } else {
                     agent.start_continue()?
@@ -3940,17 +4072,16 @@ where
             }
         };
         self.install_lane_active_agent(&lane_runtime, agent)?;
-        if lane_runtime.lane_id == self.root_lane_id
-            && lane_runtime.abort_requested.load(Ordering::Acquire)
-        {
+        if lane_runtime.abort_requested.load(Ordering::Acquire) {
             // A sticky root abort can be observed before the newly created
             // core run has emitted any trace lifecycle event. Do not enter a
             // trace-bearing drive in that interval: close the already durable
             // epoch and operation directly, exactly as an abort requested
             // before agent installation requires.
             self.clear_lane_active_agent(&lane_runtime);
-            self.settle_root_children_before_finish(&operation_id)
-                .await?;
+            if lane_runtime.lane_id == self.root_lane_id {
+                self.settle_root_children_before_finish(&operation_id).await?;
+            }
             self.finish_operation(
                 &lane_runtime,
                 &operation_id,
@@ -3961,9 +4092,13 @@ where
         }
         let drive_result = run.drive().await;
         self.clear_lane_active_agent(&lane_runtime);
-        let trace_events = trace_capture.events()?;
-        let complete_trace = matches!(trace_events.first(), Some(TraceEvent::EpisodeHeader(_)))
-            && matches!(trace_events.last(), Some(TraceEvent::EpisodeEnd(_)));
+        let trace_events = trace_capture.events();
+        let complete_trace = matches!(
+            trace_events.as_ref(),
+            Ok(events)
+                if matches!(events.first(), Some(TraceEvent::EpisodeHeader(_)))
+                    && matches!(events.last(), Some(TraceEvent::EpisodeEnd(_)))
+        );
         if complete_trace || !matches!(&drive_result, Err(CoreError::Cancelled)) {
             self.persist_trace_artifact(
                 &operation_id,
@@ -3976,8 +4111,8 @@ where
         // Cancellation can win immediately after installation, before core
         // has emitted its terminal trace event. There is no complete trace to
         // retain in that exact interval; the durable aborted operation remains
-        // the authoritative evidence. Any non-cancelled drive still requires
-        // a complete trace artifact.
+        // the authoritative evidence. A non-cancelled drive retains either a
+        // complete trace artifact or an explicit trace-unavailable diagnostic.
         match drive_result {
             Ok(()) => {
                 let reduction = reduce_lane(self.snapshot()?, lane_runtime.lane_id.clone())?;
@@ -4020,7 +4155,19 @@ where
                     )
                 }
             }
-            Err(error @ CoreError::EffectGate(_)) => Err(HarnessError::Core(error)),
+            Err(error @ CoreError::EffectGate(_)) => {
+                let interrupted_mutation = runtime.lock()
+                    .map_err(|_| HarnessError::invalid_state("durable effect state mutex is poisoned"))?
+                    .interrupted_mutation;
+                if interrupted_mutation {
+                    if lane_runtime.lane_id == self.root_lane_id {
+                        self.settle_root_children_before_finish(&operation_id).await?;
+                    }
+                    self.finish_operation(&lane_runtime, &operation_id, &epoch_id, OperationOutcome::Aborted)?;
+                    return Err(HarnessError::Core(CoreError::Cancelled));
+                }
+                Err(HarnessError::Core(error))
+            }
             Err(error) => {
                 let outcome = if matches!(error, CoreError::Cancelled) {
                     OperationOutcome::Aborted
@@ -4093,6 +4240,9 @@ where
         operation_id: &OperationId,
     ) -> Result<EpochId, HarnessError> {
         let lane = lane_runtime.lane_id.clone();
+        let prepared = reduce_lane(self.snapshot()?, lane.clone())?;
+        let configuration = self.configuration_for_reduction(lane_runtime, &prepared)?;
+        let epoch_resume_data = configuration.lifecycle.before_epoch()?;
         let (epoch_id, sequence, revision_id, snapshot_id, profile_id) = {
             let mut session = self.session_lock()?;
             let snapshot = session.snapshot()?;
@@ -4107,7 +4257,10 @@ where
             {
                 return Err(HarnessError::RecoveryRequired { plan: plan.clone() });
             }
-            let configuration = self.configuration_for_reduction(lane_runtime, &reduction)?;
+            if reduction.lane_state.leaf_id != prepared.lane_state.leaf_id
+                || reduction.effective_configuration != prepared.effective_configuration {
+                return Err(HarnessError::invalid_state("epoch source changed during preparation"));
+            }
             let epoch_index = snapshot
                 .records()
                 .iter()
@@ -4126,7 +4279,6 @@ where
             let core_run_id =
                 CoreRunId::new(durable_identifier("core-run", [epoch_id.as_str(), "v1"]))
                     .map_err(|error| HarnessError::invalid_state(error.to_string()))?;
-            let epoch_resume_data = configuration.lifecycle.before_epoch()?;
             let revision_id = configuration.identity.revision_id.clone();
             let snapshot_id = configuration.identity.snapshot_id.clone();
             let profile_id = configuration.identity.profile_id.clone();
@@ -4161,39 +4313,46 @@ where
         epoch_id: &EpochId,
         outcome: OperationOutcome,
     ) -> Result<DurableOperation, HarnessError> {
-        self.finish_epoch(
-            lane,
-            operation_id,
-            epoch_id,
-            match outcome {
-                OperationOutcome::Completed => EpochFinishReason::Settled,
-                OperationOutcome::Aborted | OperationOutcome::Failed { .. } => {
-                    EpochFinishReason::Interrupted
-                }
-            },
-        )?;
+        let input_ids = self.input_ids_for_operation(operation_id)?;
         let (sequence, reduction) = {
             let mut session = self.session_lock()?;
-            let stored =
-                session.append_record(LaneRecord::OperationFinished(OperationFinishedRecord {
+            let mut items = vec![
+                SessionCommitItem::Record(LaneRecord::EpochFinished(EpochFinishedRecord {
+                    epoch_id: epoch_id.clone(),
+                    operation_id: operation_id.clone(),
+                    reason: match outcome {
+                        OperationOutcome::Completed => EpochFinishReason::Settled,
+                        OperationOutcome::Aborted | OperationOutcome::Failed { .. } => EpochFinishReason::Interrupted,
+                    },
+                })),
+                SessionCommitItem::Record(LaneRecord::OperationFinished(OperationFinishedRecord {
                     operation_id: operation_id.clone(),
                     outcome: outcome.clone(),
-                }))?;
+                })),
+            ];
+            items.extend(operation::input_settlement_records(operation_id, &input_ids, &outcome)
+                .into_iter().map(SessionCommitItem::Record));
+            if outcome == OperationOutcome::Completed {
+                let snapshot = session.snapshot()?;
+                let is_child = snapshot.facts().iter().any(|stored| matches!(&stored.fact,
+                    SessionFact::AgentSpawned(agent) if agent.lane_id == lane.lane_id));
+                let has_controls = reduce_lane(snapshot.clone(), lane.lane_id.clone())?
+                    .pending_extension_controls.iter().any(|pending| &pending.control.operation_id == operation_id);
+                if !is_child && !has_controls {
+                    items.push(extension_state::turn_checkpoint_item(&snapshot, &lane.lane_id, operation_id)?);
+                }
+            }
+            let stored = session.commit(SessionCommit::new(items)?)?;
             let snapshot = session.snapshot()?;
             (stored.seq, reduce_lane(snapshot, lane.lane_id.clone())?)
         };
+        self.publish_input_completions_after_commit(operation_id, &input_ids, &outcome)?;
         if reduction.lane_state.active_operation.is_some() || reduction.recovery_plan.is_some() {
             return Err(HarnessError::invalid_state(
                 "terminal operation did not reduce to an idle lane",
             ));
         }
-        if lane.lane_id == self.root_lane_id {
-            // Only a confirmed durable terminal root operation clears the
-            // pre-install cancellation request. Claim release alone is not a
-            // settlement boundary: an effect-gate failure may leave recovery
-            // work open and must retain this request in-process.
-            lane.abort_requested.store(false, Ordering::Release);
-        }
+        lane.abort_requested.store(false, Ordering::Release);
         self.publish_event(TeaEvent::Session(SessionEvent::OperationFinished {
             sequence,
             lane_id: lane.lane_id.clone(),
@@ -4424,20 +4583,49 @@ where
     /// terminal durable record. The trace is evidence, not recovery state:
     /// a conflicting second trace for one durable core run is corruption
     /// rather than an invitation to silently replace historical evidence.
+    ///
+    /// Trace capture and object publication are optional diagnostic retention.
+    /// Their fixed, content-free failure category is retained instead, so they
+    /// cannot reopen completed model or tool semantics. A cancellation that
+    /// wins before its first trace header deliberately records neither. The
+    /// session append for either a trace fact or its unavailable diagnostic
+    /// remains mandatory.
     fn persist_trace_artifact(
         &self,
         operation_id: &OperationId,
         epoch_id: &EpochId,
         identity: &HarnessIdentity,
         provenance: &RunProvenance,
-        events: Vec<TraceEvent>,
+        events: Result<Vec<TraceEvent>, HarnessError>,
     ) -> Result<(), HarnessError> {
+        let core_run_id = provenance
+            .core_run_id
+            .as_ref()
+            .ok_or_else(|| HarnessError::invalid_state("trace provenance has no core-run ID"))
+            .and_then(|value| {
+                CoreRunId::new(value.clone())
+                    .map_err(|error| HarnessError::invalid_state(error.to_string()))
+            })?;
+        let events = match events {
+            Ok(events) => events,
+            Err(_) => {
+                return self.record_trace_unavailable(
+                    operation_id,
+                    epoch_id,
+                    &core_run_id,
+                    "capture_unavailable",
+                );
+            }
+        };
         if !matches!(events.first(), Some(TraceEvent::EpisodeHeader(_)))
             || !matches!(events.last(), Some(TraceEvent::EpisodeEnd(_)))
         {
-            return Err(HarnessError::invalid_state(
-                "core trace must contain one header and one terminal episode record",
-            ));
+            return self.record_trace_unavailable(
+                operation_id,
+                epoch_id,
+                &core_run_id,
+                "invalid_trace",
+            );
         }
         let mut sink = JsonLinesSink::new(Vec::new());
         for event in events {
@@ -4445,17 +4633,33 @@ where
                 .expect("writing a trace event into an in-memory buffer is infallible");
         }
         let bytes = sink.into_inner();
-        let artifact = self.artifacts.put(&bytes, "application/x-ndjson")?;
-        let core_run_id = provenance
-            .core_run_id
-            .as_ref()
-            .ok_or_else(|| HarnessError::invalid_state("trace provenance has no core-run ID"))?;
+        if !std::str::from_utf8(&bytes)
+            .ok()
+            .is_some_and(|jsonl| tea_trace::decode_jsonl(jsonl).is_ok())
+        {
+            return self.record_trace_unavailable(
+                operation_id,
+                epoch_id,
+                &core_run_id,
+                "invalid_trace",
+            );
+        }
+        let artifact = match self.artifacts.put(&bytes, "application/x-ndjson") {
+            Ok(artifact) => artifact,
+            Err(_) => {
+                return self.record_trace_unavailable(
+                    operation_id,
+                    epoch_id,
+                    &core_run_id,
+                    "artifact_store_unavailable",
+                );
+            }
+        };
         let fact = TraceArtifactFact {
             schema_version: tea_trace::TRACE_SCHEMA_VERSION,
             operation_id: operation_id.clone(),
             epoch_id: epoch_id.clone(),
-            core_run_id: CoreRunId::new(core_run_id.clone())
-                .map_err(|error| HarnessError::invalid_state(error.to_string()))?,
+            core_run_id,
             harness_revision_id: identity.revision_id.clone(),
             harness_snapshot_id: identity.snapshot_id.clone(),
             model_harness_profile: identity.profile_id.clone(),
@@ -4485,6 +4689,10 @@ where
                 | SessionFact::WorkspaceDeltaApplied(_)
                 | SessionFact::Custom { .. } => None,
                 SessionFact::TraceArtifact(_) => None,
+                SessionFact::ProviderRequestMaterial(_)
+                | SessionFact::ExtensionStateValueSet(_)
+                | SessionFact::TurnCheckpoint(_)
+                | SessionFact::ForkedLane(_) => None,
             });
         if let Some(existing) = existing {
             if existing == &fact {
@@ -4496,6 +4704,36 @@ where
             )));
         }
         session.append_fact(SessionFact::TraceArtifact(fact))?;
+        Ok(())
+    }
+
+    fn record_trace_unavailable(
+        &self,
+        operation_id: &OperationId,
+        epoch_id: &EpochId,
+        core_run_id: &CoreRunId,
+        reason: &'static str,
+    ) -> Result<(), HarnessError> {
+        let fact = SessionFact::Custom {
+            type_name: "tea.trace-unavailable.v1".into(),
+            payload: JsonValue::object([
+                ("schema_version", JsonValue::Number(tea_protocol::JsonNumber::Unsigned(1))),
+                ("operation_id", JsonValue::String(operation_id.to_string())),
+                ("epoch_id", JsonValue::String(epoch_id.to_string())),
+                ("core_run_id", JsonValue::String(core_run_id.to_string())),
+                ("reason", JsonValue::String(reason.into())),
+            ]),
+        };
+        let mut session = self.session_lock()?;
+        let snapshot = session.snapshot()?;
+        if snapshot
+            .facts()
+            .iter()
+            .any(|stored| stored.fact == fact)
+        {
+            return Ok(());
+        }
+        session.append_fact(fact)?;
         Ok(())
     }
 
@@ -4562,19 +4800,7 @@ where
                 })
         });
         let configuration = match &epoch {
-            Some(epoch) => {
-                let configuration =
-                    self.configuration_for_revision(lane, &epoch.harness_revision_id)?;
-                if configuration.identity.snapshot_id() != &epoch.harness_snapshot_id
-                    || configuration.identity.profile_id() != &epoch.model_harness_profile
-                {
-                    return Err(HarnessError::invalid_state(format!(
-                        "epoch {} immutable revision no longer resolves to its recorded snapshot/profile",
-                        epoch.id,
-                    )));
-                }
-                configuration
-            }
+            Some(epoch) => self.configuration_for_epoch_started(lane, snapshot, epoch)?,
             None => self.configuration_for_revision(lane, &operation.initial_harness_revision)?,
         };
         configuration.lifecycle.before_resume(
@@ -4615,48 +4841,6 @@ where
             })
     }
 
-    fn append_interrupted_tool_result(
-        &self,
-        lane: &LaneRuntime,
-        snapshot: &SessionSnapshot,
-        result_entry_id: &EntryId,
-    ) -> Result<(), HarnessError> {
-        let started = recovery_tool_start(snapshot, result_entry_id)?.clone();
-        let tool_call_id = ToolCallId::new(started.tool_call_id.clone()).map_err(|error| {
-            HarnessError::invalid_state(format!(
-                "stored tool invocation has invalid call ID: {error}"
-            ))
-        })?;
-        let result = AgentToolResult {
-            tool_call_id,
-            content: "Tool execution was interrupted. Tea cannot prove whether the external effect occurred, so it was not replayed.".into(),
-            details: None,
-            usage: None,
-            added_tool_names: Vec::new(),
-            terminate: false,
-            is_error: true,
-            failure: Some(tea_core::tool::ToolFailure::recoverable()),
-        };
-        let configuration = self.configuration_for_revision(lane, &started.harness_revision_id)?;
-        let retained = retain_tool_result_with_projection(
-            self.artifacts.as_ref(),
-            configuration.artifact_policy_config(),
-            &result,
-            &result,
-        )
-        .map_err(|error| HarnessError::invalid_state(error.to_string()))?;
-        let entry = tool_result_entry(&result, &result, &started.tool_name, retained)
-            .map_err(|error| HarnessError::invalid_state(error.to_string()))?;
-        self.session_lock()?.append_entry(
-            &lane.lane_id,
-            ProvisionedEntry {
-                id: result_entry_id.clone(),
-                body: SessionEntry::ToolResult(entry),
-            },
-        )?;
-        Ok(())
-    }
-
     fn configuration_for_reduction(
         &self,
         lane: &LaneRuntime,
@@ -4670,6 +4854,7 @@ where
         services: &RuntimeServices,
         reduction: &tea_session::LaneReduction,
     ) -> Result<ResolvedHarness, HarnessError> {
+        validate_runtime_model_selection(services, reduction)?;
         let revision_id = reduction
             .lane_state
             .active_harness_revision
@@ -4689,9 +4874,50 @@ where
             .resolve_revision(revision_id, &lane.runtime_services)
     }
 
+    fn configuration_for_epoch_started(
+        &self,
+        lane: &LaneRuntime,
+        snapshot: &SessionSnapshot,
+        started: &EpochStartedRecord,
+    ) -> Result<ResolvedHarness, HarnessError> {
+        self.configuration_for_epoch_started_with_state_generation(lane, snapshot, started, None)
+    }
+
+    fn configuration_for_epoch_started_with_state_generation(
+        &self,
+        lane: &LaneRuntime,
+        snapshot: &SessionSnapshot,
+        started: &EpochStartedRecord,
+        state_generation: Option<ExtensionStateGeneration>,
+    ) -> Result<ResolvedHarness, HarnessError> {
+        validate_runtime_model_selection_at_epoch_source(
+            &lane.runtime_services,
+            snapshot,
+            started,
+        )?;
+        let configuration = match state_generation {
+            Some(generation) => self.manager.resolve_revision_for_epoch(
+                &started.harness_revision_id,
+                &lane.runtime_services,
+                generation,
+            )?,
+            None => self.configuration_for_revision(lane, &started.harness_revision_id)?,
+        };
+        if configuration.identity.snapshot_id() != &started.harness_snapshot_id
+            || configuration.identity.profile_id() != &started.model_harness_profile
+        {
+            return Err(HarnessError::invalid_state(format!(
+                "epoch {} immutable revision no longer resolves to its recorded snapshot/profile",
+                started.id,
+            )));
+        }
+        Ok(configuration)
+    }
+
     fn epoch_configuration(
         &self,
         lane: &LaneRuntime,
+        operation_id: &OperationId,
         epoch_id: &EpochId,
     ) -> Result<ResolvedHarness, HarnessError> {
         let snapshot = self.snapshot()?;
@@ -4699,7 +4925,11 @@ where
             .records()
             .iter()
             .find_map(|stored| match &stored.record {
-                LaneRecord::EpochStarted(record) if &record.id == epoch_id => Some(record),
+                LaneRecord::EpochStarted(record)
+                    if &record.id == epoch_id && &record.operation_id == operation_id =>
+                {
+                    Some(record)
+                }
                 _ => None,
             })
             .ok_or_else(|| {
@@ -4707,15 +4937,18 @@ where
                     format!("epoch {epoch_id} has no durable start record",),
                 )
             })?;
-        let configuration = self.configuration_for_revision(lane, &started.harness_revision_id)?;
-        if configuration.identity.snapshot_id() != &started.harness_snapshot_id
-            || configuration.identity.profile_id() != &started.model_harness_profile
-        {
-            return Err(HarnessError::invalid_state(format!(
-                "epoch {epoch_id} immutable revision no longer resolves to its recorded snapshot/profile",
-            )));
-        }
-        Ok(configuration)
+        let generation = ExtensionStateGeneration::new(
+            lane.lane_id.clone(),
+            operation_id.clone(),
+            epoch_id.clone(),
+            started.harness_revision_id.clone(),
+        );
+        self.configuration_for_epoch_started_with_state_generation(
+            lane,
+            &snapshot,
+            started,
+            Some(generation),
+        )
     }
 }
 
@@ -4733,6 +4966,88 @@ impl SessionSupervisor<tea_session::JsonlSession> {
             .export_to(destination, additional_roots)
             .map_err(Into::into)
     }
+}
+
+/// Bind the host-owned provider descriptor to the exact durable model
+/// selection effective on a lane. A resolved harness is provider-neutral, so
+/// this check is the boundary that prevents a later request from silently
+/// naming a model different from the branch's `ModelChanged` entry.
+pub(super) fn validate_runtime_model_selection(
+    services: &RuntimeServices,
+    reduction: &tea_session::LaneReduction,
+) -> Result<(), HarnessError> {
+    validate_runtime_model_descriptor(
+        services,
+        reduction.effective_configuration.model.as_ref(),
+    )
+}
+
+fn validate_runtime_model_descriptor(
+    services: &RuntimeServices,
+    expected: Option<&ModelChangedEntry>,
+) -> Result<(), HarnessError> {
+    match (expected, services.model_descriptor()) {
+        (None, None) => Ok(()),
+        (Some(expected), Some(actual))
+            if actual.provider == expected.provider
+                && actual.model == expected.model
+                && actual.revision == expected.revision =>
+        {
+            Ok(())
+        }
+        _ => Err(HarnessError::invalid_state(
+            "runtime services model descriptor does not match durable model selection",
+        )),
+    }
+}
+
+/// Derive the model selection that was visible when an epoch was started.
+/// The current lane leaf may advance while an operation remains open, so using
+/// its latest selection would let a historical epoch run with a swapped host
+/// descriptor.
+fn model_selection_at_source_leaf(
+    snapshot: &SessionSnapshot,
+    source_leaf_id: Option<&EntryId>,
+) -> Result<Option<ModelChangedEntry>, HarnessError> {
+    let entries = snapshot
+        .entries()
+        .iter()
+        .map(|entry| (entry.header.id.clone(), entry))
+        .collect::<BTreeMap<_, _>>();
+    let mut chain = Vec::new();
+    let mut visited = BTreeSet::new();
+    let mut cursor = source_leaf_id.cloned();
+    while let Some(entry_id) = cursor {
+        if !visited.insert(entry_id.clone()) {
+            return Err(HarnessError::invalid_state(format!(
+                "epoch source leaf ancestry contains a cycle at {entry_id}",
+            )));
+        }
+        let entry = entries.get(&entry_id).ok_or_else(|| {
+            HarnessError::invalid_state(format!(
+                "epoch source leaf refers to missing entry {entry_id}",
+            ))
+        })?;
+        cursor = entry.header.parent_id.clone();
+        chain.push(*entry);
+    }
+
+    let mut selected = None;
+    for entry in chain.into_iter().rev() {
+        if let SessionEntry::ModelChanged(model) = &entry.body {
+            selected = Some(model.clone());
+        }
+    }
+    Ok(selected)
+}
+
+fn validate_runtime_model_selection_at_epoch_source(
+    services: &RuntimeServices,
+    snapshot: &SessionSnapshot,
+    started: &EpochStartedRecord,
+) -> Result<(), HarnessError> {
+    let selected = model_selection_at_source_leaf(snapshot, started.source_leaf_id.as_ref())?;
+    validate_runtime_model_descriptor(services, selected.as_ref())
 }
 
 fn validate_reserved_host_tool_names(
@@ -4778,6 +5093,10 @@ fn latest_harness_catalog(snapshot: &SessionSnapshot) -> Option<&tea_session::Ha
             | SessionFact::WorkspaceDelta(_)
             | SessionFact::AgentTaskFinished(_)
             | SessionFact::WorkspaceDeltaApplied(_)
+            | SessionFact::ProviderRequestMaterial(_)
+            | SessionFact::ExtensionStateValueSet(_)
+            | SessionFact::TurnCheckpoint(_)
+            | SessionFact::ForkedLane(_)
             | SessionFact::Custom { .. } => None,
         })
 }
@@ -4805,12 +5124,6 @@ fn replay_safe_host_tools(tools: &ToolRegistry) -> BTreeSet<String> {
     STABLE_ARTIFACT_TOOL_NAMES
         .into_iter()
         .chain(std::iter::once(STABLE_HARNESS_TOOL_NAME))
-        // `spawn_agent` derives every identity from the already-durable tool
-        // intent and completes an append-only, idempotent transaction.  It is
-        // the one collaboration effect that must replay after an intent-only
-        // crash; apply remains deliberately excluded because an external Git
-        // mutation without its terminal fact is ambiguous.
-        .chain(std::iter::once("spawn_agent"))
         .filter(|name| tools.get(name).is_some())
         .map(str::to_owned)
         .collect()
@@ -4820,32 +5133,29 @@ struct OperationClaim {
     lane: Arc<LaneRuntime>,
 }
 
-/// Bridges core's awaited run-local observer boundary into the bounded
+/// Bridges core's non-vetoing run-local observer boundary into the bounded
 /// application fanout. This intentionally has no session writer: core events
 /// are observational, while durable state continues to flow through the
 /// supervisor's explicit commit procedures.
 struct HarnessAgentEventObserver {
     events: Arc<EventHub>,
     lane_id: LaneId,
+    operation_id: OperationId,
+    epoch_id: EpochId,
 }
 
 impl EventObserver for HarnessAgentEventObserver {
-    fn observe<'a>(
-        &'a self,
-        event: &'a AgentEvent,
-        _cancellation: tea_core::scheduler::CancellationToken,
-    ) -> ObserverFuture<'a> {
-        self.events.publish(TeaEvent::Agent {
-            lane_id: self.lane_id.clone(),
-            event: event.clone(),
-        });
-        Box::pin(std::future::ready(Ok(())))
+    fn observe(&self, event: &AgentEvent) {
+        self.events.publish_agent(super::events::ObservationRun::new(
+            self.lane_id.clone(), self.operation_id.clone(), self.epoch_id.clone(), event.run_id,
+        ), event);
     }
 }
 
 impl Drop for OperationClaim {
     fn drop(&mut self) {
         self.lane.active.store(false, Ordering::Release);
+        self.lane.drive_notifier.notify_release();
     }
 }
 
@@ -4906,10 +5216,13 @@ struct EpochRuntime<S> {
     /// consumed once by `before_tool`, rather than creating a second intent.
     replay_tool_starts: BTreeMap<(EntryId, u32), ToolStartedRecord>,
     pending_providers: BTreeMap<EffectId, PendingProvider>,
+    pending_compaction_providers: BTreeMap<EffectId, compaction::PendingCompactionProvider>,
+    compaction_steps: BTreeMap<crate::compaction::CompactionId, compaction::CompactionStep>,
     pending_tools: BTreeMap<EffectId, PendingTool>,
     started_tool_indices: BTreeMap<EntryId, BTreeSet<u32>>,
     last_assistant_entry: Option<EntryId>,
     fault: Option<String>,
+    interrupted_mutation: bool,
 }
 
 struct PendingProvider {
@@ -4961,10 +5274,13 @@ where
             replay_safe_host_tools: init.replay_safe_host_tools,
             replay_tool_starts: init.replay_tool_starts,
             pending_providers: BTreeMap::new(),
+            pending_compaction_providers: BTreeMap::new(),
+            compaction_steps: BTreeMap::new(),
             pending_tools: BTreeMap::new(),
             started_tool_indices: BTreeMap::new(),
             last_assistant_entry: init.last_assistant_entry,
             fault: None,
+            interrupted_mutation: false,
         }
     }
 
@@ -4974,6 +5290,9 @@ where
             EffectSubject::DurableWrite { write } => self.before_durable_write(write),
             EffectSubject::ProviderRequest { request } => {
                 self.before_provider(action.id(), request)
+            }
+            EffectSubject::CompactionProviderRequest { operation, request } => {
+                self.before_compaction_provider(action.id(), operation, request)
             }
             EffectSubject::ToolExecution { call } => self.before_tool(action.id(), call),
             EffectSubject::HookInvocation { hook } => {
@@ -5004,6 +5323,10 @@ where
             (EffectSubject::ProviderRequest { .. }, EffectOutcome::ProviderRequest(outcome)) => {
                 self.after_provider(action.id(), outcome)
             }
+            (
+                EffectSubject::CompactionProviderRequest { .. },
+                EffectOutcome::CompactionProviderRequest(outcome),
+            ) => self.after_compaction_provider(action.id(), outcome),
             (EffectSubject::ToolExecution { call }, EffectOutcome::ToolExecution(outcome)) => {
                 self.after_tool(action.id(), call, *outcome)
             }
@@ -5038,6 +5361,9 @@ where
                     self.persist_tool_schema_deviation(call)?;
                 }
                 self.persist_tool_result(call, result, result)
+            }
+            DurableWriteRequest::CompactionReplacement { replacement } => {
+                self.persist_compaction_replacement(replacement)
             }
         }
     }
@@ -5079,8 +5405,18 @@ where
         let epoch_id = self.epoch_id.clone();
         let profile_id = self.identity.profile_id.clone();
         let request_surface_digest = provider_request_digest(request);
+        let material = request_material(request)?;
+        let bytes = material.to_json_string().map_err(|error| self.fault(error.to_string()))?;
+        let retained = self.artifacts.put(bytes.as_bytes(), "application/vnd.tea.model-request+json")
+            .map_err(|error| self.fault(error.to_string()))?;
+        let request_material = PayloadRef::Artifact {
+            artifact_id: retained.artifact_id,
+            byte_len: retained.byte_len,
+            media_type: retained.media_type,
+        };
         self.mutate(|session| {
-            session.append_record(LaneRecord::StepAttempted(StepAttemptedRecord {
+            session.commit(SessionCommit::new(vec![
+                SessionCommitItem::Record(LaneRecord::StepAttempted(StepAttemptedRecord {
                 id: step_id.clone(),
                 operation_id: operation_id.clone(),
                 epoch_id: epoch_id.clone(),
@@ -5088,19 +5424,23 @@ where
                 attempt: assistant_attempt,
                 result_entry_id: result_entry_id.clone(),
                 reason: None,
-            }))?;
-            session.append_record(LaneRecord::ProviderRequestStarted(
+            })),
+                SessionCommitItem::Record(LaneRecord::ProviderRequestStarted(
                 ProviderRequestStartedRecord {
                     request_id: request_id.clone(),
-                    operation_id,
-                    epoch_id,
+                    operation_id: operation_id.clone(),
+                    epoch_id: epoch_id.clone(),
                     step_id,
                     physical_attempt: 1,
                     model_harness_profile: profile_id,
                     request_surface_digest,
                     idempotency_key: None,
                 },
-            ))?;
+            )),
+                SessionCommitItem::Fact(SessionFact::ProviderRequestMaterial(tea_session::ProviderRequestMaterialFact {
+                    operation_id, epoch_id, request_id: request_id.clone(), request: request_material,
+                })),
+            ])?)?;
             Ok(())
         })?;
         if self
@@ -5144,7 +5484,7 @@ where
                 let operation_id = self.operation_id.clone();
                 let lane = self.lane.clone();
                 self.mutate(|session| {
-                    session.append_record(LaneRecord::ProviderRequestSettled(
+                    let mut items = vec![SessionCommitItem::Record(LaneRecord::ProviderRequestSettled(
                         ProviderRequestSettledRecord {
                             request_id: pending.request_id.clone(),
                             operation_id: operation_id.clone(),
@@ -5154,23 +5494,24 @@ where
                             response_artifact: None,
                             classification,
                         },
-                    ))?;
+                    ))];
                     if let Some(usage) = response.usage.as_ref() {
-                        session.append_record(LaneRecord::Usage(tea_session::UsageRecord {
+                        items.push(SessionCommitItem::Record(LaneRecord::Usage(tea_session::UsageRecord {
                             operation_id: operation_id.clone(),
                             request_id: Some(pending.request_id.clone()),
                             usage: core_usage(usage),
-                        }))?;
+                        })));
                     }
                     if let Some(assistant) = assistant {
-                        session.append_entry(
-                            &lane,
-                            ProvisionedEntry {
+                        items.push(SessionCommitItem::Entry {
+                            lane_id: lane,
+                            entry: ProvisionedEntry {
                                 id: pending.result_entry_id.clone(),
                                 body: SessionEntry::AssistantMessage(assistant),
                             },
-                        )?;
+                        });
                     }
+                    session.commit(SessionCommit::new(items)?)?;
                     Ok(())
                 })?;
                 if !response.context_overflow {
@@ -5427,14 +5768,16 @@ where
             (artifact_id, byte_len, entry.artifact_policy_id.clone())
         });
         let lane = self.lane.clone();
+        let mut items = vec![SessionCommitItem::Entry {
+            lane_id: lane.clone(),
+            entry: ProvisionedEntry {
+                id: result_entry_id.clone(),
+                body: SessionEntry::ToolResult(entry),
+            },
+        }];
+        items.extend(self.plugin_memory_items(&result_entry_id, call)?);
         self.mutate(|session| {
-            session.append_entry(
-                &lane,
-                ProvisionedEntry {
-                    id: result_entry_id,
-                    body: SessionEntry::ToolResult(entry),
-                },
-            )?;
+            session.commit(SessionCommit::new(items)?)?;
             Ok(())
         })?;
         if let Some((artifact_id, byte_len, policy_id)) = retained_artifact {
@@ -5559,15 +5902,14 @@ where
         Ok(())
     }
 
-    /// Append typed policy memory only after the paired raw tool result has
-    /// committed. The collector is process-local and keyed by the completed
-    /// tool-call identity; it has no route to create a semantic parent or
-    /// bypass the session writer.
-    fn persist_plugin_memory(
+    /// Validate typed policy memory before committing it atomically with its
+    /// tool result. The collector is process-local and keyed by the completed
+    /// call; a committed result cannot outlive an uncommitted memory proposal.
+    fn plugin_memory_items(
         &mut self,
-        pending: &PendingTool,
+        result_entry_id: &EntryId,
         call: &ToolCall,
-    ) -> Result<(), EffectGateError> {
+    ) -> Result<Vec<SessionCommitItem>, EffectGateError> {
         let proposals = self
             .memory_collector
             .take_for_call(call.id.as_str())
@@ -5577,7 +5919,7 @@ where
                 ))
             })?;
         if proposals.is_empty() {
-            return Ok(());
+            return Ok(Vec::new());
         }
         let mut entries = Vec::with_capacity(proposals.len());
         for (index, collected) in proposals.into_iter().enumerate() {
@@ -5585,28 +5927,22 @@ where
             let id = EntryId::new(durable_identifier(
                 "entry-plugin-memory",
                 [
-                    pending.result_entry_id.as_str(),
+                    result_entry_id.as_str(),
                     collected.extension_id.as_str(),
                     collected.proposal.kind.as_str(),
                     index.as_str(),
                 ],
             ))
             .map_err(|error| self.fault(error.to_string()))?;
-            entries.push((id, plugin_memory_entry(collected)?));
+            entries.push(SessionCommitItem::Entry {
+                lane_id: self.lane.clone(),
+                entry: ProvisionedEntry {
+                    id,
+                    body: SessionEntry::PluginMemory(plugin_memory_entry(collected)?),
+                },
+            });
         }
-        let lane = self.lane.clone();
-        self.mutate(|session| {
-            for (id, entry) in entries {
-                session.append_entry(
-                    &lane,
-                    ProvisionedEntry {
-                        id,
-                        body: SessionEntry::PluginMemory(entry),
-                    },
-                )?;
-            }
-            Ok(())
-        })
+        Ok(entries)
     }
 
     fn after_tool(
@@ -5630,8 +5966,18 @@ where
         {
             return Err(self.fault("tool settlement does not match its durable effect intent"));
         }
+        if outcome.raw_result.failure.as_ref().is_some_and(|failure| failure.disposition() == ToolFailureDisposition::Cancelled) {
+            let snapshot = self.session_snapshot()?;
+            let intent = snapshot.records().iter().find_map(|stored| match &stored.record {
+                LaneRecord::ToolStarted(tool) if tool.result_entry_id == pending.result_entry_id => Some(tool),
+                _ => None,
+            }).ok_or_else(|| self.fault("cancelled tool has no durable intent"))?;
+            if intent.replay_policy_at_start == ToolReplayPolicy::Never {
+                self.interrupted_mutation = true;
+                return Err(self.fault("cancelled tool outcome is indeterminate and requires host reconciliation"));
+            }
+        }
         self.persist_tool_result(call, &outcome.raw_result, &outcome.result)?;
-        self.persist_plugin_memory(&pending, call)?;
         self.pending_tools.remove(&action_id);
         Ok(())
     }
@@ -5713,6 +6059,33 @@ fn session_time_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
         .unwrap_or(0)
+}
+
+fn request_material(request: &tea_core::scheduler::ModelRequest) -> Result<JsonValue, EffectGateError> {
+    let model = request.model.as_ref().map(|model| JsonValue::object([
+        ("provider", JsonValue::String(model.provider.clone())),
+        ("model", JsonValue::String(model.model.clone())),
+        ("revision", model.revision.clone().map(JsonValue::String).unwrap_or(JsonValue::Null)),
+    ])).unwrap_or(JsonValue::Null);
+    let tools = request.tools.iter().map(|tool| JsonValue::object([
+        ("name", JsonValue::String(tool.name.clone())),
+        ("description", JsonValue::String(tool.description.clone())),
+        ("schema", tool.schema.clone()),
+        ("execution_mode", JsonValue::String(match tool.execution_mode {
+            crate::tool::ToolExecutionMode::Sequential => "sequential",
+            crate::tool::ToolExecutionMode::Parallel => "parallel",
+        }.into())),
+    ])).collect::<Vec<_>>();
+    Ok(JsonValue::object([
+        ("format", JsonValue::String("tea-model-request".into())),
+        ("version", JsonValue::from(1_u64)),
+        ("system_prompt", JsonValue::String(request.system_prompt.clone())),
+        ("context", JsonValue::String(request.context.clone())),
+        ("tools", JsonValue::Array(tools)),
+        ("model", model),
+        ("thinking_level", JsonValue::String(thinking_level_name(request.thinking_level).into())),
+        ("session_id", request.session_id.clone().map(JsonValue::String).unwrap_or(JsonValue::Null)),
+    ]))
 }
 
 fn provider_request_digest(request: &tea_core::scheduler::ModelRequest) -> Digest {
@@ -6142,115 +6515,6 @@ fn core_failure_code(error: &CoreError) -> &'static str {
     }
 }
 
-impl<S> ExtensionStateStore for SessionSupervisor<S>
-where
-    S: SessionWriter + Send + 'static,
-{
-    fn read_extension_state(
-        &self,
-        extension_id: &str,
-    ) -> Result<ExtensionStateView, ExtensionError> {
-        let snapshot = self
-            .snapshot()
-            .map_err(|error| ExtensionError::new(error.to_string()))?;
-        let lane = self
-            .root_lane()
-            .map_err(|error| ExtensionError::new(error.to_string()))?;
-        extension_state_view(&snapshot, &lane.lane_id, extension_id)
-            .map_err(|error| ExtensionError::new(error.to_string()))
-    }
-
-    fn append_extension_state(
-        &self,
-        extension_id: &str,
-        update: ExtensionStateUpdate,
-    ) -> Result<(), ExtensionError> {
-        let lane = self
-            .root_lane()
-            .map_err(|error| ExtensionError::new(error.to_string()))?;
-        self.append_extension_state_update(&lane, extension_id, update)
-            .map_err(|error| ExtensionError::new(error.to_string()))
-    }
-}
-
-fn extension_state_view(
-    snapshot: &SessionSnapshot,
-    lane_id: &LaneId,
-    extension_id: &str,
-) -> Result<ExtensionStateView, HarnessError> {
-    if !portable_extension_label(extension_id) {
-        return Err(HarnessError::invalid_state(
-            "extension state namespace must use a portable extension ID",
-        ));
-    }
-    let mut latest = BTreeMap::new();
-    for entry in active_branch_entries(snapshot, lane_id)? {
-        let SessionEntry::PluginMemory(memory) = entry.body else {
-            continue;
-        };
-        if memory.plugin_id != extension_id {
-            continue;
-        }
-        let PayloadRef::Inline(content) = memory.content else {
-            continue;
-        };
-        latest.insert(memory.kind, content);
-    }
-    Ok(ExtensionStateView { latest })
-}
-
-fn active_branch_entries(
-    snapshot: &SessionSnapshot,
-    lane_id: &LaneId,
-) -> Result<Vec<tea_session::StoredEntry>, HarnessError> {
-    let reduction = reduce_lane(snapshot.clone(), lane_id.clone())?;
-    let by_id = snapshot
-        .entries()
-        .iter()
-        .map(|entry| (entry.header.id.clone(), entry))
-        .collect::<BTreeMap<_, _>>();
-    let mut chain = Vec::new();
-    let mut seen = BTreeSet::new();
-    let mut cursor = reduction.lane_state.leaf_id;
-    while let Some(id) = cursor {
-        if !seen.insert(id.clone()) {
-            return Err(HarnessError::invalid_state(format!(
-                "extension state branch contains a parent cycle at entry {id}",
-            )));
-        }
-        let entry = by_id.get(&id).ok_or_else(|| {
-            HarnessError::invalid_state(format!(
-                "extension state branch refers to missing entry {id}",
-            ))
-        })?;
-        cursor = entry.header.parent_id.clone();
-        chain.push((*entry).clone());
-    }
-    chain.reverse();
-    Ok(chain)
-}
-
-fn validate_extension_state_update(
-    extension_id: &str,
-    update: &ExtensionStateUpdate,
-) -> Result<(), HarnessError> {
-    if !portable_extension_label(extension_id) || !portable_extension_label(&update.kind) {
-        return Err(HarnessError::invalid_state(
-            "extension state update requires portable extension ID and kind",
-        ));
-    }
-    let bytes = update
-        .content
-        .to_json_string()
-        .map_err(|error| HarnessError::invalid_state(error.to_string()))?;
-    if bytes.len() > 16 * 1024 {
-        return Err(HarnessError::invalid_state(
-            "extension state update content exceeds 16384 bytes",
-        ));
-    }
-    Ok(())
-}
-
 fn portable_extension_label(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 120
@@ -6450,143 +6714,7 @@ fn derive_core_messages(
     snapshot: &SessionSnapshot,
     lane: &LaneId,
 ) -> Result<Vec<AgentMessage>, HarnessError> {
-    let mut messages = Vec::new();
-    for entry in snapshot
-        .entries()
-        .iter()
-        .filter(|entry| &entry.lane_id == lane)
-    {
-        let message_id = MessageId(messages.len() as u64 + 1);
-        match &entry.body {
-            SessionEntry::UserMessage(user) => messages.push(AgentMessage::User {
-                id: message_id,
-                content: user.content.clone(),
-            }),
-            SessionEntry::AssistantMessage(assistant) => {
-                let tool_calls = assistant
-                    .tool_calls
-                    .iter()
-                    .map(|call| {
-                        Ok(AgentToolCall {
-                            id: ToolCallId::new(call.id.clone()).map_err(|error| {
-                                HarnessError::invalid_state(format!(
-                                    "durable assistant tool-call ID is invalid: {error}"
-                                ))
-                            })?,
-                            name: call.name.clone(),
-                            arguments: SerializedJson::new(
-                                call.arguments.to_json_string().map_err(|error| {
-                                    HarnessError::invalid_state(format!(
-                                        "durable assistant arguments cannot encode: {error}"
-                                    ))
-                                })?,
-                            ),
-                        })
-                    })
-                    .collect::<Result<Vec<_>, HarnessError>>()?;
-                let stop_reason = assistant
-                    .stop_reason
-                    .as_deref()
-                    .map(parse_stop_reason)
-                    .transpose()?;
-                let opaque_context = assistant
-                    .opaque_context
-                    .iter()
-                    .map(|item| {
-                        OpaqueProviderContextItem::new(
-                            item.provider.clone(),
-                            item.kind.clone(),
-                            item.item_id.clone(),
-                            item.payload.clone(),
-                        )
-                        .map_err(|error| {
-                            HarnessError::invalid_state(format!(
-                                "durable assistant opaque provider context is invalid: {error}"
-                            ))
-                        })
-                    })
-                    .collect::<Result<Vec<_>, HarnessError>>()?;
-                messages.push(AgentMessage::Assistant {
-                    id: message_id,
-                    content: assistant.content.clone(),
-                    tool_calls,
-                    stop_reason,
-                    error_message: assistant.error_message.clone(),
-                    opaque_context,
-                });
-            }
-            SessionEntry::ToolResult(result) => {
-                let (content, details) = projection_content(&result.model_projection)
-                    .map_err(|error| HarnessError::invalid_state(error.to_string()))?;
-                messages.push(AgentMessage::ToolResult {
-                    id: message_id,
-                    tool_call_id: ToolCallId::new(result.tool_call_id.clone()).map_err(
-                        |error| {
-                            HarnessError::invalid_state(format!(
-                                "durable tool-result call ID is invalid: {error}"
-                            ))
-                        },
-                    )?,
-                    tool_name: result.tool_name.clone(),
-                    content,
-                    details: details.map(SerializedJson::new),
-                    usage: Box::new(Some(tea_core::state::Usage {
-                        total_tokens: result.usage.total_tokens,
-                        input_tokens: result.usage.input_tokens,
-                        output_tokens: result.usage.output_tokens,
-                        reasoning_tokens: result.usage.reasoning_tokens,
-                        cache_read_tokens: result.usage.cache_read_tokens,
-                        cache_write_tokens: result.usage.cache_write_tokens,
-                        cost: result.usage.cost.clone(),
-                    })),
-                    added_tool_names: Vec::new(),
-                    terminate: result.terminate,
-                    is_error: result.is_error,
-                    failure: None,
-                });
-            }
-            SessionEntry::ModelChanged(_)
-            | SessionEntry::ThinkingChanged(_)
-            | SessionEntry::ToolActivationChanged(_)
-            | SessionEntry::HarnessRevisionChanged(_) => {}
-            SessionEntry::PluginMemory(tea_session::PluginMemoryEntry {
-                plugin_id,
-                kind,
-                content: PayloadRef::Inline(content),
-                visibility: MemoryVisibility::ModelVisible,
-                ..
-            }) => {
-                let content = content.to_json_string().map_err(|error| {
-                    HarnessError::invalid_state(format!(
-                        "model-visible plugin memory {}:{} cannot encode: {error}",
-                        plugin_id, kind,
-                    ))
-                })?;
-                messages.push(AgentMessage::User {
-                    id: message_id,
-                    content: format!("[Plugin memory {plugin_id}:{kind}]\n{content}"),
-                });
-            }
-            SessionEntry::PluginMemory(tea_session::PluginMemoryEntry {
-                visibility: MemoryVisibility::ModelVisible,
-                content: PayloadRef::Artifact { .. },
-                ..
-            })
-            | SessionEntry::Compaction(_)
-            | SessionEntry::BranchSummary(_)
-            | SessionEntry::Custom(tea_session::CustomEntry {
-                model_visible: true,
-                ..
-            }) => {
-                return Err(HarnessError::invalid_state(format!(
-                    "model-visible durable entry {} requires a harness context derivation policy",
-                    entry.header.id
-                )));
-            }
-            SessionEntry::PluginMemory(_) | SessionEntry::Custom(_) => {}
-        }
-    }
-    Ok(messages)
+    Ok(derive_default_snapshot_context(snapshot, lane.clone())?.messages)
 }
 
 fn recovery_tool_start<'a>(
@@ -6691,8 +6819,8 @@ fn validate_host_apply_diagnostic(diagnostic: &str) -> Result<(), HarnessError> 
     Ok(())
 }
 
-/// Return only the unresolved source-order suffix of the final assistant tool
-/// batch. A crash may happen after a result prefix committed, especially when
+/// Return only unresolved calls in source order from the final assistant tool
+/// batch. A crash may happen after any result subset committed, especially when
 /// parallel tools settle; those entries remain part of restored context and
 /// must not cause the host effect to execute again.
 fn recovery_tool_calls(
@@ -6714,34 +6842,22 @@ fn recovery_tool_calls(
     };
     let trailing_results = snapshot.entries()[assistant_index.saturating_add(1)..]
         .iter()
+        .filter(|entry| entry.lane_id == snapshot.entries()[assistant_index].lane_id)
+        .take_while(|entry| !matches!(&entry.body, SessionEntry::AssistantMessage(_) | SessionEntry::UserMessage(_)))
         .filter_map(|entry| match &entry.body {
             SessionEntry::ToolResult(result) => Some(result),
             _ => None,
         })
         .collect::<Vec<_>>();
-    let mut first_missing = None;
-    for (index, call) in assistant.tool_calls.iter().enumerate() {
-        let result = trailing_results
-            .iter()
-            .find(|result| result.tool_call_id == call.id && result.tool_name == call.name);
-        match (first_missing, result) {
-            (None, Some(_)) => {}
-            (None, None) => first_missing = Some(index),
-            (Some(_), None) => {}
-            (Some(_), Some(_)) => {
-                return Err(HarnessError::invalid_state(
-                    "durable recovered tool results are not a source-order prefix",
-                ));
-            }
-        }
-    }
-    let first_missing = first_missing.ok_or_else(|| {
-        HarnessError::invalid_state("recovery assistant has no unresolved tool calls")
-    })?;
-    assistant
+    let missing = assistant
         .tool_calls
         .iter()
-        .skip(first_missing)
+        .filter(|call| !trailing_results.iter().any(|result| result.tool_call_id == call.id && result.tool_name == call.name))
+        .collect::<Vec<_>>();
+    if missing.is_empty() {
+        return Err(HarnessError::invalid_state("recovery assistant has no unresolved tool calls"));
+    }
+    missing.into_iter()
         .map(|call| {
             Ok(AgentToolCall {
                 id: ToolCallId::new(call.id.clone()).map_err(|error| {

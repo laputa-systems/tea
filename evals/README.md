@@ -7,7 +7,8 @@ The maintained evaluation surfaces are under `evals/quality`:
 - `multiedit-disabled` materializes, runs, and grades the repository-owned
   isolated hidden-runner design eval with an unavailable legacy batch-edit
   capability.
-- `coding` is an explicit provider-opt-in check for the pinned Express cases.
+- `prepare-cache` may explicitly fetch the historical pinned Express source
+  cache, but it never performs inference.
 
 The core fixture corpus is owned by the crate at
 `crates/tea-core/fixtures`. The quality harness lowers its declarative
@@ -20,9 +21,13 @@ Run the provider-free gate with:
 PYTHONDONTWRITEBYTECODE=1 python3 -m evals.quality fast --out /tmp/pi-quality-fast
 ```
 
-The coding tier requires an explicit model, environment file, cache root, and
-workspace root. See [`quality/README.md`](quality/README.md) for its setup and
-scope.
+The former coding and full commands are retired: their Rust adapter no longer
+exists, and an arbitrary model identifier cannot satisfy the repository's
+free-only verification contract. The only proposed live boundary is the
+feature-gated Rust guard described in
+[`docs/verification.md`](../docs/verification.md). Its explicit public-fixture
+headless transport exercise remains semantically `BLOCKED` until dedicated
+drivers prove every live-case oracle.
 
 `controller.py` and `baselines.example.json` remain a generic, caller-supplied
 multi-baseline controller contract. The checked-in provider-specific manifests

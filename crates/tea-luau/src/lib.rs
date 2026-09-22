@@ -37,7 +37,7 @@ mod tests {
         LuaPolicy, LuaPolicyHookSet, PolicyContextEntry, PolicyContextInput, PolicyError,
         PolicyLimits, PolicyPromptSection,
     };
-    use crate::bundle::{Bundle, BundleManifest, BUNDLE_ABI_VERSION};
+    use crate::bundle::{Bundle, BundleManifest, BUNDLE_ABI_V3_VERSION};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use tea_core::error::HookError;
@@ -162,7 +162,7 @@ mod tests {
     #[test]
     fn policy_bundle_resolves_only_its_closed_relative_module_graph() {
         let bundle = Bundle::from_sources(
-            BundleManifest::new(BUNDLE_ABI_VERSION, "main.luau", std::iter::empty::<&str>())
+            BundleManifest::new(BUNDLE_ABI_V3_VERSION, "main.luau", std::iter::empty::<&str>())
                 .expect("manifest is valid"),
             [
                 (
@@ -189,10 +189,10 @@ mod tests {
     }
 
     #[test]
-    fn v1_bundle_exposes_named_prompt_sections() {
+    fn v3_bundle_exposes_named_prompt_sections() {
         let bundle = Bundle::from_sources(
-            BundleManifest::new(BUNDLE_ABI_VERSION, "main.luau", std::iter::empty::<&str>())
-                .expect("v1 manifest is valid"),
+            BundleManifest::new(BUNDLE_ABI_V3_VERSION, "main.luau", std::iter::empty::<&str>())
+                .expect("v3 manifest is valid"),
             [(
                 "main.luau",
                 r#"
@@ -208,9 +208,9 @@ mod tests {
             "#,
             )],
         )
-        .expect("v1 bundle is closed");
+        .expect("v3 bundle is closed");
 
-        let policy = LuaPolicy::load_bundle(bundle).expect("v1 policy must load");
+        let policy = LuaPolicy::load_bundle(bundle).expect("v3 policy must load");
         assert_eq!(
             policy.prompt_sections(),
             &[PolicyPromptSection {
@@ -225,10 +225,10 @@ mod tests {
     }
 
     #[test]
-    fn v1_bundle_rejects_duplicate_named_prompt_sections() {
+    fn v3_bundle_rejects_duplicate_named_prompt_sections() {
         let bundle = Bundle::from_sources(
-            BundleManifest::new(BUNDLE_ABI_VERSION, "main.luau", std::iter::empty::<&str>())
-                .expect("v1 manifest is valid"),
+            BundleManifest::new(BUNDLE_ABI_V3_VERSION, "main.luau", std::iter::empty::<&str>())
+                .expect("v3 manifest is valid"),
             [(
                 "main.luau",
                 r#"
@@ -241,7 +241,7 @@ mod tests {
             "#,
             )],
         )
-        .expect("v1 source tree is closed");
+        .expect("v3 source tree is closed");
 
         assert!(matches!(
             LuaPolicy::load_bundle(bundle),
@@ -250,10 +250,10 @@ mod tests {
     }
 
     #[test]
-    fn v1_before_tool_can_normalize_arguments_without_bypassing_core_validation() {
+    fn v3_before_tool_can_normalize_arguments_without_bypassing_core_validation() {
         let bundle = Bundle::from_sources(
-            BundleManifest::new(BUNDLE_ABI_VERSION, "main.luau", std::iter::empty::<&str>())
-                .expect("v1 manifest is valid"),
+            BundleManifest::new(BUNDLE_ABI_V3_VERSION, "main.luau", std::iter::empty::<&str>())
+                .expect("v3 manifest is valid"),
             [(
                 "main.luau",
                 r#"
@@ -272,9 +272,9 @@ mod tests {
             "#,
             )],
         )
-        .expect("v1 source tree is closed");
+        .expect("v3 source tree is closed");
 
-        let policy = LuaPolicy::load_bundle(bundle).expect("v1 policy must load");
+        let policy = LuaPolicy::load_bundle(bundle).expect("v3 policy must load");
         assert_eq!(
             policy.before_tool_call(&call("inspect")),
             Ok(BeforeToolCall::Normalize {
@@ -284,10 +284,10 @@ mod tests {
     }
 
     #[test]
-    fn v1_after_tool_projects_only_model_visible_fields_and_annotations() {
+    fn v3_after_tool_projects_only_model_visible_fields_and_annotations() {
         let bundle = Bundle::from_sources(
-            BundleManifest::new(BUNDLE_ABI_VERSION, "main.luau", std::iter::empty::<&str>())
-                .expect("v1 manifest is valid"),
+            BundleManifest::new(BUNDLE_ABI_V3_VERSION, "main.luau", std::iter::empty::<&str>())
+                .expect("v3 manifest is valid"),
             [(
                 "main.luau",
                 r#"
@@ -307,8 +307,8 @@ mod tests {
             "#,
             )],
         )
-        .expect("v1 source tree is closed");
-        let policy = LuaPolicy::load_bundle(bundle).expect("v1 policy must load");
+        .expect("v3 source tree is closed");
+        let policy = LuaPolicy::load_bundle(bundle).expect("v3 policy must load");
         let raw = AgentToolResult {
             tool_call_id: call("inspect").id,
             content: "raw tool output".into(),
@@ -344,10 +344,10 @@ mod tests {
     }
 
     #[test]
-    fn v1_after_tool_rejects_unknown_behavior_changing_fields() {
+    fn v3_after_tool_rejects_unknown_behavior_changing_fields() {
         let bundle = Bundle::from_sources(
-            BundleManifest::new(BUNDLE_ABI_VERSION, "main.luau", std::iter::empty::<&str>())
-                .expect("v1 manifest is valid"),
+            BundleManifest::new(BUNDLE_ABI_V3_VERSION, "main.luau", std::iter::empty::<&str>())
+                .expect("v3 manifest is valid"),
             [(
                 "main.luau",
                 r#"
@@ -360,8 +360,8 @@ mod tests {
             "#,
             )],
         )
-        .expect("v1 source tree is closed");
-        let policy = LuaPolicy::load_bundle(bundle).expect("v1 policy must load");
+        .expect("v3 source tree is closed");
+        let policy = LuaPolicy::load_bundle(bundle).expect("v3 policy must load");
         let raw = AgentToolResult {
             tool_call_id: call("inspect").id,
             content: "raw".into(),
@@ -380,10 +380,10 @@ mod tests {
     }
 
     #[test]
-    fn v1_context_projection_receives_metadata_only_and_returns_a_bounded_patch() {
+    fn v3_context_projection_receives_metadata_only_and_returns_a_bounded_patch() {
         let bundle = Bundle::from_sources(
-            BundleManifest::new(BUNDLE_ABI_VERSION, "main.luau", std::iter::empty::<&str>())
-                .expect("v1 manifest is valid"),
+            BundleManifest::new(BUNDLE_ABI_V3_VERSION, "main.luau", std::iter::empty::<&str>())
+                .expect("v3 manifest is valid"),
             [(
                 "main.luau",
                 r#"
@@ -407,7 +407,7 @@ mod tests {
             "#,
             )],
         )
-        .expect("v1 source tree is closed");
+        .expect("v3 source tree is closed");
         let policy = LuaPolicy::load_bundle(bundle).expect("context policy loads");
         let patch = policy
             .context_projection(&PolicyContextInput {
@@ -438,10 +438,10 @@ mod tests {
     }
 
     #[test]
-    fn v1_resume_hooks_persist_bounded_state_and_receive_only_their_own_values() {
+    fn v3_resume_hooks_persist_bounded_state_and_receive_only_their_own_values() {
         let bundle = Bundle::from_sources(
-            BundleManifest::new(BUNDLE_ABI_VERSION, "main.luau", std::iter::empty::<&str>())
-                .expect("v1 manifest is valid"),
+            BundleManifest::new(BUNDLE_ABI_V3_VERSION, "main.luau", std::iter::empty::<&str>())
+                .expect("v3 manifest is valid"),
             [(
                 "main.luau",
                 r#"
@@ -480,8 +480,8 @@ mod tests {
             "#,
             )],
         )
-        .expect("v1 source tree is closed");
-        let policy = LuaPolicy::load_bundle(bundle).expect("v1 policy must load");
+        .expect("v3 source tree is closed");
+        let policy = LuaPolicy::load_bundle(bundle).expect("v3 policy must load");
 
         let operation = policy
             .before_operation_resume_data()
@@ -512,7 +512,7 @@ mod tests {
     #[test]
     fn policy_bundle_applies_source_limit_to_every_module() {
         let bundle = Bundle::from_sources(
-            BundleManifest::new(BUNDLE_ABI_VERSION, "main.luau", std::iter::empty::<&str>())
+            BundleManifest::new(BUNDLE_ABI_V3_VERSION, "main.luau", std::iter::empty::<&str>())
                 .expect("manifest is valid"),
             [
                 ("main.luau", "return require('./prompt.luau')"),

@@ -16,6 +16,7 @@ use tea_core::runtime::{
     SubagentModel, WorkspaceApplyOutcome, WorkspaceDelta, WorkspaceFinalization,
     WorkspaceLease as CoreWorkspaceLease,
 };
+use tea_core::scheduler::ModelProvider;
 use tea_core::state::{ModelDescriptor, ThinkingLevel};
 use tea_session::{
     AgentId, ArtifactId, ArtifactStore, SessionId, WorkspaceDeltaId, WorkspaceLeaseId,
@@ -39,13 +40,30 @@ pub(crate) struct TuiSubagentHost {
     session_directory: PathBuf,
     session_id: SessionId,
     logical_workspace_label: String,
-    factory: Arc<ProviderFactory>,
+    provider_source: ChildProviderSource,
     artifacts: Arc<dyn ArtifactStore>,
     child_harnesses: BTreeMap<ChildHarnessKey, HarnessIdentity>,
     coding_capability_router: Option<CodingCapabilityRouter>,
     engine: GitWorkspaceEngine,
     leases: Mutex<BTreeMap<WorkspaceLeaseId, GitWorkspaceLease>>,
     deltas: Mutex<BTreeMap<WorkspaceDeltaId, GitWorkspaceDelta>>,
+}
+
+/// Child-model authority used only while reconstructing lane-local services.
+///
+/// Normal terminal sessions resolve a configured adapter lazily through the
+/// terminal provider factory. The feature-only verification path instead
+/// receives an already guarded child provider directly, so it cannot discover
+/// a credential, select a fallback model, or accidentally reuse the root
+/// consumer's role-labelled provider.
+#[derive(Clone)]
+enum ChildProviderSource {
+    Factory(Arc<ProviderFactory>),
+    #[cfg(feature = "live-verification")]
+    LiveVerification {
+        descriptor: ModelDescriptor,
+        provider: Arc<dyn ModelProvider>,
+    },
 }
 
 impl std::fmt::Debug for TuiSubagentHost {
@@ -92,12 +110,64 @@ impl TuiSubagentHost {
         child_harnesses: impl IntoIterator<Item = (ModelDescriptor, HarnessIdentity)>,
         coding_capability_router: Option<CodingCapabilityRouter>,
     ) -> Self {
+        Self::with_provider_source(
+            workspace,
+            session_directory,
+            session_id,
+            logical_workspace_label,
+            ChildProviderSource::Factory(factory),
+            artifacts,
+            child_harnesses,
+            coding_capability_router,
+        )
+    }
+
+    /// Bind the live-verification child role to the exact already-guarded
+    /// provider supplied by the verification factory. This has no terminal
+    /// configuration or provider-factory fallback.
+    #[cfg(feature = "live-verification")]
+    pub(crate) fn new_live_verification(
+        workspace: PathBuf,
+        session_directory: PathBuf,
+        session_id: SessionId,
+        logical_workspace_label: String,
+        descriptor: ModelDescriptor,
+        provider: Arc<dyn ModelProvider>,
+        artifacts: Arc<dyn ArtifactStore>,
+        child_harnesses: impl IntoIterator<Item = (ModelDescriptor, HarnessIdentity)>,
+        coding_capability_router: Option<CodingCapabilityRouter>,
+    ) -> Self {
+        Self::with_provider_source(
+            workspace,
+            session_directory,
+            session_id,
+            logical_workspace_label,
+            ChildProviderSource::LiveVerification {
+                descriptor,
+                provider,
+            },
+            artifacts,
+            child_harnesses,
+            coding_capability_router,
+        )
+    }
+
+    fn with_provider_source(
+        workspace: PathBuf,
+        session_directory: PathBuf,
+        session_id: SessionId,
+        logical_workspace_label: String,
+        provider_source: ChildProviderSource,
+        artifacts: Arc<dyn ArtifactStore>,
+        child_harnesses: impl IntoIterator<Item = (ModelDescriptor, HarnessIdentity)>,
+        coding_capability_router: Option<CodingCapabilityRouter>,
+    ) -> Self {
         Self {
             workspace,
             session_directory,
             session_id,
             logical_workspace_label,
-            factory,
+            provider_source,
             artifacts,
             child_harnesses: child_harnesses
                 .into_iter()
@@ -161,11 +231,25 @@ impl TuiSubagentHost {
             .get(&ChildHarnessKey::from(&model.descriptor))
             .cloned()
             .ok_or_else(|| host_error("selected child model has no pre-seeded harness identity"))?;
-        let configured = self
-            .factory
-            .configured(&model.descriptor)
-            .map_err(app_error)?;
-        let compactor = self.factory.compactor(&configured).map_err(app_error)?;
+        let (provider, compactor) = match &self.provider_source {
+            ChildProviderSource::Factory(factory) => {
+                let configured = factory.configured(&model.descriptor).map_err(app_error)?;
+                let compactor = factory.compactor(&configured).map_err(app_error)?;
+                (configured.provider, Some(compactor))
+            }
+            #[cfg(feature = "live-verification")]
+            ChildProviderSource::LiveVerification {
+                descriptor,
+                provider,
+            } => {
+                if &model.descriptor != descriptor {
+                    return Err(host_error(
+                        "live verification child model differs from its injected descriptor",
+                    ));
+                }
+                (Arc::clone(provider), None)
+            }
+        };
         if let Some(router) = &self.coding_capability_router {
             let coding_host = CodingHost::with_operations(
                 lease.worktree_path(),
@@ -189,14 +273,16 @@ impl TuiSubagentHost {
             .context_window
             .map(automatic_compaction_policy)
             .unwrap_or_else(AutomaticCompactionPolicy::disabled);
-        let runtime_services = RuntimeServices::from_agent_configuration(
-            Arc::clone(&configured.provider),
+        let mut runtime_services = RuntimeServices::from_agent_configuration(
+            provider,
             configuration,
         )
         .model(model.descriptor.clone())
         .thinking_level(thinking)
-        .automatic_compaction(automatic_compaction)
-        .compactor(compactor);
+        .automatic_compaction(automatic_compaction);
+        if let Some(compactor) = compactor {
+            runtime_services = runtime_services.compactor(compactor);
+        }
         Ok(PreparedSubagent {
             workspace: CoreWorkspaceLease {
                 id: lease.workspace_lease_id().clone(),

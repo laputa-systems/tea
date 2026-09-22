@@ -6,10 +6,13 @@
 //! only when the owning [`CompactionHandle`] is still active and uncancelled.
 
 use crate::agent::{ActiveRun, Agent, AgentInner};
+use crate::effect::{
+    CompactionProviderEffectOutcome, DurableWriteRequest, EffectOutcome, EffectSubject,
+};
 use crate::error::CoreError;
-use crate::event::{AgentEvent, AgentEventKind, CompactionOutcome};
+use crate::event::{AgentEventKind, CompactionOutcome};
 use crate::run::RunHandle;
-use crate::scheduler::CancellationToken;
+use crate::scheduler::{CancellationToken, ModelRequest};
 use crate::state::{
     AgentMessage, AgentPhase, MessageId, ModelDescriptor, RunPhase, RunState, StopReason,
 };
@@ -19,6 +22,7 @@ use std::fmt;
 use std::future::Future;
 use std::num::NonZeroU64;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// Version of the context shape supplied to [`Compactor`].
@@ -160,6 +164,22 @@ pub struct CompactionOperation {
     pub overflow_retry_ordinal: Option<u32>,
     /// Whether a successful commit resumes a previously interrupted provider request.
     pub retry_provider_request: bool,
+}
+
+/// The complete canonical transition proposed by one compaction operation.
+///
+/// `source_messages` remains owned by the agent until the durable host has
+/// accepted this write. A durable host uses it to prove that its append-only
+/// context record replaces the same effective source that core validated;
+/// raw session history is never deleted by this value.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CompactionReplacement {
+    /// Immutable operation identity and strategy selection.
+    pub operation: CompactionOperation,
+    /// Canonical source captured before the compactor ran.
+    pub source_messages: Vec<AgentMessage>,
+    /// Validated canonical context that will replace `source_messages`.
+    pub replacement_messages: Vec<AgentMessage>,
 }
 
 /// Content-free source metadata for a compaction attempt.
@@ -644,6 +664,44 @@ impl std::error::Error for CompactionError {}
 pub type CompactionFuture<'a> =
     Pin<Box<dyn Future<Output = Result<CompactionResult, CompactionError>> + Send + 'a>>;
 
+/// Opaque token for one compactor-owned provider request admitted by core's
+/// effect gate.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct CompactionRequestTicket(u64);
+
+/// Future returned while a compactor asks the core to admit one provider
+/// request.
+pub type CompactionRequestBeginFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<CompactionRequestTicket, CompactionError>> + Send + 'a>>;
+
+/// Future returned while a compactor settles one admitted provider request.
+pub type CompactionRequestSettlementFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<(), CompactionError>> + Send + 'a>>;
+
+/// Effect boundary available to a compactor for a physical summary request.
+///
+/// Provider-backed compactors must call `begin_provider_request` with the
+/// exact prepared [`ModelRequest`] before transport dispatch, then settle the
+/// returned ticket exactly once. Deterministic compactors that make no
+/// provider request intentionally never call this port. One compaction
+/// operation admits at most one physical request because its durable
+/// replacement links exactly that request's intent and settlement.
+pub trait CompactionRequestPort: Send + Sync {
+    /// Persist intent before dispatching this exact summary-provider request.
+    fn begin_provider_request<'a>(
+        &'a self,
+        request: ModelRequest,
+    ) -> CompactionRequestBeginFuture<'a>;
+
+    /// Persist the terminal outcome before exposing a replacement derived
+    /// from this request.
+    fn settle_provider_request<'a>(
+        &'a self,
+        ticket: CompactionRequestTicket,
+        outcome: CompactionProviderEffectOutcome,
+    ) -> CompactionRequestSettlementFuture<'a>;
+}
+
 /// A caller-supplied policy and execution boundary for manual compaction.
 ///
 /// Implementations may call a model, use a local algorithm, or reject the
@@ -666,6 +724,22 @@ pub trait Compactor: Send + Sync {
         cancellation: CancellationToken,
     ) -> CompactionFuture<'a>;
 
+    /// Produce a replacement while admitting every physical provider request
+    /// through the core-owned compaction request port.
+    ///
+    /// The default preserves the original provider-agnostic compactor API for
+    /// deterministic and caller-owned implementations that do not dispatch a
+    /// provider request. Provider-backed compactors must override this method
+    /// instead of invoking their transport through [`Self::compact`].
+    fn compact_with_requests<'a>(
+        &'a self,
+        context: CompactionContext,
+        cancellation: CancellationToken,
+        _requests: &'a dyn CompactionRequestPort,
+    ) -> CompactionFuture<'a> {
+        self.compact(context, cancellation)
+    }
+
     /// Produce an automatic replacement using the core-selected safe split.
     ///
     /// Existing manual compactors remain valid: by default they receive the
@@ -680,6 +754,147 @@ pub trait Compactor: Send + Sync {
     ) -> CompactionFuture<'a> {
         self.compact(context, cancellation)
     }
+
+    /// Automatic counterpart to [`Self::compact_with_requests`].
+    ///
+    /// The default preserves existing automatic compactors. Provider-backed
+    /// implementations override this method when their automatic split also
+    /// dispatches a summary request.
+    fn compact_automatic_with_requests<'a>(
+        &'a self,
+        context: CompactionContext,
+        request: AutomaticCompactionRequest,
+        cancellation: CancellationToken,
+        _requests: &'a dyn CompactionRequestPort,
+    ) -> CompactionFuture<'a> {
+        self.compact_automatic(context, request, cancellation)
+    }
+}
+
+/// Core-owned implementation of the compactor provider port for one
+/// operation. Tickets are deliberately private to this transaction so a
+/// compactor cannot settle an unrelated model request.
+pub(crate) struct CoreCompactionRequestPort<'a> {
+    run: &'a RunHandle,
+    operation: CompactionOperation,
+    next_ticket: AtomicU64,
+    provider_request_admitted: AtomicBool,
+    pending: Mutex<BTreeMap<CompactionRequestTicket, crate::run::EffectTicket>>,
+}
+
+impl<'a> CoreCompactionRequestPort<'a> {
+    pub(crate) fn new(run: &'a RunHandle, operation: CompactionOperation) -> Self {
+        Self {
+            run,
+            operation,
+            next_ticket: AtomicU64::new(0),
+            provider_request_admitted: AtomicBool::new(false),
+            pending: Mutex::new(BTreeMap::new()),
+        }
+    }
+
+    pub(crate) async fn settle_unfinished(&self, cancelled: bool) -> Result<(), CompactionError> {
+        let pending = {
+            let mut pending = self
+                .pending
+                .lock()
+                .expect("compaction request port mutex poisoned");
+            std::mem::take(&mut *pending)
+        };
+        if pending.is_empty() {
+            return Ok(());
+        }
+        let outcome = if cancelled {
+            CompactionProviderEffectOutcome::Cancelled
+        } else {
+            CompactionProviderEffectOutcome::Failed {
+                message: "compactor returned without settling an admitted provider request".into(),
+            }
+        };
+        for (_, ticket) in pending {
+            self.run
+                .settle_effect(
+                    ticket,
+                    EffectOutcome::CompactionProviderRequest(outcome.clone()),
+                )
+                .await
+                .map_err(compaction_effect_error)?;
+        }
+        Err(CompactionError::failed(
+            "compactor returned without settling an admitted provider request",
+        ))
+    }
+}
+
+impl CompactionRequestPort for CoreCompactionRequestPort<'_> {
+    fn begin_provider_request<'a>(
+        &'a self,
+        request: ModelRequest,
+    ) -> CompactionRequestBeginFuture<'a> {
+        Box::pin(async move {
+            if self
+                .provider_request_admitted
+                .swap(true, Ordering::AcqRel)
+            {
+                return Err(CompactionError::failed(
+                    "a compaction operation may admit only one provider request",
+                ));
+            }
+            let effect = match self
+                .run
+                .begin_effect(EffectSubject::CompactionProviderRequest {
+                    operation: self.operation.clone(),
+                    request,
+                })
+                .await
+            {
+                Ok(effect) => effect,
+                Err(error) => {
+                    self.provider_request_admitted.store(false, Ordering::Release);
+                    return Err(compaction_effect_error(error));
+                }
+            };
+            let ticket = CompactionRequestTicket(
+                self.next_ticket
+                    .fetch_add(1, Ordering::Relaxed)
+                    .saturating_add(1),
+            );
+            let previous = self
+                .pending
+                .lock()
+                .expect("compaction request port mutex poisoned")
+                .insert(ticket, effect);
+            debug_assert!(previous.is_none(), "compaction ticket IDs are monotonic");
+            Ok(ticket)
+        })
+    }
+
+    fn settle_provider_request<'a>(
+        &'a self,
+        ticket: CompactionRequestTicket,
+        outcome: CompactionProviderEffectOutcome,
+    ) -> CompactionRequestSettlementFuture<'a> {
+        Box::pin(async move {
+            let effect = self
+                .pending
+                .lock()
+                .expect("compaction request port mutex poisoned")
+                .remove(&ticket)
+                .ok_or_else(|| {
+                    CompactionError::failed(
+                        "compactor settled a provider request that was not admitted",
+                    )
+                })?;
+            self.run
+                .settle_effect(effect, EffectOutcome::CompactionProviderRequest(outcome))
+                .await
+                .map_err(compaction_effect_error)
+        })
+    }
+}
+
+fn compaction_effect_error(error: CoreError) -> CompactionError {
+    CompactionError::failed(format!("compaction effect gate rejected the operation: {error}"))
 }
 
 /// A reserved, caller-driven manual compaction operation.
@@ -708,8 +923,8 @@ impl CompactionHandle {
         self.run.id()
     }
 
-    /// Return the ordered lifecycle events emitted by this compaction.
-    pub fn events(&self) -> Vec<AgentEvent> {
+    /// Return the bounded diagnostic lifecycle-event suffix for this compaction.
+    pub fn events(&self) -> crate::run::RunEventDiagnostics {
         self.run.events()
     }
 
@@ -820,13 +1035,24 @@ impl CompactionHandle {
         }
 
         let source_history_revision = context.source_history_revision;
-        let replacement = match self
+        let source_messages = context.messages.clone();
+        let request_port = CoreCompactionRequestPort::new(&self.run, operation.clone());
+        let compact_result = self
             .compactor
-            .compact(context, self.run.cancellation.clone())
-            .await
-        {
+            .compact_with_requests(context, self.run.cancellation.clone(), &request_port)
+            .await;
+        let port_result = request_port
+            .settle_unfinished(self.run.cancellation.is_cancelled())
+            .await;
+        let replacement = match compact_result {
             Ok(replacement) => replacement,
             Err(error) => {
+                if let Err(port_error) = port_result {
+                    let _ = self
+                        .emit_lifecycle_terminal(&agent, operation.id, CompactionTerminalOutcome::Failed)
+                        .await;
+                    return self.settle_failure(&agent, port_error).await;
+                }
                 let outcome = if matches!(error, CompactionError::TimedOut { .. }) {
                     CompactionTerminalOutcome::TimedOut
                 } else {
@@ -838,6 +1064,12 @@ impl CompactionHandle {
                 return self.settle_failure(&agent, error).await;
             }
         };
+        if let Err(error) = port_result {
+            let _ = self
+                .emit_lifecycle_terminal(&agent, operation.id, CompactionTerminalOutcome::Failed)
+                .await;
+            return self.settle_failure(&agent, error).await;
+        }
         if self.run.cancellation.is_cancelled() {
             let _ = self
                 .emit_lifecycle_terminal(&agent, operation.id, CompactionTerminalOutcome::Cancelled)
@@ -910,13 +1142,15 @@ impl CompactionHandle {
         }
 
         let retained_message_count = replacement.messages.len();
-        if let Err(error) = commit_replacement(
+        if let Err(error) = commit_replacement_durably(
             &agent,
-            self.id(),
-            &self.run.cancellation,
-            source_history_revision,
+            &self.run,
+            operation.clone(),
+            source_messages,
             replacement.messages,
-        ) {
+        )
+        .await
+        {
             return match error {
                 CoreError::Cancelled => {
                     let _ = self
@@ -948,6 +1182,9 @@ impl CompactionHandle {
             .await
         {
             return self.settle_emit_failure(error);
+        }
+        if self.run.cancellation.is_cancelled() {
+            return self.settle_cancelled(&agent).await;
         }
         if let Err(error) = self
             .run
@@ -1143,6 +1380,7 @@ pub(crate) fn snapshot_context(agent: &AgentInner) -> CompactionContext {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn commit_replacement(
     agent: &AgentInner,
     run_id: crate::state::RunId,
@@ -1151,6 +1389,113 @@ pub(crate) fn commit_replacement(
     replacement: Vec<AgentMessage>,
 ) -> Result<(), CoreError> {
     let mut state = agent.state.lock().expect("agent state mutex poisoned");
+    validate_replacement_precondition(
+        &state,
+        run_id,
+        cancellation,
+        expected_history_revision,
+    )?;
+    state.replace_messages(replacement);
+    Ok(())
+}
+
+/// Persist a replacement through the configured host gate before making it
+/// observable in the agent's canonical state.
+///
+/// The agent's single-run ownership makes the source stable across the gate
+/// wait: public mutation APIs reject active agents and queued steering is not
+/// canonical history until this same run drains it. The preflight still makes
+/// cancellation and stale-source failures fail before a durable host writes a
+/// semantic replacement; the final CAS remains the authoritative publication
+/// check.
+pub(crate) async fn commit_replacement_durably(
+    agent: &AgentInner,
+    run: &RunHandle,
+    operation: CompactionOperation,
+    source_messages: Vec<AgentMessage>,
+    replacement_messages: Vec<AgentMessage>,
+) -> Result<(), CoreError> {
+    reserve_durable_replacement_commit(agent, run, operation.source_history_revision)?;
+    let write = run
+        .begin_effect(EffectSubject::DurableWrite {
+            write: DurableWriteRequest::CompactionReplacement {
+                replacement: CompactionReplacement {
+                    operation: operation.clone(),
+                    source_messages,
+                    replacement_messages: replacement_messages.clone(),
+                },
+            },
+        })
+        .await?;
+    run.settle_effect(
+        write,
+        EffectOutcome::DurableWrite(crate::effect::EffectCompletion::Succeeded),
+    )
+    .await?;
+    publish_durable_replacement(
+        agent,
+        run.id(),
+        operation.source_history_revision,
+        replacement_messages,
+    )
+}
+
+/// Select cancellation or durable publication before entering the bounded
+/// non-cancellable replacement segment.
+///
+/// A successful reservation means a later cancellation must settle after the
+/// host accepts the write. Otherwise a committed `CompactionEntry` could
+/// change context after reopen while the live agent retained its old history.
+/// The final publication therefore intentionally accepts a cancelling run
+/// with the same owner; cancellation before this check still leaves both
+/// durable and live context untouched.
+fn reserve_durable_replacement_commit(
+    agent: &AgentInner,
+    run: &RunHandle,
+    expected_history_revision: u64,
+) -> Result<(), CoreError> {
+    let state = agent.state.lock().expect("agent state mutex poisoned");
+    validate_replacement_precondition(
+        &state,
+        run.id(),
+        &run.cancellation,
+        expected_history_revision,
+    )
+}
+
+/// Adopt a replacement whose durable write already succeeded.
+///
+/// Do not re-check cancellation here: the reservation established the
+/// cancellation winner before the host was allowed to commit. A cancellation
+/// that arrives afterward still settles the run, but cannot retract a durable
+/// semantic transition or leave process memory divergent from reopen.
+fn publish_durable_replacement(
+    agent: &AgentInner,
+    run_id: crate::state::RunId,
+    expected_history_revision: u64,
+    replacement: Vec<AgentMessage>,
+) -> Result<(), CoreError> {
+    let mut state = agent.state.lock().expect("agent state mutex poisoned");
+    if !matches!(state.phase, AgentPhase::Running(id) | AgentPhase::Cancelling(id) if id == run_id)
+    {
+        return Err(CoreError::Cancelled);
+    }
+    if state.history_revision != expected_history_revision {
+        return Err(CoreError::Compaction(CompactionError::StaleSource {
+            expected_revision: expected_history_revision,
+            actual_revision: state.history_revision,
+        }));
+    }
+    state.replace_messages(replacement);
+    Ok(())
+}
+
+fn validate_replacement_precondition(
+    state: &crate::state::AgentState,
+    run_id: crate::state::RunId,
+    cancellation: &CancellationToken,
+    expected_history_revision: u64,
+) -> Result<(), CoreError> {
     if cancellation.is_cancelled() {
         return Err(CoreError::Cancelled);
     }
@@ -1163,7 +1508,6 @@ pub(crate) fn commit_replacement(
             actual_revision: state.history_revision,
         }));
     }
-    state.replace_messages(replacement);
     Ok(())
 }
 

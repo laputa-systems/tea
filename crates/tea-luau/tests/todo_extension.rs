@@ -5,7 +5,6 @@
 //! `extension.state` capability. They assert model-facing results, durable
 //! state, and the activity projection published on every call.
 
-use std::collections::BTreeMap;
 use std::future::Future;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
@@ -13,7 +12,7 @@ use tea_core::effect::RunProvenance;
 use tea_core::harness::extension::{
     ExtensionCapabilityBindings, ExtensionCommandInput, ExtensionEngine, ExtensionError,
     ExtensionLimits, ExtensionMemoryCollector, ExtensionStateHandle, ExtensionStateStore,
-    ExtensionStateUpdate, ExtensionStateView, ResolvedExtension,
+    ExtensionStateGeneration, ExtensionStateUpdate, ExtensionStateView, ResolvedExtension,
 };
 use tea_core::harness::ExtensionStateCapability;
 use tea_core::hooks::NoHooks;
@@ -22,32 +21,30 @@ use tea_core::tool::{ToolCall, ToolContext, ToolUpdate, ToolUpdateSink};
 use tea_luau::LuauExtensionEngine;
 use tea_protocol::JsonValue;
 
-/// Session-shaped state store: latest value per kind, exactly like the durable
-/// extension-state reduction the supervisor performs.
+/// Session-shaped state store: one whole private value for this extension.
 #[derive(Default)]
 struct MemoryStateStore {
-    latest: Mutex<BTreeMap<String, JsonValue>>,
+    value: Mutex<Option<JsonValue>>,
 }
 
 impl ExtensionStateStore for MemoryStateStore {
     fn read_extension_state(
         &self,
+        _generation: &ExtensionStateGeneration,
         _extension_id: &str,
     ) -> Result<ExtensionStateView, ExtensionError> {
         Ok(ExtensionStateView {
-            latest: self.latest.lock().expect("state store lock").clone(),
+            value: self.value.lock().expect("state store lock").clone(),
         })
     }
 
-    fn append_extension_state(
+    fn replace_extension_state(
         &self,
+        _generation: &ExtensionStateGeneration,
         _extension_id: &str,
         update: ExtensionStateUpdate,
     ) -> Result<(), ExtensionError> {
-        self.latest
-            .lock()
-            .expect("state store lock")
-            .insert(update.kind, update.content);
+        *self.value.lock().expect("state store lock") = Some(update.value);
         Ok(())
     }
 }
@@ -118,7 +115,19 @@ impl TodoFixture {
             .insert(
                 "extension.state",
                 Arc::new(
-                    ExtensionStateCapability::new("todo", handle).expect("portable extension id"),
+                    ExtensionStateCapability::new(
+                        "todo",
+                        handle.for_generation(
+                            ExtensionStateGeneration::from_strings(
+                                "todo-fixture-lane",
+                                "todo-fixture-operation",
+                                "todo-fixture-epoch",
+                                "todo-fixture-revision",
+                            )
+                            .expect("fixture state generation"),
+                        ),
+                    )
+                    .expect("portable extension id"),
                 ),
                 // Exactly the grant the durable host gives this extension.
                 tea_luau::builtins::todo_tool_limits(),
@@ -197,19 +206,12 @@ impl TodoFixture {
     }
 
     fn stored(&self) -> Option<JsonValue> {
-        self.store
-            .latest
-            .lock()
-            .expect("state store lock")
-            .get("todo.state.v1")
-            .cloned()
+        self.store.value.lock().expect("state store lock").clone()
     }
 
     fn install(&self, state: &str) {
-        self.store.latest.lock().expect("state store lock").insert(
-            "todo.state.v1".into(),
-            JsonValue::parse(state).expect("fixture state is valid JSON"),
-        );
+        *self.store.value.lock().expect("state store lock") =
+            Some(JsonValue::parse(state).expect("fixture state is valid JSON"));
     }
 
     fn todos_command(&self) -> String {
@@ -223,7 +225,7 @@ impl TodoFixture {
             .invoke(&ExtensionCommandInput {
                 arguments: String::new(),
                 state: ExtensionStateView {
-                    latest: self.store.latest.lock().expect("state store lock").clone(),
+                    value: self.store.value.lock().expect("state store lock").clone(),
                 },
             })
             .expect("/todos evaluates")

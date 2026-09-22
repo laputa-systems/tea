@@ -23,7 +23,7 @@ end
 --- activity presentation is the ambient todo UI, and structural or status
 --- changes belong to the model-facing tool.
 local function command(input)
-    local state, unreadable = core.validate_state(input.state[core.STATE_KIND])
+    local state, unreadable = core.validate_state(input.state)
     if state == nil then
         return { notice = "Durable todo state is unreadable (" .. unreadable .. ")" }
     end
@@ -41,6 +41,7 @@ local SCHEMA = table.concat({
 })
 
 return {
+    state_version = "todo.v1",
     prompt_sections = { { id = "todo", content = prompt } },
     commands = {
         {

@@ -227,7 +227,7 @@ mod tests {
     }
 
     #[test]
-    fn agent_attribution_round_trips_json_and_cbor_while_legacy_json_stays_readable() {
+    fn agent_attribution_round_trips_json_and_cbor_and_rejects_legacy_json() {
         let provenance = TraceProvenance {
             lane_id: Some("lane-child".into()),
             agent_id: Some("agent-child".into()),
@@ -250,18 +250,28 @@ mod tests {
         };
         assert_eq!(decoded.provenance, Some(provenance));
 
+        let unassigned = TraceEvent::from(EpisodeHeader::new("episode-main").with_provenance(
+            TraceProvenance {
+                lane_id: Some("lane-main".into()),
+                ..TraceProvenance::default()
+            },
+        ));
+        let mut unassigned_json = JsonLinesSink::new(Vec::new());
+        unassigned_json
+            .append(unassigned)
+            .expect("in-memory JSON write succeeds");
+        let unassigned_encoded =
+            String::from_utf8(unassigned_json.into_inner()).expect("JSON is UTF-8");
+        assert!(unassigned_encoded.contains(r#""agent_id":null"#));
+        assert!(
+            decode_json_line(unassigned_encoded.trim_end()).is_ok(),
+            "an optional agent identity is canonically represented by an explicit null"
+        );
+
         let legacy = r#"{"schema_version":1,"type":"episode_header","episode_id":"legacy","metadata":{},"started_at_ms":null,"provenance":{"session_id":null,"lane_id":"lane-child","operation_id":null,"epoch_id":null,"core_run_id":null,"harness_snapshot_id":null,"harness_revision_id":null,"model_harness_profile_id":null,"experiment_id":null}}"#;
-        let TraceEvent::EpisodeHeader(legacy_header) =
-            decode_json_line(legacy).expect("pre-agent v1 attribution remains readable")
-        else {
-            panic!("legacy header remains a header");
-        };
-        assert_eq!(
-            legacy_header
-                .provenance
-                .as_ref()
-                .and_then(|value| value.agent_id.as_deref()),
-            None
+        assert!(
+            decode_json_line(legacy).is_err(),
+            "a pre-agent header has no canonical representation in this format"
         );
 
         let mut cbor = CborSink::new(Vec::new());

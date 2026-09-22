@@ -17,8 +17,8 @@ use tea_session::{
 
 mod catalog;
 
-const SNAPSHOT_SCHEMA_VERSION: u16 = 1;
-const EXTENSION_ABI_VERSION: u16 = 1;
+const SNAPSHOT_SCHEMA_VERSION: u16 = 2;
+const EXTENSION_ABI_VERSION: u16 = 3;
 
 /// Actor that created a revision or candidate.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -163,6 +163,9 @@ pub struct PluginBundleRef {
     pub tree_id: HarnessTreeId,
     /// Requested capabilities frozen when the bundle was validated.
     pub requested_capabilities: BTreeSet<String>,
+    /// Immutable whole-value state contract, when this bundle requests
+    /// `extension.state`.
+    pub state_version: Option<String>,
 }
 
 /// Exact extension source paired with the immutable bundle reference that
@@ -626,8 +629,15 @@ impl HarnessRepository {
         draft: HarnessCandidateDraft,
     ) -> Result<HarnessCandidateV1, HarnessLineageError> {
         let parent = self.require_revision(&draft.parent_revision_id)?.clone();
+        let parent_snapshot = self.require_snapshot(&parent.snapshot_id)?.clone();
         let snapshot = self.require_snapshot(&draft.proposed_snapshot_id)?.clone();
-        let validation = validate_candidate(&draft, &parent, &snapshot, &self.trees)?;
+        let validation = validate_candidate(
+            &draft,
+            &parent,
+            &parent_snapshot,
+            &snapshot,
+            &self.trees,
+        )?;
         let candidate_id = candidate_id(&draft)?;
         let candidate = HarnessCandidateV1 {
             candidate_id: candidate_id.clone(),
@@ -736,15 +746,17 @@ impl HarnessRepository {
             .collect()
     }
 
-    /// Read immutable manifest-declared capability names for a plugin in one
-    /// staged tree.  This is used while applying structured registry changes;
-    /// model input never supplies a replacement capability set separately.
-    pub fn plugin_capabilities(
+    /// Derive the immutable extension descriptor for one staged plugin tree.
+    ///
+    /// Structured candidate authoring may select only this source-derived
+    /// capability set and state contract; model input cannot replace either
+    /// field separately.
+    pub fn plugin_descriptor(
         &self,
         tree_id: &HarnessTreeId,
         plugin_id: &str,
         resource_limits: &HarnessResourceLimits,
-    ) -> Result<BTreeSet<String>, HarnessLineageError> {
+    ) -> Result<crate::harness::extension::ExtensionDescriptor, HarnessLineageError> {
         let tree = self
             .trees
             .get(tree_id)
@@ -761,8 +773,19 @@ impl HarnessRepository {
         )?;
         self.extension_engine
             .describe(&source)
-            .map(|descriptor| descriptor.requested_capabilities)
             .map_err(extension_error)
+    }
+
+    /// Read immutable manifest-declared capability names for a plugin in one
+    /// staged tree.
+    pub fn plugin_capabilities(
+        &self,
+        tree_id: &HarnessTreeId,
+        plugin_id: &str,
+        resource_limits: &HarnessResourceLimits,
+    ) -> Result<BTreeSet<String>, HarnessLineageError> {
+        self.plugin_descriptor(tree_id, plugin_id, resource_limits)
+            .map(|descriptor| descriptor.requested_capabilities)
     }
 
     /// Borrow an immutable resolved snapshot.
@@ -1111,6 +1134,22 @@ fn collect_plugin_surfaces(
         let descriptor = extension_engine
             .describe(&source)
             .map_err(extension_error)?;
+        if descriptor.requested_capabilities != bundle.requested_capabilities {
+            return Err(HarnessLineageError::Invalid {
+                message: format!(
+                    "plugin {} source capabilities disagree with its immutable bundle reference",
+                    bundle.plugin_id
+                ),
+            });
+        }
+        if descriptor.state_version != bundle.state_version {
+            return Err(HarnessLineageError::Invalid {
+                message: format!(
+                    "plugin {} source state contract disagrees with its immutable bundle reference",
+                    bundle.plugin_id
+                ),
+            });
+        }
         for section in descriptor.prompt_sections {
             surfaces.prompt_sections.push(PromptSectionDescriptor {
                 id: format!("{}.{}", bundle.plugin_id, section.id),
@@ -1248,6 +1287,7 @@ fn is_reserved_tool_name(name: &str) -> bool {
 fn validate_candidate(
     draft: &HarnessCandidateDraft,
     parent: &HarnessRevisionV1,
+    parent_snapshot: &HarnessSnapshotV1,
     snapshot: &HarnessSnapshotV1,
     trees: &BTreeMap<HarnessTreeId, HarnessTree>,
 ) -> Result<CandidateValidation, HarnessLineageError> {
@@ -1320,6 +1360,36 @@ fn validate_candidate(
     }
     if draft.changed_surfaces.is_empty() && parent.snapshot_id != draft.proposed_snapshot_id {
         diagnostics.push("non-noop candidate must name at least one changed surface".into());
+    }
+    let proposed_state_versions = snapshot
+        .spec
+        .ordered_global_plugins
+        .iter()
+        .chain(snapshot.spec.ordered_session_plugins.iter())
+        .map(|bundle| (bundle.plugin_id.as_str(), bundle.state_version.as_deref()))
+        .collect::<BTreeMap<_, _>>();
+    for bundle in parent_snapshot
+        .spec
+        .ordered_global_plugins
+        .iter()
+        .chain(parent_snapshot.spec.ordered_session_plugins.iter())
+    {
+        let Some(previous_version) = bundle.state_version.as_deref() else {
+            continue;
+        };
+        let Some(next_version) = proposed_state_versions.get(bundle.plugin_id.as_str()) else {
+            diagnostics.push(format!(
+                "candidate removes stateful extension {} with state_version {previous_version:?}; state replacement is not supported",
+                bundle.plugin_id,
+            ));
+            continue;
+        };
+        if *next_version != Some(previous_version) {
+            diagnostics.push(format!(
+                "candidate changes extension {} state_version from {previous_version:?} to {next_version:?}; state replacement is not supported",
+                bundle.plugin_id,
+            ));
+        }
     }
     let is_noop = parent.snapshot_id == draft.proposed_snapshot_id;
     if is_noop {
@@ -1590,6 +1660,13 @@ fn write_bundles(writer: &mut CanonicalHashWriter, name: &str, bundles: &[Plugin
     for bundle in bundles {
         writer.string(&format!("{name}_plugin_id"), &bundle.plugin_id);
         writer.string(&format!("{name}_tree_id"), bundle.tree_id.as_str());
+        writer.boolean(
+            &format!("{name}_has_state_version"),
+            bundle.state_version.is_some(),
+        );
+        if let Some(state_version) = &bundle.state_version {
+            writer.string(&format!("{name}_state_version"), state_version);
+        }
         writer.u64(
             &format!("{name}_capability_count"),
             bundle.requested_capabilities.len() as u64,
@@ -1740,6 +1817,49 @@ fn validate_label(value: &str, kind: &str) -> Result<(), HarnessLineageError> {
 mod tests {
     use super::*;
 
+    fn stateful_snapshot(id: &str, state_version: &str) -> HarnessSnapshotV1 {
+        let digest = Digest::from_bytes("state-contract-fixture");
+        HarnessSnapshotV1 {
+            id: HarnessSnapshotId::new(id).expect("fixture snapshot ID"),
+            schema_version: SNAPSHOT_SCHEMA_VERSION,
+            luau_abi_version: EXTENSION_ABI_VERSION,
+            spec: HarnessSnapshotSpec {
+                base_profile_digest: digest,
+                base_system_prompt: "fixture".into(),
+                model_harness_profile: ModelHarnessProfileId::new("fixture-profile")
+                    .expect("fixture profile ID"),
+                self_extension_addendum: None,
+                ordered_global_plugins: vec![PluginBundleRef {
+                    plugin_id: "todo".into(),
+                    tree_id: HarnessTreeId::new("fixture-todo-tree")
+                        .expect("fixture tree ID"),
+                    requested_capabilities: BTreeSet::from(["extension.state".into()]),
+                    state_version: Some(state_version.into()),
+                }],
+                ordered_session_plugins: Vec::new(),
+                prompt_sections: Vec::new(),
+                plugin_prompt_sections: Vec::new(),
+                tool_presentations: Vec::new(),
+                plugin_tool_presentations: Vec::new(),
+                hook_bundle_digest: digest,
+                capability_bindings: Vec::new(),
+                resource_limits: HarnessResourceLimits::default(),
+                compaction_policy_digest: digest,
+                tool_projection_digest: digest,
+                failure_policy_digest: digest,
+            },
+            fingerprints: HarnessSurfaceFingerprints {
+                system_prompt_digest: digest,
+                ordered_tool_definitions_digest: digest,
+                tool_execution_policy_digest: digest,
+                hook_bundle_digest: digest,
+                capability_bindings_digest: digest,
+                compaction_policy_digest: digest,
+                provider_surface_digest: digest,
+            },
+        }
+    }
+
     fn tool() -> ToolPresentationDescriptor {
         ToolPresentationDescriptor {
             name: "transaction".into(),
@@ -1767,5 +1887,77 @@ mod tests {
             digest_tool_execution_policies(&[original]),
             digest_tool_execution_policies(&[changed])
         );
+    }
+
+    #[test]
+    fn candidate_cannot_reinterpret_an_existing_extension_state_contract() {
+        let parent_snapshot = stateful_snapshot("fixture-parent-snapshot", "todo.v1");
+        let proposed_snapshot = stateful_snapshot("fixture-proposed-snapshot", "todo.v2");
+        let parent = HarnessRevisionV1 {
+            revision_id: HarnessRevisionId::new("fixture-parent-revision")
+                .expect("fixture revision ID"),
+            snapshot_id: parent_snapshot.id.clone(),
+            parent_revision_ids: Vec::new(),
+            actor: HarnessActor::Host,
+            reason: HarnessRevisionReason::Initial,
+            candidate_id: None,
+            created_at_ms: 0,
+        };
+        let draft = HarnessCandidateDraft {
+            parent_revision_id: parent.revision_id.clone(),
+            proposed_snapshot_id: proposed_snapshot.id.clone(),
+            actor: HarnessActor::Model,
+            operation_id: None,
+            tool_invocation_id: None,
+            hypothesis: CandidateHypothesis {
+                targeted_evidence: "state compatibility".into(),
+                expected_effect: "new extension behavior".into(),
+                regression_risk: "existing state is reinterpreted".into(),
+            },
+            changed_paths: Vec::new(),
+            registry_operations: Vec::new(),
+            changed_surfaces: BTreeSet::from([HarnessSurface::Hooks]),
+            targeted_failures: Vec::new(),
+            evidence: Vec::new(),
+            expected_effects: Vec::new(),
+            regression_risks: Vec::new(),
+            capability_ceiling: BTreeSet::new(),
+        };
+
+        let validation = validate_candidate(
+            &draft,
+            &parent,
+            &parent_snapshot,
+            &proposed_snapshot,
+            &BTreeMap::new(),
+        )
+        .expect("state contract validation completes");
+
+        assert!(!validation.accepted);
+        assert!(validation
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.contains("todo")
+                && diagnostic.contains("state_version")
+                && diagnostic.contains("not supported")));
+
+        let mut removed_snapshot = stateful_snapshot("fixture-removed-snapshot", "todo.v1");
+        removed_snapshot.spec.ordered_global_plugins.clear();
+        let mut removal_draft = draft.clone();
+        removal_draft.proposed_snapshot_id = removed_snapshot.id.clone();
+        let removal = validate_candidate(
+            &removal_draft,
+            &parent,
+            &parent_snapshot,
+            &removed_snapshot,
+            &BTreeMap::new(),
+        )
+        .expect("state removal validation completes");
+
+        assert!(!removal.accepted);
+        assert!(removal
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.contains("removes stateful extension todo")));
     }
 }

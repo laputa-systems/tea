@@ -158,9 +158,11 @@ fn expected_artifact_lengths(
             SessionEntry::Custom(entry) => {
                 record_payload_length(&mut expected, &entry.payload)?;
             }
+            SessionEntry::Compaction(entry) => {
+                record_payload_length(&mut expected, &entry.replacement)?;
+            }
             SessionEntry::UserMessage(_)
             | SessionEntry::AssistantMessage(_)
-            | SessionEntry::Compaction(_)
             | SessionEntry::BranchSummary(_)
             | SessionEntry::ModelChanged(_)
             | SessionEntry::ThinkingChanged(_)
@@ -188,6 +190,12 @@ fn expected_artifact_lengths(
             SessionFact::TraceArtifact(trace) => {
                 record_length(&mut expected, trace.artifact_id, trace.byte_len)?;
             }
+            SessionFact::ProviderRequestMaterial(material) => {
+                record_payload_length(&mut expected, &material.request)?;
+            }
+            SessionFact::ExtensionStateValueSet(_)
+            | SessionFact::TurnCheckpoint(_)
+            | SessionFact::ForkedLane(_) => {}
             SessionFact::Custom { .. } => {}
         }
     }

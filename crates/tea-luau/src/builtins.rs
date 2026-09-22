@@ -201,7 +201,7 @@ pub fn web(limits: ExtensionLimits) -> ExtensionSourceTree {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bundle::{Bundle, BundleManifest, BUNDLE_ABI_V2_VERSION};
+    use crate::bundle::{Bundle, BundleManifest, BUNDLE_ABI_V3_VERSION};
     use crate::{LuaPolicy, LuauExtensionEngine, PolicyError};
     use std::future::Future;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -234,7 +234,7 @@ mod tests {
             max_memory_bytes: 1024 * 1024,
             max_interrupt_checks: 10_000,
         });
-        let manifest = BundleManifest::new(BUNDLE_ABI_V2_VERSION, "init.luau", ["extension.state"])
+        let manifest = BundleManifest::new(BUNDLE_ABI_V3_VERSION, "init.luau", ["extension.state"])
             .expect("manifest is valid");
         LuaPolicy::load_bundle(
             Bundle::from_sources(
@@ -751,15 +751,15 @@ mod tests {
         let _ = std::fs::remove_dir_all(workspace);
     }
 
-    fn load_v2_policy(source: &str) -> Result<LuaPolicy, PolicyError> {
+    fn load_v3_policy(source: &str) -> Result<LuaPolicy, PolicyError> {
         let manifest = BundleManifest::new(
-            BUNDLE_ABI_V2_VERSION,
+            BUNDLE_ABI_V3_VERSION,
             "init.luau",
             std::iter::empty::<&str>(),
         )
-        .expect("v2 manifest is valid");
+        .expect("v3 manifest is valid");
         let bundle =
-            Bundle::from_sources(manifest, [("init.luau", source)]).expect("v2 bundle is closed");
+            Bundle::from_sources(manifest, [("init.luau", source)]).expect("v3 bundle is closed");
         LuaPolicy::load_bundle(bundle)
     }
 
@@ -1395,7 +1395,6 @@ mod tests {
             )
             .expect("goal starts");
         let state = started.state.expect("command persists state");
-        assert_eq!(state.kind, "goal.state.v1");
         assert!(started.internal_input.is_some());
 
         let edited = policy
@@ -1404,7 +1403,7 @@ mod tests {
                 &ExtensionCommandInput {
                     arguments: "edit finish the extension and document it".into(),
                     state: ExtensionStateView {
-                        latest: BTreeMap::from([(state.kind.clone(), state.content.clone())]),
+                        value: Some(state.value.clone()),
                     },
                 },
             )
@@ -1413,7 +1412,7 @@ mod tests {
             edited
                 .state
                 .as_ref()
-                .and_then(|update| update.content.get("objective"))
+                .and_then(|update| update.value.get("objective"))
                 .and_then(tea_protocol::JsonValue::as_str),
             Some("finish the extension and document it"),
         );
@@ -1452,7 +1451,7 @@ mod tests {
                 &ExtensionCommandInput {
                     arguments: "pause".into(),
                     state: ExtensionStateView {
-                        latest: BTreeMap::from([(state.kind.clone(), state.content.clone())]),
+                        value: Some(state.value.clone()),
                     },
                 },
             )
@@ -1462,7 +1461,7 @@ mod tests {
             paused
                 .state
                 .expect("pause persists state")
-                .content
+                .value
                 .get("status")
                 .and_then(tea_protocol::JsonValue::as_str),
             Some("paused"),
@@ -1475,7 +1474,7 @@ mod tests {
                 usage: Default::default(),
                 elapsed_active_seconds: 2,
                 state: ExtensionStateView {
-                    latest: BTreeMap::from([(state.kind, state.content)]),
+                    value: Some(state.value),
                 },
             })
             .expect("idle callback runs");
@@ -1483,7 +1482,7 @@ mod tests {
         assert_eq!(
             idle.state
                 .expect("idle accounts state")
-                .content
+                .value
                 .get("tokens_used")
                 .and_then(tea_protocol::JsonValue::as_u64),
             Some(0),
@@ -1491,24 +1490,8 @@ mod tests {
     }
 
     #[test]
-    fn v1_declarations_reject_v2_host_fields() {
-        let error = match LuaPolicy::load(
-            r#"return {
-                prompt_sections = {},
-                commands = {{ name = "/review", help = "review", handler = function(_) return nil end }},
-            }"#,
-        ) {
-            Ok(_) => panic!("v1 must not silently accept host commands"),
-            Err(error) => error,
-        };
-        assert!(
-            matches!(error, PolicyError::Contract { message } if message.contains("unknown field"))
-        );
-    }
-
-    #[test]
-    fn v2_commands_reject_duplicates_and_invalid_results() {
-        let duplicate = match load_v2_policy(
+    fn v3_commands_reject_duplicates_and_invalid_results() {
+        let duplicate = match load_v3_policy(
             r#"return {
                 prompt_sections = {},
                 commands = {
@@ -1524,7 +1507,7 @@ mod tests {
             matches!(duplicate, PolicyError::Contract { message } if message.contains("duplicate extension command"))
         );
 
-        let policy = load_v2_policy(
+        let policy = load_v3_policy(
             r#"return {
                 prompt_sections = {},
                 commands = {
@@ -1532,7 +1515,7 @@ mod tests {
                 },
             }"#,
         )
-        .expect("valid v2 command loads");
+        .expect("valid v3 command loads");
         assert!(matches!(
             policy.execute_host_command(
                 "/review",

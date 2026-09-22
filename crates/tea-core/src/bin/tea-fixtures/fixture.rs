@@ -56,7 +56,6 @@ pub(super) struct Fixture {
     pub(super) after_tool_replace: Option<FixtureAfterToolReplace>,
     pub(super) context_hooks: Option<FixtureContextHooks>,
     pub(super) should_stop_after_turn: bool,
-    pub(super) hold_agent_end_observer: bool,
     pub(super) tools: Vec<FixtureToolSpec>,
     pub(super) streams: Vec<FixtureModelStream>,
     pub(super) last_usage: FixtureUsage,

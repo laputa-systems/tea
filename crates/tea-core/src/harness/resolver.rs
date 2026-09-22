@@ -20,7 +20,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 use tea_core::compaction::AutomaticCompactionPolicy;
 use tea_core::harness::extension::{
-    ExtensionEngine, ExtensionMemoryCollector, ExtensionSourceTree,
+    ExtensionEngine, ExtensionMemoryCollector, ExtensionSourceTree, ExtensionStateGeneration,
 };
 use tea_core::hooks::HookSet;
 use tea_core::tool::{ToolFailureCircuitBreaker, ToolRegistry, ToolResultProjectionPolicy};
@@ -104,6 +104,8 @@ pub struct ResolvedHarness {
     pub(crate) host_commands: Vec<ResolvedHostCommand>,
     /// Optional extension callbacks evaluated only at a durable idle boundary.
     pub(crate) idle_hooks: Vec<ResolvedIdleHook>,
+    /// Immutable state contracts keyed by their fixed extension identity.
+    pub(crate) extension_state_versions: BTreeMap<String, String>,
     /// Host hooks wrapped by source-pinned extension hooks for this snapshot.
     pub(crate) hooks: Arc<dyn HookSet>,
     /// Immutable policy values selected for this resolved epoch.
@@ -172,6 +174,13 @@ impl ResolvedHarness {
         &self.idle_hooks
     }
 
+    /// Return the state contract pinned for one resolved extension.
+    pub(crate) fn extension_state_version(&self, extension_id: &str) -> Option<&str> {
+        self.extension_state_versions
+            .get(extension_id)
+            .map(String::as_str)
+    }
+
     pub(crate) fn hooks(&self) -> Arc<dyn HookSet> {
         Arc::clone(&self.hooks)
     }
@@ -202,6 +211,8 @@ impl ResolvedHarness {
 pub(crate) struct ResolvedHostCommand {
     pub(crate) extension_id: String,
     pub(crate) command: Arc<dyn tea_core::harness::extension::ExtensionHostCommand>,
+    /// Immutable state contract for the owning extension, if any.
+    pub(crate) state_version: Option<String>,
 }
 
 /// One executable idle hook paired with the extension whose state it may read.
@@ -209,6 +220,8 @@ pub(crate) struct ResolvedHostCommand {
 pub(crate) struct ResolvedIdleHook {
     pub(crate) extension_id: String,
     pub(crate) hook: Arc<dyn tea_core::harness::extension::ExtensionIdleHook>,
+    /// Immutable state contract for the owning extension, if any.
+    pub(crate) state_version: Option<String>,
 }
 
 /// Session-local immutable harness catalog.
@@ -295,6 +308,40 @@ impl HarnessResolver {
         revision_id: &HarnessRevisionId,
         runtime_services: &RuntimeServices,
     ) -> Result<ResolvedHarness, HarnessError> {
+        self.resolve_revision_with_state_generation(revision_id, runtime_services, None)
+    }
+
+    /// Resolve one executable epoch with state capabilities bound to its exact
+    /// durable generation.
+    ///
+    /// Ordinary configuration resolution deliberately has no executable state
+    /// authority. Tool and lifecycle callbacks must use this path so a handle
+    /// cannot survive the epoch that selected it.
+    pub(crate) fn resolve_revision_for_epoch(
+        &self,
+        revision_id: &HarnessRevisionId,
+        runtime_services: &RuntimeServices,
+        state_generation: ExtensionStateGeneration,
+    ) -> Result<ResolvedHarness, HarnessError> {
+        if state_generation.harness_revision_id() != revision_id {
+            return Err(HarnessError::invalid_state(format!(
+                "extension state generation revision {} does not match executable revision {revision_id}",
+                state_generation.harness_revision_id(),
+            )));
+        }
+        self.resolve_revision_with_state_generation(
+            revision_id,
+            runtime_services,
+            Some(&state_generation),
+        )
+    }
+
+    fn resolve_revision_with_state_generation(
+        &self,
+        revision_id: &HarnessRevisionId,
+        runtime_services: &RuntimeServices,
+        state_generation: Option<&ExtensionStateGeneration>,
+    ) -> Result<ResolvedHarness, HarnessError> {
         let (revision, snapshot, extensions) = {
             let repository = self.lock_repository()?;
             let revision = repository.revision(revision_id).cloned().ok_or_else(|| {
@@ -315,6 +362,18 @@ impl HarnessResolver {
             (revision, snapshot, extensions)
         };
         let mut resolved_bindings = BTreeMap::new();
+        let extension_state_versions = snapshot
+            .spec
+            .ordered_global_plugins
+            .iter()
+            .chain(snapshot.spec.ordered_session_plugins.iter())
+            .filter_map(|bundle| {
+                bundle
+                    .state_version
+                    .as_ref()
+                    .map(|state_version| (bundle.plugin_id.clone(), state_version.clone()))
+            })
+            .collect::<BTreeMap<_, _>>();
         for loaded in &extensions {
             self.validate_fixed_tool_authority(&loaded.source)?;
             for capability in &loaded.plugin.requested_capabilities {
@@ -337,6 +396,7 @@ impl HarnessResolver {
                     reference.binding_digest,
                     &snapshot.id,
                     &snapshot.spec.resource_limits,
+                    state_generation,
                 )?;
                 resolved_bindings.insert(
                     (loaded.plugin.plugin_id.clone(), capability.clone()),
@@ -490,12 +550,14 @@ impl HarnessResolver {
                 host_commands.push(ResolvedHostCommand {
                     extension_id: plugin_id.clone(),
                     command: Arc::clone(command),
+                    state_version: extension_state_versions.get(plugin_id).cloned(),
                 });
             }
             if let Some(hook) = &resolved.idle_hook {
                 idle_hooks.push(ResolvedIdleHook {
                     extension_id: plugin_id.clone(),
                     hook: Arc::clone(hook),
+                    state_version: extension_state_versions.get(plugin_id).cloned(),
                 });
             }
         }
@@ -508,6 +570,7 @@ impl HarnessResolver {
             plugin_tools,
             host_commands,
             idle_hooks,
+            extension_state_versions,
             lifecycle,
             memory_collector,
             context_policies,
@@ -615,12 +678,14 @@ impl HarnessResolver {
             target_plugin_ids
                 .iter()
                 .map(|plugin_id| {
+                    let descriptor = repository
+                        .plugin_descriptor(&tree.id, plugin_id, &resource_limits)
+                        .map_err(lineage_error)?;
                     Ok(PluginBundleRef {
                         plugin_id: plugin_id.clone(),
                         tree_id: tree.id.clone(),
-                        requested_capabilities: repository
-                            .plugin_capabilities(&tree.id, plugin_id, &resource_limits)
-                            .map_err(lineage_error)?,
+                        requested_capabilities: descriptor.requested_capabilities,
+                        state_version: descriptor.state_version,
                     })
                 })
                 .collect::<Result<Vec<_>, HarnessError>>()?
@@ -1215,6 +1280,7 @@ fn resolve_snapshot(input: ResolveSnapshotInput<'_>) -> Result<ResolvedHarness, 
         extension_tools: input.plugin_tools,
         host_commands: input.host_commands,
         idle_hooks: input.idle_hooks,
+        extension_state_versions: input.extension_state_versions,
         hooks: input.hooks,
         automatic_compaction: input.runtime_services.automatic_compaction_policy().clone(),
         tool_result_projection: input
@@ -1241,6 +1307,7 @@ struct ResolveSnapshotInput<'a> {
     plugin_tools: ToolRegistry,
     host_commands: Vec<ResolvedHostCommand>,
     idle_hooks: Vec<ResolvedIdleHook>,
+    extension_state_versions: BTreeMap<String, String>,
     lifecycle: PluginLifecycleRegistry,
     memory_collector: Arc<ExtensionMemoryCollector>,
     context_policies: ContextPolicyRegistry,
@@ -1317,6 +1384,7 @@ mod tests {
                     allowed_while_active: false,
                 }],
                 lifecycle_hook_ids: Vec::new(),
+                state_version: None,
             })
         }
 

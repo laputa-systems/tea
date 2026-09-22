@@ -58,7 +58,7 @@ fn caller_driven_text_run_emits_lifecycle_and_settles() {
                 matches!(
                     event.kind,
                     AgentEventKind::MessageUpdate {
-                        message: crate::state::AgentMessage::Assistant { .. },
+                        message_id: _,
                         ..
                     }
                 )
@@ -365,48 +365,6 @@ fn length_stop_without_tool_calls_continues_the_unfinished_response() {
         Ok::<(), CoreError>(())
     })
     .expect("length stop without tools should continue");
-}
-
-#[test]
-fn cancellation_settles_terminal_events_before_wait_for_idle() {
-    smol::block_on(async {
-        let observer_agent = Arc::new(Mutex::new(None));
-        let agent = Agent::builder()
-            .model_provider(Arc::new(TextOnlyProvider))
-            .observer(Arc::new(AbortOnAgentStartObserver {
-                agent: Arc::clone(&observer_agent),
-            }))
-            .build();
-        *observer_agent.lock().expect("test agent mutex") = Some(agent.clone());
-        let run = agent.start_prompt("cancel through an awaited observer")?;
-
-        let error = run
-            .drive()
-            .await
-            .expect_err("observer requested cancellation");
-
-        assert_eq!(error, CoreError::Cancelled);
-        assert_eq!(run.snapshot().phase, crate::state::RunPhase::Cancelled);
-        let events = run.events();
-        assert!(matches!(events[0].kind, AgentEventKind::AgentStart));
-        assert!(matches!(
-            events[events.len() - 2].kind,
-            AgentEventKind::TurnEnd {
-                reason: StopReason::Aborted,
-                ..
-            }
-        ));
-        assert!(matches!(
-            events.last().map(|event| &event.kind),
-            Some(AgentEventKind::AgentEnd { .. })
-        ));
-        assert_eq!(agent.snapshot().phase, AgentPhase::Idle);
-
-        agent.wait_for_idle().await;
-
-        Ok::<(), CoreError>(())
-    })
-    .expect("cancelled run must settle before wait_for_idle resolves");
 }
 
 #[test]

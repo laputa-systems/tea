@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use tea_core::tool::{CancellationSettlementMode, ToolExecutionMode};
 use tea_protocol::JsonValue;
 
-/// One named v1 prompt contribution owned by a policy bundle.
+/// One named v3 prompt contribution owned by a policy bundle.
 ///
 /// The host namespaces this ID with the immutable plugin identity during
 /// harness composition.  A policy cannot append revision IDs, paths, or other
@@ -93,7 +93,7 @@ pub struct PolicyHostCommand {
     pub allowed_while_active: bool,
 }
 
-/// Visibility requested by a bounded ABI-v1 plugin-memory proposal.
+/// Visibility requested by a bounded ABI-v3 plugin-memory proposal.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PolicyMemoryVisibility {
     /// The host context policy may later select the entry for model context.
@@ -103,7 +103,7 @@ pub enum PolicyMemoryVisibility {
     ExternalOnly,
 }
 
-/// Retention requested by a bounded ABI-v1 plugin-memory proposal.
+/// Retention requested by a bounded ABI-v3 plugin-memory proposal.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PolicyMemoryRetention {
     /// Retain under ordinary session/export reachability rules.
@@ -131,7 +131,7 @@ pub struct PolicyMemoryProposal {
     pub retention: PolicyMemoryRetention,
 }
 
-/// The complete output of one ABI-v1 post-tool policy callback.
+/// The complete output of one ABI-v3 post-tool policy callback.
 ///
 /// [`tea_core::hooks::AfterToolCall`] remains the only part that changes a
 /// core transcript. A memory proposal is a separate Rust-owned semantic
@@ -145,7 +145,7 @@ pub struct PolicyAfterToolOutput {
     pub memory: Option<PolicyMemoryProposal>,
 }
 
-/// One metadata-only semantic entry exposed to an ABI-v1 context policy.
+/// One metadata-only semantic entry exposed to an ABI-v3 context policy.
 ///
 /// The policy receives neither message bodies nor raw tool/artifact payloads.
 /// It can reason only over stable entry identities, broad semantic kinds, and
@@ -178,7 +178,7 @@ pub struct PolicyContextAnnotation {
     pub content: String,
 }
 
-/// An ABI-v1 policy's typed context-projection proposal.
+/// An ABI-v3 policy's typed context-projection proposal.
 ///
 /// Rust maps these opaque IDs to its immutable semantic tree and validates
 /// every root, pairing, recovery, and provider-limit invariant before a
@@ -204,18 +204,21 @@ pub struct LuaPolicy {
     pub(super) prompt_sections: Vec<PolicyPromptSection>,
     pub(super) tools: Vec<PolicyTool>,
     pub(super) host_commands: Vec<PolicyHostCommand>,
+    /// Immutable state contract selected by a v3 bundle, if it requests the
+    /// narrow `extension.state` capability.
+    pub(super) state_version: Option<String>,
 }
 
 pub(super) struct PolicyRuntime {
     pub(super) lua: Lua,
     pub(super) before_tool_call: Option<Function>,
-    /// Optional ABI-v1 model-projection hook. It receives only the completed
+    /// Optional ABI-v3 model-projection hook. It receives only the completed
     /// model-facing result and can never alter the durable raw result or its
     /// usage accounting.
     pub(super) after_tool_call: Option<Function>,
-    /// Optional ABI-v1 metadata-only context-projection policy.
+    /// Optional ABI-v3 metadata-only context-projection policy.
     pub(super) context_projection: Option<Function>,
-    /// ABI-v1 lifecycle callbacks keyed by a bundle-local stable registration
+    /// ABI-v3 lifecycle callbacks keyed by a bundle-local stable registration
     /// ID. These callbacks are deliberately retained inside the policy VM:
     /// Rust owns the resulting durable record and a policy never receives a
     /// session writer or a shared plugin-memory object.
@@ -228,7 +231,7 @@ pub(super) struct PolicyRuntime {
     pub(super) max_interrupt_checks: usize,
 }
 
-/// One stable ABI-v1 lifecycle registration.
+/// One stable ABI-v3 lifecycle registration.
 ///
 /// A single registration may contribute independent operation and epoch
 /// state, then receive exactly those two values during recovery. Keeping the

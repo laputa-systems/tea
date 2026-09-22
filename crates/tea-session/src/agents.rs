@@ -306,8 +306,8 @@ struct OperationInfo {
     original_input: Vec<crate::ProvisionedEntry>,
     initial_harness_revision: HarnessRevisionId,
     model_harness_profile: ModelHarnessProfileId,
-    started_seq: crate::Sequence,
-    finished: Option<(crate::Sequence, OperationOutcome)>,
+    started_at: TimelinePosition,
+    finished: Option<(TimelinePosition, OperationOutcome)>,
 }
 
 #[derive(Clone)]
@@ -317,7 +317,19 @@ struct ToolInfo {
     tool_name: String,
     effective_args: crate::JsonValue,
     idempotency_key: String,
+    position: TimelinePosition,
+}
+
+/// Strict durable order for facts that may share one commit sequence.
+///
+/// JSONL assigns a sequence to the atomic group, while its ordered items
+/// retain the dependency order inside that group. Graph validation must use
+/// both dimensions so an atomically created lane can immediately be bound to
+/// its spawned child without admitting reversed dependencies.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct TimelinePosition {
     sequence: crate::Sequence,
+    item_index: u64,
 }
 
 /// Reduce and validate the durable child-agent graph.
@@ -330,17 +342,18 @@ pub fn reduce_agent_graph(snapshot: &SessionSnapshot) -> Result<AgentGraphReduct
     reduce_agent_graph_prefix(snapshot.header(), snapshot.mutations())
 }
 
-/// Borrowed prospective-append form used by the session writer. It preserves
-/// the graph reducer's exact semantics without cloning a retained snapshot.
-pub(crate) fn reduce_agent_graph_ref_with_append(
+/// Borrowed prospective-commit form used by storage before its one physical
+/// append. The graph reducer sees every item in semantic order without
+/// cloning the retained session prefix.
+pub(crate) fn reduce_agent_graph_ref_with_commit(
     snapshot: &SessionSnapshot,
-    appended: &crate::StoredMutation,
+    appended: &crate::StoredCommit,
 ) -> Result<AgentGraphReduction, Corruption> {
     reduce_agent_graph_prefix(
         snapshot.header(),
         snapshot
             .mutations()
-            .chain(std::iter::once(appended.borrowed())),
+            .chain(appended.items.iter().map(crate::StoredMutation::borrowed)),
     )
 }
 
@@ -348,28 +361,43 @@ fn reduce_agent_graph_prefix<'a>(
     header: &SessionHeader,
     mutations: impl Iterator<Item = crate::StoredMutationRef<'a>>,
 ) -> Result<AgentGraphReduction, Corruption> {
-    let mut lanes = BTreeMap::<LaneId, (Option<EntryId>, crate::Sequence)>::new();
-    lanes.insert(header.initial_lane.clone(), (None, crate::Sequence(0)));
-    let mut entries = BTreeMap::<EntryId, (LaneId, SessionEntry, crate::Sequence)>::new();
+    let mut lanes = BTreeMap::<LaneId, (Option<EntryId>, TimelinePosition)>::new();
+    lanes.insert(
+        header.initial_lane.clone(),
+        (
+            None,
+            TimelinePosition {
+                sequence: crate::Sequence(0),
+                item_index: 0,
+            },
+        ),
+    );
+    let mut entries = BTreeMap::<EntryId, (LaneId, SessionEntry, TimelinePosition)>::new();
     let mut operations = BTreeMap::<OperationId, OperationInfo>::new();
     let mut epochs =
-        BTreeMap::<crate::EpochId, (OperationId, Option<EntryId>, crate::Sequence)>::new();
+        BTreeMap::<crate::EpochId, (OperationId, Option<EntryId>, TimelinePosition)>::new();
     let mut tools = BTreeMap::<String, Vec<ToolInfo>>::new();
     let mut policy = None;
     let mut policy_sequence = None;
-    let mut spawns = Vec::<(crate::Sequence, AgentSpawnedFact)>::new();
-    let mut deltas = Vec::<(crate::Sequence, WorkspaceDeltaFact)>::new();
-    let mut terminals = Vec::<(crate::Sequence, AgentTaskFinishedFact)>::new();
-    let mut applied = Vec::<(crate::Sequence, WorkspaceDeltaAppliedFact)>::new();
+    let mut spawns = Vec::<(TimelinePosition, AgentSpawnedFact)>::new();
+    let mut deltas = Vec::<(TimelinePosition, WorkspaceDeltaFact)>::new();
+    let mut terminals = Vec::<(TimelinePosition, AgentTaskFinishedFact)>::new();
+    let mut applied = Vec::<(TimelinePosition, WorkspaceDeltaAppliedFact)>::new();
+    let mut item_index = 0_u64;
 
     for mutation in mutations {
+        let position = TimelinePosition {
+            sequence: mutation.sequence(),
+            item_index,
+        };
+        item_index = item_index.saturating_add(1);
         match mutation.mutation {
             SessionMutationRef::Lane(stored) => {
                 let crate::LaneMutation::Created {
                     lane_id,
                     base_leaf_id,
                 } = &stored.mutation;
-                lanes.insert(lane_id.clone(), (base_leaf_id.clone(), stored.seq));
+                lanes.insert(lane_id.clone(), (base_leaf_id.clone(), position));
             }
             SessionMutationRef::Entry(stored) => {
                 entries.insert(
@@ -377,7 +405,7 @@ fn reduce_agent_graph_prefix<'a>(
                     (
                         stored.lane_id.clone(),
                         stored.body.clone(),
-                        stored.header.seq,
+                        position,
                     ),
                 );
             }
@@ -391,7 +419,7 @@ fn reduce_agent_graph_prefix<'a>(
                             original_input: record.original_input.clone(),
                             initial_harness_revision: record.initial_harness_revision.clone(),
                             model_harness_profile: record.model_harness_profile.clone(),
-                            started_seq: stored.seq,
+                            started_at: position,
                             finished: None,
                         },
                     );
@@ -403,7 +431,7 @@ fn reduce_agent_graph_prefix<'a>(
                             record.operation_id
                         ))
                     })?;
-                    operation.finished = Some((stored.seq, record.outcome.clone()));
+                    operation.finished = Some((position, record.outcome.clone()));
                 }
                 LaneRecord::EpochStarted(record) => {
                     epochs.insert(
@@ -411,7 +439,7 @@ fn reduce_agent_graph_prefix<'a>(
                         (
                             record.operation_id.clone(),
                             record.source_leaf_id.clone(),
-                            stored.seq,
+                            position,
                         ),
                     );
                 }
@@ -425,7 +453,7 @@ fn reduce_agent_graph_prefix<'a>(
                             tool_name: record.tool_name.clone(),
                             effective_args: record.effective_args.clone(),
                             idempotency_key: record.idempotency_key.clone(),
-                            sequence: stored.seq,
+                            position,
                         });
                 }
                 _ => {}
@@ -439,37 +467,37 @@ fn reduce_agent_graph_prefix<'a>(
                     }
                     value.validate()?;
                     policy = Some(value.clone());
-                    policy_sequence = Some(stored.seq);
+                    policy_sequence = Some(position);
                 }
                 crate::SessionFact::AgentSpawned(value) => {
-                    spawns.push((stored.seq, value.clone()));
+                    spawns.push((position, value.clone()));
                 }
                 crate::SessionFact::WorkspaceDelta(value) => {
-                    deltas.push((stored.seq, value.clone()));
+                    deltas.push((position, value.clone()));
                 }
                 crate::SessionFact::AgentTaskFinished(value) => {
-                    terminals.push((stored.seq, value.clone()));
+                    terminals.push((position, value.clone()));
                 }
                 crate::SessionFact::WorkspaceDeltaApplied(value) => {
-                    applied.push((stored.seq, value.clone()));
+                    applied.push((position, value.clone()));
                 }
                 _ => {}
             },
         }
     }
 
-    let spawn_sequences = spawns
+    let spawn_positions = spawns
         .iter()
-        .map(|(sequence, spawn)| (spawn.agent_id.clone(), *sequence))
+        .map(|(position, spawn)| (spawn.agent_id.clone(), *position))
         .collect::<BTreeMap<_, _>>();
     if let (Some(policy_sequence), Some(first_root_harness_revision)) = (
         policy_sequence,
         entries
             .values()
-            .filter_map(|(lane_id, entry, sequence)| {
+            .filter_map(|(lane_id, entry, position)| {
                 (lane_id == &header.initial_lane
                     && matches!(entry, SessionEntry::HarnessRevisionChanged(_)))
-                .then_some(*sequence)
+                .then_some(*position)
             })
             .min(),
     ) && policy_sequence >= first_root_harness_revision
@@ -481,18 +509,18 @@ fn reduce_agent_graph_prefix<'a>(
     let mut nodes = BTreeMap::<AgentId, AgentGraphNode>::new();
     let mut agent_by_lane = BTreeMap::<LaneId, AgentId>::new();
     let mut task_names = BTreeSet::<(OperationId, String)>::new();
-    for (sequence, spawn) in spawns {
+    for (position, spawn) in spawns {
         let policy = policy.as_ref().ok_or_else(|| {
             Corruption::new("agent spawn requires a prior persisted subagent policy")
         })?;
-        if policy_sequence.is_none_or(|policy_sequence| policy_sequence >= sequence) {
+        if policy_sequence.is_none_or(|policy_sequence| policy_sequence >= position) {
             return Err(Corruption::new(
                 "agent spawn must follow the persisted subagent policy",
             ));
         }
         validate_spawn(
             &spawn,
-            sequence,
+            position,
             &header.session_id,
             &lanes,
             &entries,
@@ -566,8 +594,8 @@ fn reduce_agent_graph_prefix<'a>(
                 "subagent operation {operation_id} disagrees with agent {agent_id} linkage"
             )));
         }
-        if operation.started_seq
-            <= *spawn_sequences
+        if operation.started_at
+            <= *spawn_positions
                 .get(agent_id)
                 .ok_or_else(|| Corruption::new(format!("agent {agent_id} has no spawn sequence")))?
         {
@@ -613,9 +641,9 @@ fn reduce_agent_graph_prefix<'a>(
     }
 
     let mut deltas_by_id =
-        BTreeMap::<WorkspaceDeltaId, (crate::Sequence, WorkspaceDeltaFact)>::new();
+        BTreeMap::<WorkspaceDeltaId, (TimelinePosition, WorkspaceDeltaFact)>::new();
     let mut delta_by_agent = BTreeMap::<AgentId, WorkspaceDeltaId>::new();
-    for (sequence, delta) in deltas {
+    for (position, delta) in deltas {
         validate_delta(&delta)?;
         let node = nodes.get(&delta.agent_id).ok_or_else(|| {
             Corruption::new(format!(
@@ -644,7 +672,7 @@ fn reduce_agent_graph_prefix<'a>(
                 delta.delta_id
             )));
         };
-        if *finished_sequence >= sequence {
+        if *finished_sequence >= position {
             return Err(Corruption::new(format!(
                 "workspace delta {} must follow child operation completion",
                 delta.delta_id
@@ -660,7 +688,7 @@ fn reduce_agent_graph_prefix<'a>(
                 delta.agent_id
             )));
         }
-        deltas_by_id.insert(delta.delta_id.clone(), (sequence, delta));
+        deltas_by_id.insert(delta.delta_id.clone(), (position, delta));
     }
 
     for node in nodes.values_mut() {
@@ -671,8 +699,8 @@ fn reduce_agent_graph_prefix<'a>(
         }
     }
 
-    let mut terminal_sequences = BTreeMap::<AgentId, crate::Sequence>::new();
-    for (sequence, terminal) in terminals {
+    let mut terminal_positions = BTreeMap::<AgentId, TimelinePosition>::new();
+    for (position, terminal) in terminals {
         validate_terminal(&terminal)?;
         let node = nodes.get_mut(&terminal.agent_id).ok_or_else(|| {
             Corruption::new(format!(
@@ -695,7 +723,7 @@ fn reduce_agent_graph_prefix<'a>(
                 terminal.agent_id
             )));
         };
-        if *finished_sequence >= sequence || *outcome != terminal.outcome {
+        if *finished_sequence >= position || *outcome != terminal.outcome {
             return Err(Corruption::new(format!(
                 "agent terminal result {} disagrees with child operation outcome",
                 terminal.agent_id
@@ -703,14 +731,14 @@ fn reduce_agent_graph_prefix<'a>(
         }
         let expected_final_entry_id = entries
             .iter()
-            .filter_map(|(entry_id, (lane_id, entry, entry_sequence))| {
+            .filter_map(|(entry_id, (lane_id, entry, entry_position))| {
                 (lane_id == &node.spawned.lane_id
-                    && *entry_sequence > operation.started_seq
-                    && *entry_sequence < *finished_sequence
+                    && *entry_position > operation.started_at
+                    && *entry_position < *finished_sequence
                     && matches!(entry, SessionEntry::AssistantMessage(_)))
-                .then_some((entry_sequence, entry_id))
+                .then_some((entry_position, entry_id))
             })
-            .max_by_key(|(entry_sequence, _)| **entry_sequence)
+            .max_by_key(|(entry_position, _)| **entry_position)
             .map(|(_, entry_id)| entry_id);
         if terminal.final_entry_id.as_ref() != expected_final_entry_id {
             return Err(Corruption::new(format!(
@@ -719,13 +747,13 @@ fn reduce_agent_graph_prefix<'a>(
             )));
         }
         if let Some(entry_id) = &terminal.final_entry_id {
-            let Some((lane_id, entry, entry_sequence)) = entries.get(entry_id) else {
+            let Some((lane_id, entry, entry_position)) = entries.get(entry_id) else {
                 return Err(Corruption::new(format!(
                     "agent terminal result {} refers to missing final entry {entry_id}",
                     terminal.agent_id
                 )));
             };
-            if *entry_sequence >= sequence
+            if *entry_position >= position
                 || lane_id != &node.spawned.lane_id
                 || !matches!(entry, SessionEntry::AssistantMessage(_))
             {
@@ -750,7 +778,7 @@ fn reduce_agent_graph_prefix<'a>(
             (Some(delta_id), Some(delta)) if delta_id == &delta.delta_id => {
                 if deltas_by_id
                     .get(delta_id)
-                    .is_none_or(|(delta_sequence, _)| *delta_sequence >= sequence)
+                    .is_none_or(|(delta_position, _)| *delta_position >= position)
                 {
                     return Err(Corruption::new(format!(
                         "agent terminal result {} must follow its workspace delta fact",
@@ -777,8 +805,8 @@ fn reduce_agent_graph_prefix<'a>(
                 "agent has more than one terminal result fact",
             ));
         }
-        if terminal_sequences
-            .insert(node.spawned.agent_id.clone(), sequence)
+        if terminal_positions
+            .insert(node.spawned.agent_id.clone(), position)
             .is_some()
         {
             return Err(Corruption::new(
@@ -788,20 +816,20 @@ fn reduce_agent_graph_prefix<'a>(
     }
 
     let mut used_apply_intents = BTreeSet::new();
-    for (sequence, applied_fact) in applied {
+    for (position, applied_fact) in applied {
         validate_changed_paths(&applied_fact.changed_paths)?;
         validate_bounded_nonempty(
             "applied delta tool call ID",
             &applied_fact.tool_call_id,
             MAX_MODEL_IDENTIFIER_BYTES,
         )?;
-        let Some((delta_sequence, delta)) = deltas_by_id.get(&applied_fact.delta_id) else {
+        let Some((delta_position, delta)) = deltas_by_id.get(&applied_fact.delta_id) else {
             return Err(Corruption::new(format!(
                 "applied workspace delta {} is unknown",
                 applied_fact.delta_id
             )));
         };
-        if *delta_sequence >= sequence {
+        if *delta_position >= position {
             return Err(Corruption::new(format!(
                 "applied workspace delta {} precedes its delta fact",
                 applied_fact.delta_id
@@ -826,9 +854,9 @@ fn reduce_agent_graph_prefix<'a>(
                 applied_fact.delta_id
             )));
         }
-        if terminal_sequences
+        if terminal_positions
             .get(&delta.agent_id)
-            .is_none_or(|terminal_sequence| *terminal_sequence >= sequence)
+            .is_none_or(|terminal_position| *terminal_position >= position)
         {
             return Err(Corruption::new(format!(
                 "applied workspace delta {} must follow the child terminal result",
@@ -847,7 +875,7 @@ fn reduce_agent_graph_prefix<'a>(
             .unwrap_or_default()
             .iter()
             .filter(|tool| {
-                tool.sequence < sequence
+                tool.position < position
                     && tool.operation_id == node.spawned.parent_operation_id
                     && tool.tool_name == "apply_agent_changes"
             })
@@ -863,7 +891,7 @@ fn reduce_agent_graph_prefix<'a>(
         if !used_apply_intents.insert((
             apply_tool.operation_id.clone(),
             applied_fact.tool_call_id.clone(),
-            apply_tool.sequence,
+            apply_tool.position,
         )) {
             return Err(Corruption::new(
                 "one apply_agent_changes intent cannot authorize more than one applied fact",
@@ -926,12 +954,12 @@ fn reduce_agent_graph_prefix<'a>(
 
 fn validate_spawn(
     spawn: &AgentSpawnedFact,
-    sequence: crate::Sequence,
+    position: TimelinePosition,
     session_id: &crate::SessionId,
-    lanes: &BTreeMap<LaneId, (Option<EntryId>, crate::Sequence)>,
-    entries: &BTreeMap<EntryId, (LaneId, SessionEntry, crate::Sequence)>,
+    lanes: &BTreeMap<LaneId, (Option<EntryId>, TimelinePosition)>,
+    entries: &BTreeMap<EntryId, (LaneId, SessionEntry, TimelinePosition)>,
     operations: &BTreeMap<OperationId, OperationInfo>,
-    epochs: &BTreeMap<crate::EpochId, (OperationId, Option<EntryId>, crate::Sequence)>,
+    epochs: &BTreeMap<crate::EpochId, (OperationId, Option<EntryId>, TimelinePosition)>,
     tools: &BTreeMap<String, Vec<ToolInfo>>,
     policy: &SubagentPolicyFact,
 ) -> Result<(), Corruption> {
@@ -969,7 +997,7 @@ fn validate_spawn(
         || parent
             .finished
             .as_ref()
-            .is_some_and(|(finished, _)| *finished < sequence)
+            .is_some_and(|(finished, _)| *finished < position)
     {
         return Err(Corruption::new(format!(
             "agent {} parent operation is not a root-lane operation",
@@ -982,7 +1010,7 @@ fn validate_spawn(
         .unwrap_or_default()
         .iter()
         .filter(|tool| {
-            tool.sequence < sequence
+            tool.position < position
                 && tool.operation_id == spawn.parent_operation_id
                 && tool.tool_name == "spawn_agent"
         })
@@ -1018,13 +1046,13 @@ fn validate_spawn(
             spawn.agent_id
         )));
     }
-    let Some((base_leaf_id, lane_sequence)) = lanes.get(&spawn.lane_id) else {
+    let Some((base_leaf_id, lane_position)) = lanes.get(&spawn.lane_id) else {
         return Err(Corruption::new(format!(
             "agent {} refers to a missing child lane {}",
             spawn.agent_id, spawn.lane_id
         )));
     };
-    if *lane_sequence >= sequence || *base_leaf_id != spawn.base_leaf_id {
+    if *lane_position >= position || *base_leaf_id != spawn.base_leaf_id {
         return Err(Corruption::new(format!(
             "agent {} child lane does not match its durable branch base",
             spawn.agent_id
@@ -1047,7 +1075,7 @@ fn validate_spawn(
             spawn.agent_id
         ))
     })?;
-    if spawn_tool_epoch.0 != spawn.parent_operation_id || spawn_tool_epoch.2 >= sequence {
+    if spawn_tool_epoch.0 != spawn.parent_operation_id || spawn_tool_epoch.2 >= position {
         return Err(Corruption::new(format!(
             "agent {} spawn tool epoch does not belong to its parent operation",
             spawn.agent_id
@@ -1060,28 +1088,28 @@ fn validate_spawn(
             "parent-context agent must fork the exact parent epoch source leaf",
         ));
     }
-    let mut model = None::<(crate::Sequence, &ModelChangedEntry)>;
-    let mut thinking = None::<(crate::Sequence, &str)>;
-    let mut harness = None::<(crate::Sequence, &crate::HarnessRevisionChangedEntry)>;
-    for (lane_id, entry, entry_sequence) in entries.values() {
-        if lane_id != &spawn.lane_id || *entry_sequence >= sequence {
+    let mut model = None::<(TimelinePosition, &ModelChangedEntry)>;
+    let mut thinking = None::<(TimelinePosition, &str)>;
+    let mut harness = None::<(TimelinePosition, &crate::HarnessRevisionChangedEntry)>;
+    for (lane_id, entry, entry_position) in entries.values() {
+        if lane_id != &spawn.lane_id || *entry_position >= position {
             continue;
         }
         match entry {
             SessionEntry::ModelChanged(value)
-                if model.is_none_or(|(prior, _)| prior < *entry_sequence) =>
+                if model.is_none_or(|(prior, _)| prior < *entry_position) =>
             {
-                model = Some((*entry_sequence, value));
+                model = Some((*entry_position, value));
             }
             SessionEntry::ThinkingChanged(value)
-                if thinking.is_none_or(|(prior, _)| prior < *entry_sequence) =>
+                if thinking.is_none_or(|(prior, _)| prior < *entry_position) =>
             {
-                thinking = Some((*entry_sequence, value.level.as_str()));
+                thinking = Some((*entry_position, value.level.as_str()));
             }
             SessionEntry::HarnessRevisionChanged(value)
-                if harness.is_none_or(|(prior, _)| prior < *entry_sequence) =>
+                if harness.is_none_or(|(prior, _)| prior < *entry_position) =>
             {
-                harness = Some((*entry_sequence, value));
+                harness = Some((*entry_position, value));
             }
             _ => {}
         }

@@ -14,6 +14,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, Weak};
 use tea_protocol::JsonValue;
+use tea_session::{EpochId, HarnessRevisionId, LaneId, OperationId};
 
 /// Exact closed source files selected for one immutable extension resolution.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -87,24 +88,27 @@ pub struct ExtensionHostCommandDescription {
     pub allowed_while_active: bool,
 }
 
-/// Latest inline values owned by one extension, indexed by its local kind.
+/// Maximum canonical JSON bytes retained for one extension state value.
+pub const MAX_EXTENSION_STATE_VALUE_BYTES: usize = 16 * 1024;
+
+/// One bounded private value owned by one extension on one conversation.
 ///
-/// The host derives this view from `PluginMemory`; an extension never receives
-/// a session writer, entry IDs, another extension's values, or artifact paths.
+/// `None` means the extension has not written a value on this branch. The
+/// host derives this value from immutable state facts; an extension never
+/// receives a session writer, entry IDs, another extension's value, or
+/// artifact paths.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ExtensionStateView {
-    /// Latest value for each extension-local kind on the active branch.
-    pub latest: BTreeMap<String, JsonValue>,
+    /// The latest complete state value for this extension namespace.
+    pub value: Option<JsonValue>,
 }
 
-/// One append-only extension-local state update.
+/// One complete replacement for an extension-local state value.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ExtensionStateUpdate {
-    /// Versioned extension-local state kind.
-    pub kind: String,
-    /// Inline structured state. The durable runtime applies fixed
-    /// external-only/session retention semantics for this control surface.
-    pub content: JsonValue,
+    /// Inline structured state. The durable runtime persists this complete
+    /// bounded value as one private namespace fact.
+    pub value: JsonValue,
 }
 
 /// Bounded input supplied to an extension host-command handler.
@@ -121,7 +125,7 @@ pub struct ExtensionCommandInput {
 pub struct ExtensionCommandResult {
     /// One bounded host notice or result line.
     pub notice: Option<String>,
-    /// At most one append-only extension-local state update.
+    /// At most one complete extension-local state replacement.
     pub state: Option<ExtensionStateUpdate>,
     /// Optional internal model context for a new durable operation. This is
     /// never represented as a user-authored chat message.
@@ -169,7 +173,8 @@ pub struct ExtensionIdleInput {
 /// Result of an extension's optional idle hook.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ExtensionIdleResult {
-    /// At most one append-only state update made before a continuation starts.
+    /// At most one complete state replacement made before a continuation
+    /// starts.
     pub state: Option<ExtensionStateUpdate>,
     /// At most one internal follow-up operation request.
     pub internal_input: Option<String>,
@@ -183,21 +188,95 @@ pub trait ExtensionIdleHook: Send + Sync {
     fn on_idle(&self, input: &ExtensionIdleInput) -> Result<ExtensionIdleResult, ExtensionError>;
 }
 
+/// Exact durable execution generation permitted to access extension state.
+///
+/// Extension source is resolved before an epoch can execute, but a callback may
+/// return after its operation has already settled or another lane has started.
+/// This token binds the state capability to the one live lane, operation,
+/// epoch, and immutable harness revision that selected it. It is intentionally
+/// not a general execution context: only state access needs this narrow guard.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExtensionStateGeneration {
+    lane_id: LaneId,
+    operation_id: OperationId,
+    epoch_id: EpochId,
+    harness_revision_id: HarnessRevisionId,
+}
+
+impl ExtensionStateGeneration {
+    /// Construct the exact live generation that resolved an extension tool.
+    pub fn new(
+        lane_id: LaneId,
+        operation_id: OperationId,
+        epoch_id: EpochId,
+        harness_revision_id: HarnessRevisionId,
+    ) -> Self {
+        Self {
+            lane_id,
+            operation_id,
+            epoch_id,
+            harness_revision_id,
+        }
+    }
+
+    /// Validate durable identifiers supplied by a host integration.
+    pub fn from_strings(
+        lane_id: impl Into<String>,
+        operation_id: impl Into<String>,
+        epoch_id: impl Into<String>,
+        harness_revision_id: impl Into<String>,
+    ) -> Result<Self, ExtensionError> {
+        Ok(Self::new(
+            LaneId::new(lane_id.into()).map_err(|error| ExtensionError::new(error.to_string()))?,
+            OperationId::new(operation_id.into())
+                .map_err(|error| ExtensionError::new(error.to_string()))?,
+            EpochId::new(epoch_id.into()).map_err(|error| ExtensionError::new(error.to_string()))?,
+            HarnessRevisionId::new(harness_revision_id.into())
+                .map_err(|error| ExtensionError::new(error.to_string()))?,
+        ))
+    }
+
+    /// Owning durable lane.
+    pub fn lane_id(&self) -> &LaneId {
+        &self.lane_id
+    }
+
+    /// Owning logical operation.
+    pub fn operation_id(&self) -> &OperationId {
+        &self.operation_id
+    }
+
+    /// Exact open core epoch.
+    pub fn epoch_id(&self) -> &EpochId {
+        &self.epoch_id
+    }
+
+    /// Immutable harness revision that selected the executable extension.
+    pub fn harness_revision_id(&self) -> &HarnessRevisionId {
+        &self.harness_revision_id
+    }
+}
+
 /// Narrow host port for one extension's durable state namespace.
 ///
 /// Implementations are trusted host objects. The extension-facing capability
 /// below fixes `extension_id` before this port is invoked, so Luau source
 /// cannot select another extension's namespace or obtain a session writer.
 pub trait ExtensionStateStore: Send + Sync {
-    /// Read the latest inline value for every kind owned by one extension.
+    /// Read the latest complete private value owned by one extension.
     fn read_extension_state(
         &self,
+        generation: &ExtensionStateGeneration,
         extension_id: &str,
     ) -> Result<ExtensionStateView, ExtensionError>;
-    /// Append one external-only/session-retained value to that extension's
-    /// namespace. Existing values are never mutated.
-    fn append_extension_state(
+    /// Persist one bounded complete value in that extension's namespace.
+    ///
+    /// The store retains the change as an immutable fact, but exposes only
+    /// the latest complete value. An extension cannot patch individual keys
+    /// or address another namespace through this port.
+    fn replace_extension_state(
         &self,
+        generation: &ExtensionStateGeneration,
         extension_id: &str,
         update: ExtensionStateUpdate,
     ) -> Result<(), ExtensionError>;
@@ -212,6 +291,7 @@ pub trait ExtensionStateStore: Send + Sync {
 #[derive(Clone, Default)]
 pub struct ExtensionStateHandle {
     store: Arc<Mutex<Option<Weak<dyn ExtensionStateStore>>>>,
+    generation: Option<ExtensionStateGeneration>,
 }
 
 impl fmt::Debug for ExtensionStateHandle {
@@ -224,6 +304,7 @@ impl fmt::Debug for ExtensionStateHandle {
         formatter
             .debug_struct("ExtensionStateHandle")
             .field("attached", &attached)
+            .field("generation_bound", &self.generation.is_some())
             .finish()
     }
 }
@@ -249,8 +330,23 @@ impl ExtensionStateHandle {
         Ok(())
     }
 
+    /// Bind this handle to one exact live epoch generation.
+    ///
+    /// A detached or catalog-level handle deliberately cannot fall back to a
+    /// global lane. Only the resolver's epoch path may mint an executable
+    /// handle, preventing late callbacks from writing after settlement.
+    pub fn for_generation(&self, generation: ExtensionStateGeneration) -> Self {
+        Self {
+            store: Arc::clone(&self.store),
+            generation: Some(generation),
+        }
+    }
+
     /// Read state through the attached trusted runtime.
     pub fn read(&self, extension_id: &str) -> Result<ExtensionStateView, ExtensionError> {
+        let generation = self.generation.as_ref().ok_or_else(|| {
+            ExtensionError::new("extension state handle has no active epoch generation")
+        })?;
         let store = self
             .store
             .lock()
@@ -258,15 +354,18 @@ impl ExtensionStateHandle {
             .as_ref()
             .and_then(Weak::upgrade)
             .ok_or_else(|| ExtensionError::new("extension state handle is not attached"))?;
-        store.read_extension_state(extension_id)
+        store.read_extension_state(generation, extension_id)
     }
 
-    /// Append state through the attached trusted runtime.
-    pub fn append(
+    /// Replace state through the attached trusted runtime.
+    pub fn replace(
         &self,
         extension_id: &str,
         update: ExtensionStateUpdate,
     ) -> Result<(), ExtensionError> {
+        let generation = self.generation.as_ref().ok_or_else(|| {
+            ExtensionError::new("extension state handle has no active epoch generation")
+        })?;
         let store = self
             .store
             .lock()
@@ -274,7 +373,7 @@ impl ExtensionStateHandle {
             .as_ref()
             .and_then(Weak::upgrade)
             .ok_or_else(|| ExtensionError::new("extension state handle is not attached"))?;
-        store.append_extension_state(extension_id, update)
+        store.replace_extension_state(generation, extension_id, update)
     }
 }
 
@@ -291,6 +390,12 @@ pub struct ExtensionDescriptor {
     pub host_commands: Vec<ExtensionHostCommandDescription>,
     /// Extension-local lifecycle registration IDs.
     pub lifecycle_hook_ids: Vec<String>,
+    /// Immutable whole-state contract for `extension.state`, when requested.
+    ///
+    /// Candidate validation rejects a version change for an existing
+    /// extension instead of silently resetting or reinterpreting its private
+    /// state.
+    pub state_version: Option<String>,
 }
 
 /// Metadata-only semantic entry exposed to extension context policy.
@@ -879,6 +984,7 @@ mod tests {
                 tools: Vec::new(),
                 host_commands: Vec::new(),
                 lifecycle_hook_ids: Vec::new(),
+                state_version: None,
             })
         }
 

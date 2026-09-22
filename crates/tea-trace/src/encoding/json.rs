@@ -55,7 +55,7 @@ pub fn decode_json_line(line: &str) -> Result<TraceEvent, JsonTraceDecodeError> 
     };
     let mut canonical = String::new();
     write_json_event(&mut canonical, &event);
-    if canonical != line && legacy_header_without_agent_id(&event).as_deref() != Some(line) {
+    if canonical != line {
         return Err(JsonTraceDecodeError::new(
             "non-canonical or extra trace fields",
         ));
@@ -370,10 +370,6 @@ fn parse_compaction(o: &Obj) -> Result<TraceEvent, JsonTraceDecodeError> {
 }
 
 pub(super) fn write_json_event(output: &mut String, event: &TraceEvent) {
-    write_json_event_with_agent_id(output, event, true);
-}
-
-fn write_json_event_with_agent_id(output: &mut String, event: &TraceEvent, include_agent_id: bool) {
     output.push('{');
     json_field_name(output, "schema_version");
     output.push_str(&event_schema_version(event).to_string());
@@ -381,7 +377,7 @@ fn write_json_event_with_agent_id(output: &mut String, event: &TraceEvent, inclu
     json_field_name(output, "type");
     json_string(output, event_type(event));
     match event {
-        TraceEvent::EpisodeHeader(header) => write_json_header(output, header, include_agent_id),
+        TraceEvent::EpisodeHeader(header) => write_json_header(output, header),
         TraceEvent::Turn(turn) => write_json_turn(output, turn),
         TraceEvent::Tool(tool) => write_json_tool(output, tool),
         TraceEvent::Compaction(compaction) => write_json_compaction(output, compaction),
@@ -390,7 +386,7 @@ fn write_json_event_with_agent_id(output: &mut String, event: &TraceEvent, inclu
     output.push('}');
 }
 
-fn write_json_header(output: &mut String, header: &EpisodeHeader, include_agent_id: bool) {
+fn write_json_header(output: &mut String, header: &EpisodeHeader) {
     output.push(',');
     json_field_string(output, "episode_id", &header.episode_id);
     output.push(',');
@@ -400,7 +396,7 @@ fn write_json_header(output: &mut String, header: &EpisodeHeader, include_agent_
     json_field_optional_number(output, "started_at_ms", header.started_at_ms);
     output.push(',');
     json_field_name(output, "provenance");
-    json_optional_provenance(output, header.provenance.as_ref(), include_agent_id);
+    json_optional_provenance(output, header.provenance.as_ref());
 }
 
 fn write_json_turn(output: &mut String, turn: &Turn) {
@@ -418,11 +414,7 @@ fn write_json_turn(output: &mut String, turn: &Turn) {
     json_optional_cache_evidence(output, turn.cache_evidence.as_ref());
 }
 
-fn json_optional_provenance(
-    output: &mut String,
-    provenance: Option<&TraceProvenance>,
-    include_agent_id: bool,
-) {
+fn json_optional_provenance(output: &mut String, provenance: Option<&TraceProvenance>) {
     let Some(provenance) = provenance else {
         output.push_str("null");
         return;
@@ -432,9 +424,7 @@ fn json_optional_provenance(
         ("session_id", provenance.session_id.as_deref()),
         ("lane_id", provenance.lane_id.as_deref()),
     ];
-    if include_agent_id {
-        fields.push(("agent_id", provenance.agent_id.as_deref()));
-    }
+    fields.push(("agent_id", provenance.agent_id.as_deref()));
     fields.extend([
         ("operation_id", provenance.operation_id.as_deref()),
         ("epoch_id", provenance.epoch_id.as_deref()),
@@ -460,22 +450,6 @@ fn json_optional_provenance(
         json_field_optional_string(output, name, value);
     }
     output.push('}');
-}
-
-fn legacy_header_without_agent_id(event: &TraceEvent) -> Option<String> {
-    let TraceEvent::EpisodeHeader(header) = event else {
-        return None;
-    };
-    if header
-        .provenance
-        .as_ref()
-        .is_none_or(|provenance| provenance.agent_id.is_some())
-    {
-        return None;
-    }
-    let mut legacy = String::new();
-    write_json_event_with_agent_id(&mut legacy, event, false);
-    Some(legacy)
 }
 
 fn json_optional_cache_evidence(output: &mut String, evidence: Option<&CacheEvidence>) {

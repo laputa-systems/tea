@@ -394,6 +394,10 @@ opaque_id!(
     OperationId
 );
 opaque_id!(
+    /// Identifies one settled user-turn boundary that may anchor a fork.
+    TurnCheckpointId
+);
+opaque_id!(
     /// Identifies one immutable core-run epoch.
     EpochId
 );

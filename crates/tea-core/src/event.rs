@@ -1,18 +1,14 @@
-//! Lifecycle events and awaited observer boundaries.
+//! Lifecycle events and non-vetoing observer boundaries.
 //!
 //! Event construction is intentionally separate from state mutation.  The run loop must first
 //! settle state, then emit the corresponding event in this order:
 //! `agent_start → turn_start → message* / prompt_layout_observed / tool_execution* →
 //! model_turn_usage? → turn_end → agent_end`.
 
-use crate::error::CoreError;
-use crate::scheduler::CancellationToken;
 use crate::state::{
     AgentMessage, ModelTurnAccounting, RunId, SerializedJson, StopReason, ToolCallId, TurnId,
 };
 use crate::tool::{AgentToolResult, ToolUpdate};
-use std::future::Future;
-use std::pin::Pin;
 
 /// Monotonic sequence assigned by one run.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Hash)]
@@ -166,17 +162,17 @@ pub enum AgentEventKind {
     TurnStart { turn_id: TurnId },
     /// A message became visible.
     MessageStart { message: AgentMessage },
-    /// A partial message update.
+    /// An exact assistant text fragment from an active stream.
     ///
-    /// `text_delta` is the provider event payload, while `message` is the
-    /// reduced assistant snapshot after that delta. Keeping both prevents an
-    /// observer from having to diff snapshots (which is wrong for repeated
-    /// text, thinking, or future interleaved content blocks).
+    /// The stable message ID joins this transient delta to its `MessageStart`
+    /// and `MessageEnd` boundaries. It deliberately carries no growing
+    /// message snapshot: observers that need durable content consume the
+    /// terminal `MessageEnd` message instead.
     MessageUpdate {
-        /// Reduced message snapshot after this update.
-        message: AgentMessage,
+        /// Assistant message receiving the fragment.
+        message_id: crate::state::MessageId,
         /// Exact text fragment delivered by the current v1 stream event.
-        text_delta: Option<String>,
+        text_delta: String,
     },
     /// A message settled.
     MessageEnd { message: AgentMessage },
@@ -228,8 +224,7 @@ pub enum AgentEventKind {
     /// This event is emitted after the assistant message has settled and before `TurnEnd`.
     /// Missing fields remain unknown (`None`); the core never estimates a value.
     ModelTurnUsage { accounting: ModelTurnAccounting },
-    /// The loop emitted its final event. Awaited observers may still keep the
-    /// agent active before terminal settlement makes it idle.
+    /// The loop emitted its final event.
     AgentEnd { messages: Vec<AgentMessage> },
 }
 
@@ -240,47 +235,17 @@ pub enum AgentEventKind {
 /// explicit `AgentEventKind` name.
 pub type AgentEventPayload = AgentEventKind;
 
-/// A boxed observer future that is settled before the run advances.
-pub type ObserverFuture<'a> = Pin<Box<dyn Future<Output = Result<(), CoreError>> + Send + 'a>>;
-
-/// An awaited lifecycle observer.
+/// A synchronous, non-vetoing lifecycle observer.
 ///
-/// Observers see state after the event reducer has applied the event. Their
-/// futures are awaited in registration order, including for `AgentEnd`, so an
-/// unfinished terminal observer keeps the run active. The bounded,
-/// non-blocking [`crate::EventSubscription`] returned by
-/// [`crate::Agent::subscribe_nonblocking`] is a separate lossy channel
-/// contract, while [`crate::LosslessEventSubscription`] returned by
-/// [`crate::Agent::subscribe_lossless`] is an explicitly unbounded channel;
-/// neither must be silently substituted for this one.
+/// Observers see state after the corresponding event has been reduced. They
+/// have no return channel into run settlement: a callback panic is caught and
+/// ignored after the event has been recorded. Implementations must complete
+/// promptly and must not wait for I/O, locks owned by a consumer, or an
+/// executor. Slow consumers use the bounded, explicitly-lagged
+/// [`crate::agent::EventSubscription`] returned by
+/// [`crate::Agent::subscribe_nonblocking`]; it is never a reliable
+/// operation-completion path.
 pub trait EventObserver: Send + Sync {
-    /// Observe one reduced event using the run's cancellation scope.
-    fn observe<'a>(
-        &'a self,
-        event: &'a AgentEvent,
-        cancellation: CancellationToken,
-    ) -> ObserverFuture<'a>;
-}
-
-/// A bounded, owned event collection useful for deterministic providers and tests.
-#[derive(Clone, Debug, Default)]
-pub struct EventLog {
-    events: Vec<AgentEvent>,
-}
-
-impl EventLog {
-    /// Append one event in sequence order.
-    pub fn push(&mut self, event: AgentEvent) {
-        self.events.push(event);
-    }
-
-    /// Borrow the ordered event view.
-    pub fn as_slice(&self) -> &[AgentEvent] {
-        &self.events
-    }
-
-    /// Consume the log into owned events.
-    pub fn into_events(self) -> Vec<AgentEvent> {
-        self.events
-    }
+    /// Observe one reduced event.
+    fn observe(&self, event: &AgentEvent);
 }

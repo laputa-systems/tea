@@ -1,16 +1,18 @@
 use crate::composer::Composer;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU64;
 use tea_core::event::{
     AgentEvent, AgentEventKind, AutomaticCompactionOutcome, CompactionOutcome,
     ProviderRequestSkipReason,
 };
 use tea_core::harness::extension::ExtensionHostCommandDescription;
+use tea_core::runtime::{ObservationRun, PreviewEvent, PreviewIdentity, PreviewTarget};
 use tea_core::state::{AgentMessage, ModelDescriptor, ThinkingLevel, ToolCallId, Usage};
 use tea_providers::ProviderRegistry;
+use tea_session::EntryId;
 
 use super::commands;
-use super::durable::DurableSessionSummary;
+use super::durable::{DurableSessionSummary, HostTranscriptMessage};
 use super::host::{model_candidates, overlay_lines};
 
 /// Typed transcript entry contract for presentation consumers.
@@ -48,6 +50,16 @@ pub struct ToolProjection {
     pub latest_progress: Option<String>,
     pub settled_result: Option<String>,
     pub state: ToolState,
+}
+
+/// A transient assistant row keyed by the complete observation identity.
+///
+/// The core `MessageId` alone is not durable across a replacement epoch, so
+/// it cannot safely address an in-progress terminal row after recovery.
+#[derive(Clone, Debug)]
+struct AssistantPreviewLine {
+    transcript_index: usize,
+    truncated: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -127,6 +139,9 @@ pub struct AppState {
     /// `None`; retaining it keeps event identity available without formatting it
     /// into user-visible text.
     pub(super) transcript_sequences: Vec<Option<u64>>,
+    /// Durable identities aligned with canonical transcript rows. Local
+    /// welcome and notice rows intentionally retain `None`.
+    pub(super) transcript_entry_ids: Vec<Option<EntryId>>,
     pub(super) composer: Composer,
     pub(super) status: UiStatus,
     /// Monotonic marker for a semantic transcript replacement. The renderer
@@ -146,6 +161,18 @@ pub struct AppState {
     pub(super) streaming_line: Option<usize>,
     /// Active generic tool rows keyed by the core-owned call identity.
     pub(super) active_tool_lines: BTreeMap<ToolCallId, usize>,
+    /// Root-only coalesced preview rows indexed by their complete attempt
+    /// identity. These are never used as durable transcript identities.
+    active_assistant_previews: BTreeMap<PreviewIdentity, AssistantPreviewLine>,
+    active_tool_previews: BTreeMap<PreviewIdentity, usize>,
+    /// Terminal semantic events fence their corresponding previews so a late
+    /// coalesced update cannot revive a completed row.
+    fenced_previews: BTreeSet<PreviewIdentity>,
+    /// Completed observation attempts reject every later preview, including a
+    /// subject that did not have an individually delivered terminal fence.
+    /// This remains local projection state and is reset only by a transcript
+    /// replacement or atomic observation resnapshot.
+    completed_preview_runs: BTreeSet<ObservationRun>,
     /// The most recent core-emitted context estimate. `None` means the core has not supplied
     /// capacity-policy evidence for this projection; it is never inferred from rendered text.
     pub(super) context_estimate: Option<ContextEstimate>,
@@ -163,9 +190,13 @@ pub struct AppState {
     /// Interactive reverse-history search, if the composer is filtering the
     /// active session's durable user-message history.
     pub(super) history_search: Option<HistorySearch>,
-    /// One local next-message slot. It remains editable until the active durable
-    /// operation settles, so the terminal never advertises a mutable core queue.
+    /// One rendered next-message slot projected from runtime-owned accepted
+    /// inputs. The terminal stores neither payload authority nor queue order.
     pub(super) queued_message: Option<String>,
+    /// Durable accepted-input identities represented by `queued_message` in
+    /// dispatch order. They are used only for the all-or-nothing withdrawal
+    /// request when an empty composer receives Up.
+    pub(super) queued_input_ids: Vec<EntryId>,
     pub(super) surface: UiSurface,
     /// Payload for data-bearing temporary surfaces such as help.
     pub(super) surface_lines: Vec<String>,
@@ -176,7 +207,7 @@ pub struct AppState {
     pub(super) slash_completion: Option<SlashCompletion>,
     /// Immutable commands resolved from the active durable harness revision.
     pub(super) extension_commands: Vec<ExtensionHostCommandDescription>,
-    /// Field-wise provider accounting observed directly from the lossless event stream.
+    /// Field-wise provider accounting from live observations or durable resnapshots.
     pub(super) reported_usage: Usage,
     /// Optional child-lane activity derived from the durable supervisor. The
     /// field is absent, rather than zeroed, for feature-disabled sessions so
@@ -271,8 +302,22 @@ impl AppState {
         );
     }
 
-    /// Apply one typed core event after its reducer has committed state.
-    pub fn apply_event(&mut self, event: &AgentEvent) {
+    /// State-only test helper for semantic core events without a durable
+    /// observation envelope. Production callers must use
+    /// [`Self::apply_observed_event`] so a semantic event cannot settle a
+    /// preview from a different replacement epoch with the same core-local
+    /// identifier.
+    #[cfg(test)]
+    pub(crate) fn apply_event(&mut self, event: &AgentEvent) {
+        self.apply_event_for_run(None, event);
+    }
+
+    /// Apply one semantic observation event from a specific core attempt.
+    pub(super) fn apply_observed_event(&mut self, run: &ObservationRun, event: &AgentEvent) {
+        self.apply_event_for_run(Some(run), event);
+    }
+
+    fn apply_event_for_run(&mut self, run: Option<&ObservationRun>, event: &AgentEvent) {
         let sequence = Some(event.sequence.0);
         match &event.kind {
             AgentEventKind::AgentStart => {
@@ -292,37 +337,46 @@ impl AppState {
                     );
                 }
             }
-            AgentEventKind::MessageUpdate {
-                message,
-                text_delta,
-            } => {
-                if let (AgentMessage::Assistant { .. }, Some(delta)) = (message, text_delta) {
-                    if let Some(index) = self.streaming_line {
-                        if let Some(TranscriptEntry::Assistant { text, .. }) =
-                            self.transcript.get_mut(index)
-                        {
-                            text.push_str(delta);
-                        }
-                    } else {
-                        self.push_entry(
-                            sequence,
-                            TranscriptEntry::Assistant {
-                                text: delta.clone(),
-                                streaming: true,
-                            },
-                        );
-                        self.streaming_line = self.transcript.len().checked_sub(1);
+            AgentEventKind::MessageUpdate { text_delta, .. } => {
+                // Streaming text is carried as `PreviewEvent` in live
+                // subscriptions. Retain this branch only for direct
+                // state-projection tests and callers without an observation
+                // envelope.
+                if run.is_some() {
+                    return;
+                }
+                if let Some(index) = self.streaming_line {
+                    if let Some(TranscriptEntry::Assistant { text, .. }) =
+                        self.transcript.get_mut(index)
+                    {
+                        text.push_str(text_delta);
                     }
+                } else {
+                    self.push_entry(
+                        sequence,
+                        TranscriptEntry::Assistant {
+                            text: text_delta.clone(),
+                            streaming: true,
+                        },
+                    );
+                    self.streaming_line = self.transcript.len().checked_sub(1);
                 }
             }
             AgentEventKind::MessageEnd { message } => {
                 if let AgentMessage::Assistant {
+                    id,
                     content,
                     error_message,
                     ..
                 } = message
                 {
-                    if let Some(index) = self.streaming_line {
+                    let preview_index = run.and_then(|run| {
+                        self.active_assistant_previews
+                            .get(&PreviewIdentity::assistant(run.clone(), *id))
+                            .map(|line| line.transcript_index)
+                    });
+                    let index = preview_index.or_else(|| run.is_none().then_some(self.streaming_line).flatten());
+                    if let Some(index) = index {
                         if let Some(error) = error_message {
                             if let Some(entry) = self.transcript.get_mut(index) {
                                 *entry = TranscriptEntry::Error {
@@ -353,7 +407,9 @@ impl AppState {
                             },
                         );
                     }
-                    self.streaming_line = None;
+                    if run.is_none() {
+                        self.streaming_line = None;
+                    }
                 }
             }
             AgentEventKind::ToolExecutionStart {
@@ -376,12 +432,19 @@ impl AppState {
                     }),
                 );
                 self.active_tool_lines.insert(tool_call_id.clone(), index);
+                if let Some(run) = run {
+                    self.active_tool_previews
+                        .insert(PreviewIdentity::tool(run.clone(), tool_call_id.clone()), index);
+                }
             }
             AgentEventKind::ToolExecutionUpdate {
                 tool_call_id,
                 tool_name,
                 update,
             } => {
+                if run.is_some() {
+                    return;
+                }
                 // An update with no activity claim leaves the current
                 // presentation alone; only an explicit value replaces it.
                 if let Some(activity) = &update.activity {
@@ -404,18 +467,35 @@ impl AppState {
                 result,
                 ..
             } => {
-                self.update_tool_line(
-                    tool_call_id,
-                    sequence,
-                    tool_name,
-                    if result.is_error {
-                        ToolState::Failed
-                    } else {
-                        ToolState::Completed
-                    },
-                    None,
-                    Some(result.content.clone()),
-                );
+                let state = if result.is_error {
+                    ToolState::Failed
+                } else {
+                    ToolState::Completed
+                };
+                let preview_index = run.and_then(|run| {
+                    self.active_tool_previews
+                        .get(&PreviewIdentity::tool(run.clone(), tool_call_id.clone()))
+                        .copied()
+                });
+                if let Some(index) = preview_index {
+                    self.update_tool_line_at(
+                        index,
+                        sequence,
+                        tool_name,
+                        state,
+                        None,
+                        Some(result.content.clone()),
+                    );
+                } else {
+                    self.update_tool_line(
+                        tool_call_id,
+                        sequence,
+                        tool_name,
+                        state,
+                        None,
+                        Some(result.content.clone()),
+                    );
+                }
                 self.active_tool_lines.remove(tool_call_id);
             }
             // Usage is projected by the attached snapshot/footer; a transcript row
@@ -515,73 +595,223 @@ impl AppState {
         }
     }
 
+    /// Apply one coalesced, non-durable live preview. A preview can only
+    /// update a row whose complete observation identity is still open.
+    pub(super) fn apply_preview(&mut self, preview: &PreviewEvent) {
+        let identity = preview.identity().clone();
+        if self.completed_preview_runs.contains(&identity.run)
+            || self.fenced_previews.contains(&identity)
+        {
+            return;
+        }
+        match preview {
+            PreviewEvent::AssistantText {
+                sequence,
+                text,
+                truncated,
+                ..
+            } => self.apply_assistant_preview(identity, Some(sequence.0), text, *truncated),
+            PreviewEvent::ToolProgress {
+                sequence,
+                tool_name,
+                content,
+                activity,
+                truncated,
+                ..
+            } => self.apply_tool_preview(
+                identity,
+                Some(sequence.0),
+                tool_name,
+                content,
+                activity.as_deref(),
+                *truncated,
+            ),
+        }
+    }
+
+    /// Fence semantic-final preview subjects after applying their canonical
+    /// terminal event. The fence lasts only for the owning core attempt and
+    /// therefore cannot become durable state.
+    pub(super) fn fence_previews(
+        &mut self,
+        identities: impl IntoIterator<Item = PreviewIdentity>,
+    ) {
+        for identity in identities {
+            self.active_assistant_previews.remove(&identity);
+            self.active_tool_previews.remove(&identity);
+            self.fenced_previews.insert(identity);
+        }
+    }
+
+    /// Discard every transient row attached to a completed core attempt.
+    /// Semantic terminal rows remain because they have already been converted
+    /// to canonical presentation before this method is called. Exact fences
+    /// and the completed-run fence stay until a snapshot replacement so a
+    /// delayed preview cannot revive settled output.
+    pub(super) fn clear_previews_for_run(&mut self, run: &ObservationRun) {
+        let mut transient_indexes = BTreeSet::new();
+        self.active_assistant_previews.retain(|identity, line| {
+            if identity.run == *run {
+                transient_indexes.insert(line.transcript_index);
+                false
+            } else {
+                true
+            }
+        });
+        self.active_tool_previews.retain(|identity, index| {
+            if identity.run == *run {
+                transient_indexes.insert(*index);
+                false
+            } else {
+                true
+            }
+        });
+        self.completed_preview_runs.insert(run.clone());
+        self.discard_transient_rows(&transient_indexes);
+    }
+
+    /// Drop all observation-only state before an atomic snapshot rebuild.
+    pub(super) fn clear_previews(&mut self) {
+        let transient_indexes = self
+            .active_assistant_previews
+            .values()
+            .map(|line| line.transcript_index)
+            .chain(self.active_tool_previews.values().copied())
+            .collect::<BTreeSet<_>>();
+        self.active_assistant_previews.clear();
+        self.active_tool_previews.clear();
+        self.fenced_previews.clear();
+        self.completed_preview_runs.clear();
+        self.streaming_line = None;
+        self.discard_transient_rows(&transient_indexes);
+    }
+
     /// Rebuild the visible transcript from a restored canonical conversation.
     ///
     /// These rows deliberately have no event sequence: loading a session is a host projection,
     /// not a replay of historical core events. Future events continue from the live subscription.
+    #[cfg(test)]
     pub(super) fn restore_messages(&mut self, messages: &[AgentMessage]) {
         self.clear_transcript();
         self.clear_history();
         for message in messages {
-            match message {
-                AgentMessage::User { content, .. } => {
-                    self.record_history(content);
-                    self.push_entry(
+            self.restore_message(None, message);
+        }
+    }
+
+    /// Rebuild from an atomic durable snapshot while retaining every stored
+    /// entry identity for scrollback-frontier recovery.
+    pub(super) fn restore_durable_messages(&mut self, messages: &[HostTranscriptMessage]) {
+        self.clear_transcript();
+        self.clear_history();
+        for message in messages {
+            self.restore_message(Some(message.entry_id.clone()), &message.message);
+        }
+    }
+
+    /// Attach durable identities to already-projected terminal rows without
+    /// replacing the visible transcript. A live semantic event can precede
+    /// the next redraw while its durable record is already committed; binding
+    /// it here prevents a later resnapshot from duplicating scrollback.
+    pub(super) fn bind_durable_messages(&mut self, messages: &[HostTranscriptMessage]) {
+        let mut transcript_index = 0;
+        for durable in messages {
+            loop {
+                let Some(entry) = self.transcript.get(transcript_index) else {
+                    return;
+                };
+                match entry {
+                    TranscriptEntry::Welcome { .. } | TranscriptEntry::Notice { .. } => {
+                        transcript_index = transcript_index.saturating_add(1);
+                    }
+                    _ if durable_message_matches(entry, &durable.message) => {
+                        let Some(identity) = self.transcript_entry_ids.get_mut(transcript_index)
+                        else {
+                            return;
+                        };
+                        if identity.as_ref().is_some_and(|id| id != &durable.entry_id) {
+                            return;
+                        }
+                        *identity = Some(durable.entry_id.clone());
+                        transcript_index = transcript_index.saturating_add(1);
+                        break;
+                    }
+                    _ => return,
+                }
+            }
+        }
+    }
+
+    /// Return the durable identity aligned with one presentation row.
+    pub(super) fn transcript_entry_id(&self, index: usize) -> Option<&EntryId> {
+        self.transcript_entry_ids
+            .get(index)
+            .and_then(Option::as_ref)
+    }
+
+    fn restore_message(&mut self, entry_id: Option<EntryId>, message: &AgentMessage) {
+        match message {
+            AgentMessage::User { content, .. } => {
+                self.record_history(content);
+                self.push_entry_with_id(
+                    None,
+                    entry_id,
+                    TranscriptEntry::User {
+                        text: content.clone(),
+                    },
+                );
+            }
+            AgentMessage::Assistant {
+                content,
+                error_message,
+                ..
+            } => {
+                if let Some(error) = error_message {
+                    self.push_entry_with_id(
                         None,
-                        TranscriptEntry::User {
+                        entry_id,
+                        TranscriptEntry::Error {
+                            text: error.clone(),
+                        },
+                    );
+                } else {
+                    self.push_entry_with_id(
+                        None,
+                        entry_id,
+                        TranscriptEntry::Assistant {
                             text: content.clone(),
+                            streaming: false,
                         },
                     );
                 }
-                AgentMessage::Assistant {
-                    content,
-                    error_message,
-                    ..
-                } => {
-                    if let Some(error) = error_message {
-                        self.push_entry(
-                            None,
-                            TranscriptEntry::Error {
-                                text: error.clone(),
-                            },
-                        );
-                    } else {
-                        self.push_entry(
-                            None,
-                            TranscriptEntry::Assistant {
-                                text: content.clone(),
-                                streaming: false,
-                            },
-                        );
-                    }
-                }
-                AgentMessage::ToolResult {
-                    tool_call_id,
-                    tool_name,
-                    content,
-                    is_error,
-                    ..
-                } => {
-                    let state = if *is_error {
-                        ToolState::Failed
-                    } else {
-                        ToolState::Completed
-                    };
-                    let transcript_index = self.transcript.len();
-                    self.push_entry(
-                        None,
-                        TranscriptEntry::Tool(ToolProjection {
-                            call_id: tool_call_id.clone(),
-                            sequence: None,
-                            transcript_index,
-                            tool_name: tool_name.clone(),
-                            arguments: String::new(),
-                            latest_progress: None,
-                            settled_result: Some(content.clone()),
-                            state,
-                        }),
-                    );
-                }
+            }
+            AgentMessage::ToolResult {
+                tool_call_id,
+                tool_name,
+                content,
+                is_error,
+                ..
+            } => {
+                let state = if *is_error {
+                    ToolState::Failed
+                } else {
+                    ToolState::Completed
+                };
+                let transcript_index = self.transcript.len();
+                self.push_entry_with_id(
+                    None,
+                    entry_id,
+                    TranscriptEntry::Tool(ToolProjection {
+                        call_id: tool_call_id.clone(),
+                        sequence: None,
+                        transcript_index,
+                        tool_name: tool_name.clone(),
+                        arguments: String::new(),
+                        latest_progress: None,
+                        settled_result: Some(content.clone()),
+                        state,
+                    }),
+                );
             }
         }
     }
@@ -955,8 +1185,18 @@ impl AppState {
     }
 
     pub(super) fn push_entry(&mut self, sequence: Option<u64>, entry: TranscriptEntry) {
+        self.push_entry_with_id(sequence, None, entry);
+    }
+
+    fn push_entry_with_id(
+        &mut self,
+        sequence: Option<u64>,
+        entry_id: Option<EntryId>,
+        entry: TranscriptEntry,
+    ) {
         self.transcript.push(entry);
         self.transcript_sequences.push(sequence);
+        self.transcript_entry_ids.push(entry_id);
     }
 
     fn update_tool_line(
@@ -969,17 +1209,7 @@ impl AppState {
         result: Option<String>,
     ) {
         if let Some(index) = self.active_tool_lines.get(tool_call_id).copied() {
-            if let Some(TranscriptEntry::Tool(projection)) = self.transcript.get_mut(index) {
-                projection.sequence = sequence;
-                projection.tool_name = tool_name.to_owned();
-                projection.state = state;
-                if progress.is_some() {
-                    projection.latest_progress = progress;
-                }
-                if result.is_some() {
-                    projection.settled_result = result;
-                }
-                self.transcript_sequences[index] = sequence;
+            if self.update_tool_line_at(index, sequence, tool_name, state, progress.clone(), result.clone()) {
                 return;
             }
         }
@@ -998,6 +1228,181 @@ impl AppState {
             }),
         );
         self.active_tool_lines.insert(tool_call_id.clone(), index);
+    }
+
+    fn update_tool_line_at(
+        &mut self,
+        index: usize,
+        sequence: Option<u64>,
+        tool_name: &str,
+        state: ToolState,
+        progress: Option<String>,
+        result: Option<String>,
+    ) -> bool {
+        let Some(TranscriptEntry::Tool(projection)) = self.transcript.get_mut(index) else {
+            return false;
+        };
+        projection.sequence = sequence;
+        projection.tool_name = tool_name.to_owned();
+        projection.state = state;
+        if progress.is_some() {
+            projection.latest_progress = progress;
+        }
+        if result.is_some() {
+            projection.settled_result = result;
+        }
+        if let Some(entry_sequence) = self.transcript_sequences.get_mut(index) {
+            *entry_sequence = sequence;
+        }
+        true
+    }
+
+    fn apply_assistant_preview(
+        &mut self,
+        identity: PreviewIdentity,
+        sequence: Option<u64>,
+        text: &str,
+        truncated: bool,
+    ) {
+        if !matches!(&identity.target, PreviewTarget::AssistantMessage { .. }) {
+            return;
+        }
+        if let Some(line) = self.active_assistant_previews.get_mut(&identity) {
+            let index = line.transcript_index;
+            let prepend_ellipsis = truncated && !line.truncated;
+            line.truncated |= truncated;
+            if let Some(TranscriptEntry::Assistant {
+                text: rendered,
+                streaming,
+            }) = self.transcript.get_mut(index)
+            {
+                if prepend_ellipsis {
+                    rendered.insert(0, '…');
+                }
+                rendered.push_str(text);
+                *streaming = true;
+                if let Some(entry_sequence) = self.transcript_sequences.get_mut(index) {
+                    *entry_sequence = sequence;
+                }
+                return;
+            }
+            self.active_assistant_previews.remove(&identity);
+        }
+        let index = self.transcript.len();
+        self.push_entry(
+            sequence,
+            TranscriptEntry::Assistant {
+                text: preview_text(text, truncated),
+                streaming: true,
+            },
+        );
+        self.active_assistant_previews.insert(
+            identity,
+            AssistantPreviewLine {
+                transcript_index: index,
+                truncated,
+            },
+        );
+    }
+
+    fn apply_tool_preview(
+        &mut self,
+        identity: PreviewIdentity,
+        sequence: Option<u64>,
+        tool_name: &str,
+        content: &str,
+        activity: Option<&str>,
+        truncated: bool,
+    ) {
+        let PreviewTarget::ToolCall { tool_call_id } = &identity.target else {
+            return;
+        };
+        if let Some(activity) = activity {
+            self.activity_text = Some(preview_text(&sanitize_activity(activity), truncated));
+        }
+        let index = match self.active_tool_previews.get(&identity).copied() {
+            Some(index) => index,
+            None if content.is_empty() => return,
+            None => {
+                let index = self.transcript.len();
+                self.push_entry(
+                    sequence,
+                    TranscriptEntry::Tool(ToolProjection {
+                        call_id: tool_call_id.clone(),
+                        sequence,
+                        transcript_index: index,
+                        tool_name: tool_name.to_owned(),
+                        arguments: String::new(),
+                        latest_progress: None,
+                        settled_result: None,
+                        state: ToolState::Progress,
+                    }),
+                );
+                self.active_tool_lines.insert(tool_call_id.clone(), index);
+                self.active_tool_previews.insert(identity.clone(), index);
+                index
+            }
+        };
+        let progress = (!content.is_empty()).then(|| preview_text(content, truncated));
+        let _ = self.update_tool_line_at(
+            index,
+            sequence,
+            tool_name,
+            ToolState::Progress,
+            progress,
+            None,
+        );
+    }
+
+    fn discard_transient_rows(&mut self, indexes: &BTreeSet<usize>) {
+        if indexes.is_empty() {
+            return;
+        }
+        let entries = std::mem::take(&mut self.transcript);
+        let sequences = std::mem::take(&mut self.transcript_sequences);
+        let entry_ids = std::mem::take(&mut self.transcript_entry_ids);
+        let mut replacement_indexes = BTreeMap::new();
+        for (old_index, entry) in entries.into_iter().enumerate() {
+            if indexes.contains(&old_index) {
+                continue;
+            }
+            let new_index = self.transcript.len();
+            replacement_indexes.insert(old_index, new_index);
+            self.transcript.push(entry);
+            self.transcript_sequences
+                .push(sequences.get(old_index).copied().flatten());
+            self.transcript_entry_ids
+                .push(entry_ids.get(old_index).cloned().flatten());
+        }
+        self.streaming_line = self
+            .streaming_line
+            .and_then(|index| replacement_indexes.get(&index).copied());
+        self.active_tool_lines.retain(|_, index| {
+            let Some(replacement) = replacement_indexes.get(index).copied() else {
+                return false;
+            };
+            *index = replacement;
+            true
+        });
+        self.active_assistant_previews.retain(|_, line| {
+            let Some(replacement) = replacement_indexes.get(&line.transcript_index).copied() else {
+                return false;
+            };
+            line.transcript_index = replacement;
+            true
+        });
+        self.active_tool_previews.retain(|_, index| {
+            let Some(replacement) = replacement_indexes.get(index).copied() else {
+                return false;
+            };
+            *index = replacement;
+            true
+        });
+        for (index, entry) in self.transcript.iter_mut().enumerate() {
+            if let TranscriptEntry::Tool(projection) = entry {
+                projection.transcript_index = index;
+            }
+        }
     }
 
     pub(super) fn notice(&mut self, text: impl Into<String>) {
@@ -1180,39 +1585,39 @@ impl AppState {
         self.history_index = Some(next);
         self.history.get(next).cloned()
     }
-    /// Append a submitted active-operation message to the one visible next-message slot.
-    pub(crate) fn queue_message(&mut self, message: String) {
-        match &mut self.queued_message {
-            Some(queued) => {
-                if !queued.is_empty() {
-                    queued.push_str("\n\n");
-                }
-                queued.push_str(&message);
-            }
-            None => self.queued_message = Some(message),
+    /// Replace the one visible next-message slot from the authoritative
+    /// runtime queue. Multiple accepted inputs retain their dispatch order
+    /// while sharing the established combined presentation surface.
+    pub(crate) fn set_queued_inputs(&mut self, inputs: Vec<(EntryId, String)>) {
+        if inputs.is_empty() {
+            self.clear_queued_inputs();
+            return;
         }
+        self.queued_input_ids = inputs.iter().map(|(id, _)| id.clone()).collect();
+        self.queued_message = Some(
+            inputs
+                .into_iter()
+                .map(|(_, content)| content)
+                .collect::<Vec<_>>()
+                .join("\n\n"),
+        );
     }
 
-    /// Borrow the local next-message slot for presentation.
+    /// Borrow the runtime-projected next-message slot for presentation.
     pub(crate) fn queued_message(&self) -> Option<&str> {
         self.queued_message.as_deref()
     }
 
-    /// Take the full local next-message slot for durable prompt admission.
-    pub(super) fn take_queued_message(&mut self) -> Option<String> {
-        self.queued_message.take()
+    /// Borrow the exact accepted inputs represented by the combined slot.
+    pub(super) fn queued_input_ids(&self) -> &[EntryId] {
+        &self.queued_input_ids
     }
 
-    /// Restore the next-message slot only when doing so cannot replace a draft.
-    pub(super) fn restore_queued_message(&mut self) -> bool {
-        if !self.composer.text().is_empty() {
-            return false;
-        }
-        let Some(message) = self.take_queued_message() else {
-            return false;
-        };
-        self.composer.replace_from_editor(message);
-        true
+    /// Drop the disposable queue projection after a successful runtime
+    /// withdrawal or session replacement. This never mutates durable inputs.
+    pub(super) fn clear_queued_inputs(&mut self) {
+        self.queued_message = None;
+        self.queued_input_ids.clear();
     }
 
     pub(super) fn clear_transcript(&mut self) {
@@ -1221,8 +1626,14 @@ impl AppState {
         self.activity_text = None;
         self.transcript.clear();
         self.transcript_sequences.clear();
+        self.transcript_entry_ids.clear();
         self.streaming_line = None;
         self.active_tool_lines.clear();
+        self.active_assistant_previews.clear();
+        self.active_tool_previews.clear();
+        self.fenced_previews.clear();
+        self.completed_preview_runs.clear();
+        self.clear_queued_inputs();
         self.reported_usage = Usage::default();
         self.projection_generation = self.projection_generation.wrapping_add(1);
     }
@@ -1245,6 +1656,70 @@ impl AppState {
             .surface_offset
             .saturating_add(lines)
             .min(self.surface_lines.len().saturating_sub(1));
+    }
+}
+
+/// Mark a bounded preview as incomplete without inventing unavailable text.
+fn preview_text(text: &str, truncated: bool) -> String {
+    if truncated {
+        format!("…{text}")
+    } else {
+        text.to_owned()
+    }
+}
+
+/// Compare a live presentation row only with the semantic shape persisted by
+/// `project_host_messages`. This deliberately rejects local notices and
+/// incomplete previews so a reconnect can preserve only an EntryId-identical
+/// scrollback prefix.
+fn durable_message_matches(entry: &TranscriptEntry, message: &AgentMessage) -> bool {
+    match (entry, message) {
+        (
+            TranscriptEntry::User { text },
+            AgentMessage::User {
+                content,
+                ..
+            },
+        ) => text == content,
+        (
+            TranscriptEntry::Assistant {
+                text,
+                streaming: false,
+            },
+            AgentMessage::Assistant {
+                content,
+                error_message: None,
+                ..
+            },
+        ) => text == content,
+        (
+            TranscriptEntry::Error { text },
+            AgentMessage::Assistant {
+                error_message: Some(error),
+                ..
+            },
+        ) => text == error,
+        (
+            TranscriptEntry::Tool(projection),
+            AgentMessage::ToolResult {
+                tool_call_id,
+                tool_name,
+                content,
+                is_error,
+                ..
+            },
+        ) => {
+            &projection.call_id == tool_call_id
+                && projection.tool_name == tool_name.as_str()
+                && projection.settled_result.as_deref() == Some(content.as_str())
+                && projection.state
+                    == if *is_error {
+                        ToolState::Failed
+                    } else {
+                        ToolState::Completed
+                    }
+        }
+        _ => false,
     }
 }
 

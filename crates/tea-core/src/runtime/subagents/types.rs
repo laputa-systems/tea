@@ -351,8 +351,11 @@ pub struct SubagentWorkspaceChange {
 pub struct SubagentStatus {
     /// Deterministic child identity.
     pub agent_id: AgentId,
-    /// Accepted child operation.
-    pub operation_id: OperationId,
+    /// Accepted child operation, when the durable spawn reached operation
+    /// admission before interruption. A `None` value is an inspectable,
+    /// unstarted child assignment; it never authorizes resurrection of that
+    /// assignment.
+    pub operation_id: Option<OperationId>,
     /// Stable name unique within the owning root operation.
     pub task_name: String,
     /// Full configured provider/model/revision descriptor.
@@ -411,7 +414,8 @@ pub struct ReopenSubagentRequest {
     pub workspace_lease_id: WorkspaceLeaseId,
     /// Child model chosen when the lane was created.
     pub model: SubagentModel,
-    /// Persisted child reasoning level that must be reinstalled before drive.
+    /// Persisted child reasoning level used to validate fresh host authority
+    /// while reconciling the retained lease.
     pub thinking: ThinkingLevel,
 }
 

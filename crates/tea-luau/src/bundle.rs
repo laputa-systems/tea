@@ -11,22 +11,17 @@ use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
 
-/// The original closed-bundle ABI.
+/// The only accepted closed-bundle ABI.
 ///
-/// A bundle declares deterministic named prompt sections, bounded lifecycle
-/// callbacks, typed context proposals, and the `before_tool` decision hook.
-/// Older append-style declarations are deliberately not accepted.
-pub const BUNDLE_ABI_VERSION: u32 = 1;
-
-/// The closed-bundle ABI that adds host commands and idle callbacks.
-///
-/// Version 2 intentionally leaves the v1 declaration shape unchanged. A v1
-/// bundle cannot opt into the new host-facing fields by accident.
-pub const BUNDLE_ABI_V2_VERSION: u32 = 2;
+/// ABI v3 includes host commands, idle callbacks, and the optional
+/// `state_version` declaration. A bundle that requests `extension.state`
+/// declares that version, so immutable harness candidates can reject an
+/// incompatible state change.
+pub const BUNDLE_ABI_V3_VERSION: u32 = 3;
 
 /// Whether this build understands a closed-bundle ABI version.
 pub const fn supports_bundle_abi(abi_version: u32) -> bool {
-    matches!(abi_version, BUNDLE_ABI_VERSION | BUNDLE_ABI_V2_VERSION)
+    abi_version == BUNDLE_ABI_V3_VERSION
 }
 
 /// A canonical, bundle-local module path.
@@ -306,7 +301,7 @@ impl BundleManifest {
     {
         if !supports_bundle_abi(abi_version) {
             return Err(ManifestError::UnsupportedAbiVersion {
-                expected: BUNDLE_ABI_V2_VERSION,
+                expected: BUNDLE_ABI_V3_VERSION,
                 actual: abi_version,
             });
         }
@@ -378,7 +373,7 @@ impl fmt::Display for ManifestError {
             } => {
                 write!(
                     formatter,
-                    "unsupported bundle ABI version {actual}; supported versions are {BUNDLE_ABI_VERSION} and {BUNDLE_ABI_V2_VERSION}"
+                    "unsupported bundle ABI version {actual}; supported version is {BUNDLE_ABI_V3_VERSION}"
                 )
             }
             Self::InvalidEntrypoint(error) => {
@@ -669,7 +664,7 @@ mod tests {
     use super::*;
 
     fn manifest(capabilities: &[&str]) -> BundleManifest {
-        BundleManifest::new(BUNDLE_ABI_VERSION, "main.luau", capabilities).unwrap()
+        BundleManifest::new(BUNDLE_ABI_V3_VERSION, "main.luau", capabilities).unwrap()
     }
 
     fn bundle() -> Bundle {
@@ -702,25 +697,31 @@ mod tests {
 
     #[test]
     fn manifest_rejects_bad_abi_entrypoint_and_capabilities() {
+        for retired in [1, 2] {
+            assert!(matches!(
+                BundleManifest::new(retired, "main.luau", std::iter::empty::<&str>()),
+                Err(ManifestError::UnsupportedAbiVersion { expected: BUNDLE_ABI_V3_VERSION, actual }) if actual == retired
+            ));
+        }
         assert!(matches!(
             BundleManifest::new(99, "main.luau", std::iter::empty::<&str>()),
             Err(ManifestError::UnsupportedAbiVersion { .. })
         ));
         assert!(matches!(
             BundleManifest::new(
-                BUNDLE_ABI_VERSION,
+                BUNDLE_ABI_V3_VERSION,
                 "../main.luau",
                 std::iter::empty::<&str>()
             ),
             Err(ManifestError::InvalidEntrypoint(_))
         ));
         assert!(matches!(
-            BundleManifest::new(BUNDLE_ABI_VERSION, "main.luau", ["world..exec"]),
+            BundleManifest::new(BUNDLE_ABI_V3_VERSION, "main.luau", ["world..exec"]),
             Err(ManifestError::InvalidCapability(_))
         ));
         assert!(matches!(
             BundleManifest::new(
-                BUNDLE_ABI_VERSION,
+                BUNDLE_ABI_V3_VERSION,
                 "main.luau",
                 ["world.exec", "world.exec"]
             ),

@@ -5,7 +5,7 @@ use crate::ids::*;
 use crate::model::*;
 use crate::store::{
     SessionAppendIndex, SessionClock, SessionError, SessionReader, SessionWriter,
-    SystemSessionClock, validate_snapshot, validate_snapshot_append,
+    SystemSessionClock, prepare_commit, validate_prepared_commit, validate_snapshot,
 };
 use crate::{
     ArtifactError, JsonValue, LaneId, SessionVerification, SessionVerificationError, verify_session,
@@ -309,7 +309,10 @@ impl JsonlSession {
         durability: DurabilityMode,
         clock: Arc<dyn SessionClock>,
     ) -> Result<Self, SessionError> {
-        if header.kind != "session" || header.version != SESSION_FORMAT_VERSION {
+        if header.kind != "tea-session"
+            || header.format != SESSION_FORMAT_IDENTITY
+            || header.version != SESSION_FORMAT_VERSION
+        {
             return Err(SessionError::InvalidInput {
                 message: "JSONL v1 creation requires a v1 session header".into(),
             });
@@ -717,21 +720,23 @@ impl JsonlSession {
         }
     }
 
-    fn write_mutation(&mut self, mutation: SessionMutation) -> Result<(), SessionError> {
+    fn write_commit(&mut self, commit: SessionCommit) -> Result<StoredCommit, SessionError> {
         self.writable()?;
-        let mutation = seal_mutation(&self.snapshot, mutation)?;
-        let refresh_head = selects_main_harness_revision(&mutation);
-        let locally_validated = self.append_index.is_locally_validated_mutation(&mutation)?;
-        if !locally_validated {
-            // Reject cross-record invalid input before it can become durable,
-            // but borrow the prospective payload through the sole pure
-            // reducer instead of cloning the complete retained prefix.
-            validate_snapshot_append(&self.snapshot, &mutation)?;
-        }
-        let encoded = encode_mutation(&mutation)
+        let stored = prepare_commit(
+            &self.snapshot,
+            &self.append_index,
+            commit,
+            self.clock.now_ms(),
+        )?;
+        // Reject cross-record invalid input before it can become durable. The
+        // prospective group is borrowed through the pure reducers, so this
+        // never clones the retained prefix or exposes a partial group.
+        validate_prepared_commit(&self.snapshot, &self.append_index, &stored)?;
+        let refresh_head = stored.items.iter().any(selects_main_harness_revision);
+        let encoded = encode_commit(&stored)
             .to_json_string()
             .map_err(|error| SessionError::InvalidInput {
-                message: format!("session mutation cannot encode as JSON: {error}"),
+                message: format!("session commit cannot encode as JSON: {error}"),
             })?;
         ensure_complete_line_size(&encoded)?;
         if let Err(error) = write_complete_line(
@@ -748,14 +753,16 @@ impl JsonlSession {
         // `session.jsonl` is authoritative. A cache failure cannot undo its
         // committed prefix, so defer the disposable cache until after the
         // reduced state advances and never report it as a failed commit.
-        self.append_index.advance(&mutation);
-        self.snapshot.push_mutation(mutation);
+        for item in &stored.items {
+            self.append_index.advance(item);
+        }
+        self.snapshot.push_commit(stored.clone());
         if refresh_head {
             self.cache_warning = write_head_cache(&self.directory, &self.snapshot, self.durability)
                 .err()
                 .map(|error| error.to_string());
         }
-        Ok(())
+        Ok(stored)
     }
 }
 
@@ -798,16 +805,17 @@ fn reject_unsupported_format(file: &mut File, path: &Path) -> Result<(), Session
     let Some(fields) = header.as_object() else {
         return Ok(());
     };
-    if fields.get("kind").and_then(JsonValue::as_str) != Some("session") {
+    let Some(kind) = fields.get("kind").and_then(JsonValue::as_str) else {
         return Ok(());
-    }
+    };
     let observed_version = fields.get("version").and_then(JsonValue::as_u64);
-    if let Some(observed_version) = observed_version
-        && observed_version != u64::from(SESSION_FORMAT_VERSION)
+    if kind != "tea-session"
+        || fields.get("format").and_then(JsonValue::as_str) != Some(SESSION_FORMAT_IDENTITY)
+        || observed_version.is_some_and(|version| version != u64::from(SESSION_FORMAT_VERSION))
     {
         return Err(SessionError::UnsupportedFormat {
             path: path.display().to_string(),
-            observed_version: Some(observed_version),
+            observed_version,
         });
     }
     Ok(())
@@ -859,66 +867,8 @@ impl SessionReader for JsonlSession {
 }
 
 impl SessionWriter for JsonlSession {
-    fn append_entry(
-        &mut self,
-        lane_id: &LaneId,
-        entry: ProvisionedEntry,
-    ) -> Result<StoredEntry, SessionError> {
-        self.writable()?;
-        if self.append_index.contains_entry(&entry.id) {
-            return Err(SessionError::InvalidInput {
-                message: format!("entry ID {} already materialized", entry.id),
-            });
-        }
-        let parent_id = self.append_index.lane_leaf(lane_id)?;
-        let stored = StoredEntry {
-            lane_id: lane_id.clone(),
-            header: EntryHeader {
-                id: entry.id,
-                parent_id,
-                seq: self.snapshot.next_sequence(),
-                timestamp_ms: self.clock.now_ms(),
-            },
-            body: entry.body,
-        };
-        self.write_mutation(SessionMutation::Entry(stored.clone()))?;
-        Ok(stored)
-    }
-
-    fn append_record(&mut self, record: LaneRecord) -> Result<StoredRecord, SessionError> {
-        self.writable()?;
-        let stored = StoredRecord {
-            seq: self.snapshot.next_sequence(),
-            timestamp_ms: self.clock.now_ms(),
-            record,
-        };
-        self.write_mutation(SessionMutation::Record(stored.clone()))?;
-        Ok(stored)
-    }
-
-    fn append_lane_mutation(
-        &mut self,
-        mutation: LaneMutation,
-    ) -> Result<StoredLaneMutation, SessionError> {
-        self.writable()?;
-        let stored = StoredLaneMutation {
-            seq: self.snapshot.next_sequence(),
-            timestamp_ms: self.clock.now_ms(),
-            mutation,
-        };
-        self.write_mutation(SessionMutation::Lane(stored.clone()))?;
-        Ok(stored)
-    }
-
-    fn append_fact(&mut self, fact: SessionFact) -> Result<StoredFact, SessionError> {
-        self.writable()?;
-        let stored = StoredFact {
-            seq: self.snapshot.next_sequence(),
-            timestamp_ms: self.clock.now_ms(),
-            fact,
-        };
-        self.write_mutation(SessionMutation::Fact(stored.clone()))?;
-        Ok(stored)
+    fn commit(&mut self, commit: SessionCommit) -> Result<StoredCommit, SessionError> {
+        self.write_commit(commit)
     }
 }
 
@@ -1423,32 +1373,34 @@ fn decode_snapshot_stream(
         match lines.next_line()? {
             ReadLine::Complete(line) => {
                 let value = parse_canonical_line(path, &line)?;
-                let mutation = decode_mutation(&value, &snapshot.header().session_id)
+                let commit = decode_mutation(&value, &snapshot.header().session_id)
                     .map_err(|error| format_mutation_error(path, line.line, line.offset, error))?;
-                if mutation.seq != snapshot.next_sequence() {
+                if commit.seq != snapshot.next_sequence() {
                     return Err(format_decoded_mutation_error(
                         path,
                         line.line,
                         line.offset,
-                        &mutation,
+                        &commit,
                         format!(
                             "non-consecutive sequence {}; expected {}",
-                            mutation.seq.0,
+                            commit.seq.0,
                             snapshot.next_sequence().0
                         ),
                     ));
                 }
-                if mutation.prev_digest != snapshot.last_digest() {
+                if commit.prev_digest != snapshot.last_digest() {
                     return Err(format_decoded_mutation_error(
                         path,
                         line.line,
                         line.offset,
-                        &mutation,
+                        &commit,
                         "previous digest mismatch".into(),
                     ));
                 }
-                append_index.advance(&mutation);
-                snapshot.push_mutation(mutation);
+                for item in &commit.items {
+                    append_index.advance(item);
+                }
+                snapshot.push_commit(commit);
             }
             ReadLine::End => return Ok((snapshot, append_index, None)),
             ReadLine::IncompleteTail { offset } => {
@@ -1612,15 +1564,15 @@ fn format_decoded_mutation_error(
     path: &Path,
     line: usize,
     offset: u64,
-    mutation: &StoredMutation,
+    commit: &StoredCommit,
     message: String,
 ) -> SessionError {
     SessionError::Format {
         path: path.display().to_string(),
         line,
         offset,
-        sequence: Some(mutation.seq),
-        mutation_kind: Some(mutation_kind_name(&mutation.mutation).into()),
+        sequence: Some(commit.seq),
+        mutation_kind: Some("commit".into()),
         message,
     }
 }
@@ -1634,7 +1586,8 @@ fn io(path: &Path, error: std::io::Error) -> SessionError {
 
 fn encode_unsigned_header(header: &SessionHeader) -> JsonValue {
     JsonValue::object([
-        ("kind", JsonValue::String("session".into())),
+        ("kind", JsonValue::String("tea-session".into())),
+        ("format", JsonValue::String(SESSION_FORMAT_IDENTITY.into())),
         ("version", JsonValue::from(u64::from(header.version))),
         ("session_id", string_value(&header.session_id)),
         ("created_at_ms", JsonValue::from(header.created_at_ms)),
@@ -1674,6 +1627,7 @@ fn decode_header(value: &JsonValue) -> Result<SessionHeader, String> {
         object,
         &[
             "kind",
+            "format",
             "version",
             "session_id",
             "created_at_ms",
@@ -1684,8 +1638,13 @@ fn decode_header(value: &JsonValue) -> Result<SessionHeader, String> {
         ],
         "header",
     )?;
-    if required_string(object, "kind")? != "session" {
-        return Err("header kind must be `session`".into());
+    if required_string(object, "kind")? != "tea-session" {
+        return Err("header kind must be `tea-session`".into());
+    }
+    if required_string(object, "format")? != SESSION_FORMAT_IDENTITY {
+        return Err(format!(
+            "header format must be `{SESSION_FORMAT_IDENTITY}`"
+        ));
     }
     let version = required_u64(object, "version")?;
     if version != u64::from(SESSION_FORMAT_VERSION) {
@@ -1693,7 +1652,8 @@ fn decode_header(value: &JsonValue) -> Result<SessionHeader, String> {
     }
     let digest = parse_digest(required_string(object, "digest")?)?;
     let header = SessionHeader {
-        kind: "session".into(),
+        kind: "tea-session".into(),
+        format: SESSION_FORMAT_IDENTITY.into(),
         version: SESSION_FORMAT_VERSION,
         session_id: parse_id!(SessionId, required_string(object, "session_id")?),
         created_at_ms: required_u64(object, "created_at_ms")?,
@@ -1708,13 +1668,39 @@ fn decode_header(value: &JsonValue) -> Result<SessionHeader, String> {
     Ok(header)
 }
 
-pub(crate) fn encode_mutation(mutation: &StoredMutation) -> JsonValue {
+pub(crate) fn encode_commit(commit: &StoredCommit) -> JsonValue {
     JsonValue::object([
-        ("seq", JsonValue::from(mutation.seq.0)),
-        ("timestamp_ms", JsonValue::from(mutation.timestamp_ms)),
-        ("prev_digest", digest_value(mutation.prev_digest)),
-        ("mutation", encode_mutation_payload(&mutation.mutation)),
-        ("digest", digest_value(mutation.digest)),
+        ("seq", JsonValue::from(commit.seq.0)),
+        ("timestamp_ms", JsonValue::from(commit.timestamp_ms)),
+        ("prev_digest", digest_value(commit.prev_digest)),
+        ("mutation", encode_commit_payload(&commit.items)),
+        ("digest", digest_value(commit.digest)),
+    ])
+}
+
+#[cfg(test)]
+pub(crate) fn encode_mutation(mutation: &StoredMutation) -> JsonValue {
+    encode_commit(&StoredCommit {
+        seq: mutation.seq,
+        timestamp_ms: mutation.timestamp_ms,
+        prev_digest: mutation.prev_digest,
+        digest: mutation.digest,
+        items: vec![mutation.clone()],
+    })
+}
+
+fn encode_commit_payload(items: &[StoredMutation]) -> JsonValue {
+    JsonValue::object([
+        ("kind", JsonValue::String("commit".into())),
+        (
+            "items",
+            JsonValue::Array(
+                items
+                    .iter()
+                    .map(|item| encode_mutation_payload(&item.mutation))
+                    .collect(),
+            ),
+        ),
     ])
 }
 
@@ -1747,29 +1733,60 @@ fn encode_mutation_payload(mutation: &SessionMutation) -> JsonValue {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn seal_mutation(
     snapshot: &SessionSnapshot,
     mutation: SessionMutation,
 ) -> Result<StoredMutation, SessionError> {
     let (seq, timestamp_ms) = mutation_envelope_values(&mutation);
+    let commit = seal_commit(snapshot, seq, timestamp_ms, vec![mutation])?;
+    Ok(commit
+        .items
+        .into_iter()
+        .next()
+        .expect("one-item semantic commit returns one stored mutation"))
+}
+
+pub(crate) fn seal_commit(
+    snapshot: &SessionSnapshot,
+    seq: Sequence,
+    timestamp_ms: u64,
+    mutations: Vec<SessionMutation>,
+) -> Result<StoredCommit, SessionError> {
+    if mutations.is_empty() {
+        return Err(SessionError::InvalidInput {
+            message: "a semantic commit must contain at least one item".into(),
+        });
+    }
     let prev_digest = snapshot.last_digest();
-    let digest = calculate_record_digest(
+    let digest = calculate_commit_digest(
         &snapshot.header().session_id,
         seq,
         timestamp_ms,
         prev_digest,
-        &mutation,
+        &mutations,
     )
     .map_err(|message| SessionError::InvalidInput { message })?;
-    Ok(StoredMutation {
+    let items = mutations
+        .into_iter()
+        .map(|mutation| StoredMutation {
+            seq,
+            timestamp_ms,
+            prev_digest,
+            digest,
+            mutation,
+        })
+        .collect();
+    Ok(StoredCommit {
         seq,
         timestamp_ms,
         prev_digest,
         digest,
-        mutation,
+        items,
     })
 }
 
+#[cfg(test)]
 fn mutation_envelope_values(mutation: &SessionMutation) -> (Sequence, u64) {
     match mutation {
         SessionMutation::Entry(entry) => (entry.header.seq, entry.header.timestamp_ms),
@@ -1779,17 +1796,28 @@ fn mutation_envelope_values(mutation: &SessionMutation) -> (Sequence, u64) {
     }
 }
 
-fn calculate_record_digest(
+fn calculate_commit_digest(
     session_id: &SessionId,
     seq: Sequence,
     timestamp_ms: u64,
     prev_digest: Digest,
-    mutation: &SessionMutation,
+    mutations: &[SessionMutation],
 ) -> Result<Digest, String> {
-    let canonical_payload = encode_mutation_payload(mutation)
+    let items = mutations
+        .iter()
+        .cloned()
+        .map(|mutation| StoredMutation {
+            seq,
+            timestamp_ms,
+            prev_digest,
+            digest: Digest::zero(),
+            mutation,
+        })
+        .collect::<Vec<_>>();
+    let canonical_payload = encode_commit_payload(&items)
         .to_json_string()
-        .map_err(|error| format!("session mutation cannot encode canonically: {error}"))?;
-    let mut hasher = CanonicalHashWriter::new("tea-session-record-v1", 1, 1);
+        .map_err(|error| format!("session commit cannot encode canonically: {error}"))?;
+    let mut hasher = CanonicalHashWriter::new("tea-session-commit-v1", 1, 1);
     hasher.string("session_id", session_id.as_str());
     hasher.u64("sequence", seq.0);
     hasher.u64("timestamp_ms", timestamp_ms);
@@ -1815,20 +1843,10 @@ impl From<String> for MutationDecodeError {
     }
 }
 
-impl MutationDecodeError {
-    fn from_decoded_mutation(message: impl Into<String>, mutation: &StoredMutation) -> Self {
-        Self {
-            message: message.into(),
-            sequence: Some(mutation.seq),
-            mutation_kind: Some(mutation_kind_name(&mutation.mutation).into()),
-        }
-    }
-}
-
 fn decode_mutation(
     value: &JsonValue,
     session_id: &SessionId,
-) -> Result<StoredMutation, MutationDecodeError> {
+) -> Result<StoredCommit, MutationDecodeError> {
     let fields = object(value)?;
     require_exact_fields(
         fields,
@@ -1839,40 +1857,61 @@ fn decode_mutation(
     let timestamp_ms = required_u64(fields, "timestamp_ms")?;
     let prev_digest = parse_digest(required_string(fields, "prev_digest")?)?;
     let digest = parse_digest(required_string(fields, "digest")?)?;
-    let mutation = decode_session_mutation(required_value(fields, "mutation")?, seq, timestamp_ms)?;
-    if calculate_record_digest(session_id, seq, timestamp_ms, prev_digest, &mutation)? != digest {
+    let mutations = decode_commit_payload(required_value(fields, "mutation")?, seq, timestamp_ms)?;
+    if calculate_commit_digest(session_id, seq, timestamp_ms, prev_digest, &mutations)? != digest {
         return Err(MutationDecodeError {
-            message: "record digest mismatch".into(),
+            message: "commit digest mismatch".into(),
             sequence: Some(seq),
-            mutation_kind: Some(mutation_kind_name(&mutation).into()),
+            mutation_kind: Some("commit".into()),
         });
     }
-    let stored = StoredMutation {
+    let stored = StoredCommit {
         seq,
         timestamp_ms,
         prev_digest,
         digest,
-        mutation,
+        items: mutations
+            .into_iter()
+            .map(|mutation| StoredMutation {
+                seq,
+                timestamp_ms,
+                prev_digest,
+                digest,
+                mutation,
+            })
+            .collect(),
     };
     // Decoding must be lossless for the closed v1 wire schema. In particular,
     // an unknown nested field must not be silently excluded from the digest
     // calculation just because this decoder has no semantic home for it.
-    if encode_mutation(&stored) != *value {
-        return Err(MutationDecodeError::from_decoded_mutation(
-            "mutation does not match the v1 schema",
-            &stored,
-        ));
+    if encode_commit(&stored) != *value {
+        return Err(MutationDecodeError {
+            message: "commit does not match the v1 schema".into(),
+            sequence: Some(seq),
+            mutation_kind: Some("commit".into()),
+        });
     }
     Ok(stored)
 }
 
-fn mutation_kind_name(mutation: &SessionMutation) -> &'static str {
-    match mutation {
-        SessionMutation::Entry(_) => "entry",
-        SessionMutation::Record(_) => "record",
-        SessionMutation::Lane(_) => "lane",
-        SessionMutation::Fact(_) => "fact",
+fn decode_commit_payload(
+    value: &JsonValue,
+    seq: Sequence,
+    timestamp_ms: u64,
+) -> Result<Vec<SessionMutation>, String> {
+    let fields = object(value)?;
+    require_exact_fields(fields, &["kind", "items"], "commit mutation")?;
+    if required_string(fields, "kind")? != "commit" {
+        return Err("session mutation kind must be `commit`".into());
     }
+    let items = required_array(fields, "items")?;
+    if items.is_empty() {
+        return Err("semantic commit must contain at least one item".into());
+    }
+    items
+        .iter()
+        .map(|item| decode_session_mutation(item, seq, timestamp_ms))
+        .collect()
 }
 
 fn decode_session_mutation(
@@ -1996,6 +2035,12 @@ fn encode_entry(entry: &SessionEntry) -> JsonValue {
             (
                 "harness_revision_id",
                 optional_id(entry.harness_revision_id.as_ref()),
+            ),
+            ("replacement", encode_payload_ref(&entry.replacement)),
+            ("replacement_digest", digest_value(entry.replacement_digest)),
+            (
+                "provider_request_id",
+                optional_id(entry.provider_request_id.as_ref()),
             ),
         ]),
         SessionEntry::BranchSummary(entry) => JsonValue::object([
@@ -2122,6 +2167,12 @@ fn decode_entry(value: &JsonValue) -> Result<SessionEntry, String> {
                 object,
                 "harness_revision_id",
             )?,
+            replacement: decode_payload_ref(required_value(object, "replacement")?)?,
+            replacement_digest: parse_digest(required_string(object, "replacement_digest")?)?,
+            provider_request_id: optional_id_of::<ProviderRequestId>(
+                object,
+                "provider_request_id",
+            )?,
         })),
         "branch_summary" => Ok(SessionEntry::BranchSummary(BranchSummaryEntry {
             summary: required_string(object, "summary")?,
@@ -2184,6 +2235,10 @@ fn encode_record(record: &LaneRecord) -> JsonValue {
                         .map(encode_provisioned_entry)
                         .collect(),
                 ),
+            ),
+            (
+                "input_ids",
+                JsonValue::Array(record.input_ids.iter().map(string_value).collect()),
             ),
             (
                 "initial_harness_revision",
@@ -2347,21 +2402,34 @@ fn encode_record(record: &LaneRecord) -> JsonValue {
                 JsonValue::String(record.idempotency_key.clone()),
             ),
         ]),
-        LaneRecord::QueueEnqueued(record) => JsonValue::object([
-            ("type", JsonValue::String("queue_enqueued".into())),
-            ("operation_id", string_value(&record.operation_id)),
-            (
-                "queue_item_id",
-                JsonValue::String(record.queue_item_id.clone()),
-            ),
+        LaneRecord::InputAccepted(record) => JsonValue::object([
+            ("type", JsonValue::String("input_accepted".into())),
+            ("lane_id", string_value(&record.lane_id)),
+            ("entry", encode_provisioned_entry(&record.entry)),
         ]),
-        LaneRecord::QueueCancelled(record) => JsonValue::object([
-            ("type", JsonValue::String("queue_cancelled".into())),
+        LaneRecord::InputWithdrawn(record) => JsonValue::object([
+            ("type", JsonValue::String("input_withdrawn".into())),
+            ("lane_id", string_value(&record.lane_id)),
+            ("input_id", string_value(&record.input_id)),
+        ]),
+        LaneRecord::InputSettled(record) => JsonValue::object([
+            ("type", JsonValue::String("input_settled".into())),
             ("operation_id", string_value(&record.operation_id)),
-            (
-                "queue_item_id",
-                JsonValue::String(record.queue_item_id.clone()),
-            ),
+            ("input_id", string_value(&record.input_id)),
+            ("outcome", encode_operation_outcome(&record.outcome)),
+        ]),
+        LaneRecord::ExtensionControlEnqueued(record) => JsonValue::object([
+            ("type", JsonValue::String("extension_control_enqueued".into())),
+            ("operation_id", string_value(&record.operation_id)),
+            ("control_id", JsonValue::String(record.control_id.clone())),
+            ("extension_id", JsonValue::String(record.extension_id.clone())),
+            ("harness_revision_id", string_value(&record.harness_revision_id)),
+            ("command_name", JsonValue::String(record.command_name.clone())),
+            ("arguments", record.arguments.clone()),
+        ]),
+        LaneRecord::ExtensionControlApplied(record) => JsonValue::object([
+            ("type", JsonValue::String("extension_control_applied".into())),
+            ("control_id", JsonValue::String(record.control_id.clone())),
         ]),
         LaneRecord::WriteDeferred(record) => JsonValue::object([
             ("type", JsonValue::String("write_deferred".into())),
@@ -2405,6 +2473,17 @@ fn decode_record(value: &JsonValue) -> Result<LaneRecord, String> {
             original_input: required_array(object, "original_input")?
                 .iter()
                 .map(decode_provisioned_entry)
+                .collect::<Result<Vec<_>, _>>()?,
+            input_ids: required_array(object, "input_ids")?
+                .iter()
+                .map(|value| {
+                    value
+                        .as_str()
+                        .ok_or_else(|| "input ID must be a string".to_string())
+                        .and_then(|value| {
+                            <EntryId as ParseOpaqueId>::parse_opaque(value.to_owned())
+                        })
+                })
                 .collect::<Result<Vec<_>, _>>()?,
             initial_harness_revision: parse_id!(
                 HarnessRevisionId,
@@ -2525,14 +2604,37 @@ fn decode_record(value: &JsonValue) -> Result<LaneRecord, String> {
             ),
             idempotency_key: required_string(object, "idempotency_key")?,
         })),
-        "queue_enqueued" => Ok(LaneRecord::QueueEnqueued(QueueEnqueuedRecord {
-            operation_id: parse_id!(OperationId, required_string(object, "operation_id")?),
-            queue_item_id: required_string(object, "queue_item_id")?,
+        "input_accepted" => Ok(LaneRecord::InputAccepted(InputAcceptedRecord {
+            lane_id: parse_id!(LaneId, required_string(object, "lane_id")?),
+            entry: decode_provisioned_entry(required_value(object, "entry")?)?,
         })),
-        "queue_cancelled" => Ok(LaneRecord::QueueCancelled(QueueCancelledRecord {
-            operation_id: parse_id!(OperationId, required_string(object, "operation_id")?),
-            queue_item_id: required_string(object, "queue_item_id")?,
+        "input_withdrawn" => Ok(LaneRecord::InputWithdrawn(InputWithdrawnRecord {
+            lane_id: parse_id!(LaneId, required_string(object, "lane_id")?),
+            input_id: parse_id!(EntryId, required_string(object, "input_id")?),
         })),
+        "input_settled" => Ok(LaneRecord::InputSettled(InputSettledRecord {
+            operation_id: parse_id!(OperationId, required_string(object, "operation_id")?),
+            input_id: parse_id!(EntryId, required_string(object, "input_id")?),
+            outcome: decode_operation_outcome(required_value(object, "outcome")?)?,
+        })),
+        "extension_control_enqueued" => Ok(LaneRecord::ExtensionControlEnqueued(
+            ExtensionControlEnqueuedRecord {
+                operation_id: parse_id!(OperationId, required_string(object, "operation_id")?),
+                control_id: required_string(object, "control_id")?,
+                extension_id: required_string(object, "extension_id")?,
+                harness_revision_id: parse_id!(
+                    HarnessRevisionId,
+                    required_string(object, "harness_revision_id")?
+                ),
+                command_name: required_string(object, "command_name")?,
+                arguments: required_value(object, "arguments")?.clone(),
+            },
+        )),
+        "extension_control_applied" => Ok(LaneRecord::ExtensionControlApplied(
+            ExtensionControlAppliedRecord {
+                control_id: required_string(object, "control_id")?,
+            },
+        )),
         "write_deferred" => Ok(LaneRecord::WriteDeferred(WriteDeferredRecord {
             operation_id: parse_id!(OperationId, required_string(object, "operation_id")?),
             entry: decode_provisioned_entry(required_value(object, "entry")?)?,
@@ -2788,6 +2890,34 @@ fn encode_fact(fact: &SessionFact) -> JsonValue {
             ("byte_len", JsonValue::from(fact.byte_len)),
             ("media_type", JsonValue::String(fact.media_type.clone())),
         ]),
+        SessionFact::ProviderRequestMaterial(fact) => JsonValue::object([
+            ("type", JsonValue::String("provider_request_material".into())),
+            ("operation_id", string_value(&fact.operation_id)),
+            ("epoch_id", string_value(&fact.epoch_id)),
+            ("request_id", string_value(&fact.request_id)),
+            ("request", encode_payload_ref(&fact.request)),
+        ]),
+        SessionFact::ExtensionStateValueSet(fact) => JsonValue::object([
+            ("type", JsonValue::String("extension_state_value_set".into())),
+            ("lane_id", string_value(&fact.lane_id)),
+            ("extension_id", JsonValue::String(fact.extension_id.clone())),
+            ("state_version", JsonValue::String(fact.state_version.clone())),
+            ("value", fact.value.clone()),
+        ]),
+        SessionFact::TurnCheckpoint(fact) => JsonValue::object([
+            ("type", JsonValue::String("turn_checkpoint".into())),
+            ("checkpoint_id", string_value(&fact.checkpoint_id)),
+            ("lane_id", string_value(&fact.lane_id)),
+            ("operation_id", string_value(&fact.operation_id)),
+            ("leaf_id", optional_id(fact.leaf_id.as_ref())),
+            ("extension_state", encode_extension_state(&fact.extension_state)),
+        ]),
+        SessionFact::ForkedLane(fact) => JsonValue::object([
+            ("type", JsonValue::String("forked_lane".into())),
+            ("checkpoint_id", string_value(&fact.checkpoint_id)),
+            ("lane_id", string_value(&fact.lane_id)),
+            ("base_leaf_id", optional_id(fact.base_leaf_id.as_ref())),
+        ]),
         SessionFact::Custom { type_name, payload } => JsonValue::object([
             ("type", JsonValue::String("custom".into())),
             ("type_name", JsonValue::String(type_name.clone())),
@@ -2935,12 +3065,75 @@ fn decode_fact(value: &JsonValue) -> Result<SessionFact, String> {
             byte_len: required_u64(fields, "byte_len")?,
             media_type: required_string(fields, "media_type")?,
         })),
+        "provider_request_material" => Ok(SessionFact::ProviderRequestMaterial(
+            ProviderRequestMaterialFact {
+                operation_id: parse_id!(OperationId, required_string(fields, "operation_id")?),
+                epoch_id: parse_id!(EpochId, required_string(fields, "epoch_id")?),
+                request_id: parse_id!(ProviderRequestId, required_string(fields, "request_id")?),
+                request: decode_payload_ref(required_value(fields, "request")?)?,
+            },
+        )),
+        "extension_state_value_set" => Ok(SessionFact::ExtensionStateValueSet(
+            ExtensionStateValueSetFact {
+                lane_id: parse_id!(LaneId, required_string(fields, "lane_id")?),
+                extension_id: required_string(fields, "extension_id")?,
+                state_version: required_string(fields, "state_version")?,
+                value: required_value(fields, "value")?.clone(),
+            },
+        )),
+        "turn_checkpoint" => Ok(SessionFact::TurnCheckpoint(TurnCheckpointFact {
+            checkpoint_id: parse_id!(TurnCheckpointId, required_string(fields, "checkpoint_id")?),
+            lane_id: parse_id!(LaneId, required_string(fields, "lane_id")?),
+            operation_id: parse_id!(OperationId, required_string(fields, "operation_id")?),
+            leaf_id: optional_id_of::<EntryId>(fields, "leaf_id")?,
+            extension_state: decode_extension_state(required_value(fields, "extension_state")?)?,
+        })),
+        "forked_lane" => Ok(SessionFact::ForkedLane(ForkedLaneFact {
+            checkpoint_id: parse_id!(TurnCheckpointId, required_string(fields, "checkpoint_id")?),
+            lane_id: parse_id!(LaneId, required_string(fields, "lane_id")?),
+            base_leaf_id: optional_id_of::<EntryId>(fields, "base_leaf_id")?,
+        })),
         "custom" => Ok(SessionFact::Custom {
             type_name: required_string(fields, "type_name")?,
             payload: required_value(fields, "payload")?.clone(),
         }),
         other => Err(format!("unknown session fact type {other:?}")),
     }
+}
+
+fn encode_extension_state(state: &BTreeMap<String, ExtensionStateValue>) -> JsonValue {
+    JsonValue::Object(
+        state
+            .iter()
+            .map(|(extension_id, value)| {
+                (
+                    extension_id.clone(),
+                    JsonValue::object([
+                        ("state_version", JsonValue::String(value.state_version.clone())),
+                        ("value", value.value.clone()),
+                    ]),
+                )
+            })
+            .collect(),
+    )
+}
+
+fn decode_extension_state(
+    value: &JsonValue,
+) -> Result<BTreeMap<String, ExtensionStateValue>, String> {
+    object(value)?
+        .iter()
+        .map(|(extension_id, value)| {
+            let object = object(value)?;
+            Ok((
+                extension_id.clone(),
+                ExtensionStateValue {
+                    state_version: required_string(object, "state_version")?,
+                    value: required_value(object, "value")?.clone(),
+                },
+            ))
+        })
+        .collect()
 }
 
 fn encode_subagent_model(model: &SubagentModelRecord) -> JsonValue {
@@ -3434,6 +3627,7 @@ impl_parse_opaque_id!(
     EntryId,
     RecordId,
     OperationId,
+    TurnCheckpointId,
     EpochId,
     StepId,
     ProviderRequestId,

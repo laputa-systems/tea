@@ -71,12 +71,6 @@ impl CliOptions {
         parse_impl(args, true)
     }
 
-    /// Render generated top-level help. Kept as a compatibility façade for
-    /// library users; the text itself is rendered from the shared schema.
-    pub fn help_text() -> String {
-        help::render_root()
-    }
-
     pub fn provider(&self) -> Option<&OsStr> {
         self.provider.as_deref()
     }

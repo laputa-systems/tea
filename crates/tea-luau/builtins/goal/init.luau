@@ -1,7 +1,5 @@
 local prompt = require("./prompts.luau")
 
-local state_kind = "goal.state.v1"
-
 local function escape(value)
     value = tostring(value or "")
     value = string.gsub(value, "\\", "\\\\")
@@ -71,7 +69,7 @@ local function continuation(state)
 end
 
 local function command(input)
-    local state = input.state[state_kind]
+    local state = input.state
     local arguments = string.gsub(input.arguments or "", "^%s*(.-)%s*$", "%1")
     if arguments == "" or arguments == "status" then
         return { notice = status_notice(state) }
@@ -83,7 +81,6 @@ local function command(input)
         return {
             notice = "Goal cleared",
             state = {
-                kind = state_kind,
                 content_json = encode_goal({
                     objective = "",
                     status = "complete",
@@ -101,7 +98,7 @@ local function command(input)
             return { notice = "Only an active goal can be paused" }
         end
         state.status = "paused"
-        return { notice = "Goal paused", state = { kind = state_kind, content_json = encode_goal(state) } }
+        return { notice = "Goal paused", state = { content_json = encode_goal(state) } }
     end
     if arguments == "resume" then
         if state == nil or (state.status ~= "paused" and state.status ~= "blocked") then
@@ -114,7 +111,7 @@ local function command(input)
         state.status = "active"
         return {
             notice = "Goal resumed",
-            state = { kind = state_kind, content_json = encode_goal(state) },
+            state = { content_json = encode_goal(state) },
             internal_input = continuation(state),
         }
     end
@@ -132,7 +129,7 @@ local function command(input)
         state.last_blocker = nil
         return {
             notice = "Goal updated: " .. objective,
-            state = { kind = state_kind, content_json = encode_goal(state) },
+            state = { content_json = encode_goal(state) },
             internal_input = continuation(state),
         }
     end
@@ -151,7 +148,7 @@ local function command(input)
     }
     return {
         notice = "Goal started: " .. arguments,
-        state = { kind = state_kind, content_json = encode_goal(next) },
+        state = { content_json = encode_goal(next) },
         internal_input = continuation(next),
     }
 end
@@ -164,7 +161,7 @@ return function(_)
         method = "get",
         arguments_json = "{}",
     })
-    local goal = state["goal.state.v1"]
+    local goal = state
     if goal == nil or goal.objective == "" then return { content = "No goal is stored." } end
     local content = "Goal state: " .. tostring(goal.objective) .. " (" .. tostring(goal.status) .. "); tokens used " .. tostring(goal.tokens_used or 0) .. "; active time " .. tostring(goal.time_used_seconds or 0) .. "s"
     if type(goal.token_budget) == "number" then
@@ -177,7 +174,7 @@ end
 local create_goal_handler = [[
 return function(call)
     local state = coroutine.yield({ kind = "capability", capability = "extension.state", method = "get", arguments_json = "{}" })
-    local current = state["goal.state.v1"]
+    local current = state
     if current ~= nil and current.objective ~= "" and current.status ~= "complete" then
         return { content = "An unfinished goal already exists.", is_error = true }
     end
@@ -195,7 +192,7 @@ return function(call)
         return value
     end
     local json = "{\"objective\":\"" .. esc(objective) .. "\",\"status\":\"active\",\"token_budget\":" .. budget_json .. ",\"tokens_used\":0,\"time_used_seconds\":0,\"blocker_turns\":0,\"last_blocker\":null}"
-    coroutine.yield({ kind = "capability", capability = "extension.state", method = "append", arguments_json = "{\"kind\":\"goal.state.v1\",\"content\":" .. json .. "}" })
+    coroutine.yield({ kind = "capability", capability = "extension.state", method = "replace", arguments_json = "{\"value\":" .. json .. "}" })
     return { content = "Goal created." }
 end
 ]]
@@ -203,7 +200,7 @@ end
 local update_goal_handler = [[
 return function(call)
     local state = coroutine.yield({ kind = "capability", capability = "extension.state", method = "get", arguments_json = "{}" })
-    local goal = state["goal.state.v1"]
+    local goal = state
     if goal == nil or (goal.status ~= "active" and goal.status ~= "paused") then return { content = "No unfinished goal exists.", is_error = true } end
     local status = call.arguments.status
     if status ~= "complete" and status ~= "blocked" then return { content = "status must be complete or blocked", is_error = true } end
@@ -236,7 +233,7 @@ return function(call)
     local last_blocker = "null"
     if type(goal.last_blocker) == "string" then last_blocker = "\"" .. esc(goal.last_blocker) .. "\"" end
     local json = "{\"objective\":\"" .. esc(goal.objective) .. "\",\"status\":\"" .. goal.status .. "\",\"token_budget\":" .. budget .. ",\"tokens_used\":" .. tostring(goal.tokens_used or 0) .. ",\"time_used_seconds\":" .. tostring(goal.time_used_seconds or 0) .. ",\"blocker_turns\":" .. tostring(goal.blocker_turns or 0) .. ",\"last_blocker\":" .. last_blocker .. "}"
-    coroutine.yield({ kind = "capability", capability = "extension.state", method = "append", arguments_json = "{\"kind\":\"goal.state.v1\",\"content\":" .. json .. "}" })
+    coroutine.yield({ kind = "capability", capability = "extension.state", method = "replace", arguments_json = "{\"value\":" .. json .. "}" })
     if status == "blocked" and goal.blocker_turns < 3 then
         return { content = "Blocker recorded. It must persist for three consecutive goal turns before the goal can be blocked." }
     end
@@ -245,6 +242,7 @@ end
 ]]
 
 return {
+    state_version = "goal.v1",
     prompt_sections = { { id = "goal", content = prompt } },
     commands = {
         { name = "/goal", help = "set, inspect, or control a long-running goal", allowed_while_active = true, handler = command },
@@ -277,17 +275,17 @@ return {
     },
     on_idle = function(input)
         if input.outcome ~= "completed" then return nil end
-        local state = input.state[state_kind]
+        local state = input.state
         if state == nil or state.status ~= "active" then return nil end
         local usage = input.usage or {}
         state.tokens_used = number(state.tokens_used) + number(usage.input_tokens) + number(usage.output_tokens) + number(usage.reasoning_tokens)
         state.time_used_seconds = number(state.time_used_seconds) + number(input.elapsed_active_seconds)
         if type(state.token_budget) == "number" and state.tokens_used >= state.token_budget then
             state.status = "budget_limited"
-            return { state = { kind = state_kind, content_json = encode_goal(state) } }
+            return { state = { content_json = encode_goal(state) } }
         end
         return {
-            state = { kind = state_kind, content_json = encode_goal(state) },
+            state = { content_json = encode_goal(state) },
             internal_input = continuation(state),
         }
     end,

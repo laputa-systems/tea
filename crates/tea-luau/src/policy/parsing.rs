@@ -6,7 +6,7 @@ use super::types::{
     PolicyMemoryVisibility, PolicyResumeHook,
 };
 use super::{PolicyError, PolicyPromptSection, PolicyTool};
-use crate::bundle::{BUNDLE_ABI_V2_VERSION, BUNDLE_ABI_VERSION};
+use crate::bundle::BUNDLE_ABI_V3_VERSION;
 use mlua::{Function, Table, Value};
 use std::collections::BTreeSet;
 use tea_core::harness::extension::{
@@ -27,47 +27,39 @@ pub(super) struct ParsedDeclaration {
     pub(super) context_projection: Option<Function>,
     pub(super) resume_hooks: Vec<PolicyResumeHook>,
     pub(super) on_idle: Option<Function>,
+    pub(super) state_version: Option<String>,
 }
 
 pub(super) fn parse_declaration(
     declaration: &Table,
     abi_version: u32,
 ) -> Result<ParsedDeclaration, PolicyError> {
-    match abi_version {
-        BUNDLE_ABI_VERSION => parse_canonical_declaration(declaration, false, "v1"),
-        BUNDLE_ABI_V2_VERSION => parse_canonical_declaration(declaration, true, "v2"),
-        _ => Err(PolicyError::Contract {
+    if abi_version != BUNDLE_ABI_V3_VERSION {
+        return Err(PolicyError::Contract {
             message: format!("unsupported policy declaration ABI {abi_version}"),
-        }),
+        });
     }
+    parse_canonical_declaration(declaration)
 }
 
-fn parse_canonical_declaration(
-    declaration: &Table,
-    allow_host_extensions: bool,
-    abi_name: &str,
-) -> Result<ParsedDeclaration, PolicyError> {
-    let mut fields = vec![
+fn parse_canonical_declaration(declaration: &Table) -> Result<ParsedDeclaration, PolicyError> {
+    let fields = [
         "prompt_sections",
         "tools",
         "before_tool",
         "after_tool",
         "context_projection",
         "resume_hooks",
+        "commands",
+        "on_idle",
+        "state_version",
     ];
-    if allow_host_extensions {
-        fields.extend(["commands", "on_idle"]);
-    }
-    require_only_fields(
-        declaration,
-        &fields,
-        &format!("{abi_name} policy declaration"),
-    )?;
+    require_only_fields(declaration, &fields, "v3 policy declaration")?;
     let declared_sections = declaration
         .get::<Option<Table>>("prompt_sections")
         .map_err(contract_error)?
         .ok_or_else(|| PolicyError::Contract {
-            message: "v1 policy must declare prompt_sections as an array".into(),
+            message: "v3 policy must declare prompt_sections as an array".into(),
         })?;
     let prompt_sections = parse_prompt_sections(&declared_sections)?;
     let before_tool = declaration
@@ -85,15 +77,23 @@ fn parse_canonical_declaration(
         .map(|hooks| parse_resume_hooks(&hooks))
         .transpose()?
         .unwrap_or_default();
-    let (host_commands, host_command_handlers, on_idle) = if allow_host_extensions {
-        let (commands, handlers) = parse_host_commands(declaration)?;
-        let on_idle = declaration
-            .get::<Option<Function>>("on_idle")
-            .map_err(contract_error)?;
-        (commands, handlers, on_idle)
-    } else {
-        (Vec::new(), Vec::new(), None)
-    };
+    let (host_commands, host_command_handlers) = parse_host_commands(declaration)?;
+    let on_idle = declaration
+        .get::<Option<Function>>("on_idle")
+        .map_err(contract_error)?;
+    let state_version = declaration
+        .get::<Option<String>>("state_version")
+        .map_err(contract_error)?
+        .map(|state_version| {
+            if is_portable_label(&state_version) {
+                Ok(state_version)
+            } else {
+                Err(PolicyError::Contract {
+                    message: "v3 state_version must use a portable non-empty label of at most 120 bytes".into(),
+                })
+            }
+        })
+        .transpose()?;
     let tools = parse_tools(declaration)?;
     Ok(ParsedDeclaration {
         prompt_sections,
@@ -105,6 +105,7 @@ fn parse_canonical_declaration(
         context_projection,
         resume_hooks,
         on_idle,
+        state_version,
     })
 }
 
@@ -117,7 +118,7 @@ fn parse_host_commands(
     else {
         return Ok((Vec::new(), Vec::new()));
     };
-    require_dense_array(&commands, "v2 extension commands")?;
+    require_dense_array(&commands, "v3 extension commands")?;
     let mut names = BTreeSet::new();
     let mut metadata = Vec::new();
     let mut handlers = Vec::new();
@@ -126,7 +127,7 @@ fn parse_host_commands(
         require_only_fields(
             &command,
             &["name", "help", "allowed_while_active", "handler"],
-            "v2 extension command",
+            "v3 extension command",
         )?;
         let name: String = command.get("name").map_err(contract_error)?;
         let help: String = command.get("help").map_err(contract_error)?;
@@ -138,7 +139,7 @@ fn parse_host_commands(
         if !is_command_name(&name) {
             return Err(PolicyError::Contract {
                 message: format!(
-                    "v2 extension command name {name:?} must begin with /, use ASCII letters, digits, _ or -, and be at most 80 bytes"
+                    "v3 extension command name {name:?} must begin with /, use ASCII letters, digits, _ or -, and be at most 80 bytes"
                 ),
             });
         }
@@ -147,12 +148,12 @@ fn parse_host_commands(
             || help.bytes().any(|byte| byte.is_ascii_control())
         {
             return Err(PolicyError::Contract {
-                message: format!("v2 extension command {name:?} help must be non-empty printable text of at most 240 bytes"),
+                message: format!("v3 extension command {name:?} help must be non-empty printable text of at most 240 bytes"),
             });
         }
         if !names.insert(name.clone()) {
             return Err(PolicyError::Contract {
-                message: format!("v2 policy contains duplicate extension command {name:?}"),
+                message: format!("v3 policy contains duplicate extension command {name:?}"),
             });
         }
         metadata.push(PolicyHostCommand {
@@ -168,12 +169,12 @@ fn parse_host_commands(
     Ok((metadata, handlers))
 }
 
-/// Parse the ABI-v1 lifecycle table. A registration uses one stable local
+/// Parse the ABI-v3 lifecycle table. A registration uses one stable local
 /// ID for all three phases so recovery can hand it only the values it wrote
 /// before the operation and epoch commits.  The host later namespaces this
 /// local ID with the immutable plugin identity before persisting it.
 fn parse_resume_hooks(declaration: &Table) -> Result<Vec<PolicyResumeHook>, PolicyError> {
-    require_dense_array(declaration, "v1 resume_hooks")?;
+    require_dense_array(declaration, "v3 resume_hooks")?;
     let mut ids = BTreeSet::new();
     let mut hooks = Vec::new();
     for hook in declaration.sequence_values::<Table>() {
@@ -181,19 +182,19 @@ fn parse_resume_hooks(declaration: &Table) -> Result<Vec<PolicyResumeHook>, Poli
         require_only_fields(
             &hook,
             &["id", "before_operation", "before_epoch", "before_resume"],
-            "v1 resume hook",
+            "v3 resume hook",
         )?;
         let id: String = hook.get("id").map_err(contract_error)?;
         if !is_portable_label(&id) {
             return Err(PolicyError::Contract {
                 message: format!(
-                    "v1 resume hook ID {id:?} must use [A-Za-z0-9._-] and be at most 120 bytes"
+                    "v3 resume hook ID {id:?} must use [A-Za-z0-9._-] and be at most 120 bytes"
                 ),
             });
         }
         if !ids.insert(id.clone()) {
             return Err(PolicyError::Contract {
-                message: format!("v1 policy contains duplicate resume hook {id:?}"),
+                message: format!("v3 policy contains duplicate resume hook {id:?}"),
             });
         }
         let before_operation = hook
@@ -208,7 +209,7 @@ fn parse_resume_hooks(declaration: &Table) -> Result<Vec<PolicyResumeHook>, Poli
         if before_operation.is_none() && before_epoch.is_none() && before_resume.is_none() {
             return Err(PolicyError::Contract {
                 message: format!(
-                    "v1 resume hook {id:?} must declare before_operation, before_epoch, or before_resume"
+                    "v3 resume hook {id:?} must declare before_operation, before_epoch, or before_resume"
                 ),
             });
         }
@@ -223,27 +224,27 @@ fn parse_resume_hooks(declaration: &Table) -> Result<Vec<PolicyResumeHook>, Poli
 }
 
 fn parse_prompt_sections(declaration: &Table) -> Result<Vec<PolicyPromptSection>, PolicyError> {
-    require_dense_array(declaration, "v1 prompt_sections")?;
+    require_dense_array(declaration, "v3 prompt_sections")?;
     let mut ids = BTreeSet::new();
     let mut sections = Vec::new();
     for section in declaration.sequence_values::<Table>() {
         let section = section.map_err(contract_error)?;
-        require_only_fields(&section, &["id", "content"], "v1 prompt section")?;
+        require_only_fields(&section, &["id", "content"], "v3 prompt section")?;
         let id: String = section.get("id").map_err(contract_error)?;
         let content: String = section.get("content").map_err(contract_error)?;
         if !is_portable_label(&id) {
             return Err(PolicyError::Contract {
-                message: format!("v1 prompt section ID {id:?} must use [A-Za-z0-9._-]"),
+                message: format!("v3 prompt section ID {id:?} must use [A-Za-z0-9._-]"),
             });
         }
         if content.trim().is_empty() {
             return Err(PolicyError::Contract {
-                message: format!("v1 prompt section {id:?} must not be empty"),
+                message: format!("v3 prompt section {id:?} must not be empty"),
             });
         }
         if !ids.insert(id.clone()) {
             return Err(PolicyError::Contract {
-                message: format!("v1 policy contains duplicate prompt section {id:?}"),
+                message: format!("v3 policy contains duplicate prompt section {id:?}"),
             });
         }
         sections.push(PolicyPromptSection { id, content });
@@ -452,18 +453,17 @@ pub(super) fn parse_extension_result(value: Value) -> Result<ExtensionCommandRes
         .get::<Option<Table>>("state")
         .map_err(contract_error)?
         .map(|state| {
-            require_only_fields(&state, &["kind", "content_json"], "extension state update")?;
-            let kind: String = state.get("kind").map_err(contract_error)?;
+            require_only_fields(&state, &["content_json"], "extension state replacement")?;
             let content_json: String = state.get("content_json").map_err(contract_error)?;
-            if !is_portable_label(&kind) || content_json.len() > 16 * 1024 {
+            if content_json.len() > 16 * 1024 {
                 return Err(PolicyError::Contract {
-                    message: "extension state update kind must be portable and content_json must be at most 16384 bytes".into(),
+                    message: "extension state replacement content_json must be at most 16384 bytes".into(),
                 });
             }
             let content = JsonValue::parse(&content_json).map_err(|error| PolicyError::Contract {
                 message: format!("extension state content_json must be valid JSON: {error}"),
             })?;
-            Ok(ExtensionStateUpdate { kind, content })
+            Ok(ExtensionStateUpdate { value: content })
         })
         .transpose()?;
     Ok(ExtensionCommandResult {
@@ -539,7 +539,7 @@ pub(super) fn parse_decision(value: Value) -> Result<BeforeToolCall, PolicyError
     }
 }
 
-/// Decode the deliberately narrow ABI-v1 post-tool projection. The policy
+/// Decode the deliberately narrow ABI-v3 post-tool projection. The policy
 /// sees a completed result, but it cannot name usage, failure classification,
 /// dynamic tools, or any raw-artifact field. Those remain Rust-owned facts.
 pub(super) fn parse_after_tool_output(value: Value) -> Result<PolicyAfterToolOutput, PolicyError> {
@@ -639,7 +639,7 @@ pub(super) fn parse_after_tool_output(value: Value) -> Result<PolicyAfterToolOut
                     is_error: is_error
                         .map(Replacement::Replace)
                         .unwrap_or(Replacement::Keep),
-                    // ABI v1 policies are deliberately unable to falsify raw
+                    // ABI v3 policies are deliberately unable to falsify raw
                     // usage, failures, or capability registrations.
                     failure: Replacement::Keep,
                     usage: Replacement::Keep,
@@ -659,7 +659,7 @@ const MAX_CONTEXT_PATCH_ENTRY_IDS: usize = 512;
 const MAX_CONTEXT_PATCH_ANNOTATIONS: usize = 32;
 const MAX_CONTEXT_ANNOTATION_BYTES: usize = 4 * 1024;
 
-/// Decode the metadata-only ABI-v1 context policy result. Entry IDs are
+/// Decode the metadata-only ABI-v3 context policy result. Entry IDs are
 /// intentionally opaque strings here: `tea_core::runtime` maps them to one branch
 /// and rejects references outside that branch or any protected invariant.
 pub(super) fn parse_context_projection(
@@ -939,7 +939,7 @@ fn parse_memory_proposal(table: &Table) -> Result<PolicyMemoryProposal, PolicyEr
     })
 }
 
-/// Construct the only result shape that an ABI-v1 policy may inspect. This
+/// Construct the only result shape that an ABI-v3 policy may inspect. This
 /// stays here beside parsing so new fields cannot accidentally become script
 /// visible merely because Rust's `AgentToolResult` grows.
 pub(super) fn policy_result_fields(
@@ -981,7 +981,7 @@ fn optional_string(table: &Table, name: &str) -> Result<Option<String>, PolicyEr
         })?;
     if value.as_ref().is_some_and(|value| value.len() > 16 * 1024) {
         return Err(PolicyError::Contract {
-            message: format!("{name} exceeds the 16384 byte ABI-v1 projection limit"),
+            message: format!("{name} exceeds the 16384 byte ABI-v3 projection limit"),
         });
     }
     Ok(value)

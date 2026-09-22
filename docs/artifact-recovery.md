@@ -32,6 +32,9 @@ catalog blob cannot hide a missing or altered transitive source object.
 The root set is explicit:
 
 - payload and semantic references in the v1 session;
+- exact provider request material retained by `ProviderRequestMaterialFact`;
+- compaction replacement payloads and any recovery-index artifacts retained by
+  `CompactionEntry`;
 - harness catalog and immutable source-tree objects;
 - redacted trace artifacts recorded by SessionFact::TraceArtifact;
 - evolution failure-signature trace citations returned by
@@ -43,6 +46,14 @@ rechecking their identity. JsonlSession::collect_unreferenced_artifacts runs
 that plan/application pair while the session writer lock is held. Stores
 without inventory/removal support reject collection rather than pretending it
 completed.
+
+Provider request and compaction artifacts must be published and identity-checked
+before the semantic commit that references them. A failed or indeterminate
+commit can therefore leave a verified orphan, but never a durable reference to
+partial bytes. Conversely, a committed `ProviderRequestMaterialFact` or
+`CompactionEntry` keeps its exact artifact payload reachable through export and
+collection; hosts must not substitute reconstructed request or replacement
+material during recovery.
 
 JsonlSession::export_to creates a new destination directory atomically. It
 copies the verified JSONL prefix and only the supplied reachable artifact

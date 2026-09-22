@@ -29,6 +29,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::future::Future;
 use std::num::{NonZeroU32, NonZeroU64};
 use std::pin::Pin;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tea_protocol::JsonValue;
@@ -43,6 +44,14 @@ use tea_session::{
     ToolResultEntry, ToolStartedRecord, Usage, WorkspaceDeltaId, WorkspaceLeaseId,
     reduce_agent_graph, reduce_lane,
 };
+
+mod recovery_tests;
+mod process_recovery_tests;
+mod input_queue_tests;
+mod compaction_tests;
+mod model_selection_tests;
+mod resume_claim_tests;
+mod trace_failure_tests;
 
 #[derive(Debug)]
 struct QueuedProvider {
@@ -65,9 +74,42 @@ impl ModelProvider for QueuedProvider {
     }
 }
 
+struct BlockingProvider {
+    started: Arc<AtomicUsize>,
+}
+
+impl ModelProvider for BlockingProvider {
+    fn stream<'a>(
+        &'a self,
+        _request: ModelRequest,
+        _cancellation: CancellationToken,
+    ) -> ModelFuture<'a> {
+        self.started.fetch_add(1, Ordering::SeqCst);
+        Box::pin(std::future::pending())
+    }
+}
+
+#[derive(Clone)]
+enum FixtureChildProvider {
+    CompletionPerChild,
+    Shared(Arc<dyn ModelProvider>),
+}
+
+impl FixtureChildProvider {
+    fn runtime_provider(&self) -> Arc<dyn ModelProvider> {
+        match self {
+            Self::CompletionPerChild => Arc::new(QueuedProvider {
+                streams: Mutex::new(VecDeque::from([completion_stream()])),
+            }),
+            Self::Shared(provider) => Arc::clone(provider),
+        }
+    }
+}
+
 #[derive(Clone)]
 struct FixtureSubagentHost {
     child_identity: HarnessIdentity,
+    child_provider: FixtureChildProvider,
     allowed_models: BTreeMap<String, ModelDescriptor>,
     requests: Arc<Mutex<Vec<PrepareSubagentRequest>>>,
     reopen_count: Arc<Mutex<u32>>,
@@ -127,6 +169,7 @@ impl SubagentHost for FixtureSubagentHost {
         request: PrepareSubagentRequest,
     ) -> SubagentHostFuture<'a, PreparedSubagent> {
         let child_identity = self.child_identity.clone();
+        let child_provider = self.child_provider.clone();
         let allowed_models = self.allowed_models.clone();
         let requests = Arc::clone(&self.requests);
         Box::pin(async move {
@@ -140,6 +183,7 @@ impl SubagentHost for FixtureSubagentHost {
                 descriptor.clone(),
                 request.agent_id.clone(),
                 request.thinking,
+                child_provider.runtime_provider(),
             );
             requests
                 .lock()
@@ -154,6 +198,7 @@ impl SubagentHost for FixtureSubagentHost {
         request: ReopenSubagentRequest,
     ) -> SubagentHostFuture<'a, PreparedSubagent> {
         let child_identity = self.child_identity.clone();
+        let child_provider = self.child_provider.clone();
         let count = Arc::clone(&self.reopen_count);
         let fail = Arc::clone(&self.cleanup_fail);
         Box::pin(async move {
@@ -167,6 +212,7 @@ impl SubagentHost for FixtureSubagentHost {
                 request.model.descriptor,
                 request.agent_id,
                 request.thinking,
+                child_provider.runtime_provider(),
             );
             *count.lock().expect("fixture child-host reopen mutex") += 1;
             Ok(prepared)
@@ -245,6 +291,7 @@ fn fixture_prepared_subagent(
     descriptor: ModelDescriptor,
     agent_id: tea_session::AgentId,
     thinking: tea_core::state::ThinkingLevel,
+    child_provider: Arc<dyn ModelProvider>,
 ) -> PreparedSubagent {
     PreparedSubagent {
         workspace: WorkspaceLease {
@@ -253,9 +300,7 @@ fn fixture_prepared_subagent(
         },
         harness_identity,
         runtime_services: RuntimeServices::new(
-            Arc::new(QueuedProvider {
-                streams: Mutex::new(VecDeque::from([completion_stream()])),
-            }),
+            child_provider,
             ToolRegistry::default(),
         )
         .model(descriptor)
@@ -382,6 +427,25 @@ impl FixtureTaskRuntime {
                 .expect("fixture task ownership mutex")
                 .insert(task_id, task);
         }
+    }
+
+    /// Poll every owned child exactly once without selecting an executor.
+    fn poll_all_owned_tasks_once(&self) {
+        let tasks = {
+            let mut owned = self.tasks.lock().expect("fixture task ownership mutex");
+            std::mem::take(&mut *owned)
+        };
+        let mut pending = BTreeMap::new();
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        for (task_id, mut task) in tasks {
+            if task.as_mut().poll(&mut context).is_pending() {
+                pending.insert(task_id, task);
+            }
+        }
+        self.tasks
+            .lock()
+            .expect("fixture task ownership mutex")
+            .extend(pending);
     }
 }
 
@@ -704,14 +768,17 @@ fn build_subagent_runtime_with_child_surface(
         .put(b"fixture child patch", "application/x-git-diff")
         .expect("fixture patch artifact stores")
         .artifact_id;
-    let root_provider = Arc::new(QueuedProvider {
+    let root_provider: Arc<dyn ModelProvider> = Arc::new(QueuedProvider {
         streams: Mutex::new(root_streams.into()),
     });
-    let child_provider = Arc::new(QueuedProvider {
-        streams: Mutex::new(VecDeque::new()),
-    });
+    let child_provider = FixtureChildProvider::CompletionPerChild;
     let (manager, root_identity, root_services, child_identity) =
-        fixture_subagent_manager(root_provider, child_provider, store.clone(), &policy);
+        fixture_subagent_manager(
+            root_provider,
+            child_provider.runtime_provider(),
+            store.clone(),
+            &policy,
+        );
     let requests = Arc::new(Mutex::new(Vec::new()));
     let reopen_count = Arc::new(Mutex::new(0));
     let host = Arc::new(FixtureSubagentHost {
@@ -720,6 +787,7 @@ fn build_subagent_runtime_with_child_surface(
         } else {
             child_identity
         },
+        child_provider,
         allowed_models: policy
             .models
             .iter()
@@ -886,13 +954,12 @@ fn build_active_spawn_replay_fixture_with_options(
     let spawn_definition_digest =
         super::supervisor::tool_definition_digest(&DefinitionOnlyTool(spawn_definition))
             .expect("fixture spawn definition hashes");
+    let child_provider = FixtureChildProvider::CompletionPerChild;
     let (manager, root_identity, root_services, child_identity) = fixture_subagent_manager(
         Arc::new(QueuedProvider {
             streams: Mutex::new(VecDeque::from([completion_stream()])),
         }),
-        Arc::new(QueuedProvider {
-            streams: Mutex::new(VecDeque::new()),
-        }),
+        child_provider.runtime_provider(),
         store.clone(),
         &policy,
     );
@@ -904,6 +971,7 @@ fn build_active_spawn_replay_fixture_with_options(
     let apply_requests = Arc::new(Mutex::new(Vec::new()));
     let host = Arc::new(FixtureSubagentHost {
         child_identity: child_identity.clone(),
+        child_provider,
         allowed_models: policy
             .models
             .iter()
@@ -1057,7 +1125,10 @@ fn build_active_spawn_replay_fixture_with_options(
                         tool_call_id: call.id.to_string(),
                         tool_name: call.name.clone(),
                         full_result: PayloadRef::Inline(JsonValue::String("spawn settled".into())),
-                        model_projection: JsonValue::String("spawn settled".into()),
+                        model_projection: JsonValue::object([
+                            ("content", JsonValue::String("spawn settled".into())),
+                            ("details", JsonValue::Null),
+                        ]),
                         is_error: false,
                         terminate: false,
                         usage: Usage::default(),
@@ -1154,7 +1225,7 @@ fn apply_agent_changes_intent_only_recovery_requires_host_reconciliation() {
             assert!(matches!(
                 error,
                 HarnessError::RecoveryRequired {
-                    plan: tea_session::RecoveryPlan::SynthesizeInterruptedToolResult {
+                    plan: tea_session::RecoveryPlan::ReconcileToolEffect {
                         ref result_entry_id,
                     },
                 } if result_entry_id.as_str() == "fixture-root-replay-apply-result"
@@ -1342,7 +1413,12 @@ fn append_finished_foreign_spawn_with_reused_task_name(
         .expect("older root finishes");
 }
 
-fn build_active_two_spawn_fixture() -> (
+fn build_active_spawn_fixture(
+    session_id: &str,
+    policy: SubagentPolicy,
+    child_provider: FixtureChildProvider,
+    calls: Vec<(ToolCall, SpawnAgentRequest)>,
+) -> (
     Arc<SessionSupervisor<MemorySession>>,
     Arc<FixtureTaskRuntime>,
     RunProvenance,
@@ -1353,19 +1429,17 @@ fn build_active_two_spawn_fixture() -> (
         .put(b"fixture child patch", "application/x-git-diff")
         .expect("fixture patch artifact stores")
         .artifact_id;
-    let policy = fixture_subagent_policy();
     let (manager, root_identity, root_services, child_identity) = fixture_subagent_manager(
         Arc::new(QueuedProvider {
             streams: Mutex::new(VecDeque::new()),
         }),
-        Arc::new(QueuedProvider {
-            streams: Mutex::new(VecDeque::new()),
-        }),
+        child_provider.runtime_provider(),
         store.clone(),
         &policy,
     );
     let host = Arc::new(FixtureSubagentHost {
         child_identity,
+        child_provider,
         allowed_models: policy
             .models
             .iter()
@@ -1380,42 +1454,8 @@ fn build_active_two_spawn_fixture() -> (
         apply_requests: Arc::new(Mutex::new(Vec::new())),
     });
     let tasks = Arc::new(FixtureTaskRuntime::accepting());
-    let calls = vec![
-        (
-            ToolCall {
-                id: ToolCallId::new("fixture-root-multi-z").expect("tool call ID"),
-                name: "spawn_agent".into(),
-                arguments: SerializedJson::new(
-                    r#"{"task_name":"z_task","task":"inspect z","model":"child-model","context":"task"}"#,
-                ),
-            },
-            SpawnAgentRequest {
-                task_name: "z_task".into(),
-                task: "inspect z".into(),
-                model: "child-model".into(),
-                thinking: None,
-                context_mode: AgentContextMode::Task,
-            },
-        ),
-        (
-            ToolCall {
-                id: ToolCallId::new("fixture-root-multi-a").expect("tool call ID"),
-                name: "spawn_agent".into(),
-                arguments: SerializedJson::new(
-                    r#"{"task_name":"a_task","task":"inspect a","model":"child-model","context":"task"}"#,
-                ),
-            },
-            SpawnAgentRequest {
-                task_name: "a_task".into(),
-                task: "inspect a".into(),
-                model: "child-model".into(),
-                thinking: None,
-                context_mode: AgentContextMode::Task,
-            },
-        ),
-    ];
     let mut session = MemorySession::create(SessionHeader::new(
-        SessionId::new("runtime-subagent-multi").expect("fixture session ID"),
+        SessionId::new(session_id).expect("fixture session ID"),
         "runtime-subagent-multi-workspace",
         fixture_metadata(),
     ))
@@ -1492,7 +1532,7 @@ fn build_active_two_spawn_fixture() -> (
             .expect("spawn tool intent commits");
     }
     let provenance = RunProvenance {
-        session_id: Some("runtime-subagent-multi".into()),
+        session_id: Some(session_id.into()),
         lane_id: Some(LaneId::main().to_string()),
         agent_id: None,
         operation_id: Some(operation_id.to_string()),
@@ -1520,6 +1560,52 @@ fn build_active_two_spawn_fixture() -> (
     })
     .expect("fixture supervisor creates");
     (runtime, tasks, provenance, calls)
+}
+
+fn build_active_two_spawn_fixture() -> (
+    Arc<SessionSupervisor<MemorySession>>,
+    Arc<FixtureTaskRuntime>,
+    RunProvenance,
+    Vec<(ToolCall, SpawnAgentRequest)>,
+) {
+    build_active_spawn_fixture(
+        "runtime-subagent-multi",
+        fixture_subagent_policy(),
+        FixtureChildProvider::CompletionPerChild,
+        vec![
+            fixture_spawn_request("fixture-root-multi-z", "z_task", "inspect z"),
+            fixture_spawn_request("fixture-root-multi-a", "a_task", "inspect a"),
+        ],
+    )
+}
+
+fn fixture_spawn_request(
+    call_id: &str,
+    task_name: &str,
+    task: &str,
+) -> (ToolCall, SpawnAgentRequest) {
+    let arguments = JsonValue::object([
+        ("task_name", JsonValue::String(task_name.into())),
+        ("task", JsonValue::String(task.into())),
+        ("model", JsonValue::String("child-model".into())),
+        ("context", JsonValue::String("task".into())),
+    ])
+    .to_json_string()
+    .expect("fixture spawn arguments encode");
+    (
+        ToolCall {
+            id: ToolCallId::new(call_id).expect("fixture tool call ID"),
+            name: "spawn_agent".into(),
+            arguments: SerializedJson::new(arguments),
+        },
+        SpawnAgentRequest {
+            task_name: task_name.into(),
+            task: task.into(),
+            model: "child-model".into(),
+            thinking: None,
+            context_mode: AgentContextMode::Task,
+        },
+    )
 }
 
 fn fixture_apply_call(agent_id: &AgentId) -> ToolCall {
@@ -1652,7 +1738,7 @@ fn subagent_spawn_accepts_a_task_context_child_and_hands_it_to_the_task_runtime(
 }
 
 #[test]
-fn subagent_spawn_intent_is_durably_replayable_before_any_child_fact_exists() {
+fn subagent_spawn_intent_is_not_replay_safe_after_interruption() {
     smol::block_on(async {
         let (runtime, _requests, _tasks) = build_subagent_runtime(
             "runtime-subagent-intent-replay-policy",
@@ -1679,14 +1765,14 @@ fn subagent_spawn_intent_is_durably_replayable_before_any_child_fact_exists() {
             .expect("spawn intent is durable");
         assert_eq!(
             spawn.replay_policy_at_start,
-            ToolReplayPolicy::Safe,
-            "an intent-only crash must resume the deterministic spawn transaction"
+            ToolReplayPolicy::Never,
+            "a persisted spawn intent never authorizes a child after interruption"
         );
     });
 }
 
 #[test]
-fn subagent_spawn_intent_only_resume_replays_exactly_one_child_transaction() {
+fn subagent_spawn_intent_only_resume_requires_explicit_reconciliation() {
     smol::block_on(async {
         let (
             runtime,
@@ -1702,28 +1788,24 @@ fn subagent_spawn_intent_only_resume_replays_exactly_one_child_transaction() {
             _request,
         ) = build_active_spawn_replay_fixture_with_options(false, false, false, None);
 
-        runtime
+        let error = runtime
             .resume()
             .await
-            .expect("an intent-only spawn resumes the deterministic transaction");
+            .expect_err("an old spawn intent must not create a child during resume");
+        assert!(matches!(error, HarnessError::RecoveryRequired { .. }));
 
         let snapshot = runtime.snapshot().expect("recovered snapshot reads");
         let graph = reduce_agent_graph(&snapshot).expect("recovered child graph reduces");
-        assert_eq!(graph.agents.len(), 1, "replay derives one durable child");
-        let child = graph.agents.values().next().expect("replayed child exists");
-        assert!(
-            child.operation_id.is_some(),
-            "replay accepts the child operation before settling the root"
-        );
+        assert!(graph.agents.is_empty(), "resume does not manufacture a child");
         assert_eq!(
             requests.lock().expect("fixture request mutex").len(),
-            1,
-            "replay prepares one isolated workspace"
+            0,
+            "resume does not prepare an isolated workspace"
         );
         assert_eq!(
             *tasks.accepted.lock().expect("fixture task count mutex"),
-            1,
-            "replay hands one child operation to structured task ownership"
+            0,
+            "resume does not hand a child operation to task ownership"
         );
         assert_eq!(
             snapshot
@@ -1738,18 +1820,18 @@ fn subagent_spawn_intent_only_resume_replays_exactly_one_child_transaction() {
                     )
                 })
                 .count(),
-            1,
-            "the recovered spawn intent has exactly one durable tool result"
+            0,
+            "a blocked spawn intent does not receive a synthetic success result"
         );
 
         let recovered_sequence = snapshot.last_sequence();
         let repeated = runtime
             .resume()
             .await
-            .expect_err("a settled operation has no recovery obligation");
+            .expect_err("the interrupted spawn remains blocked until explicit reconciliation");
         assert!(
-            repeated.to_string().contains("no open operation"),
-            "repeat recovery reports the settled boundary instead of replaying again"
+            matches!(repeated, HarnessError::RecoveryRequired { .. }),
+            "repeat recovery keeps the unresolved effect explicit"
         );
         assert_eq!(
             runtime
@@ -1757,13 +1839,13 @@ fn subagent_spawn_intent_only_resume_replays_exactly_one_child_transaction() {
                 .expect("repeated snapshot reads")
                 .last_sequence(),
             recovered_sequence,
-            "repeat recovery cannot duplicate the child transaction"
+            "repeat recovery cannot duplicate or advance the child transaction"
         );
     });
 }
 
 #[test]
-fn subagent_spawn_replay_inherits_durable_parent_thinking_after_reopen() {
+fn subagent_reopen_does_not_turn_a_persisted_spawn_intent_into_child_work() {
     smol::block_on(async {
         let (
             runtime,
@@ -1802,28 +1884,22 @@ fn subagent_spawn_replay_inherits_durable_parent_thinking_after_reopen() {
             subagents,
         })
         .expect("reopen hydrates the durable root configuration");
-        reopened
-            .resume()
-            .await
-            .expect("spawn recovery inherits the durable parent thinking");
-
         assert_eq!(
-            requests.lock().expect("fixture request mutex")[0].thinking,
-            crate::state::ThinkingLevel::High,
-            "host preparation receives the reduced parent thinking, not the reopened service default"
+            requests.lock().expect("fixture request mutex").len(),
+            0,
+            "opening a session does not prepare a child workspace"
         );
-        let graph = reduce_agent_graph(&reopened.snapshot().expect("recovered snapshot reads"))
-            .expect("recovered graph reduces");
         assert_eq!(
-            graph
+            *tasks.accepted.lock().expect("fixture task count mutex"),
+            0,
+            "opening a session does not hand child work to the task runtime"
+        );
+        assert!(
+            reduce_agent_graph(&reopened.snapshot().expect("reopened snapshot reads"))
+                .expect("reopened graph reduces")
                 .agents
-                .values()
-                .next()
-                .expect("replayed child exists")
-                .spawned
-                .thinking,
-            "high",
-            "the replayed child retains the exact durable inherited identity"
+                .is_empty(),
+            "the old tool intent remains an unresolved root effect rather than a child"
         );
     });
 }
@@ -2238,9 +2314,23 @@ fn subagent_spawn_keeps_source_order_and_accepts_distinct_models_from_one_provid
             graph
                 .agents
                 .values()
-                .map(|node| node.spawned.model.model.as_str())
-                .collect::<Vec<_>>(),
-            ["child-model", "child-model-b"]
+                .find(|node| node.spawned.task_name == "first_task")
+                .expect("first source-ordered child exists")
+                .spawned
+                .model
+                .model,
+            "child-model"
+        );
+        assert_eq!(
+            graph
+                .agents
+                .values()
+                .find(|node| node.spawned.task_name == "second_task")
+                .expect("second source-ordered child exists")
+                .spawned
+                .model
+                .model,
+            "child-model-b"
         );
     });
 }
@@ -2281,7 +2371,7 @@ fn subagent_spawn_uses_the_configured_alternate_provider_catalog() {
 }
 
 #[test]
-fn subagent_spawn_replay_reuses_one_durable_child_and_reacquires_task_ownership() {
+fn subagent_spawn_replay_never_restarts_an_interrupted_child_assignment() {
     smol::block_on(async {
         let (
             runtime,
@@ -2333,17 +2423,17 @@ fn subagent_spawn_replay_reuses_one_durable_child_and_reacquires_task_ownership(
             "a same-idempotency replay with mismatched durable task data is rejected"
         );
 
-        let handle = runtime
+        let retry = runtime
             .accept_subagent_spawn(&coordinator, call, provenance, request)
             .await
-            .expect("exact replay reopens the child lease and retries task handoff");
-        assert_eq!(handle.state, AgentState::Running);
+            .expect_err("an interrupted child assignment requires a new spawn request");
+        assert!(retry.to_string().contains("interrupted child assignment"));
         assert_eq!(requests.lock().expect("fixture request mutex").len(), 1);
-        assert_eq!(*reopen_count.lock().expect("fixture reopen mutex"), 1);
+        assert_eq!(*reopen_count.lock().expect("fixture reopen mutex"), 0);
         assert_eq!(
             *tasks.accepted.lock().expect("fixture task count mutex"),
-            1,
-            "only the successful replay task is supervisor-owned"
+            0,
+            "a failed handoff is not checkpoint-resurrected"
         );
         assert_eq!(
             reduce_agent_graph(&runtime.snapshot().expect("snapshot reads"))
@@ -2357,7 +2447,326 @@ fn subagent_spawn_replay_reuses_one_durable_child_and_reacquires_task_ownership(
 }
 
 #[test]
-fn subagent_reopen_registers_and_resumes_an_open_child_before_root_waits() {
+fn subagent_child_lanes_reject_public_resume_and_prompt_drives() {
+    smol::block_on(async {
+        let (
+            runtime,
+            tasks,
+            _requests,
+            reopen_count,
+            _cleanup_fail,
+            _finalizations,
+            _apply_outcomes,
+            _apply_requests,
+            call,
+            provenance,
+            request,
+        ) = build_active_spawn_replay_fixture();
+        let coordinator = runtime
+            .subagent_coordinator_for_test()
+            .expect("fixture coordinator exists");
+        let spawned = runtime
+            .accept_subagent_spawn(&coordinator, call, provenance.clone(), request)
+            .await
+            .expect("child operation accepts");
+        coordinator
+            .interrupt(
+                &ToolContext {
+                    cancellation: CancellationToken::new(),
+                    provenance,
+                },
+                &spawned.agent_id.to_string(),
+            )
+            .await
+            .expect("child reaches its retained terminal boundary");
+
+        let child_lane = spawned.agent_id.lane_id();
+        let before = runtime.snapshot().expect("pre-drive snapshot reads").last_sequence();
+        let prompt_error = runtime
+            .run_lane_prompt(child_lane.clone(), "resume the old child assignment")
+            .await
+            .expect_err("a public prompt must not create another child operation");
+        assert!(prompt_error
+            .to_string()
+            .contains("durable child lanes cannot be driven directly"));
+        let resume_error = runtime
+            .resume_lane(child_lane)
+            .await
+            .expect_err("a public resume must not re-enter a retained child operation");
+        assert!(resume_error
+            .to_string()
+            .contains("durable child lanes cannot be driven directly"));
+        assert_eq!(
+            runtime.snapshot().expect("post-drive snapshot reads").last_sequence(),
+            before,
+            "rejected public child drives perform no durable mutation"
+        );
+        assert_eq!(
+            *tasks.accepted.lock().expect("fixture task count mutex"),
+            1,
+            "rejected public child drives create no replacement task"
+        );
+        assert_eq!(
+            *reopen_count.lock().expect("fixture reopen mutex"),
+            0,
+            "rejected public child drives do not reactivate the old workspace"
+        );
+    });
+}
+
+#[test]
+fn subagent_main_lane_resume_routes_through_retained_child_reconciliation() {
+    smol::block_on(async {
+        let (
+            runtime,
+            tasks,
+            _requests,
+            reopen_count,
+            _cleanup_fail,
+            finalizations,
+            _apply_outcomes,
+            apply_requests,
+            call,
+            provenance,
+            request,
+        ) = build_active_spawn_replay_fixture_with_options(false, true, false, None);
+        let coordinator = runtime
+            .subagent_coordinator_for_test()
+            .expect("fixture coordinator exists");
+        let spawned = runtime
+            .accept_subagent_spawn(&coordinator, call, provenance, request)
+            .await
+            .expect("child operation accepts");
+        let accepted_before_resume = *tasks.accepted.lock().expect("fixture task count mutex");
+        finalizations
+            .lock()
+            .expect("fixture finalization mutex")
+            .push_back(FixtureFinalization::Delta);
+
+        runtime
+            .resume_lane(LaneId::main())
+            .await
+            .expect("main-lane resume uses root continuation recovery");
+
+        let graph = reduce_agent_graph(&runtime.snapshot().expect("snapshot reads"))
+            .expect("reconciled graph reduces");
+        let child = graph.agents.get(&spawned.agent_id).expect("child remains durable");
+        assert!(child.terminal.is_some(), "root continuation reports the retained child");
+        assert!(child.workspace_delta.is_some(), "root continuation preserves child evidence");
+        assert_eq!(
+            *reopen_count.lock().expect("fixture reopen mutex"),
+            1,
+            "main-lane resume explicitly reattaches only to reconcile the retained child"
+        );
+        assert_eq!(
+            *tasks.accepted.lock().expect("fixture task count mutex"),
+            accepted_before_resume,
+            "main-lane resume never creates a replacement child task"
+        );
+        assert!(
+            apply_requests.lock().expect("fixture apply request mutex").is_empty(),
+            "main-lane recovery never auto-applies retained child changes"
+        );
+    });
+}
+
+#[test]
+fn subagent_reopen_is_passive_and_explicit_continuation_retains_an_interrupted_child_delta() {
+    smol::block_on(async {
+        let (
+            runtime,
+            tasks,
+            _requests,
+            reopen_count,
+            _cleanup_fail,
+            finalizations,
+            _apply_outcomes,
+            apply_requests,
+            call,
+            provenance,
+            request,
+        ) = build_active_spawn_replay_fixture();
+        let coordinator = runtime
+            .subagent_coordinator_for_test()
+            .expect("fixture coordinator exists");
+        let spawned = runtime
+            .accept_subagent_spawn(&coordinator, call, provenance, request)
+            .await
+            .expect("child operation accepts");
+        finalizations
+            .lock()
+            .expect("fixture finalization mutex")
+            .push_back(FixtureFinalization::Delta);
+        let session = runtime
+            .clone_session_for_test()
+            .expect("durable session clones for restart fixture");
+        let (resolver, root_services, artifacts, subagents) = runtime
+            .reopen_parts_for_test()
+            .expect("reopen parts remain host-owned");
+        tasks.lose_owned_tasks_for_restart();
+        drop(runtime);
+
+        let reopened = SessionSupervisor::reopen(SessionSupervisorReopenInput {
+            session,
+            resolver,
+            root_services,
+            lane_services: BTreeMap::new(),
+            artifacts,
+            rollover_budget: 1,
+            subagents,
+        })
+        .expect("reopen reconstructs root from durable identity");
+        assert_eq!(
+            *reopen_count.lock().expect("fixture reopen mutex"),
+            0,
+            "opening does not reattach a child workspace"
+        );
+        assert_eq!(
+            *tasks.accepted.lock().expect("fixture task count mutex"),
+            1,
+            "opening does not create a replacement task"
+        );
+        reopened
+            .reconcile_interrupted_subagents_for_test()
+            .await
+            .expect("explicit continuation reconciles child workspace evidence");
+        let recovered_coordinator = reopened
+            .subagent_coordinator_for_test()
+            .expect("reopened coordinator exists");
+        assert_eq!(
+            *reopen_count.lock().expect("fixture reopen mutex"),
+            1,
+            "only explicit continuation reattaches the durable child lease"
+        );
+        assert_eq!(
+            tasks.owned_task_count(),
+            0,
+            "continuation never starts a replacement task"
+        );
+        let graph = reduce_agent_graph(&reopened.snapshot().expect("reconciled snapshot reads"))
+            .expect("reconciled graph reduces");
+        let child = graph.agents.get(&spawned.agent_id).expect("child remains durable");
+        assert!(matches!(
+            child.state,
+            AgentState::DeltaReady {
+                outcome: OperationOutcome::Aborted,
+                ..
+            }
+        ));
+        assert!(matches!(
+            child.terminal.as_ref().map(|terminal| &terminal.report),
+            Some(PayloadRef::Inline(JsonValue::String(report))) if report.contains("interrupted")
+        ), "the retained terminal report tells the truth instead of presenting resumed output");
+        assert!(child.workspace_delta.is_some(), "salvageable workspace evidence is retained");
+        assert!(recovered_coordinator.is_exposable(&spawned.agent_id));
+        assert!(
+            apply_requests.lock().expect("fixture apply request mutex").is_empty(),
+            "recovery never applies a retained child delta"
+        );
+        reopened
+            .reconcile_interrupted_subagents_for_test()
+            .await
+            .expect("a terminal interrupted child remains an idempotent observation");
+        assert_eq!(
+            *reopen_count.lock().expect("fixture reopen mutex"),
+            1,
+            "reconciliation never reopens or reruns an already terminal child"
+        );
+    });
+}
+
+#[test]
+fn subagent_unsafe_tool_prefix_blocks_reconciliation_before_workspace_cleanup() {
+    smol::block_on(async {
+        let (
+            runtime,
+            tasks,
+            _requests,
+            reopen_count,
+            _cleanup_fail,
+            finalizations,
+            _apply_outcomes,
+            apply_requests,
+            call,
+            provenance,
+            request,
+        ) = build_active_spawn_replay_fixture();
+        let coordinator = runtime
+            .subagent_coordinator_for_test()
+            .expect("fixture coordinator exists");
+        let spawned = runtime
+            .accept_subagent_spawn(&coordinator, call, provenance, request)
+            .await
+            .expect("child operation accepts");
+        let epoch_id = runtime
+            .start_subagent_epoch_for_test(&spawned.agent_id)
+            .expect("child epoch starts before its unsafe tool intent");
+        runtime
+            .append_subagent_open_tool_prefix_for_test(&spawned.agent_id, &epoch_id)
+            .expect("child unsafe tool intent persists without an outcome");
+        let expected_result_entry_id = runtime
+            .snapshot()
+            .expect("unsafe child prefix snapshot reads")
+            .records()
+            .iter()
+            .find_map(|stored| match &stored.record {
+                LaneRecord::ToolStarted(tool)
+                    if tool.operation_id == spawned.operation_id
+                        && tool.tool_name == "fixture_child_tool" =>
+                {
+                    Some(tool.result_entry_id.clone())
+                }
+                _ => None,
+            })
+            .expect("child unsafe tool result identity is durable");
+        finalizations
+            .lock()
+            .expect("fixture finalization mutex")
+            .push_back(FixtureFinalization::Delta);
+
+        let error = runtime
+            .reconcile_interrupted_subagents_for_test()
+            .await
+            .expect_err("an indeterminate child tool must be host-reconciled first");
+        assert!(matches!(
+            error,
+            HarnessError::RecoveryRequired {
+                plan: tea_session::RecoveryPlan::ReconcileToolEffect {
+                    ref result_entry_id,
+                },
+            } if result_entry_id == &expected_result_entry_id
+        ));
+        assert_eq!(
+            *reopen_count.lock().expect("fixture reopen mutex"),
+            0,
+            "unsafe child recovery does not reopen a workspace before reconciliation"
+        );
+        assert_eq!(tasks.owned_task_count(), 1);
+        assert_eq!(
+            finalizations
+                .lock()
+                .expect("fixture finalization mutex")
+                .len(),
+            1,
+            "unsafe child recovery does not finalize or discard workspace evidence"
+        );
+        assert!(
+            apply_requests
+                .lock()
+                .expect("fixture apply request mutex")
+                .is_empty(),
+            "unsafe child recovery never applies retained workspace changes"
+        );
+        let graph = reduce_agent_graph(&runtime.snapshot().expect("snapshot reads"))
+            .expect("unsafe child graph remains valid");
+        let child = &graph.agents[&spawned.agent_id];
+        assert!(child.terminal.is_none());
+        assert!(child.workspace_delta.is_none());
+    });
+}
+
+#[test]
+fn subagent_interrupted_provider_attempt_is_settled_without_new_child_inference() {
     smol::block_on(async {
         let (
             runtime,
@@ -2379,39 +2788,15 @@ fn subagent_reopen_registers_and_resumes_an_open_child_before_root_waits() {
             .accept_subagent_spawn(&coordinator, call, provenance, request)
             .await
             .expect("child operation accepts");
-        let child_epoch = runtime
+        let epoch_id = runtime
             .start_subagent_epoch_for_test(&spawned.agent_id)
-            .expect("fixture commits an open child epoch prefix");
-        runtime
-            .append_subagent_open_tool_prefix_for_test(&spawned.agent_id, &child_epoch)
-            .expect("fixture commits an open child tool prefix");
-        let child = reduce_agent_graph(&runtime.snapshot().expect("snapshot reads"))
-            .expect("child graph reduces")
-            .agents
-            .get(&spawned.agent_id)
-            .cloned()
-            .expect("child exists");
-        let child_identity = HarnessIdentity::new(
-            child.spawned.harness_revision_id.clone(),
-            child.spawned.harness_snapshot_id.clone(),
-            child.spawned.model_harness_profile_id.clone(),
-        );
-        assert_eq!(
-            runtime
-                .provenance_for_test(
-                    &child.spawned.lane_id,
-                    &spawned.operation_id,
-                    &child_epoch,
-                    &child_identity,
-                )
-                .expect("child provenance derives from durable graph")
-                .agent_id,
-            Some(spawned.agent_id.to_string()),
-            "child traces carry only their exact durable AgentId"
-        );
+            .expect("child epoch starts before its provider request");
+        let request_id = runtime
+            .append_subagent_open_provider_prefix_for_test(&spawned.agent_id, &epoch_id)
+            .expect("child provider request persists without settlement");
         let session = runtime
             .clone_session_for_test()
-            .expect("durable session clones for restart fixture");
+            .expect("provider-interrupted session clones");
         let (resolver, root_services, artifacts, subagents) = runtime
             .reopen_parts_for_test()
             .expect("reopen parts remain host-owned");
@@ -2427,38 +2812,39 @@ fn subagent_reopen_registers_and_resumes_an_open_child_before_root_waits() {
             rollover_budget: 1,
             subagents,
         })
-        .expect("reopen reconstructs root from durable identity");
+        .expect("passive reopen reconstructs child evidence");
         reopened
-            .recover_subagents_for_test()
+            .reconcile_interrupted_subagents_for_test()
             .await
-            .expect("open child is restored before root recovery continues");
-        let recovered_coordinator = reopened
-            .subagent_coordinator_for_test()
-            .expect("reopened coordinator exists");
-        assert!(
-            recovered_coordinator.has_handle(&spawned.agent_id),
-            "reopen owns a replacement structured child task"
+            .expect("explicit continuation classifies the old provider attempt without replay");
+        let snapshot = reopened.snapshot().expect("reconciled snapshot reads");
+        let interrupted = snapshot
+            .records()
+            .iter()
+            .find_map(|stored| match &stored.record {
+                LaneRecord::ProviderRequestSettled(record) if record.request_id == request_id => {
+                    Some(record)
+                }
+                _ => None,
+            })
+            .expect("old child provider attempt is durably classified");
+        assert_eq!(
+            interrupted.classification,
+            tea_session::ProviderSettlementClassification::Interrupted
         );
+        assert_eq!(interrupted.usage, None);
         assert_eq!(
             *reopen_count.lock().expect("fixture reopen mutex"),
             1,
-            "the durable child lease is reattached exactly once"
+            "continuation reattaches workspace only to retain the interrupted child"
         );
+        assert_eq!(tasks.owned_task_count(), 0, "no replacement child task is started");
         assert_eq!(
-            tasks.owned_task_count(),
-            1,
-            "the old volatile task is gone and one recovered task is registered"
-        );
-        assert_eq!(
-            reopened
-                .snapshot()
-                .expect("recovered snapshot reads")
-                .records()
-                .iter()
-                .filter(|stored| matches!(&stored.record, LaneRecord::EpochStarted(record) if record.id == child_epoch))
-                .count(),
-            1,
-            "recovery registers a task for the existing epoch instead of starting a fresh epoch"
+            reduce_agent_graph(&snapshot)
+                .expect("provider-interrupted graph reduces")
+                .agents[&spawned.agent_id]
+                .state,
+            AgentState::Interrupted
         );
     });
 }
@@ -2507,7 +2893,7 @@ fn subagent_reopen_reports_missing_live_workspace_with_a_typed_error() {
         .expect("reopen reconstructs the root before live child recovery");
         assert_eq!(
             reopened
-                .recover_subagents_for_test()
+                .reconcile_interrupted_subagents_for_test()
                 .await
                 .expect_err("an open child cannot recover without host workspace authority"),
             crate::harness::HarnessError::SubagentRecovery {
@@ -2520,7 +2906,7 @@ fn subagent_reopen_reports_missing_live_workspace_with_a_typed_error() {
 }
 
 #[test]
-fn subagent_terminal_recovery_cleans_idempotently_without_reopening_a_worktree() {
+fn subagent_terminal_results_are_queryable_after_reopen_without_host_reactivation() {
     smol::block_on(async {
         let (
             runtime,
@@ -2542,6 +2928,7 @@ fn subagent_terminal_recovery_cleans_idempotently_without_reopening_a_worktree()
             .accept_subagent_spawn(&coordinator, call, provenance.clone(), request)
             .await
             .expect("child operation accepts");
+        let wait_provenance = provenance.clone();
         coordinator
             .interrupt(
                 &ToolContext {
@@ -2570,107 +2957,30 @@ fn subagent_terminal_recovery_cleans_idempotently_without_reopening_a_worktree()
             subagents,
         })
         .expect("reopen reconstructs the root");
-        reopened
-            .recover_subagents_for_test()
-            .await
-            .expect("terminal recovery performs cleanup-only work");
         let recovered = reopened
             .subagent_coordinator_for_test()
             .expect("reopened coordinator exists");
         assert!(recovered.is_exposable(&spawned.agent_id));
+        let waited = recovered
+            .wait(
+                ToolContext {
+                    cancellation: CancellationToken::new(),
+                    provenance: wait_provenance,
+                },
+                WaitAgentsRequest {
+                    targets: vec![spawned.agent_id.to_string()],
+                    return_when: WaitReturnWhen::All,
+                    timeout: Duration::from_millis(100),
+                },
+            )
+            .await
+            .expect("retained terminal report remains queryable after passive reopen");
+        assert_eq!(waited.completed.len(), 1);
+        assert!(waited.pending.is_empty());
         assert_eq!(
             *reopen_count.lock().expect("fixture reopen mutex"),
             0,
-            "a terminal child cleanup never requests a removed workspace to reopen"
-        );
-    });
-}
-
-#[test]
-fn subagent_reopen_finishes_a_durable_delta_prefix_without_losing_its_report() {
-    smol::block_on(async {
-        let (
-            runtime,
-            tasks,
-            _requests,
-            _reopen_count,
-            _cleanup_fail,
-            finalizations,
-            _apply_outcomes,
-            _apply_requests,
-            call,
-            provenance,
-            request,
-        ) = build_active_spawn_replay_fixture();
-        let coordinator = runtime
-            .subagent_coordinator_for_test()
-            .expect("fixture coordinator exists");
-        let spawned = runtime
-            .accept_subagent_spawn(&coordinator, call, provenance, request)
-            .await
-            .expect("child operation accepts");
-        runtime
-            .append_subagent_assistant_for_test(
-                &spawned.agent_id,
-                "recoverable delta report".into(),
-            )
-            .expect("fixture assistant report appends");
-        finalizations
-            .lock()
-            .expect("fixture finalization mutex")
-            .push_back(FixtureFinalization::Delta);
-        runtime
-            .persist_subagent_delta_without_terminal_for_test(&coordinator, &spawned.agent_id)
-            .await
-            .expect("durable delta prefix persists before terminal report");
-        let prefix = reduce_agent_graph(&runtime.snapshot().expect("snapshot reads"))
-            .expect("delta prefix reduces");
-        assert!(prefix.agents[&spawned.agent_id].workspace_delta.is_some());
-        assert!(prefix.agents[&spawned.agent_id].terminal.is_none());
-        let session = runtime
-            .clone_session_for_test()
-            .expect("durable delta prefix clones for restart fixture");
-        let (resolver, root_services, artifacts, subagents) = runtime
-            .reopen_parts_for_test()
-            .expect("reopen parts remain host-owned");
-        tasks.lose_owned_tasks_for_restart();
-        drop(runtime);
-        let reopened = SessionSupervisor::reopen(SessionSupervisorReopenInput {
-            session,
-            resolver,
-            root_services,
-            lane_services: BTreeMap::new(),
-            artifacts,
-            rollover_budget: 1,
-            subagents,
-        })
-        .expect("reopen reconstructs root from durable identity");
-        reopened
-            .recover_subagents_for_test()
-            .await
-            .expect("recovery finalizes delta-only prefix before root can wait");
-        let graph = reduce_agent_graph(&reopened.snapshot().expect("snapshot reads"))
-            .expect("recovered delta graph reduces");
-        let child = &graph.agents[&spawned.agent_id];
-        assert!(child.terminal.is_some());
-        assert!(
-            child.workspace_delta.is_some(),
-            "existing immutable delta is retained"
-        );
-        assert_eq!(
-            child
-                .terminal
-                .as_ref()
-                .expect("terminal report exists")
-                .report,
-            PayloadRef::Inline(JsonValue::String("recoverable delta report".into())),
-        );
-        assert!(
-            reopened
-                .subagent_coordinator_for_test()
-                .expect("reopened coordinator exists")
-                .is_exposable(&spawned.agent_id),
-            "terminal report becomes parent-visible only after recovery cleanup"
+            "opening never requests a removed workspace to reopen"
         );
     });
 }
@@ -2782,6 +3092,35 @@ fn subagent_terminalization_retains_inline_and_artifact_reports_with_nochange_or
             artifact.workspace_delta.is_some(),
             "interrupted changes remain salvageable"
         );
+        let artifact_snapshot = artifact_runtime
+            .snapshot()
+            .expect("artifact terminal snapshot reads");
+        let delta_sequence = artifact_snapshot
+            .facts()
+            .iter()
+            .find_map(|stored| match &stored.fact {
+                SessionFact::WorkspaceDelta(delta) if delta.agent_id == artifact_child.agent_id => {
+                    Some(stored.seq)
+                }
+                _ => None,
+            })
+            .expect("workspace delta fact persists");
+        let terminal_sequence = artifact_snapshot
+            .facts()
+            .iter()
+            .find_map(|stored| match &stored.fact {
+                SessionFact::AgentTaskFinished(terminal)
+                    if terminal.agent_id == artifact_child.agent_id =>
+                {
+                    Some(stored.seq)
+                }
+                _ => None,
+            })
+            .expect("child terminal fact persists");
+        assert_eq!(
+            delta_sequence, terminal_sequence,
+            "a child delta and its terminal report publish in one semantic commit"
+        );
         let PayloadRef::Artifact {
             artifact_id,
             byte_len,
@@ -2820,93 +3159,11 @@ fn subagent_terminalization_retains_inline_and_artifact_reports_with_nochange_or
 }
 
 #[test]
-fn subagent_spawn_replay_completes_each_partial_lane_binding_prefix() {
-    smol::block_on(async {
-        for configured_entries in 0..=3 {
-            let (
-                runtime,
-                tasks,
-                _requests,
-                _reopen_count,
-                _cleanup_fail,
-                _finalizations,
-                _apply_outcomes,
-                _apply_requests,
-                call,
-                provenance,
-                request,
-            ) = build_active_spawn_replay_fixture();
-            let coordinator = runtime
-                .subagent_coordinator_for_test()
-                .expect("fixture coordinator exists");
-            let agent_id = runtime
-                .persist_subagent_prefix_for_test(
-                    &coordinator,
-                    call.clone(),
-                    provenance.clone(),
-                    request.clone(),
-                    configured_entries,
-                    false,
-                )
-                .await
-                .expect("deterministic partial prefix persists");
-            let spawned = runtime
-                .accept_subagent_spawn(&coordinator, call, provenance, request)
-                .await
-                .expect("normal spawn completes only the missing durable binding suffix");
-            assert_eq!(spawned.agent_id, agent_id);
-            let snapshot = runtime.snapshot().expect("snapshot reads");
-            assert_eq!(
-                snapshot
-                    .lane_mutations()
-                    .iter()
-                    .filter(|stored| matches!(&stored.mutation, LaneMutation::Created { lane_id, .. } if lane_id == &agent_id.lane_id()))
-                    .count(),
-                1,
-                "partial prefix {configured_entries} does not duplicate lane creation"
-            );
-            for kind in ["model", "thinking", "harness"] {
-                assert_eq!(
-                    snapshot
-                        .entries()
-                        .iter()
-                        .filter(|entry| {
-                            entry.lane_id == agent_id.lane_id()
-                                && match kind {
-                                    "model" => matches!(entry.body, SessionEntry::ModelChanged(_)),
-                                    "thinking" => {
-                                        matches!(entry.body, SessionEntry::ThinkingChanged(_))
-                                    }
-                                    "harness" => matches!(
-                                        entry.body,
-                                        SessionEntry::HarnessRevisionChanged(_)
-                                    ),
-                                    _ => false,
-                                }
-                        })
-                        .count(),
-                    1,
-                    "partial prefix {configured_entries} has one durable {kind} binding"
-                );
-            }
-            assert_eq!(
-                reduce_agent_graph(&snapshot)
-                    .expect("completed prefix reduces")
-                    .agents[&agent_id]
-                    .state,
-                AgentState::Running,
-            );
-            assert_eq!(tasks.owned_task_count(), 1);
-        }
-    });
-}
-
-#[test]
-fn subagent_spawn_replay_revalidates_a_pre_registered_partial_child_lane() {
+fn subagent_spawn_commits_topology_and_assignment_as_one_semantic_group() {
     smol::block_on(async {
         let (
             runtime,
-            tasks,
+            _tasks,
             _requests,
             _reopen_count,
             _cleanup_fail,
@@ -2920,150 +3177,53 @@ fn subagent_spawn_replay_revalidates_a_pre_registered_partial_child_lane() {
         let coordinator = runtime
             .subagent_coordinator_for_test()
             .expect("fixture coordinator exists");
-        let agent_id = runtime
-            .persist_subagent_prefix_for_test(
-                &coordinator,
-                call.clone(),
-                provenance.clone(),
-                request.clone(),
-                3,
-                false,
-            )
-            .await
-            .expect("complete child configuration persists before its spawn fact");
-        let session = runtime
-            .clone_session_for_test()
-            .expect("partial child session clones for restart fixture");
-        let (resolver, root_services, artifacts, subagents) = runtime
-            .reopen_parts_for_test()
-            .expect("reopen parts remain host-owned");
-        tasks.lose_owned_tasks_for_restart();
-        drop(runtime);
-
-        let policy = fixture_subagent_policy();
-        let spawn_definition = root_subagent_tool_definitions(&policy)
-            .expect("fixture root definitions resolve")
-            .into_iter()
-            .find(|definition| definition.name == "spawn_agent")
-            .expect("fixture spawn definition exists");
-        let mut forbidden_child_tools = ToolRegistry::default();
-        forbidden_child_tools.insert(Arc::new(DefinitionOnlyTool(spawn_definition)));
-        let child_services = RuntimeServices::new(
-            Arc::new(QueuedProvider {
-                streams: Mutex::new(VecDeque::new()),
-            }),
-            forbidden_child_tools,
-        )
-        .model(policy.models[0].descriptor.clone());
-        let reopened = SessionSupervisor::reopen(SessionSupervisorReopenInput {
-            session,
-            resolver,
-            root_services,
-            lane_services: BTreeMap::from([(agent_id.lane_id(), child_services)]),
-            artifacts,
-            rollover_budget: 1,
-            subagents,
-        })
-        .expect("a graph-unclaimed partial lane can be registered for deterministic replay");
-        let reopened_coordinator = reopened
-            .subagent_coordinator_for_test()
-            .expect("reopened coordinator exists");
-
-        let error = reopened
-            .accept_subagent_spawn(&reopened_coordinator, call, provenance, request)
-            .await
-            .expect_err("graph binding revalidates the already registered child surface");
-        assert!(
-            error.to_string().contains(
-                "subagent child harness cannot expose root collaboration tool spawn_agent"
-            ),
-            "the root collaboration capability is rejected at the post-fact child boundary"
-        );
-        assert!(
-            reduce_agent_graph(&reopened.snapshot().expect("replayed snapshot reads"))
-                .expect("replayed graph reduces")
-                .agents
-                .contains_key(&agent_id),
-            "the rejection occurs after the durable spawn fact makes the lane a child"
-        );
-        assert_eq!(
-            tasks.owned_task_count(),
-            0,
-            "an invalid pre-registered child never reaches task handoff"
-        );
-    });
-}
-
-#[test]
-fn subagent_spawn_fact_without_operation_replays_the_original_assignment() {
-    smol::block_on(async {
-        let (
-            runtime,
-            tasks,
-            _requests,
-            reopen_count,
-            _cleanup_fail,
-            _finalizations,
-            _apply_outcomes,
-            _apply_requests,
-            call,
-            provenance,
-            request,
-        ) = build_active_spawn_replay_fixture();
-        let coordinator = runtime
-            .subagent_coordinator_for_test()
-            .expect("fixture coordinator exists");
-        let agent_id = runtime
-            .persist_subagent_prefix_for_test(
-                &coordinator,
-                call.clone(),
-                provenance.clone(),
-                request.clone(),
-                3,
-                true,
-            )
-            .await
-            .expect("spawn fact persists before child operation acceptance");
-        assert_eq!(
-            reduce_agent_graph(&runtime.snapshot().expect("snapshot reads"))
-                .expect("spawn-only prefix reduces")
-                .agents[&agent_id]
-                .state,
-            AgentState::Spawned,
-        );
+        let before = runtime.snapshot().expect("pre-spawn snapshot reads");
         let spawned = runtime
             .accept_subagent_spawn(&coordinator, call, provenance, request)
             .await
-            .expect("identical root-tool replay accepts the original child operation");
-        assert_eq!(spawned.agent_id, agent_id);
-        let graph = reduce_agent_graph(&runtime.snapshot().expect("snapshot reads"))
-            .expect("accepted child graph reduces");
-        let child = &graph.agents[&agent_id];
-        assert_eq!(child.state, AgentState::Running);
+            .expect("child admission commits atomically");
+        let snapshot = runtime.snapshot().expect("post-spawn snapshot reads");
         assert_eq!(
-            child.operation_id.as_ref(),
-            Some(&spawned.operation_id),
-            "replay uses the child operation derived before the crash"
+            snapshot.last_sequence().0,
+            before.last_sequence().0 + 1,
+            "one successful spawn publishes one semantic commit"
         );
-        let post_replay = runtime.snapshot().expect("snapshot reads");
-        let assignment = post_replay
-            .entries()
+        let graph = reduce_agent_graph(&snapshot).expect("atomic child graph reduces");
+        let child = &graph.agents[&spawned.agent_id];
+        let spawn_sequence = snapshot
+            .facts()
             .iter()
-            .find(|entry| {
-                entry.lane_id == agent_id.lane_id()
-                    && matches!(entry.body, SessionEntry::UserMessage(_))
+            .find_map(|stored| match &stored.fact {
+                SessionFact::AgentSpawned(fact) if fact.agent_id == spawned.agent_id => {
+                    Some(stored.seq)
+                }
+                _ => None,
             })
-            .expect("original task assignment is appended once");
+            .expect("agent spawn fact is present");
+        assert!(snapshot.lane_mutations().iter().any(|stored| {
+            stored.seq == spawn_sequence
+                && matches!(
+                    &stored.mutation,
+                    LaneMutation::Created { lane_id, .. } if lane_id == &child.spawned.lane_id
+                )
+        }));
+        assert!(snapshot.records().iter().any(|stored| {
+            stored.seq == spawn_sequence
+                && matches!(
+                    &stored.record,
+                    LaneRecord::OperationStarted(record) if record.id == spawned.operation_id
+                )
+        }));
         assert_eq!(
-            match &assignment.body {
-                SessionEntry::UserMessage(entry) => &entry.content,
-                _ => unreachable!("assignment filter selects a user entry"),
-            },
-            "inspect the replay prefix",
-            "replay recovers the durable original assignment rather than a synthesized task"
+            snapshot
+                .entries()
+                .iter()
+                .filter(|entry| entry.lane_id == child.spawned.lane_id)
+                .map(|entry| entry.header.seq)
+                .collect::<std::collections::BTreeSet<_>>(),
+            std::collections::BTreeSet::from([spawn_sequence]),
+            "configuration and assignment cannot escape as a partial child prefix"
         );
-        assert_eq!(*reopen_count.lock().expect("fixture reopen mutex"), 1);
-        assert_eq!(tasks.owned_task_count(), 1);
     });
 }
 
@@ -3439,6 +3599,84 @@ fn subagent_wait_timeout_and_cancellation_drop_notifier_wakers() {
                 "cancelled waits remove their retained activity waker"
             );
         }
+    });
+}
+
+#[test]
+fn subagent_same_engine_drives_sixteen_children_and_rejects_the_seventeenth() {
+    smol::block_on(async {
+        let mut policy = fixture_subagent_policy();
+        policy.max_concurrent = NonZeroU32::new(16).expect("sixteen is a nonzero limit");
+        policy.max_total_per_operation =
+            NonZeroU32::new(16).expect("sixteen is a nonzero total limit");
+        let provider_starts = Arc::new(AtomicUsize::new(0));
+        let child_provider = FixtureChildProvider::Shared(Arc::new(BlockingProvider {
+            started: Arc::clone(&provider_starts),
+        }));
+        let calls = (0..17)
+            .map(|index| {
+                fixture_spawn_request(
+                    &format!("fixture-root-sixteen-{index}"),
+                    &format!("child_{index:02}"),
+                    "hold inside the shared child engine",
+                )
+            })
+            .collect::<Vec<_>>();
+        let (runtime, tasks, provenance, calls) = build_active_spawn_fixture(
+            "runtime-subagent-sixteen",
+            policy,
+            child_provider,
+            calls,
+        );
+        let coordinator = runtime
+            .subagent_coordinator_for_test()
+            .expect("fixture coordinator exists");
+
+        for (call, request) in calls.iter().take(16) {
+            runtime
+                .accept_subagent_spawn(
+                    &coordinator,
+                    call.clone(),
+                    provenance.clone(),
+                    request.clone(),
+                )
+                .await
+                .expect("each bounded child admission succeeds");
+        }
+        let (seventeenth_call, seventeenth_request) = calls
+            .get(16)
+            .expect("fixture has an over-limit child intent");
+        let overflow = runtime
+            .accept_subagent_spawn(
+                &coordinator,
+                seventeenth_call.clone(),
+                provenance.clone(),
+                seventeenth_request.clone(),
+            )
+            .await
+            .expect_err("the seventeenth live child exceeds the durable concurrency ceiling");
+        assert!(overflow
+            .to_string()
+            .contains("concurrent-operation limit is exhausted"));
+        assert_eq!(tasks.owned_task_count(), 16);
+
+        tasks.hold_wait_timeouts();
+        for _ in 0..4 {
+            tasks.poll_all_owned_tasks_once();
+        }
+        assert_eq!(
+            provider_starts.load(Ordering::SeqCst),
+            16,
+            "all sixteen child tasks reach the same provider-driven child engine"
+        );
+        assert_eq!(
+            reduce_agent_graph(&runtime.snapshot().expect("sixteen-child snapshot reads"))
+                .expect("sixteen-child graph reduces")
+                .agents
+                .len(),
+            16,
+            "the rejected intent creates neither a duplicate graph node nor a task"
+        );
     });
 }
 
@@ -3918,7 +4156,7 @@ fn root_abort_remains_sticky_while_ambiguous_apply_requires_reconciliation() {
         assert!(matches!(
             resumed,
             Err(HarnessError::RecoveryRequired {
-                plan: tea_session::RecoveryPlan::SynthesizeInterruptedToolResult { .. },
+                plan: tea_session::RecoveryPlan::ReconcileToolEffect { .. },
             })
         ));
         let reduction = reduce_lane(runtime.snapshot().expect("snapshot reads"), LaneId::main())
@@ -4314,8 +4552,12 @@ fn scripted_lanes_drive_concurrently_with_independent_ledgers_and_one_writer() {
         );
         assert_eq!(
             snapshot.last_sequence().0,
-            snapshot.mutations().count() as u64,
-            "one shared writer assigns one consecutive global sequence"
+            snapshot
+                .mutations()
+                .map(|mutation| mutation.sequence())
+                .collect::<std::collections::BTreeSet<_>>()
+                .len() as u64,
+            "one shared writer assigns one consecutive global sequence per atomic commit"
         );
     });
 }

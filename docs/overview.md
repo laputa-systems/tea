@@ -28,7 +28,7 @@ through the durable harness for every prompt.
 
 - [Harness self-extension](harness-self-extension.md) describes immutable
   candidate staging and safe activation.
-- [Luau ABI v1](luau-abi-v1.md) defines the one accepted plugin contract.
+- [Luau ABI v3](luau-abi-v3.md) defines the one accepted extension contract.
 - [Model-harness profiles](model-harness-profiles.md) defines serving identity.
 - [Harness evolution](harness-evolution.md) defines durable experiments,
   promotion, and rollback.

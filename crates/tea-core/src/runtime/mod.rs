@@ -26,7 +26,10 @@ pub use context::{
 };
 pub use events::{
     ArtifactEvent, DiagnosticCode, HarnessEvent, HarnessSnapshotView, LaneSnapshotView,
-    SessionEvent, TeaEvent, TeaEventSubscription, ValidationStage,
+    ObservationRun, PreviewEvent, PreviewIdentity, PreviewTarget, SessionEvent, TeaEvent,
+    TeaEventRecvError, TeaEventSubscription, TeaEventTryRecvError, TeaObservationSnapshot,
+    ValidationStage, LIVE_PREVIEW_LIMIT, MAX_PREVIEW_ACTIVITY_BYTES, MAX_PREVIEW_TEXT_BYTES,
+    MAX_PREVIEW_TOOL_NAME_BYTES, SUBSCRIBER_EVENT_BUFFER,
 };
 pub use hosted::{HostedEpoch, HostedEpochInput};
 pub use services::{RuntimePolicyIdentities, RuntimeServices};
@@ -43,6 +46,9 @@ pub use subagents::{
     root_subagent_tool_presentations, root_subagent_tool_surface_digest,
 };
 pub use supervisor::{
-    DurableOperation, HarnessIdentity, SessionSupervisor, SessionSupervisorInput,
-    SessionSupervisorReopenInput,
+    InterruptedEffect, LaneRecoveryReport, RecoveryReport, inspect_recovery,
+    AcceptedInput, DurableOperation, ExtensionCommandAdmission, HarnessIdentity, IdleAuthorization,
+    IdleDriveOutcome, InputCompletion, InputCompletionFuture, InputCompletionHandle, InputOutcome,
+    InputDisposition, QueuedInput, SettledTurnFork, SessionSupervisor, SessionSupervisorInput, SessionSupervisorReopenInput,
+    WithdrawnInputs,
 };

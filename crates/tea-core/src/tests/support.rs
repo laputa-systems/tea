@@ -1,6 +1,5 @@
 use crate::agent::Agent;
-use crate::error::CoreError;
-use crate::event::{AgentEvent, AgentEventKind, EventObserver, ObserverFuture};
+use crate::event::{AgentEvent, AgentEventKind, EventObserver};
 use crate::hooks::{
     AfterToolCall, AgentLoopTurnUpdate, BeforeToolCall, ContextEnvelope, HookFuture, HookSet,
     Replacement,
@@ -354,22 +353,12 @@ impl HookSet for ReplacementContextHooks {
 }
 
 impl EventObserver for RecordingObserver {
-    fn observe<'a>(
-        &'a self,
-        event: &'a AgentEvent,
-        _cancellation: CancellationToken,
-    ) -> ObserverFuture<'a> {
+    fn observe(&self, event: &AgentEvent) {
         self.events
             .lock()
             .expect("test observer mutex")
             .push(event.clone());
-        Box::pin(std::future::ready(Ok(())))
     }
-}
-
-#[derive(Debug)]
-pub(super) struct AbortOnAgentStartObserver {
-    pub(super) agent: Arc<Mutex<Option<Agent>>>,
 }
 
 #[derive(Debug)]
@@ -381,32 +370,18 @@ pub(super) struct SubscribeOnAgentStartObserver {
 }
 
 #[derive(Debug)]
-pub(super) struct FailingObserver;
+pub(super) struct PanicOnAgentStartObserver;
 
-impl EventObserver for FailingObserver {
-    fn observe<'a>(
-        &'a self,
-        event: &'a AgentEvent,
-        _cancellation: CancellationToken,
-    ) -> ObserverFuture<'a> {
-        let result = if matches!(event.kind, AgentEventKind::AgentStart) {
-            Err(CoreError::Hook(crate::error::HookError::new(
-                "observer",
-                "fixture observer failure",
-            )))
-        } else {
-            Ok(())
-        };
-        Box::pin(std::future::ready(result))
+impl EventObserver for PanicOnAgentStartObserver {
+    fn observe(&self, event: &AgentEvent) {
+        if matches!(event.kind, AgentEventKind::AgentStart) {
+            panic!("fixture observer panic");
+        }
     }
 }
 
 impl EventObserver for SubscribeOnAgentStartObserver {
-    fn observe<'a>(
-        &'a self,
-        event: &'a AgentEvent,
-        _cancellation: CancellationToken,
-    ) -> ObserverFuture<'a> {
+    fn observe(&self, event: &AgentEvent) {
         if matches!(event.kind, AgentEventKind::AgentStart)
             && !self.subscribed.swap(true, Ordering::SeqCst)
         {
@@ -424,22 +399,6 @@ impl EventObserver for SubscribeOnAgentStartObserver {
                 .expect("test subscription mutex")
                 .push(subscription);
         }
-        Box::pin(std::future::ready(Ok(())))
-    }
-}
-
-impl EventObserver for AbortOnAgentStartObserver {
-    fn observe<'a>(
-        &'a self,
-        event: &'a AgentEvent,
-        _cancellation: CancellationToken,
-    ) -> ObserverFuture<'a> {
-        if matches!(event.kind, AgentEventKind::AgentStart)
-            && let Some(agent) = self.agent.lock().expect("test agent mutex").clone()
-        {
-            agent.abort();
-        }
-        Box::pin(std::future::ready(Ok(())))
     }
 }
 

@@ -1,8 +1,9 @@
 //! Presentation projection from [`crate::app::AppState`] to terminal rows.
 //!
-//! The renderer owns presentation semantics above the core event boundary.
-//! Core events remain lossless; this layer decides how a user, assistant,
-//! tool, notice, or Markdown table occupies terminal rows.
+//! The renderer owns presentation semantics above the observation boundary.
+//! Durable snapshots restore semantic state after a bounded event stream lags;
+//! this layer decides how a user, assistant, tool, notice, or Markdown table
+//! occupies terminal rows.
 
 use crate::app::{AppState, NoticeSeverity, ToolProjection, ToolState, TranscriptEntry, UiSurface};
 #[cfg(test)]
@@ -1428,8 +1429,8 @@ mod tests {
             run_id: tea_core::state::RunId(1),
             sequence: tea_core::event::EventSequence(2),
             kind: tea_core::event::AgentEventKind::MessageUpdate {
-                message: assistant.clone(),
-                text_delta: Some(assistant_text.into()),
+                message_id: tea_core::state::MessageId(2),
+                text_delta: assistant_text.into(),
             },
         });
         state.apply_event(&tea_core::event::AgentEvent {
@@ -1543,8 +1544,18 @@ mod tests {
     #[test]
     fn activity_shows_the_full_next_message_slot() {
         let mut state = AppState::new();
-        state.queue_message("first instruction".into());
-        state.queue_message("second instruction".into());
+        state.set_queued_inputs(vec![
+            (
+                tea_session::EntryId::new("render-queued-one")
+                    .expect("fixture entry ID is valid"),
+                "first instruction".into(),
+            ),
+            (
+                tea_session::EntryId::new("render-queued-two")
+                    .expect("fixture entry ID is valid"),
+                "second instruction".into(),
+            ),
+        ]);
 
         assert_eq!(
             activity_lines(&state, 80)

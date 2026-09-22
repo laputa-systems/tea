@@ -1,6 +1,5 @@
 use crate::terminal::{KeyCode, KeyEvent, KeyModifiers};
 use std::num::NonZeroU64;
-use std::sync::Arc;
 use tea_core::agent::AgentConfiguration;
 use tea_core::compaction::{AutomaticCompactionPolicy, ContextBudgetSource, OverflowRecovery};
 use tea_core::state::{ModelDescriptor, Usage};
@@ -41,6 +40,12 @@ impl App {
             self.state.notice("session changes require an idle agent");
             return Ok(());
         }
+        self.refresh_runtime_input_projection()?;
+        if !self.state.queued_input_ids().is_empty() {
+            self.state
+                .notice("withdraw queued inputs before changing sessions");
+            return Ok(());
+        }
         let (Some(home), Some(workspace)) = (self.tea_home.as_ref(), self.workspace.as_ref())
         else {
             return Err(AppError::Setup("Tea home is not initialized".into()));
@@ -77,6 +82,12 @@ impl App {
             self.state.notice("session changes require an idle agent");
             return Ok(());
         }
+        self.refresh_runtime_input_projection()?;
+        if !self.state.queued_input_ids().is_empty() {
+            self.state
+                .notice("withdraw queued inputs before changing sessions");
+            return Ok(());
+        }
         let (Some(home), Some(workspace)) = (self.tea_home.as_ref(), self.workspace.as_ref())
         else {
             return Err(AppError::Setup("Tea home is not initialized".into()));
@@ -107,12 +118,18 @@ impl App {
             self.state.notice("new session requires an idle agent");
             return Ok(());
         }
+        self.refresh_runtime_input_projection()?;
+        if !self.state.queued_input_ids().is_empty() {
+            self.state
+                .notice("withdraw queued inputs before starting a new session");
+            return Ok(());
+        }
         self.durable_subscription = None;
         self.durable_harness = None;
         self.durable_task = None;
         self.state.clear_transcript();
         self.state.clear_history();
-        self.state.take_queued_message();
+        self.state.clear_queued_inputs();
         self.state.composer_mut().clear();
         self.state.context_estimate = None;
         self.state.set_session_id(None);
@@ -321,21 +338,28 @@ impl App {
             self.state.notice("model changes require an idle agent");
             return Ok(());
         }
+        self.refresh_runtime_input_projection()?;
+        if !self.state.queued_input_ids().is_empty() {
+            return Err(AppError::Setup(
+                "withdraw queued inputs before changing the model".into(),
+            ));
+        }
         if requested.provider != "local" && self.options.local_context_window().is_some() {
             return Err(AppError::Setup(
                 "--local-context-window requires --provider local".into(),
             ));
         }
         let configuration = self.configuration_for_provider(&requested.provider)?;
-        let (configured, compactor, context_window) = {
+        let (provider, compactor, context_window) = {
             let factory = self.provider_factory()?;
-            let configured = factory.configured(&requested)?;
-            let compactor = factory.compactor(&configured)?;
-            let context_window = factory.context_window(&configured.descriptor);
-            (configured, compactor, context_window)
+            factory.validate_descriptor(&requested)?;
+            let provider = factory.lazy_provider(&requested)?;
+            let compactor = factory.lazy_compactor(&requested)?;
+            let context_window = factory.context_window(&requested);
+            (provider, compactor, context_window)
         };
-        let descriptor = configured.descriptor.clone();
-        self.configured_provider = Some(Arc::clone(&configured.provider));
+        let descriptor = requested;
+        self.configured_provider = Some(provider);
         self.configuration = Some(configuration);
         self.compactor = Some(compactor);
         let policy = context_window

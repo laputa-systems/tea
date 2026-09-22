@@ -1,8 +1,15 @@
 //! Agent and run lifecycle state and snapshots.
 
 use super::*;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, VecDeque};
 use std::fmt;
+
+/// Maximum UTF-8 byte length retained in [`AgentSnapshot::partial_response`].
+///
+/// The value is a live-inspection preview, not canonical transcript content.
+/// The run reducer retains the complete provider response locally and commits
+/// it once in the terminal assistant message.
+pub const MAX_PARTIAL_RESPONSE_BYTES: usize = 8 * 1024;
 
 /// Why model generation stopped.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -75,7 +82,7 @@ pub struct AgentState {
     pub host_messages: Vec<SerializedJson>,
     /// Current ownership phase.
     pub phase: AgentPhase,
-    /// Partial assistant content while a model stream is active.
+    /// Bounded suffix of partial assistant content while a model stream is active.
     pub partial_response: Option<String>,
     /// Whether a provider stream is currently open.
     pub is_streaming: bool,
@@ -151,6 +158,16 @@ impl AgentState {
         }
     }
 
+    /// Retain a bounded live suffix without replacing the canonical placeholder.
+    ///
+    /// The complete response stays in the run reducer until it is committed by
+    /// the terminal assistant message. This keeps per-token snapshots and run
+    /// event history proportional to the delta rather than the response so far.
+    pub(crate) fn append_partial_response_delta(&mut self, delta: &str) {
+        let partial = self.partial_response.get_or_insert_with(String::new);
+        append_bounded_suffix(partial, delta, MAX_PARTIAL_RESPONSE_BYTES);
+    }
+
     /// Remove a transient suffix and advance the source generation when it changed.
     pub(crate) fn truncate_messages(&mut self, length: usize) {
         if length < self.messages.len() {
@@ -201,7 +218,7 @@ pub struct AgentSnapshot {
     pub host_messages: Vec<SerializedJson>,
     /// Current ownership phase.
     pub phase: AgentPhase,
-    /// Partial assistant content, if streaming.
+    /// Bounded suffix of partial assistant content, if streaming.
     pub partial_response: Option<String>,
     /// Whether a provider stream is open.
     pub is_streaming: bool,
@@ -213,6 +230,33 @@ pub struct AgentSnapshot {
     pub accounting: ModelAccountingSnapshot,
     /// Monotonic canonical-history generation.
     pub history_revision: u64,
+}
+
+fn append_bounded_suffix(value: &mut String, delta: &str, limit: usize) {
+    debug_assert!(limit > 0);
+    if delta.len() >= limit {
+        let start = utf8_boundary_at_or_after(delta, delta.len().saturating_sub(limit));
+        value.clear();
+        value.push_str(&delta[start..]);
+        return;
+    }
+
+    let excess = value
+        .len()
+        .saturating_add(delta.len())
+        .saturating_sub(limit);
+    if excess > 0 {
+        let start = utf8_boundary_at_or_after(value, excess);
+        value.drain(..start);
+    }
+    value.push_str(delta);
+}
+
+fn utf8_boundary_at_or_after(value: &str, mut offset: usize) -> usize {
+    while offset < value.len() && !value.is_char_boundary(offset) {
+        offset = offset.saturating_add(1);
+    }
+    offset
 }
 
 /// Mutable state retained by one run handle.
@@ -230,8 +274,10 @@ pub struct RunState {
     pub error: Option<String>,
     /// Number of events emitted for this run.
     pub event_count: u64,
-    /// Lifecycle events emitted in source order.
-    pub events: Vec<crate::event::AgentEvent>,
+    /// Retained suffix of lifecycle events emitted in source order.
+    pub events: VecDeque<crate::event::AgentEvent>,
+    /// Number of earliest lifecycle events omitted from the diagnostic suffix.
+    pub omitted_event_count: u64,
 }
 
 impl RunState {
@@ -244,7 +290,8 @@ impl RunState {
             stop_reason: None,
             error: None,
             event_count: 0,
-            events: Vec::new(),
+            events: VecDeque::new(),
+            omitted_event_count: 0,
         }
     }
 

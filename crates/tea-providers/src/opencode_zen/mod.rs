@@ -26,7 +26,8 @@ use tea_http::{
     TransportRequest as Request, TransportStream as HttpStream, TransportStreamEvent as StreamEvent,
 };
 
-pub(crate) const RESPONSES_URL: &str = "https://opencode.ai/zen/v1/responses";
+/// The sole production OpenCode Zen Responses API origin used by this adapter.
+pub const RESPONSES_URL: &str = "https://opencode.ai/zen/v1/responses";
 
 /// The private source of the most recent OpenCode Zen failure.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -322,8 +323,19 @@ impl OpencodeZenEventStream {
             };
             match response.poll_next(context) {
                 Poll::Pending => return Poll::Pending,
-                Poll::Ready(StreamEvent::Response { status_code, .. }) => {
+                Poll::Ready(StreamEvent::Response {
+                    status_code,
+                    headers,
+                }) => {
                     self.status_code = Some(status_code);
+                    if (300..400).contains(&status_code)
+                        && cross_origin_redirect(
+                            self.provider.config.responses_url(),
+                            redirect_location(&headers),
+                        )
+                    {
+                        self.response_failure("OpenCode Zen cross-origin redirect refused".into());
+                    }
                 }
                 Poll::Ready(StreamEvent::Chunk(bytes)) => {
                     if self
@@ -440,6 +452,38 @@ fn stable_fingerprint(bytes: &[u8]) -> u64 {
         hash = hash.wrapping_mul(0x100000001b3);
     }
     hash
+}
+
+fn redirect_location(headers: &[(String, String)]) -> Option<&str> {
+    headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("location"))
+        .map(|(_, value)| value.as_str())
+}
+
+/// The generic Tea HTTP transport is direct-origin and does not follow redirects. Keep this
+/// adapter-level check as a second, visible boundary so a future transport change cannot turn a
+/// Zen redirect into an alternate-provider request.
+fn cross_origin_redirect(request_url: &str, location: Option<&str>) -> bool {
+    let Some(location) = location else {
+        return false;
+    };
+    let Some(location_origin) = origin(location) else {
+        // Relative locations cannot cross an origin. They are still not followed by the transport.
+        return false;
+    };
+    origin(request_url)
+        .is_none_or(|request_origin| !request_origin.eq_ignore_ascii_case(location_origin))
+}
+
+fn origin(url: &str) -> Option<&str> {
+    let scheme_end = url.find("://")?;
+    let authority_start = scheme_end + 3;
+    let authority_end = url[authority_start..]
+        .find(['/', '?', '#'])
+        .map(|offset| authority_start + offset)
+        .unwrap_or(url.len());
+    (authority_start < authority_end).then_some(&url[..authority_end])
 }
 
 impl OpencodeZenProvider {
@@ -637,6 +681,23 @@ mod tests {
         .unwrap();
         let payload = JsonValue::parse(std::str::from_utf8(&payload).unwrap()).unwrap();
         assert!(payload.get("max_output_tokens").is_none());
+    }
+
+    #[test]
+    fn cross_origin_redirects_are_refused_without_transport_follow_up() {
+        assert!(cross_origin_redirect(
+            RESPONSES_URL,
+            Some("https://alternate.example/responses")
+        ));
+        assert!(cross_origin_redirect(
+            RESPONSES_URL,
+            Some("http://opencode.ai/zen/v1/responses")
+        ));
+        assert!(!cross_origin_redirect(
+            RESPONSES_URL,
+            Some("https://opencode.ai/another-path")
+        ));
+        assert!(!cross_origin_redirect(RESPONSES_URL, Some("/zen/v1/responses")));
     }
 
     #[test]

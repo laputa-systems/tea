@@ -1,9 +1,8 @@
 # Quality evaluation suite
 
-This directory contains provider-free deterministic fixture checks and an
-opt-in ecological coding check. The core gate executes the Rust fixture
-runner; it does not require an upstream checkout, provider credentials, or a
-recorded replay artifact.
+This directory contains provider-free deterministic fixture checks. The core
+gate executes the Rust fixture runner; it does not require an upstream
+checkout, provider credentials, or a recorded replay artifact.
 
 ## Deterministic core gate
 
@@ -94,32 +93,12 @@ authentication. The evaluator must create the record outside the candidate
 workspace and must never pass the candidate's `evidence.json` directly to the
 grader.
 
-## Live coding gate
+## Retired live coding command
 
-The coding tier is an explicit provider-opt-in check for three pinned
-`pi-bench` Express tasks. It runs the Rust coding adapter and the selected
-validator from a fresh detached worktree; no upstream comparison or ambient
-repository discovery is performed.
-
-Populate the exact bare-repository cache first:
-
-```sh
-python3 -m evals.quality prepare-cache --cache-root /tmp/pi-quality-cache
-```
-
-Then provide an explicit model and env file:
-
-```sh
-python3 -m evals.quality coding --allow-provider \
-  --model poolside/laguna-xs-2.1:free \
-  --env-file .env \
-  --cache-root /tmp/pi-quality-cache \
-  --workspace-root /tmp/pi-quality-workspaces \
-  --out /tmp/pi-quality-coding \
-  --validator fast
-```
-
-The Rust adapter resolves the four checked-in Luau coding builtins under
-`crates/tea-luau/builtins/{read,bash,edit,find}/`. Worktrees are removed after
-each attempt and provider credentials are sourced only at the final adapter
-process boundary.
+The historical coding and full commands are intentionally absent. Their
+adapter target was removed, and neither an arbitrary provider identifier nor a
+free-looking model name is sufficient evidence for a live request. The
+historical prepare-cache command may fetch its explicitly requested source
+cache, but performs no inference. See
+[`docs/verification.md`](../../docs/verification.md) for the guarded
+free-only lane and its current BLOCKED limitation.

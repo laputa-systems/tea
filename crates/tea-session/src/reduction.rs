@@ -1,9 +1,10 @@
 use crate::{
     EffectiveLaneConfiguration, EntryId, EpochId, HarnessRevisionChangedEntry, LaneId, LaneRecord,
-    LaneState, LaneStatus, OperationId, PendingHarnessActivation, PendingQueues, PendingWrite,
-    ProvisionedEntry, Sequence, SessionEntry, SessionMutationRef, SessionSnapshot, StepId,
-    StepKind, StoredEntry, StoredMutation, StoredMutationRef, ToolReplayPolicy, ToolStartedRecord,
-    Usage,
+    InputReduction, InputState, InputStatus, LaneState, LaneStatus, OperationId,
+    PendingExtensionControl, PendingHarnessActivation, PendingWrite, ProvisionedEntry, Sequence,
+    SessionEntry, SessionFact, SessionMutationRef, SessionSnapshot, StepId, StepKind,
+    StoredCommit, StoredEntry, StoredMutation, StoredMutationRef, ToolReplayPolicy,
+    ToolStartedRecord, Usage,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -48,9 +49,11 @@ pub enum RecoveryPlan {
         /// Still-unmaterialized provisioned entries in original order.
         entries: Vec<ProvisionedEntry>,
     },
-    /// A `Never` effect intent has no durable result; append an explicit
-    /// ambiguity result rather than claiming the effect failed or replaying it.
-    SynthesizeInterruptedToolResult {
+    /// A committed effect intent has no durable outcome. It is indeterminate
+    /// until an explicit host reconciliation classifies it; recovery never
+    /// fabricates a failure result or replays it merely because the process
+    /// lost its reply.
+    ReconcileToolEffect {
         /// Provisioned result identity.
         result_entry_id: EntryId,
     },
@@ -69,6 +72,12 @@ pub enum RecoveryPlan {
     /// A physical request was dispatched but has no durable settlement.
     ReconcileProviderRequest {
         /// Provider request identity.
+        request_id: crate::ProviderRequestId,
+    },
+    /// A provider request intent has no retained request material, so storage
+    /// proves it was not admitted to the invocation boundary.
+    ProviderRequestNotAdmitted {
+        /// Provider request identity whose invocation never became eligible.
         request_id: crate::ProviderRequestId,
     },
     /// A validated activation request is ready only after the old epoch settled.
@@ -97,8 +106,12 @@ pub struct LaneReduction {
     pub effective_configuration: EffectiveLaneConfiguration,
     /// Exactly one next recovery action, when an operation remains open.
     pub recovery_plan: Option<RecoveryPlan>,
-    /// Queue items accepted minus cancellation facts.
-    pub pending_queues: PendingQueues,
+    /// Accepted input lifecycle and deterministic pending dispatch order.
+    pub input_reduction: InputReduction,
+    /// Extension controls waiting for their target operation's idle boundary.
+    pub pending_extension_controls: Vec<PendingExtensionControl>,
+    /// Exact version-pinned extension state effective on this lane.
+    pub extension_state: BTreeMap<String, crate::ExtensionStateValue>,
     /// Deferred entries not yet materialized into semantic history.
     pub pending_writes: Vec<PendingWrite>,
     /// At most one unresolved activation request for the lane.
@@ -112,6 +125,7 @@ struct OperationState {
     lane_id: LaneId,
     original_input: Vec<ProvisionedEntry>,
     finished: bool,
+    outcome: Option<crate::OperationOutcome>,
     epoch_ids: Vec<EpochId>,
     open_epochs: BTreeSet<EpochId>,
     entry_ids: Vec<EntryId>,
@@ -121,6 +135,16 @@ struct OperationState {
 /// providers, tools, or mutable live state.
 pub fn reduce_lane(input: SessionSnapshot, lane: LaneId) -> Result<LaneReduction, Corruption> {
     reduce_lane_ref(&input, lane)
+}
+
+/// Reduce only the exact version-pinned extension state effective on one
+/// lane. The result includes checkpoint inheritance and therefore never reads
+/// later parent-lane writes through a fork.
+pub fn extension_state_for_lane(
+    input: &SessionSnapshot,
+    lane: LaneId,
+) -> Result<BTreeMap<String, crate::ExtensionStateValue>, Corruption> {
+    Ok(reduce_lane_ref(input, lane)?.extension_state)
 }
 
 /// Borrowed form used while a store validates a candidate before commit.
@@ -141,14 +165,12 @@ pub(crate) fn reduce_lane_ref(
     )
 }
 
-/// Borrowed form of the pure reducer that includes one prospective mutation.
-///
-/// A writer calls this before its one append. The candidate payload remains
-/// borrowed at the wire boundary, so full-prefix validation never makes a
-/// second owned `SessionSnapshot` or duplicates large semantic payloads.
-pub(crate) fn reduce_lane_ref_with_append(
+/// Borrowed prospective-commit form used by stores before the one durable
+/// append. Every item in `appended` shares a commit sequence but reducer order
+/// remains the caller's semantic item order.
+pub(crate) fn reduce_lane_ref_with_commit(
     input: &SessionSnapshot,
-    appended: &StoredMutation,
+    appended: &StoredCommit,
     lane: LaneId,
 ) -> Result<LaneReduction, Corruption> {
     reduce_lane_prefix(
@@ -156,7 +178,7 @@ pub(crate) fn reduce_lane_ref_with_append(
         appended.seq,
         input
             .mutations()
-            .chain(std::iter::once(appended.borrowed())),
+            .chain(appended.items.iter().map(StoredMutation::borrowed)),
         lane,
     )
 }
@@ -175,25 +197,77 @@ fn reduce_lane_prefix<'a>(
     let mut active_operations = BTreeMap::<LaneId, OperationId>::new();
     let mut epochs = BTreeMap::<EpochId, OperationId>::new();
     let mut step_attempts = BTreeMap::<(OperationId, EpochId, StepKind), (StepId, u32)>::new();
+    let mut steps = BTreeMap::<StepId, (OperationId, EpochId, StepKind)>::new();
     let mut provisioned_entries = BTreeMap::<EntryId, ProvisionedEntry>::new();
     let mut tool_starts = Vec::new();
-    let mut provider_starts = BTreeMap::new();
-    let mut provider_settled = BTreeSet::new();
-    let mut queues = PendingQueues::default();
+    let mut provider_starts =
+        BTreeMap::<crate::ProviderRequestId, crate::ProviderRequestStartedRecord>::new();
+    let mut provider_settled =
+        BTreeMap::<crate::ProviderRequestId, crate::ProviderSettlementClassification>::new();
+    let mut provider_material = BTreeSet::new();
+    let mut compaction_provider_requests = BTreeSet::new();
+    let mut input_states = BTreeMap::<EntryId, InputState>::new();
+    let mut input_order = Vec::<EntryId>::new();
+    let mut extension_controls = BTreeMap::<String, PendingExtensionControl>::new();
+    let mut applied_extension_controls = BTreeSet::<String>::new();
+    let mut extension_state = BTreeMap::<LaneId, BTreeMap<String, crate::ExtensionStateValue>>::new();
+    extension_state.insert(header.initial_lane.clone(), BTreeMap::new());
+    let mut checkpoints = BTreeMap::<crate::TurnCheckpointId, crate::TurnCheckpointFact>::new();
+    let mut forked_lanes = BTreeSet::<LaneId>::new();
+    let mut fresh_lanes = BTreeSet::<LaneId>::new();
+    let mut child_spawns = BTreeMap::<crate::AgentId, (OperationId, Sequence)>::new();
+    let mut child_terminal = BTreeSet::<crate::AgentId>::new();
+    let mut checkpoint_ready_for = None::<OperationId>;
     let mut deferred_writes = Vec::new();
     let mut activation_requests = Vec::new();
     let mut usage_by_lane = BTreeMap::<LaneId, Usage>::new();
-    let mut expected_sequence = 1_u64;
+    let mut observed_sequence = Sequence(0);
+    let mut observed_item_index = 0_u64;
 
     for mutation in mutations {
+        let item_index = observed_item_index;
+        observed_item_index = observed_item_index.saturating_add(1);
         let sequence = mutation.sequence();
-        if sequence != Sequence(expected_sequence) {
+        if sequence != observed_sequence && sequence != Sequence(observed_sequence.0.saturating_add(1)) {
             return Err(Corruption::new(format!(
-                "session sequence must be consecutive: expected {}, found {}",
-                expected_sequence, sequence.0
+                "session commit sequence must be consecutive: expected {} or {}, found {}",
+                observed_sequence.0,
+                observed_sequence.0.saturating_add(1),
+                sequence.0
             )));
         }
-        expected_sequence = expected_sequence.saturating_add(1);
+        observed_sequence = sequence;
+
+        let preserves_checkpoint_readiness = match &mutation.mutation {
+            SessionMutationRef::Record(stored) => match &stored.record {
+                LaneRecord::InputSettled(record) => {
+                    checkpoint_ready_for.as_ref() == Some(&record.operation_id)
+                }
+                LaneRecord::ExtensionControlApplied(record) => {
+                    checkpoint_ready_for.as_ref().is_some_and(|operation_id| {
+                        extension_controls
+                            .get(&record.control_id)
+                            .is_some_and(|control| control.control.operation_id == *operation_id)
+                    })
+                }
+                _ => false,
+            },
+            SessionMutationRef::Fact(stored) => match &stored.fact {
+                SessionFact::TurnCheckpoint(_) => true,
+                SessionFact::ExtensionStateValueSet(fact) => {
+                    checkpoint_ready_for.as_ref().is_some_and(|operation_id| {
+                        operations
+                            .get(operation_id)
+                            .is_some_and(|operation| operation.lane_id == fact.lane_id)
+                    })
+                }
+                _ => false,
+            },
+            SessionMutationRef::Entry(_) | SessionMutationRef::Lane(_) => false,
+        };
+        if !preserves_checkpoint_readiness {
+            checkpoint_ready_for = None;
+        }
 
         match mutation.mutation {
             SessionMutationRef::Lane(stored) => match &stored.mutation {
@@ -212,9 +286,40 @@ fn reduce_lane_prefix<'a>(
                         )));
                     }
                     lane_leaves.insert(lane_id.clone(), base_leaf_id.clone());
+                    extension_state.insert(lane_id.clone(), BTreeMap::new());
+                    fresh_lanes.insert(lane_id.clone());
                 }
             },
             SessionMutationRef::Entry(stored) => {
+                fresh_lanes.remove(&stored.lane_id);
+                if let SessionEntry::Compaction(compaction) = &stored.body {
+                    validate_compaction_replacement(compaction)?;
+                    if let Some(request_id) = &compaction.provider_request_id {
+                        let is_completed_compaction_request = provider_starts
+                            .get(request_id)
+                            .is_some_and(|request| {
+                                steps.get(&request.step_id).is_some_and(
+                                    |(operation_id, epoch_id, kind)| {
+                                        operation_id == &request.operation_id
+                                            && epoch_id == &request.epoch_id
+                                            && *kind == StepKind::Compaction
+                                    },
+                                )
+                            });
+                        if !is_completed_compaction_request
+                            || !provider_material.contains(request_id)
+                            || !matches!(
+                                provider_settled.get(request_id),
+                                Some(crate::ProviderSettlementClassification::Completed)
+                            )
+                            || !compaction_provider_requests.insert(request_id.clone())
+                        {
+                            return Err(Corruption::new(format!(
+                                "compaction entry refers to provider request {request_id} without one completed compaction request, material, and unique replacement"
+                            )));
+                        }
+                    }
+                }
                 let Some(current_leaf) = lane_leaves.get(&stored.lane_id).cloned() else {
                     return Err(Corruption::new(format!(
                         "entry {} targets unknown lane {}",
@@ -261,6 +366,7 @@ fn reduce_lane_prefix<'a>(
             }
             SessionMutationRef::Record(stored) => match &stored.record {
                 LaneRecord::OperationStarted(record) => {
+                    fresh_lanes.remove(&record.lane_id);
                     if operations.contains_key(&record.id) {
                         return Err(Corruption::new(format!(
                             "duplicate operation ID {}",
@@ -314,12 +420,50 @@ fn reduce_lane_prefix<'a>(
                             }
                         }
                     }
+                    if !record.input_ids.is_empty() {
+                        if record.input_ids.len() != record.original_input.len() {
+                            return Err(Corruption::new(format!(
+                                "operation {} input membership and original input lengths differ",
+                                record.id
+                            )));
+                        }
+                        let mut seen_input_ids = BTreeSet::new();
+                        for (input_id, provisioned) in
+                            record.input_ids.iter().zip(&record.original_input)
+                        {
+                            if input_id != &provisioned.id || !seen_input_ids.insert(input_id.clone()) {
+                                return Err(Corruption::new(format!(
+                                    "operation {} has duplicate or mismatched input membership",
+                                    record.id
+                                )));
+                            }
+                            let Some(input) = input_states.get_mut(input_id) else {
+                                return Err(Corruption::new(format!(
+                                    "operation {} dispatches unaccepted input {input_id}",
+                                    record.id
+                                )));
+                            };
+                            if input.accepted.lane_id != record.lane_id
+                                || input.accepted.entry != *provisioned
+                                || input.status != InputStatus::Pending
+                            {
+                                return Err(Corruption::new(format!(
+                                    "operation {} dispatches unavailable input {input_id}",
+                                    record.id
+                                )));
+                            }
+                            input.status = InputStatus::Dispatched {
+                                operation_id: record.id.clone(),
+                            };
+                        }
+                    }
                     operations.insert(
                         record.id.clone(),
                         OperationState {
                             lane_id: record.lane_id.clone(),
                             original_input: record.original_input.clone(),
                             finished: false,
+                            outcome: None,
                             epoch_ids: Vec::new(),
                             open_epochs: BTreeSet::new(),
                             entry_ids: Vec::new(),
@@ -335,6 +479,7 @@ fn reduce_lane_prefix<'a>(
                         )));
                     }
                     operation.finished = true;
+                    operation.outcome = Some(record.outcome.clone());
                     match active_operations.remove(&operation.lane_id) {
                         Some(current) if current == record.operation_id => {}
                         _ => {
@@ -344,6 +489,7 @@ fn reduce_lane_prefix<'a>(
                             )));
                         }
                     }
+                    checkpoint_ready_for = Some(record.operation_id.clone());
                 }
                 LaneRecord::AbortRequested(record) => {
                     let _ = open_operation(&operations, &record.operation_id)?;
@@ -396,6 +542,22 @@ fn reduce_lane_prefix<'a>(
                             record.id
                         )));
                     }
+                    if steps
+                        .insert(
+                            record.id.clone(),
+                            (
+                                record.operation_id.clone(),
+                                record.epoch_id.clone(),
+                                record.kind,
+                            ),
+                        )
+                        .is_some()
+                    {
+                        return Err(Corruption::new(format!(
+                            "step ID {} was attempted more than once",
+                            record.id
+                        )));
+                    }
                     let key = (
                         record.operation_id.clone(),
                         record.epoch_id.clone(),
@@ -435,6 +597,16 @@ fn reduce_lane_prefix<'a>(
                             record.request_id
                         )));
                     }
+                    if !steps.get(&record.step_id).is_some_and(
+                        |(operation_id, epoch_id, _)| {
+                            operation_id == &record.operation_id && epoch_id == &record.epoch_id
+                        },
+                    ) {
+                        return Err(Corruption::new(format!(
+                            "provider request {} does not name its owning step {}",
+                            record.request_id, record.step_id
+                        )));
+                    }
                     if provider_starts
                         .insert(record.request_id.clone(), record.clone())
                         .is_some()
@@ -454,7 +626,9 @@ fn reduce_lane_prefix<'a>(
                         )));
                     };
                     if start.operation_id != record.operation_id
-                        || !provider_settled.insert(record.request_id.clone())
+                        || provider_settled
+                            .insert(record.request_id.clone(), record.classification.clone())
+                            .is_some()
                     {
                         return Err(Corruption::new(format!(
                             "invalid duplicate or cross-operation provider settlement {}",
@@ -475,28 +649,129 @@ fn reduce_lane_prefix<'a>(
                     validate_tool_started(record, &entries, &tool_starts)?;
                     tool_starts.push((stored.seq, record.clone()));
                 }
-                LaneRecord::QueueEnqueued(record) => {
-                    let _ = open_operation(&operations, &record.operation_id)?;
-                    let items = queues.items.entry(record.operation_id.clone()).or_default();
-                    if !items.insert(record.queue_item_id.clone()) {
+                LaneRecord::InputAccepted(record) => {
+                    fresh_lanes.remove(&record.lane_id);
+                    if !lane_leaves.contains_key(&record.lane_id) {
                         return Err(Corruption::new(format!(
-                            "queue item {} was accepted twice",
-                            record.queue_item_id
+                            "accepted input {} targets unknown lane {}",
+                            record.entry.id, record.lane_id
+                        )));
+                    }
+                    if !matches!(&record.entry.body, SessionEntry::UserMessage(_)) {
+                        return Err(Corruption::new(format!(
+                            "accepted input {} is not a user message",
+                            record.entry.id
+                        )));
+                    }
+                    if entries.contains_key(&record.entry.id)
+                        || input_states.contains_key(&record.entry.id)
+                    {
+                        return Err(Corruption::new(format!(
+                            "input {} was accepted more than once or already materialized",
+                            record.entry.id
+                        )));
+                    }
+                    input_order.push(record.entry.id.clone());
+                    input_states.insert(
+                        record.entry.id.clone(),
+                        InputState {
+                            accepted: crate::AcceptedInput {
+                                lane_id: record.lane_id.clone(),
+                                entry: record.entry.clone(),
+                                accepted_sequence: stored.seq,
+                            },
+                            status: InputStatus::Pending,
+                        },
+                    );
+                }
+                LaneRecord::InputWithdrawn(record) => {
+                    let Some(input) = input_states.get_mut(&record.input_id) else {
+                        return Err(Corruption::new(format!(
+                            "input {} was withdrawn before acceptance",
+                            record.input_id
+                        )));
+                    };
+                    if input.accepted.lane_id != record.lane_id
+                        || input.status != InputStatus::Pending
+                    {
+                        return Err(Corruption::new(format!(
+                            "input {} is not pending on lane {}",
+                            record.input_id, record.lane_id
+                        )));
+                    }
+                    input.status = InputStatus::Withdrawn;
+                }
+                LaneRecord::InputSettled(record) => {
+                    let Some(operation) = operations.get(&record.operation_id) else {
+                        return Err(Corruption::new(format!(
+                            "input {} settles unknown operation {}",
+                            record.input_id, record.operation_id
+                        )));
+                    };
+                    if !operation.finished || operation.outcome.as_ref() != Some(&record.outcome) {
+                        return Err(Corruption::new(format!(
+                            "input {} settles before or contrary to operation {}",
+                            record.input_id, record.operation_id
+                        )));
+                    }
+                    let Some(input) = input_states.get_mut(&record.input_id) else {
+                        return Err(Corruption::new(format!(
+                            "input {} settled without acceptance",
+                            record.input_id
+                        )));
+                    };
+                    if input.status
+                        != (InputStatus::Dispatched {
+                            operation_id: record.operation_id.clone(),
+                        })
+                    {
+                        return Err(Corruption::new(format!(
+                            "input {} is not dispatched by operation {}",
+                            record.input_id, record.operation_id
+                        )));
+                    }
+                    input.status = InputStatus::Settled {
+                        operation_id: record.operation_id.clone(),
+                        outcome: record.outcome.clone(),
+                    };
+                }
+                LaneRecord::ExtensionControlEnqueued(record) => {
+                    let _ = open_operation(&operations, &record.operation_id)?;
+                    validate_extension_control(record)?;
+                    if extension_controls
+                        .insert(
+                            record.control_id.clone(),
+                            PendingExtensionControl {
+                                accepted_sequence: stored.seq,
+                                accepted_item_index: item_index,
+                                control: record.clone(),
+                            },
+                        )
+                        .is_some()
+                    {
+                        return Err(Corruption::new(format!(
+                            "extension control {} was accepted more than once",
+                            record.control_id
                         )));
                     }
                 }
-                LaneRecord::QueueCancelled(record) => {
-                    let _ = open_operation(&operations, &record.operation_id)?;
-                    let Some(items) = queues.items.get_mut(&record.operation_id) else {
+                LaneRecord::ExtensionControlApplied(record) => {
+                    let Some(control) = extension_controls.remove(&record.control_id) else {
                         return Err(Corruption::new(format!(
-                            "queue item {} was cancelled before acceptance",
-                            record.queue_item_id
+                            "extension control {} was applied before acceptance or twice",
+                            record.control_id
                         )));
                     };
-                    if !items.remove(&record.queue_item_id) {
+                    let Some(operation) = operations.get(&control.control.operation_id) else {
                         return Err(Corruption::new(format!(
-                            "queue item {} was cancelled more than once or is unknown",
-                            record.queue_item_id
+                            "extension control {} targets unknown operation",
+                            record.control_id
+                        )));
+                    };
+                    if !operation.finished || !applied_extension_controls.insert(record.control_id.clone()) {
+                        return Err(Corruption::new(format!(
+                            "extension control {} was applied before its operation settled",
+                            record.control_id
                         )));
                     }
                 }
@@ -519,11 +794,148 @@ fn reduce_lane_prefix<'a>(
                         .saturating_add_assign(&record.usage);
                 }
             },
-            SessionMutationRef::Fact(_) => {}
+            SessionMutationRef::Fact(stored) => match &stored.fact {
+                SessionFact::ProviderRequestMaterial(fact) => {
+                    let Some(start) = provider_starts.get(&fact.request_id) else {
+                        return Err(Corruption::new(format!(
+                            "provider request material {} has no request intent",
+                            fact.request_id
+                        )));
+                    };
+                    if start.operation_id != fact.operation_id
+                        || start.epoch_id != fact.epoch_id
+                        || provider_settled.contains_key(&fact.request_id)
+                        || !provider_material.insert(fact.request_id.clone())
+                    {
+                        return Err(Corruption::new(format!(
+                            "provider request material {} is duplicate, late, or cross-owned",
+                            fact.request_id
+                        )));
+                    }
+                }
+                SessionFact::ExtensionStateValueSet(fact) => {
+                    fresh_lanes.remove(&fact.lane_id);
+                    validate_extension_state_value(fact)?;
+                    let Some(state) = extension_state.get_mut(&fact.lane_id) else {
+                        return Err(Corruption::new(format!(
+                            "extension state targets unknown lane {}",
+                            fact.lane_id
+                        )));
+                    };
+                    state.insert(
+                        fact.extension_id.clone(),
+                        crate::ExtensionStateValue {
+                            state_version: fact.state_version.clone(),
+                            value: fact.value.clone(),
+                        },
+                    );
+                }
+                SessionFact::TurnCheckpoint(fact) => {
+                    if checkpoints.contains_key(&fact.checkpoint_id) {
+                        return Err(Corruption::new(format!(
+                            "turn checkpoint {} was recorded more than once",
+                            fact.checkpoint_id
+                        )));
+                    }
+                    if checkpoint_ready_for.as_ref() != Some(&fact.operation_id) {
+                        return Err(Corruption::new(format!(
+                            "turn checkpoint {} does not immediately follow settlement of operation {}",
+                            fact.checkpoint_id, fact.operation_id
+                        )));
+                    }
+                    let Some(operation) = operations.get(&fact.operation_id) else {
+                        return Err(Corruption::new(format!(
+                            "turn checkpoint {} refers to unknown operation {}",
+                            fact.checkpoint_id, fact.operation_id
+                        )));
+                    };
+                    if !operation.finished || operation.lane_id != fact.lane_id {
+                        return Err(Corruption::new(format!(
+                            "turn checkpoint {} does not name a settled operation on its lane",
+                            fact.checkpoint_id
+                        )));
+                    }
+                    if lane_leaves.get(&fact.lane_id).cloned().flatten() != fact.leaf_id {
+                        return Err(Corruption::new(format!(
+                            "turn checkpoint {} does not capture the current lane leaf",
+                            fact.checkpoint_id
+                        )));
+                    }
+                    if tool_starts.iter().any(|(_, tool)| {
+                        tool.operation_id == fact.operation_id
+                            && !entries.contains_key(&tool.result_entry_id)
+                    }) || provider_starts.values().any(|request| {
+                        request.operation_id == fact.operation_id
+                            && !provider_settled.contains_key(&request.request_id)
+                    }) || extension_controls.values().any(|control| {
+                        control.control.operation_id == fact.operation_id
+                    }) || child_spawns.iter().any(|(agent_id, (operation_id, _))| {
+                        operation_id == &fact.operation_id && !child_terminal.contains(agent_id)
+                    }) {
+                        return Err(Corruption::new(format!(
+                            "turn checkpoint {} has unresolved work owned by operation {}",
+                            fact.checkpoint_id, fact.operation_id
+                        )));
+                    }
+                    if extension_state.get(&fact.lane_id) != Some(&fact.extension_state) {
+                        return Err(Corruption::new(format!(
+                            "turn checkpoint {} does not capture the exact extension state",
+                            fact.checkpoint_id
+                        )));
+                    }
+                    checkpoints.insert(fact.checkpoint_id.clone(), fact.clone());
+                    checkpoint_ready_for = None;
+                }
+                SessionFact::ForkedLane(fact) => {
+                    let Some(checkpoint) = checkpoints.get(&fact.checkpoint_id) else {
+                        return Err(Corruption::new(format!(
+                            "forked lane {} refers to unknown checkpoint {}",
+                            fact.lane_id, fact.checkpoint_id
+                        )));
+                    };
+                    if !fresh_lanes.remove(&fact.lane_id)
+                        || !forked_lanes.insert(fact.lane_id.clone())
+                        || lane_leaves.get(&fact.lane_id).cloned().flatten() != fact.base_leaf_id
+                        || fact.base_leaf_id != checkpoint.leaf_id
+                        || operations.values().any(|operation| operation.lane_id == fact.lane_id)
+                    {
+                        return Err(Corruption::new(format!(
+                            "forked lane {} is not a fresh exact checkpoint branch",
+                            fact.lane_id
+                        )));
+                    }
+                    extension_state.insert(fact.lane_id.clone(), checkpoint.extension_state.clone());
+                }
+                SessionFact::AgentSpawned(fact) => {
+                    fresh_lanes.remove(&fact.lane_id);
+                    if child_spawns
+                        .insert(
+                            fact.agent_id.clone(),
+                            (fact.parent_operation_id.clone(), stored.seq),
+                        )
+                        .is_some()
+                    {
+                        return Err(Corruption::new(format!(
+                            "agent {} was spawned more than once",
+                            fact.agent_id
+                        )));
+                    }
+                }
+                SessionFact::AgentTaskFinished(fact) => {
+                    child_terminal.insert(fact.agent_id.clone());
+                }
+                SessionFact::SubagentPolicy(_)
+                | SessionFact::WorkspaceDelta(_)
+                | SessionFact::WorkspaceDeltaApplied(_)
+                | SessionFact::HarnessCatalog(_)
+                | SessionFact::ToolSchemaDeviation(_)
+                | SessionFact::TraceArtifact(_)
+                | SessionFact::Custom { .. } => {}
+            },
         }
     }
 
-    if last_sequence.0.saturating_add(1) != expected_sequence {
+    if last_sequence != observed_sequence {
         return Err(Corruption::new(
             "snapshot last sequence disagrees with mutation timeline",
         ));
@@ -540,6 +952,25 @@ fn reduce_lane_prefix<'a>(
         .into_iter()
         .filter(|pending| !entries.contains_key(&pending.entry.id))
         .collect::<Vec<_>>();
+    let input_states = input_states
+        .into_iter()
+        .filter(|(_, input)| input.accepted.lane_id == lane)
+        .collect::<BTreeMap<_, _>>();
+    let pending_inputs = input_order
+        .into_iter()
+        .filter_map(|input_id| input_states.get(&input_id).cloned())
+        .filter_map(|input| (input.status == InputStatus::Pending).then_some(input.accepted))
+        .collect();
+    let mut pending_extension_controls = extension_controls
+        .into_values()
+        .filter(|control| {
+            operations
+                .get(&control.control.operation_id)
+                .is_some_and(|operation| operation.lane_id == lane)
+        })
+        .collect::<Vec<_>>();
+    pending_extension_controls
+        .sort_by_key(|control| (control.accepted_sequence, control.accepted_item_index));
     let pending_harness_activation =
         unresolved_activation(&activation_requests, &entries, active_operation.as_ref())?;
     let recovery_plan = derive_recovery_plan(
@@ -548,6 +979,7 @@ fn reduce_lane_prefix<'a>(
         &tool_starts,
         &provider_starts,
         &provider_settled,
+        &provider_material,
         &activation_requests,
         active_operation.as_ref(),
     )?;
@@ -567,7 +999,12 @@ fn reduce_lane_prefix<'a>(
         lane_state,
         effective_configuration,
         recovery_plan,
-        pending_queues: queues,
+        input_reduction: InputReduction {
+            pending_inputs,
+            input_states,
+        },
+        pending_extension_controls,
+        extension_state: extension_state.remove(&lane).unwrap_or_default(),
         pending_writes,
         pending_harness_activation,
         usage_totals: usage_by_lane.remove(&lane).unwrap_or_default(),
@@ -726,6 +1163,75 @@ fn any_assistant_call_matches(
     })
 }
 
+fn validate_extension_state_value(
+    fact: &crate::ExtensionStateValueSetFact,
+) -> Result<(), Corruption> {
+    validate_bounded_extension_identifier("extension state namespace", &fact.extension_id)?;
+    validate_bounded_extension_identifier("extension state version", &fact.state_version)?;
+    let bytes = fact
+        .value
+        .to_json_string()
+        .map_err(|error| Corruption::new(format!("extension state cannot encode canonically: {error}")))?
+        .len();
+    if bytes > 64 * 1024 {
+        return Err(Corruption::new(format!(
+            "extension state value exceeds the 65536-byte limit ({bytes})"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_compaction_replacement(entry: &crate::CompactionEntry) -> Result<(), Corruption> {
+    let digest = match &entry.replacement {
+        crate::PayloadRef::Inline(value) => {
+            if matches!(value, crate::JsonValue::Null) {
+                return Err(Corruption::new(
+                    "compaction replacement must not be null",
+                ));
+            }
+            let canonical = value.to_json_string().map_err(|error| {
+                Corruption::new(format!("compaction replacement cannot encode canonically: {error}"))
+            })?;
+            crate::Digest::from_bytes(canonical)
+        }
+        crate::PayloadRef::Artifact { artifact_id, .. } => artifact_id.digest(),
+    };
+    if digest != entry.replacement_digest {
+        return Err(Corruption::new(
+            "compaction replacement digest does not match its exact payload",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_extension_control(
+    record: &crate::ExtensionControlEnqueuedRecord,
+) -> Result<(), Corruption> {
+    validate_bounded_extension_identifier("extension control ID", &record.control_id)?;
+    validate_bounded_extension_identifier("extension control extension ID", &record.extension_id)?;
+    validate_bounded_extension_identifier("extension control command name", &record.command_name)?;
+    let bytes = record
+        .arguments
+        .to_json_string()
+        .map_err(|error| Corruption::new(format!("extension control cannot encode canonically: {error}")))?
+        .len();
+    if bytes > 64 * 1024 {
+        return Err(Corruption::new(format!(
+            "extension control arguments exceed the 65536-byte limit ({bytes})"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_bounded_extension_identifier(label: &str, value: &str) -> Result<(), Corruption> {
+    if value.is_empty() || value.len() > 200 || value.chars().any(char::is_control) {
+        return Err(Corruption::new(format!(
+            "{label} must be nonempty, non-control text within 200 bytes"
+        )));
+    }
+    Ok(())
+}
+
 fn derive_configuration(
     entries: &BTreeMap<EntryId, StoredEntry>,
     leaf: Option<EntryId>,
@@ -819,7 +1325,8 @@ fn derive_recovery_plan(
     operations: &BTreeMap<OperationId, OperationState>,
     tool_starts: &[(Sequence, ToolStartedRecord)],
     provider_starts: &BTreeMap<crate::ProviderRequestId, crate::ProviderRequestStartedRecord>,
-    provider_settled: &BTreeSet<crate::ProviderRequestId>,
+    provider_settled: &BTreeMap<crate::ProviderRequestId, crate::ProviderSettlementClassification>,
+    provider_material: &BTreeSet<crate::ProviderRequestId>,
     activation_requests: &[crate::HarnessActivationRequestedRecord],
     active_operation: Option<&OperationId>,
 ) -> Result<Option<RecoveryPlan>, Corruption> {
@@ -848,7 +1355,7 @@ fn derive_recovery_plan(
     {
         if !entries.contains_key(&tool.result_entry_id) {
             return Ok(Some(match tool.replay_policy_at_start {
-                ToolReplayPolicy::Never => RecoveryPlan::SynthesizeInterruptedToolResult {
+                ToolReplayPolicy::Never => RecoveryPlan::ReconcileToolEffect {
                     result_entry_id: tool.result_entry_id.clone(),
                 },
                 ToolReplayPolicy::Safe => {
@@ -859,12 +1366,17 @@ fn derive_recovery_plan(
     }
 
     for request in provider_starts.values() {
-        if &request.operation_id == operation_id && !provider_settled.contains(&request.request_id)
-        {
-            return Ok(Some(RecoveryPlan::ReconcileProviderRequest {
+        if &request.operation_id != operation_id || provider_settled.contains_key(&request.request_id) {
+            continue;
+        }
+        if !provider_material.contains(&request.request_id) {
+            return Ok(Some(RecoveryPlan::ProviderRequestNotAdmitted {
                 request_id: request.request_id.clone(),
             }));
         }
+        return Ok(Some(RecoveryPlan::ReconcileProviderRequest {
+            request_id: request.request_id.clone(),
+        }));
     }
 
     for request in activation_requests

@@ -1,9 +1,10 @@
-use crate::reduction::{reduce_lane_ref, reduce_lane_ref_with_append};
+use crate::reduction::{reduce_lane_ref, reduce_lane_ref_with_commit};
 use crate::{
     Corruption, EntryHeader, EntryId, EpochId, LaneId, LaneMutation, LaneRecord, OperationId,
     OperationKind, ProviderRequestId, ProvisionedEntry, SESSION_FORMAT_VERSION, Sequence,
-    SessionEntry, SessionFact, SessionHeader, SessionMutation, SessionSnapshot, StepId, StepKind,
-    StoredEntry, StoredFact, StoredLaneMutation, StoredMutation, StoredRecord,
+    SessionCommit, SessionCommitItem, SessionEntry, SessionFact, SessionHeader, SessionMutation,
+    SessionSnapshot, StepId, StepKind, StoredCommit, StoredEntry, StoredFact,
+    StoredLaneMutation, StoredMutation, StoredRecord,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -146,24 +147,93 @@ pub trait SessionReader {
 /// The narrow mutation interface that allocates sequences and timestamps
 /// inside each successful commit.
 pub trait SessionWriter: SessionReader {
+    /// Validate and commit one ordered semantic group as a single durable
+    /// prefix transition. On success, all returned items share one sequence;
+    /// on failure, none become visible through this writer's snapshot.
+    fn commit(&mut self, commit: SessionCommit) -> Result<StoredCommit, SessionError>;
+
     /// Append an entry to the current leaf of the named lane.
     fn append_entry(
         &mut self,
         lane_id: &LaneId,
         entry: ProvisionedEntry,
-    ) -> Result<StoredEntry, SessionError>;
+    ) -> Result<StoredEntry, SessionError> {
+        let stored = self.commit(SessionCommit::one(SessionCommitItem::Entry {
+            lane_id: lane_id.clone(),
+            entry,
+        }))?;
+        take_single_entry(stored)
+    }
 
     /// Append one immutable operation record.
-    fn append_record(&mut self, record: LaneRecord) -> Result<StoredRecord, SessionError>;
+    fn append_record(&mut self, record: LaneRecord) -> Result<StoredRecord, SessionError> {
+        take_single_record(self.commit(SessionCommit::one(SessionCommitItem::Record(record)))?)
+    }
 
     /// Append a lane topology fact.
     fn append_lane_mutation(
         &mut self,
         mutation: LaneMutation,
-    ) -> Result<StoredLaneMutation, SessionError>;
+    ) -> Result<StoredLaneMutation, SessionError> {
+        take_single_lane(self.commit(SessionCommit::one(SessionCommitItem::Lane(mutation)))?)
+    }
 
     /// Append a session-wide non-semantic fact.
-    fn append_fact(&mut self, fact: SessionFact) -> Result<StoredFact, SessionError>;
+    fn append_fact(&mut self, fact: SessionFact) -> Result<StoredFact, SessionError> {
+        take_single_fact(self.commit(SessionCommit::one(SessionCommitItem::Fact(fact)))?)
+    }
+}
+
+fn take_single_entry(stored: StoredCommit) -> Result<StoredEntry, SessionError> {
+    let Some(StoredMutation {
+        mutation: SessionMutation::Entry(entry),
+        ..
+    }) = stored.items.into_iter().next()
+    else {
+        return Err(SessionError::Corruption(Corruption::new(
+            "session writer returned a non-entry for a one-item entry commit",
+        )));
+    };
+    Ok(entry)
+}
+
+fn take_single_record(stored: StoredCommit) -> Result<StoredRecord, SessionError> {
+    let Some(StoredMutation {
+        mutation: SessionMutation::Record(record),
+        ..
+    }) = stored.items.into_iter().next()
+    else {
+        return Err(SessionError::Corruption(Corruption::new(
+            "session writer returned a non-record for a one-item record commit",
+        )));
+    };
+    Ok(record)
+}
+
+fn take_single_lane(stored: StoredCommit) -> Result<StoredLaneMutation, SessionError> {
+    let Some(StoredMutation {
+        mutation: SessionMutation::Lane(lane),
+        ..
+    }) = stored.items.into_iter().next()
+    else {
+        return Err(SessionError::Corruption(Corruption::new(
+            "session writer returned a non-lane for a one-item lane commit",
+        )));
+    };
+    Ok(lane)
+}
+
+fn take_single_fact(stored: StoredCommit) -> Result<StoredFact, SessionError> {
+    let Some(StoredMutation {
+        mutation: SessionMutation::Fact(fact),
+        ..
+    }) = stored.items.into_iter().next()
+    else {
+        return Err(SessionError::Corruption(Corruption::new(
+            "session writer returned a non-fact for a one-item fact commit",
+        )));
+    };
+    Ok(fact)
 }
 
 /// In-memory reference implementation used for storage-conformance fixtures.
@@ -197,6 +267,7 @@ pub(crate) struct SessionAppendIndex {
     active_operations: BTreeMap<LaneId, OperationId>,
     epochs: BTreeMap<EpochId, OperationId>,
     step_attempts: BTreeMap<(OperationId, EpochId, StepKind), (StepId, u32)>,
+    steps: BTreeMap<StepId, (OperationId, EpochId, StepKind)>,
     provider_starts: BTreeMap<ProviderRequestId, OperationId>,
     provider_settled: BTreeSet<ProviderRequestId>,
     agent_lanes: BTreeSet<LaneId>,
@@ -221,11 +292,20 @@ impl SessionAppendIndex {
             active_operations: BTreeMap::new(),
             epochs: BTreeMap::new(),
             step_attempts: BTreeMap::new(),
+            steps: BTreeMap::new(),
             provider_starts: BTreeMap::new(),
             provider_settled: BTreeSet::new(),
             agent_lanes: BTreeSet::new(),
             incremental_validation_ready: true,
         }
+    }
+
+    fn from_snapshot(snapshot: &SessionSnapshot) -> Self {
+        let mut index = Self::empty(snapshot.header());
+        for mutation in snapshot.mutations() {
+            index.advance(&mutation.to_owned());
+        }
+        index
     }
 
     pub(crate) fn contains_entry(&self, entry_id: &EntryId) -> bool {
@@ -277,6 +357,11 @@ impl SessionAppendIndex {
                         if matches!(&record.kind, OperationKind::Subagent { .. })
                             || self.agent_lanes.contains(&record.lane_id)
                 ) =>
+            {
+                Ok(false)
+            }
+            SessionMutation::Record(stored)
+                if matches!(&stored.record, LaneRecord::OperationStarted(record) if !record.input_ids.is_empty()) =>
             {
                 Ok(false)
             }
@@ -426,6 +511,12 @@ impl SessionAppendIndex {
                         record.id
                     )));
                 }
+                if self.steps.contains_key(&record.id) {
+                    return Err(Corruption::new(format!(
+                        "step ID {} was attempted more than once",
+                        record.id
+                    )));
+                }
                 let key = (
                     record.operation_id.clone(),
                     record.epoch_id.clone(),
@@ -458,6 +549,16 @@ impl SessionAppendIndex {
                         record.request_id
                     )));
                 }
+                if !self.steps.get(&record.step_id).is_some_and(
+                    |(operation_id, epoch_id, _)| {
+                        operation_id == &record.operation_id && epoch_id == &record.epoch_id
+                    },
+                ) {
+                    return Err(Corruption::new(format!(
+                        "provider request {} does not name its owning step {}",
+                        record.request_id, record.step_id
+                    )));
+                }
                 if self.provider_starts.contains_key(&record.request_id) {
                     return Err(Corruption::new(format!(
                         "duplicate provider request ID {}",
@@ -484,8 +585,11 @@ impl SessionAppendIndex {
             }
             LaneRecord::AbortRequested(_)
             | LaneRecord::ToolStarted(_)
-            | LaneRecord::QueueEnqueued(_)
-            | LaneRecord::QueueCancelled(_)
+            | LaneRecord::InputAccepted(_)
+            | LaneRecord::InputWithdrawn(_)
+            | LaneRecord::InputSettled(_)
+            | LaneRecord::ExtensionControlEnqueued(_)
+            | LaneRecord::ExtensionControlApplied(_)
             | LaneRecord::WriteDeferred(_)
             | LaneRecord::HarnessActivationRequested(_) => Ok(false),
         }
@@ -536,6 +640,14 @@ impl SessionAppendIndex {
                     .remove(&record.epoch_id);
             }
             LaneRecord::StepAttempted(record) => {
+                self.steps.insert(
+                    record.id.clone(),
+                    (
+                        record.operation_id.clone(),
+                        record.epoch_id.clone(),
+                        record.kind,
+                    ),
+                );
                 self.step_attempts.insert(
                     (
                         record.operation_id.clone(),
@@ -555,8 +667,11 @@ impl SessionAppendIndex {
             LaneRecord::Usage(_) => {}
             LaneRecord::AbortRequested(_)
             | LaneRecord::ToolStarted(_)
-            | LaneRecord::QueueEnqueued(_)
-            | LaneRecord::QueueCancelled(_)
+            | LaneRecord::InputAccepted(_)
+            | LaneRecord::InputWithdrawn(_)
+            | LaneRecord::InputSettled(_)
+            | LaneRecord::ExtensionControlEnqueued(_)
+            | LaneRecord::ExtensionControlApplied(_)
             | LaneRecord::WriteDeferred(_)
             | LaneRecord::HarnessActivationRequested(_) => {}
         }
@@ -588,7 +703,10 @@ impl MemorySession {
         mut header: SessionHeader,
         clock: Arc<dyn SessionClock>,
     ) -> Result<Self, SessionError> {
-        if header.kind != "session" || header.version != SESSION_FORMAT_VERSION {
+        if header.kind != "tea-session"
+            || header.format != crate::SESSION_FORMAT_IDENTITY
+            || header.version != SESSION_FORMAT_VERSION
+        {
             return Err(SessionError::InvalidInput {
                 message: "new sessions require a v1 session header".into(),
             });
@@ -628,21 +746,6 @@ impl MemorySession {
         }
     }
 
-    fn next_envelope(&self) -> (Sequence, u64) {
-        (self.snapshot.next_sequence(), self.clock.now_ms())
-    }
-
-    fn commit_mutation(&mut self, mutation: StoredMutation) -> Result<(), SessionError> {
-        if self.append_index.is_locally_validated_mutation(&mutation)? {
-            self.append_index.advance(&mutation);
-            self.snapshot.push_mutation(mutation);
-            return Ok(());
-        }
-        validate_snapshot_append(&self.snapshot, &mutation)?;
-        self.append_index.advance(&mutation);
-        self.snapshot.push_mutation(mutation);
-        Ok(())
-    }
 }
 
 impl SessionReader for MemorySession {
@@ -652,79 +755,110 @@ impl SessionReader for MemorySession {
 }
 
 impl SessionWriter for MemorySession {
-    fn append_entry(
-        &mut self,
-        lane_id: &LaneId,
-        entry: ProvisionedEntry,
-    ) -> Result<StoredEntry, SessionError> {
+    fn commit(&mut self, commit: SessionCommit) -> Result<StoredCommit, SessionError> {
         self.ensure_writable()?;
-        if self.append_index.contains_entry(&entry.id) {
-            return Err(SessionError::InvalidInput {
-                message: format!("entry ID {} already materialized", entry.id),
-            });
+        let stored = prepare_commit(
+            &self.snapshot,
+            &self.append_index,
+            commit,
+            self.clock.now_ms(),
+        )?;
+        validate_prepared_commit(&self.snapshot, &self.append_index, &stored)?;
+        for item in &stored.items {
+            self.append_index.advance(item);
         }
-        let parent_id = self.append_index.lane_leaf(lane_id)?;
-        let (seq, timestamp_ms) = self.next_envelope();
-        let stored = StoredEntry {
-            lane_id: lane_id.clone(),
-            header: EntryHeader {
-                id: entry.id,
-                parent_id,
-                seq,
+        self.snapshot.push_commit(stored.clone());
+        Ok(stored)
+    }
+}
+
+/// Materialize an ordered caller commit without changing the authoritative
+/// snapshot or append index. Both memory and JSONL writers share this path so
+/// they agree on entry parentage and the exact returned item order.
+pub(crate) fn prepare_commit(
+    snapshot: &SessionSnapshot,
+    append_index: &SessionAppendIndex,
+    commit: SessionCommit,
+    timestamp_ms: u64,
+) -> Result<StoredCommit, SessionError> {
+    let sequence = snapshot.next_sequence();
+    let mut batch_lane_leaves = BTreeMap::<LaneId, Option<EntryId>>::new();
+    let mut batch_entry_ids = BTreeSet::<EntryId>::new();
+    let mut items = Vec::with_capacity(commit.items().len());
+    for item in commit.into_items() {
+        let mutation = match item {
+            SessionCommitItem::Entry { lane_id, entry } => {
+                if append_index.contains_entry(&entry.id) || !batch_entry_ids.insert(entry.id.clone()) {
+                    return Err(SessionError::InvalidInput {
+                        message: format!("entry ID {} already materialized", entry.id),
+                    });
+                }
+                let parent_id = match batch_lane_leaves.get(&lane_id) {
+                    Some(leaf_id) => leaf_id.clone(),
+                    None => append_index.lane_leaf(&lane_id)?,
+                };
+                SessionMutation::Entry(StoredEntry {
+                    lane_id,
+                    header: EntryHeader {
+                        id: entry.id,
+                        parent_id,
+                        seq: sequence,
+                        timestamp_ms,
+                    },
+                    body: entry.body,
+                })
+            }
+            SessionCommitItem::Record(record) => SessionMutation::Record(StoredRecord {
+                seq: sequence,
                 timestamp_ms,
-            },
-            body: entry.body,
+                record,
+            }),
+            SessionCommitItem::Lane(mutation) => SessionMutation::Lane(StoredLaneMutation {
+                seq: sequence,
+                timestamp_ms,
+                mutation,
+            }),
+            SessionCommitItem::Fact(fact) => SessionMutation::Fact(StoredFact {
+                seq: sequence,
+                timestamp_ms,
+                fact,
+            }),
         };
-        let mutation =
-            crate::jsonl::seal_mutation(&self.snapshot, SessionMutation::Entry(stored.clone()))?;
-        self.commit_mutation(mutation)?;
-        Ok(stored)
+        match &mutation {
+            SessionMutation::Entry(entry) => {
+                batch_lane_leaves.insert(entry.lane_id.clone(), Some(entry.header.id.clone()));
+            }
+            SessionMutation::Lane(lane) => {
+                let LaneMutation::Created {
+                    lane_id,
+                    base_leaf_id,
+                } = &lane.mutation;
+                batch_lane_leaves.insert(lane_id.clone(), base_leaf_id.clone());
+            }
+            SessionMutation::Record(_) | SessionMutation::Fact(_) => {}
+        }
+        items.push(mutation);
     }
+    crate::jsonl::seal_commit(snapshot, sequence, timestamp_ms, items)
+}
 
-    fn append_record(&mut self, record: LaneRecord) -> Result<StoredRecord, SessionError> {
-        self.ensure_writable()?;
-        let (seq, timestamp_ms) = self.next_envelope();
-        let stored = StoredRecord {
-            seq,
-            timestamp_ms,
-            record,
-        };
-        let mutation =
-            crate::jsonl::seal_mutation(&self.snapshot, SessionMutation::Record(stored.clone()))?;
-        self.commit_mutation(mutation)?;
-        Ok(stored)
-    }
-
-    fn append_lane_mutation(
-        &mut self,
-        mutation: LaneMutation,
-    ) -> Result<StoredLaneMutation, SessionError> {
-        self.ensure_writable()?;
-        let (seq, timestamp_ms) = self.next_envelope();
-        let stored = StoredLaneMutation {
-            seq,
-            timestamp_ms,
-            mutation,
-        };
-        let mutation =
-            crate::jsonl::seal_mutation(&self.snapshot, SessionMutation::Lane(stored.clone()))?;
-        self.commit_mutation(mutation)?;
-        Ok(stored)
-    }
-
-    fn append_fact(&mut self, fact: SessionFact) -> Result<StoredFact, SessionError> {
-        self.ensure_writable()?;
-        let (seq, timestamp_ms) = self.next_envelope();
-        let stored = StoredFact {
-            seq,
-            timestamp_ms,
-            fact,
-        };
-        let mutation =
-            crate::jsonl::seal_mutation(&self.snapshot, SessionMutation::Fact(stored.clone()))?;
-        self.commit_mutation(mutation)?;
-        Ok(stored)
-    }
+/// Validate and project an ordered semantic commit without writing it.
+///
+/// This is a preflight only: `timestamp_ms` is caller-supplied planning data,
+/// not a durable receipt, and another writer may advance the prefix before a
+/// later [`SessionWriter::commit`] call. The returned reduction is exactly the
+/// state that the provided snapshot and commit would produce if committed at
+/// that timestamp.
+pub fn preview_session_commit(
+    snapshot: &SessionSnapshot,
+    commit: &SessionCommit,
+    lane: LaneId,
+    timestamp_ms: u64,
+) -> Result<crate::LaneReduction, SessionError> {
+    let append_index = SessionAppendIndex::from_snapshot(snapshot);
+    let stored = prepare_commit(snapshot, &append_index, commit.clone(), timestamp_ms)?;
+    validate_snapshot_commit(snapshot, &stored)?;
+    crate::reduction::reduce_lane_ref_with_commit(snapshot, &stored, lane).map_err(Into::into)
 }
 
 pub(crate) fn validate_snapshot(snapshot: &SessionSnapshot) -> Result<(), Corruption> {
@@ -735,26 +869,45 @@ pub(crate) fn validate_snapshot(snapshot: &SessionSnapshot) -> Result<(), Corrup
     Ok(())
 }
 
-/// Validate one prospective mutation through the same pure reducer without
-/// cloning the snapshot or its retained semantic payloads.
-pub(crate) fn validate_snapshot_append(
+/// Validate a prospective atomic semantic group through the same pure
+/// reducers used for replay, without cloning the retained session prefix.
+pub(crate) fn validate_snapshot_commit(
     snapshot: &SessionSnapshot,
-    appended: &StoredMutation,
+    appended: &StoredCommit,
 ) -> Result<(), Corruption> {
     let mut lanes = snapshot_lanes(snapshot);
-    if let SessionMutation::Lane(StoredLaneMutation {
-        mutation: LaneMutation::Created { lane_id, .. },
-        ..
-    }) = &appended.mutation
-        && !lanes.contains(lane_id)
-    {
-        lanes.push(lane_id.clone());
+    for item in &appended.items {
+        if let SessionMutation::Lane(StoredLaneMutation {
+            mutation: LaneMutation::Created { lane_id, .. },
+            ..
+        }) = &item.mutation
+            && !lanes.contains(lane_id)
+        {
+            lanes.push(lane_id.clone());
+        }
     }
     for lane in lanes {
-        let _ = reduce_lane_ref_with_append(snapshot, appended, lane)?;
+        let _ = reduce_lane_ref_with_commit(snapshot, appended, lane)?;
     }
-    let _ = crate::agents::reduce_agent_graph_ref_with_append(snapshot, appended)?;
+    let _ = crate::agents::reduce_agent_graph_ref_with_commit(snapshot, appended)?;
     Ok(())
+}
+
+/// Validate a prepared commit before the one durable append.
+///
+/// A one-item commit may use the already validated append index when that
+/// index covers the entire item lifecycle. Ordered groups, and every item not
+/// covered by that narrow index, always replay the prospective prefix through
+/// the authoritative reducers before storage changes.
+pub(crate) fn validate_prepared_commit(
+    snapshot: &SessionSnapshot,
+    append_index: &SessionAppendIndex,
+    appended: &StoredCommit,
+) -> Result<(), Corruption> {
+    if appended.items.len() == 1 && append_index.is_locally_validated_mutation(&appended.items[0])? {
+        return Ok(());
+    }
+    validate_snapshot_commit(snapshot, appended)
 }
 
 fn snapshot_lanes(snapshot: &SessionSnapshot) -> Vec<LaneId> {

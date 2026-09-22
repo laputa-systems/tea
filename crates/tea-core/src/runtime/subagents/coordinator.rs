@@ -2,9 +2,9 @@
 //!
 //! The session graph is authoritative. This type retains only temporary
 //! reservations and task handles needed while a host prepares a workspace or
-//! drives an already accepted child operation. A new coordinator can rebuild
-//! safely from the session prefix and never invents a child from in-memory
-//! state alone.
+//! drives an already accepted child operation. A new coordinator restores
+//! inspectable terminal visibility from the session prefix, but never invents
+//! or restarts a child from in-memory state alone.
 
 use super::{
     ApplyAgentChangesResult, InterruptAgentResult, SpawnAgentRequest, SpawnedAgentHandle,
@@ -441,9 +441,24 @@ where
         self.activity.notify();
     }
 
-    /// Return whether this process has completed the cleanup boundary for a
-    /// terminal child. Reopen recovery must establish this again before a
-    /// resumed root may wait on historical terminal facts.
+    /// Rebuild visibility for a retained terminal child without treating a
+    /// session reopen as an execution or workspace-cleanup request.
+    ///
+    /// A terminal graph fact already commits the report and optional delta.
+    /// The prior process may have been interrupted after that semantic
+    /// boundary, so reopening must keep the result queryable rather than
+    /// hiding it behind a volatile cleanup marker. Unlike live completion,
+    /// this reconstruction does not wake a caller that has not registered in
+    /// the new process yet.
+    pub(crate) fn restore_terminal_visibility(&self, agent_id: AgentId) {
+        if let Ok(mut state) = self.state.lock() {
+            state.exposable_agents.insert(agent_id);
+        }
+    }
+
+    /// Return whether this process may expose the retained terminal child.
+    /// Live completion sets this after cleanup; passive reopen reconstructs
+    /// it from the durable terminal fact without reactivating a workspace.
     pub(crate) fn is_exposable(&self, agent_id: &AgentId) -> bool {
         self.state
             .lock()

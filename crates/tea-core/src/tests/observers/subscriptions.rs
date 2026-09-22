@@ -51,7 +51,7 @@ fn trace_observer_does_not_change_observable_agent_behavior() {
 }
 
 #[test]
-fn awaited_observer_receives_each_reduced_event_in_source_order() {
+fn synchronous_observer_receives_each_reduced_event_in_source_order() {
     smol::block_on(async {
         let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
         let agent = Agent::builder()
@@ -66,7 +66,7 @@ fn awaited_observer_receives_each_reduced_event_in_source_order() {
 
         let emitted = run.events();
         let observed = observed.lock().expect("test observer mutex").clone();
-        assert_eq!(observed, emitted);
+        assert_eq!(observed, emitted.events);
         assert!(matches!(
             observed.last().map(|event| &event.kind),
             Some(AgentEventKind::AgentEnd { .. })
@@ -135,7 +135,7 @@ fn runtime_subscription_is_reentrant_and_drop_unsubscribes_for_future_events() {
 }
 
 #[test]
-fn nonblocking_subscription_is_ordered_lossy_and_never_delays_settlement() {
+fn nonblocking_subscription_is_ordered_or_reports_lag_without_delaying_settlement() {
     smol::block_on(async {
         let full_capacity_agent = Agent::builder()
             .model_provider(Arc::new(TextOnlyProvider))
@@ -148,8 +148,11 @@ fn nonblocking_subscription_is_ordered_lossy_and_never_delays_settlement() {
         while let Ok(event) = ordered.try_recv() {
             delivered.push(event);
         }
-        assert_eq!(delivered, ordered_run.events());
-        assert_eq!(ordered.dropped_events(), 0);
+        assert_eq!(delivered, ordered_run.events().events);
+        assert_eq!(
+            ordered.try_recv(),
+            Err(crate::agent::EventSubscriptionTryRecvError::Empty)
+        );
 
         let constrained_agent = Agent::builder()
             .model_provider(Arc::new(TextOnlyProvider))
@@ -158,131 +161,28 @@ fn nonblocking_subscription_is_ordered_lossy_and_never_delays_settlement() {
             .subscribe_nonblocking(std::num::NonZeroUsize::new(1).expect("nonzero capacity"));
         let constrained_run = constrained_agent.start_prompt("lossy events")?;
         constrained_run.drive().await?;
+        assert!(constrained_run.events().len() > 1);
         assert_eq!(constrained_agent.snapshot().phase, AgentPhase::Idle);
-        assert!(matches!(
-            constrained.try_recv().map(|event| event.kind),
-            Ok(AgentEventKind::AgentStart)
-        ));
         assert_eq!(
-            constrained.dropped_events(),
-            constrained_run.events().len() as u64 - 1
+            constrained.try_recv(),
+            Err(crate::agent::EventSubscriptionTryRecvError::Lagged)
         );
 
         Ok::<(), CoreError>(())
     })
-    .expect("nonblocking event delivery must not participate in run settlement");
+    .expect("bounded event delivery must not participate in run settlement");
 }
 
 #[test]
-fn lossless_subscription_is_ordered_without_capacity_drops() {
+fn observer_panic_cannot_veto_settlement_or_reuse() {
     smol::block_on(async {
         let agent = Agent::builder()
             .model_provider(Arc::new(TextOnlyProvider))
+            .observer(Arc::new(PanicOnAgentStartObserver))
             .build();
-        let subscription = agent.subscribe_lossless();
-        let run = agent.start_prompt("lossless ordered events")?;
+        let failed = agent.start_prompt("panic in an observer")?;
 
-        run.drive().await?;
-
-        let mut delivered = Vec::new();
-        while let Ok(event) = subscription.try_recv() {
-            delivered.push(event);
-        }
-        assert_eq!(delivered, run.events());
-        assert!(matches!(
-            subscription.try_recv(),
-            Err(std::sync::mpsc::TryRecvError::Empty)
-        ));
-
-        Ok::<(), CoreError>(())
-    })
-    .expect("lossless event delivery must preserve source order");
-}
-
-#[test]
-fn lossless_subscription_retains_all_events_under_volume() {
-    smol::block_on(async {
-        let run_count = 256;
-        let provider = Arc::new(ScriptedProvider::new((0..run_count).map(|index| {
-            ModelStream {
-                events: vec![
-                    ModelStreamEvent::TextDelta(format!("lossless event volume {index}")),
-                    ModelStreamEvent::End(StopReason::Stop),
-                ],
-            }
-        })));
-        let agent = Agent::builder().model_provider(provider).build();
-        let subscription = agent.subscribe_lossless();
-        let mut emitted = Vec::new();
-
-        for index in 0..run_count {
-            let run = agent
-                .start_prompt(format!("lossless volume run {index}"))
-                .expect("volume run starts");
-            run.drive().await?;
-            emitted.extend(run.events());
-        }
-        assert!(emitted.len() > 1_000, "volume must exceed a small queue");
-
-        let mut delivered = Vec::new();
-        while let Ok(event) = subscription.try_recv() {
-            delivered.push(event);
-        }
-        assert_eq!(delivered, emitted);
-
-        Ok::<(), CoreError>(())
-    })
-    .expect("lossless event delivery must not silently drop under volume");
-}
-
-#[test]
-fn dropping_lossless_subscription_unsubscribes_cleanly() {
-    smol::block_on(async {
-        let provider = Arc::new(ScriptedProvider::new([
-            ModelStream {
-                events: vec![
-                    ModelStreamEvent::TextDelta("before drop".into()),
-                    ModelStreamEvent::End(StopReason::Stop),
-                ],
-            },
-            ModelStream {
-                events: vec![
-                    ModelStreamEvent::TextDelta("after drop".into()),
-                    ModelStreamEvent::End(StopReason::Stop),
-                ],
-            },
-        ]));
-        let agent = Agent::builder().model_provider(provider).build();
-        let subscription = agent.subscribe_lossless();
-        let first = agent.start_prompt("before drop")?;
-        first.drive().await?;
-        drop(subscription);
-
-        let second = agent.start_prompt("after drop")?;
-        second.drive().await?;
-        assert_eq!(agent.snapshot().phase, AgentPhase::Idle);
-
-        Ok::<(), CoreError>(())
-    })
-    .expect("dropping a lossless subscription must not poison future runs");
-}
-
-#[test]
-fn observer_failure_has_one_terminal_settlement_and_leaves_the_agent_reusable() {
-    smol::block_on(async {
-        let agent = Agent::builder()
-            .model_provider(Arc::new(TextOnlyProvider))
-            .observer(Arc::new(FailingObserver))
-            .build();
-        let failed = agent.start_prompt("fail an observer")?;
-
-        assert_eq!(
-            failed.drive().await,
-            Err(CoreError::Hook(crate::error::HookError::new(
-                "observer",
-                "fixture observer failure",
-            )))
-        );
+        failed.drive().await?;
         assert_eq!(agent.snapshot().phase, AgentPhase::Idle);
         assert_eq!(
             failed
@@ -293,19 +193,46 @@ fn observer_failure_has_one_terminal_settlement_and_leaves_the_agent_reusable() 
             1
         );
 
-        // The same explicit observer still fails future runs, but neither the
-        // active-run ownership nor terminal event grammar are poisoned.
-        let reused = agent.start_prompt("reuse after observer failure")?;
-        assert_eq!(
-            reused.drive().await,
-            Err(CoreError::Hook(crate::error::HookError::new(
-                "observer",
-                "fixture observer failure",
-            )))
-        );
+        // The same observer also cannot poison future ownership or terminal
+        // event grammar.
+        let reused = agent.start_prompt("reuse after observer panic")?;
+        reused.drive().await?;
         assert_eq!(agent.snapshot().phase, AgentPhase::Idle);
 
         Ok::<(), CoreError>(())
     })
-    .expect("observer failure must settle exactly once and preserve ownership invariants");
+    .expect("observer panic must not alter settlement or ownership invariants");
+}
+
+#[test]
+fn run_event_diagnostics_report_omission_after_the_bounded_suffix_overflows() {
+    smol::block_on(async {
+        let delta_count = crate::run::RUN_EVENT_DIAGNOSTIC_LIMIT + 1;
+        let agent = Agent::builder()
+            .model_provider(Arc::new(ScriptedProvider::new([ModelStream {
+                events: (0..delta_count)
+                    .map(|_| ModelStreamEvent::TextDelta("x".into()))
+                    .chain(std::iter::once(ModelStreamEvent::End(StopReason::Stop)))
+                    .collect(),
+            }])))
+            .build();
+        let run = agent.start_prompt("overflow diagnostics")?;
+
+        run.drive().await?;
+
+        let diagnostics = run.events();
+        assert!(!diagnostics.is_complete());
+        assert!(diagnostics.omitted_events > 0);
+        assert_eq!(
+            diagnostics.events.len(),
+            crate::run::RUN_EVENT_DIAGNOSTIC_LIMIT
+        );
+        assert_eq!(
+            diagnostics.events.first().expect("retained suffix").sequence.0,
+            diagnostics.omitted_events.saturating_add(1)
+        );
+
+        Ok::<(), CoreError>(())
+    })
+    .expect("bounded event diagnostics must report omitted events");
 }

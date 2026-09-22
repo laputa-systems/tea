@@ -23,5 +23,15 @@ cache_replay_summary_v1. It preserves an exact source prefix when possible and
 records a v1 strategy descriptor, request-layout observations, provider usage,
 and compaction lifecycle records.
 
+Provider-backed compactors must admit their exact prepared `ModelRequest`
+through `CompactionRequestPort` before transport dispatch. The durable
+supervisor commits that compaction step, provider intent, and immutable exact
+request material together. Only a `Completed` settlement for that exact step
+may be linked to the `CompactionEntry` that stores the validated canonical
+replacement. A provider-summary strategy without this admission cannot commit
+a checkpoint. On passive reopen, `runtime::context` reconstructs future model
+context from the replacement while the original covered entries remain in the
+append-only session history.
+
 The durable harness adds those lifecycle records to the session and redacted
 trace. It never stores a prompt or checkpoint in the trace artifact itself.

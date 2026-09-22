@@ -116,7 +116,12 @@ impl OpencodeZenConfig {
         self
     }
 
-    pub(super) fn responses_url(&self) -> &str {
+    /// Borrow the exact Responses API endpoint selected for this configuration.
+    ///
+    /// Normal production configurations always use OpenCode Zen's fixed endpoint. Test-support
+    /// builds can inject a loopback fixture; callers that impose a stricter transport policy must
+    /// inspect this value before constructing or invoking the provider.
+    pub fn responses_url(&self) -> &str {
         self.test_responses_url
             .as_deref()
             .unwrap_or(super::RESPONSES_URL)

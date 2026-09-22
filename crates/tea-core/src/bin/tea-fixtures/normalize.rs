@@ -144,21 +144,11 @@ pub(super) fn normalize_event(
             "message_end",
             JsonValue::object([("role", JsonValue::from(message_role_name(message)))]),
         ),
-        AgentEventKind::MessageUpdate {
-            message,
-            text_delta,
-        } => (
+        AgentEventKind::MessageUpdate { text_delta, .. } => (
             "message_update",
             JsonValue::object([
-                ("role", JsonValue::from(message_role_name(message))),
-                (
-                    "delta",
-                    JsonValue::from(
-                        text_delta
-                            .as_deref()
-                            .unwrap_or_else(|| message_text(message)),
-                    ),
-                ),
+                ("role", JsonValue::from("assistant")),
+                ("delta", JsonValue::from(text_delta.clone())),
             ]),
         ),
         AgentEventKind::ToolExecutionStart {
@@ -251,14 +241,6 @@ fn message_role_name(message: &AgentMessage) -> &'static str {
         AgentMessage::User { .. } => "user",
         AgentMessage::Assistant { .. } => "assistant",
         AgentMessage::ToolResult { .. } => "tool_result",
-    }
-}
-
-fn message_text(message: &AgentMessage) -> &str {
-    match message {
-        AgentMessage::User { content, .. }
-        | AgentMessage::Assistant { content, .. }
-        | AgentMessage::ToolResult { content, .. } => content,
     }
 }
 

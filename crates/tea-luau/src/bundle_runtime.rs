@@ -360,12 +360,12 @@ impl Error for BundleRuntimeError {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bundle::{BundleManifest, BUNDLE_ABI_VERSION};
+    use crate::bundle::{BundleManifest, BUNDLE_ABI_V3_VERSION};
     use mlua::{Lua, StdLib};
 
     fn bundle(sources: impl IntoIterator<Item = (&'static str, &'static str)>) -> Bundle {
         Bundle::from_sources(
-            BundleManifest::new(BUNDLE_ABI_VERSION, "main.luau", std::iter::empty::<&str>())
+            BundleManifest::new(BUNDLE_ABI_V3_VERSION, "main.luau", std::iter::empty::<&str>())
                 .unwrap(),
             sources,
         )
@@ -374,7 +374,7 @@ mod tests {
 
     fn owned_bundle(sources: impl IntoIterator<Item = (String, String)>) -> Bundle {
         Bundle::from_sources(
-            BundleManifest::new(BUNDLE_ABI_VERSION, "main.luau", std::iter::empty::<&str>())
+            BundleManifest::new(BUNDLE_ABI_V3_VERSION, "main.luau", std::iter::empty::<&str>())
                 .unwrap(),
             sources,
         )

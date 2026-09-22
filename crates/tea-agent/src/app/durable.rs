@@ -20,14 +20,13 @@ use tea_core::coding::{
     WORKSPACE_READ_CAPABILITY_V1, WORKSPACE_SEARCH_CAPABILITY_V1,
 };
 use tea_core::compaction::AutomaticCompactionPolicy;
-use tea_core::event::AgentEventKind;
 use tea_core::harness::extension::{
     ExtensionCapability, ExtensionCapabilityError, ExtensionCapabilityFuture,
     ExtensionCapabilityRequest, ExtensionEngine, ExtensionHostCommandDescription, ExtensionLimits,
     ExtensionStateHandle, ExtensionToolLimits,
 };
 use tea_core::harness::{
-    CapabilityBindingRef, ExtensionStateCapability, HarnessActor, HarnessRepository,
+    CapabilityBindingRef, HarnessActor, HarnessRepository,
     HarnessResolver, HarnessResourceLimits, HarnessSeedBuilder, HarnessSeedExtension,
     HarnessSeedExtensionScope, ModelHarnessProfile, PluginCapabilityBinding,
     PluginCapabilityCatalog, SelfExtensionMode, ToolPresentationDescriptor,
@@ -35,7 +34,9 @@ use tea_core::harness::{
 };
 use tea_core::runtime::{
     HarnessIdentity, RuntimeServices, SessionSupervisor, SessionSupervisorInput,
-    SessionSupervisorReopenInput, SubagentPolicy, SubagentServices, TeaEvent, TeaEventSubscription,
+    SessionSupervisorReopenInput, SubagentModel, SubagentPolicy, SubagentServices, IdleAuthorization,
+    IdleDriveOutcome, InputCompletion, InputOutcome, PreviewEvent, TeaEvent,
+    TeaEventSubscription, TeaEventTryRecvError,
 };
 use tea_core::scheduler::ModelProvider;
 use tea_core::state::{
@@ -62,7 +63,7 @@ use super::subagents::{SmolTaskRuntime, TuiSubagentHost};
 use super::support::{parse_thinking_level as parse_thinking_level_name, thinking_level_name};
 
 /// Concrete durable supervisor used by the terminal application.
-pub(super) type HostHarness = SessionSupervisor<JsonlSession>;
+pub(crate) type HostHarness = SessionSupervisor<JsonlSession>;
 
 /// Describe bundled host commands before a lazy session exists. This uses the
 /// same immutable source tree and extension engine later pinned in the
@@ -90,6 +91,18 @@ pub(super) fn bundled_host_commands() -> Result<Vec<ExtensionHostCommandDescript
 pub(super) struct DurableSessionSummary {
     pub(super) id: String,
     pub(super) model: Option<ModelDescriptor>,
+}
+
+/// One canonical conversation entry prepared for terminal presentation.
+///
+/// The entry identity remains attached to the otherwise provider-neutral core
+/// message so a terminal resnapshot can preserve the exact scrollback prefix
+/// it already emitted. Core `MessageId` values are per-agent execution state
+/// and deliberately do not substitute for this durable identity.
+#[derive(Clone, Debug)]
+pub(super) struct HostTranscriptMessage {
+    pub(super) entry_id: EntryId,
+    pub(super) message: AgentMessage,
 }
 
 static NEXT_SESSION_NONCE: AtomicU64 = AtomicU64::new(1);
@@ -125,13 +138,166 @@ pub(super) struct HostHarnessReopen<'a> {
     pub(super) subagents: Option<HostSubagentConfig>,
 }
 
+/// Select how the bundled web policy receives its optional credential.
+///
+/// Normal terminal construction may read its process-local configuration once.
+/// Feature-only verification construction instead supplies no ambient
+/// credential at all, so an injected model provider is its only model-facing
+/// authority.
+#[derive(Clone, Copy)]
+enum WebCapabilityCredentialSource {
+    TerminalEnvironment,
+    NoAmbientCredential,
+}
+
+impl WebCapabilityCredentialSource {
+    fn binding(
+        self,
+    ) -> Result<(PluginCapabilityBinding, CapabilityBindingRef), AppError> {
+        match self {
+            Self::TerminalEnvironment => web_capability_binding(),
+            Self::NoAmbientCredential => web_capability_binding_with_tinyfish_api_key(None),
+        }
+    }
+}
+
 /// Global terminal authorization retained only while an enabled TUI session
 /// is being assembled. The effective `SubagentPolicy` is derived and then
 /// persisted before its root collaboration schema becomes active.
 #[derive(Clone)]
-pub(super) struct HostSubagentConfig {
-    pub(super) factory: Arc<ProviderFactory>,
-    pub(super) config: SubagentTuiConfig,
+pub(super) enum HostSubagentConfig {
+    /// Normal terminal authority resolved through the configured provider
+    /// factory and its durable subagent policy.
+    Terminal {
+        factory: Arc<ProviderFactory>,
+        config: SubagentTuiConfig,
+    },
+    /// Feature-only child authority whose descriptor and provider are
+    /// explicitly injected by live verification. It has no provider-factory
+    /// fallback or terminal configuration source.
+    #[cfg(feature = "live-verification")]
+    LiveVerification {
+        child_model: ModelDescriptor,
+        child_provider: Arc<dyn ModelProvider>,
+    },
+}
+
+impl HostSubagentConfig {
+    pub(super) fn terminal(factory: Arc<ProviderFactory>, config: SubagentTuiConfig) -> Self {
+        Self::Terminal { factory, config }
+    }
+
+    #[cfg(feature = "live-verification")]
+    pub(super) fn live_verification(
+        child_model: ModelDescriptor,
+        child_provider: Arc<dyn ModelProvider>,
+    ) -> Self {
+        Self::LiveVerification {
+            child_model,
+            child_provider,
+        }
+    }
+
+    fn resolve_policy(&self, root_model: &ModelDescriptor) -> Result<SubagentPolicy, AppError> {
+        match self {
+            Self::Terminal { factory, config } => factory.resolve_subagent_policy(root_model, config),
+            #[cfg(feature = "live-verification")]
+            Self::LiveVerification { child_model, .. } => {
+                if child_model != root_model {
+                    return Err(AppError::Setup(
+                        "live verification child must use the exact injected root descriptor".into(),
+                    ));
+                }
+                let policy = SubagentPolicy {
+                    models: vec![SubagentModel {
+                        descriptor: child_model.clone(),
+                        display_name: child_model.model.clone(),
+                        context_window: None,
+                    }],
+                    max_concurrent: NonZeroU32::new(2)
+                        .expect("fixed live-verification child limit is nonzero"),
+                    max_total_per_operation: NonZeroU32::new(2)
+                        .expect("fixed live-verification child total is nonzero"),
+                    timeout: Duration::from_secs(120),
+                };
+                policy
+                    .validate()
+                    .map_err(|error| AppError::Setup(format!("invalid live verification child policy: {error}")))?;
+                Ok(policy)
+            }
+        }
+    }
+
+    fn child_seed_provider(&self, root_provider: &Arc<dyn ModelProvider>) -> Arc<dyn ModelProvider> {
+        match self {
+            Self::Terminal { .. } => Arc::clone(root_provider),
+            #[cfg(feature = "live-verification")]
+            Self::LiveVerification { child_provider, .. } => Arc::clone(child_provider),
+        }
+    }
+
+    fn reopen_policy(
+        &self,
+        fact: Option<&SubagentPolicyFact>,
+        root_model: &ModelDescriptor,
+    ) -> Result<Option<SubagentPolicy>, AppError> {
+        match self {
+            Self::Terminal { config, .. } => reopen_subagent_policy(fact, Some(config)),
+            #[cfg(feature = "live-verification")]
+            Self::LiveVerification { .. } => {
+                let Some(fact) = fact else {
+                    return Ok(None);
+                };
+                let persisted = subagent_policy_from_fact(fact)?;
+                let expected = self.resolve_policy(root_model)?;
+                if persisted != expected {
+                    return Err(AppError::Setup(
+                        "durable child policy differs from the injected live-verification policy".into(),
+                    ));
+                }
+                Ok(Some(persisted))
+            }
+        }
+    }
+
+    fn build_host(
+        &self,
+        workspace: PathBuf,
+        session_directory: PathBuf,
+        session_id: SessionId,
+        logical_workspace_label: String,
+        artifacts: Arc<dyn tea_session::ArtifactStore>,
+        child_harnesses: Vec<(ModelDescriptor, HarnessIdentity)>,
+        coding_capability_router: Option<CodingCapabilityRouter>,
+    ) -> Arc<dyn tea_core::runtime::SubagentHost> {
+        match self {
+            Self::Terminal { factory, .. } => Arc::new(TuiSubagentHost::new(
+                workspace,
+                session_directory,
+                session_id,
+                logical_workspace_label,
+                Arc::clone(factory),
+                artifacts,
+                child_harnesses,
+                coding_capability_router,
+            )),
+            #[cfg(feature = "live-verification")]
+            Self::LiveVerification {
+                child_model,
+                child_provider,
+            } => Arc::new(TuiSubagentHost::new_live_verification(
+                workspace,
+                session_directory,
+                session_id,
+                logical_workspace_label,
+                child_model.clone(),
+                Arc::clone(child_provider),
+                artifacts,
+                child_harnesses,
+                coding_capability_router,
+            )),
+        }
+    }
 }
 
 /// Create one fresh session-local managed harness under the host-selected Tea
@@ -154,9 +320,278 @@ pub(super) fn create_mock_host_harness(
     create_host_harness_with_operations(config, super::mock::coding_operations())
 }
 
+/// Construct a verification-owned harness from injected provider ports only.
+/// It intentionally disables ambient web credentials in addition to bypassing
+/// terminal provider/configuration discovery.
+#[cfg(feature = "live-verification")]
+fn create_live_verification_host_harness(
+    config: HostHarnessConfig<'_>,
+    self_extension_mode: SelfExtensionMode,
+) -> Result<Arc<HostHarness>, AppError> {
+    create_host_harness_with_operations_and_mode(
+        config,
+        Arc::new(super::nonblocking_operations::NonblockingCodingOperations),
+        self_extension_mode,
+        WebCapabilityCredentialSource::NoAmbientCredential,
+    )
+}
+
+/// Feature-gated headless composition seam for the repository's explicit
+/// live verification driver. It accepts only injected model-facing ports and
+/// explicit filesystem authority; it never consults CLI options, terminal
+/// configuration, credentials, or ambient provider selection.
+#[cfg(feature = "live-verification")]
+pub(crate) fn create_live_verification_harness(
+    tea_home: &Path,
+    workspace: &Path,
+    model: ModelDescriptor,
+    provider: Arc<dyn ModelProvider>,
+    compactor_provider: Option<(ModelDescriptor, Arc<dyn ModelProvider>)>,
+) -> Result<Arc<HostHarness>, AppError> {
+    let configuration = super::host::host_configuration_for_provider(
+        &workspace.to_string_lossy(),
+        Some(&model.provider),
+    )?;
+    let compactor = compactor_provider
+        .map(|(model, provider)| Arc::new(ProviderCompactor::new(model, provider)));
+    create_live_verification_host_harness(HostHarnessConfig {
+        tea_home,
+        workspace,
+        configuration,
+        model,
+        provider,
+        thinking_level: Some(ThinkingLevel::Off),
+        compactor,
+        automatic_compaction: AutomaticCompactionPolicy::disabled(),
+        subagents: None,
+    }, SelfExtensionMode::Off)
+}
+
+/// Feature-gated live-child composition seam. Root and child model consumers
+/// are separately injected, even when the restricted verification factory
+/// deliberately gives them the same exact descriptor. The child host reuses
+/// the normal isolated Git lease, report, cleanup, and explicit-apply path;
+/// it cannot consult terminal configuration or construct a provider itself.
+#[cfg(feature = "live-verification")]
+pub(crate) fn create_live_verification_child_harness(
+    tea_home: &Path,
+    workspace: &Path,
+    root_model: ModelDescriptor,
+    root_provider: Arc<dyn ModelProvider>,
+    child_model: ModelDescriptor,
+    child_provider: Arc<dyn ModelProvider>,
+) -> Result<Arc<HostHarness>, AppError> {
+    if root_model != child_model {
+        return Err(AppError::Setup(
+            "live child verification requires matching explicit root and child descriptors".into(),
+        ));
+    }
+    let configuration = super::host::host_configuration_for_provider(
+        &workspace.to_string_lossy(),
+        Some(&root_model.provider),
+    )?;
+    create_live_verification_host_harness(HostHarnessConfig {
+        tea_home,
+        workspace,
+        configuration,
+        model: root_model,
+        provider: root_provider,
+        thinking_level: Some(ThinkingLevel::Off),
+        compactor: None,
+        automatic_compaction: AutomaticCompactionPolicy::disabled(),
+        subagents: Some(HostSubagentConfig::live_verification(
+            child_model,
+            child_provider,
+        )),
+    }, SelfExtensionMode::Off)
+}
+
+/// Feature-gated authoring composition seam. The selected mode is frozen in
+/// the initial session metadata, seed revision, and resolver before any model
+/// request can run. It accepts only an injected provider and filesystem
+/// authority, never terminal configuration or credentials.
+#[cfg(feature = "live-verification")]
+pub(crate) fn create_live_verification_authoring_harness(
+    tea_home: &Path,
+    workspace: &Path,
+    model: ModelDescriptor,
+    provider: Arc<dyn ModelProvider>,
+) -> Result<Arc<HostHarness>, AppError> {
+    let configuration = super::host::host_configuration_for_provider(
+        &workspace.to_string_lossy(),
+        Some(&model.provider),
+    )?;
+    create_live_verification_host_harness(HostHarnessConfig {
+        tea_home,
+        workspace,
+        configuration,
+        model,
+        provider,
+        thinking_level: Some(ThinkingLevel::Off),
+        compactor: None,
+        automatic_compaction: AutomaticCompactionPolicy::disabled(),
+        subagents: None,
+    }, SelfExtensionMode::Author)
+}
+
+/// Reopen a verification-owned durable session without consulting terminal
+/// configuration or ambient authority. This remains passive: callers must
+/// explicitly choose whether to drive a recovered operation afterwards.
+#[cfg(feature = "live-verification")]
+pub(crate) fn reopen_live_verification_harness(
+    tea_home: &Path,
+    workspace: &Path,
+    session_id: &str,
+    model: ModelDescriptor,
+    provider: Arc<dyn ModelProvider>,
+    compactor_provider: Option<(ModelDescriptor, Arc<dyn ModelProvider>)>,
+) -> Result<Arc<HostHarness>, AppError> {
+    let configuration = super::host::host_configuration_for_provider(
+        &workspace.to_string_lossy(),
+        Some(&model.provider),
+    )?;
+    let compactor = compactor_provider
+        .map(|(model, provider)| Arc::new(ProviderCompactor::new(model, provider)));
+    reopen_live_verification_host_harness(HostHarnessReopen {
+        tea_home,
+        workspace,
+        session_id,
+        configuration,
+        model,
+        provider,
+        compactor,
+        automatic_compaction: AutomaticCompactionPolicy::disabled(),
+        subagents: None,
+    })
+}
+
+/// Passively reopen an authoring verification session. The immutable header
+/// must still name `Author`; a session created with another mode cannot be
+/// repurposed by this feature-only entry point.
+#[cfg(feature = "live-verification")]
+pub(crate) fn reopen_live_verification_authoring_harness(
+    tea_home: &Path,
+    workspace: &Path,
+    session_id: &str,
+    model: ModelDescriptor,
+    provider: Arc<dyn ModelProvider>,
+) -> Result<Arc<HostHarness>, AppError> {
+    let configuration = super::host::host_configuration_for_provider(
+        &workspace.to_string_lossy(),
+        Some(&model.provider),
+    )?;
+    let harness = reopen_live_verification_host_harness(HostHarnessReopen {
+        tea_home,
+        workspace,
+        session_id,
+        configuration,
+        model,
+        provider,
+        compactor: None,
+        automatic_compaction: AutomaticCompactionPolicy::disabled(),
+        subagents: None,
+    })?;
+    require_live_verification_authoring_mode(&harness)?;
+    Ok(harness)
+}
+
+/// Feature-gated headless composition seam for a verification scenario that
+/// needs an explicitly injected compactor and a supplied automatic-compaction
+/// policy. Normal terminal construction never reaches this path.
+#[cfg(feature = "live-verification")]
+pub(crate) fn create_live_verification_compaction_harness(
+    tea_home: &Path,
+    workspace: &Path,
+    root_model: ModelDescriptor,
+    root_provider: Arc<dyn ModelProvider>,
+    compactor_provider: (ModelDescriptor, Arc<dyn ModelProvider>),
+    automatic_compaction: AutomaticCompactionPolicy,
+) -> Result<Arc<HostHarness>, AppError> {
+    let configuration = super::host::host_configuration_for_provider(
+        &workspace.to_string_lossy(),
+        Some(&root_model.provider),
+    )?;
+    let compactor = Arc::new(ProviderCompactor::new(
+        compactor_provider.0,
+        compactor_provider.1,
+    ));
+    create_live_verification_host_harness(HostHarnessConfig {
+        tea_home,
+        workspace,
+        configuration,
+        model: root_model,
+        provider: root_provider,
+        thinking_level: Some(ThinkingLevel::Off),
+        compactor: Some(compactor),
+        automatic_compaction,
+        subagents: None,
+    }, SelfExtensionMode::Off)
+}
+
+/// Passive counterpart to [`create_live_verification_compaction_harness`].
+/// It installs only injected verification ports and does not drive recovery or
+/// idle continuation while reopening.
+#[cfg(feature = "live-verification")]
+pub(crate) fn reopen_live_verification_compaction_harness(
+    tea_home: &Path,
+    workspace: &Path,
+    session_id: &str,
+    root_model: ModelDescriptor,
+    root_provider: Arc<dyn ModelProvider>,
+    compactor_provider: (ModelDescriptor, Arc<dyn ModelProvider>),
+    automatic_compaction: AutomaticCompactionPolicy,
+) -> Result<Arc<HostHarness>, AppError> {
+    let configuration = super::host::host_configuration_for_provider(
+        &workspace.to_string_lossy(),
+        Some(&root_model.provider),
+    )?;
+    let compactor = Arc::new(ProviderCompactor::new(
+        compactor_provider.0,
+        compactor_provider.1,
+    ));
+    reopen_live_verification_host_harness(HostHarnessReopen {
+        tea_home,
+        workspace,
+        session_id,
+        configuration,
+        model: root_model,
+        provider: root_provider,
+        compactor: Some(compactor),
+        automatic_compaction,
+        subagents: None,
+    })
+}
+
+/// Drive one feature-verification prompt through the normal durable one-shot
+/// path while discarding presentation bytes. Completion remains tied to the
+/// exact accepted input rather than event delivery or global idleness.
+#[cfg(feature = "live-verification")]
+pub(crate) async fn run_live_verification_one_shot(
+    harness: Arc<HostHarness>,
+    prompt: String,
+) -> Result<(), AppError> {
+    let subscription = harness.subscribe_events()?;
+    let mut output = io::sink();
+    stream_host_prompt_to(harness, subscription, prompt, &mut output).await
+}
+
 fn create_host_harness_with_operations(
     config: HostHarnessConfig<'_>,
     coding_operations: Arc<dyn CodingOperations>,
+) -> Result<Arc<HostHarness>, AppError> {
+    create_host_harness_with_operations_and_mode(
+        config,
+        coding_operations,
+        SelfExtensionMode::Off,
+        WebCapabilityCredentialSource::TerminalEnvironment,
+    )
+}
+
+fn create_host_harness_with_operations_and_mode(
+    config: HostHarnessConfig<'_>,
+    coding_operations: Arc<dyn CodingOperations>,
+    self_extension_mode: SelfExtensionMode,
+    web_credential_source: WebCapabilityCredentialSource,
 ) -> Result<Arc<HostHarness>, AppError> {
     let HostHarnessConfig {
         tea_home,
@@ -178,11 +613,7 @@ fn create_host_harness_with_operations(
     let thinking_level = thinking_level.unwrap_or(ThinkingLevel::Off);
     let subagent_policy = subagents
         .as_ref()
-        .map(|subagents| {
-            subagents
-                .factory
-                .resolve_subagent_policy(&model, &subagents.config)
-        })
+        .map(|subagents| subagents.resolve_policy(&model))
         .transpose()?;
 
     let profile = model_profile(&model)?;
@@ -214,7 +645,7 @@ fn create_host_harness_with_operations(
         let mut metadata = BTreeMap::new();
         metadata.insert(
             SELF_EXTENSION_MODE_METADATA_KEY.into(),
-            SelfExtensionMode::Off.metadata_value(),
+            self_extension_mode.metadata_value(),
         );
         metadata.insert(
             "tea.model.provider".into(),
@@ -265,7 +696,7 @@ fn create_host_harness_with_operations(
         // implicitly determine whether any model-facing coding tool exists.
         let coding_bindings =
             coding_capability_bindings_with_operations(workspace, Arc::clone(&coding_operations))?;
-        let (web_binding, web_binding_ref) = web_capability_binding()?;
+        let (web_binding, web_binding_ref) = web_credential_source.binding()?;
         let mut capability_catalog = PluginCapabilityCatalog::new();
         for binding in extension_state.bindings.iter().cloned() {
             capability_catalog
@@ -336,7 +767,7 @@ fn create_host_harness_with_operations(
             host_profile_digest(&configuration),
             root_prompt,
             profile.clone(),
-            SelfExtensionMode::Off,
+            self_extension_mode,
             resource_limits.clone(),
             template.runtime_policy_identities(),
         )
@@ -352,7 +783,10 @@ fn create_host_harness_with_operations(
             (Some(_subagents), Some(policy), Some(configuration)) => seed_child_harnesses(
                 &mut repository,
                 Arc::clone(&artifacts),
-                Arc::clone(&provider),
+                subagents
+                    .as_ref()
+                    .expect("child policy requires child authority")
+                    .child_seed_provider(&provider),
                 configuration,
                 policy,
                 &resource_limits,
@@ -412,22 +846,20 @@ fn create_host_harness_with_operations(
             HarnessResolver::new(repository, Default::default())
                 .capability_catalog(capability_catalog)
                 .reserved_extension_command_names(super::commands::names())
-                .self_extension_mode(SelfExtensionMode::Off),
+                .self_extension_mode(self_extension_mode),
         );
         let identity = HarnessIdentity::new(revision.revision_id, snapshot.id, profile.profile_id);
         let subagent_services = match (&subagents, &subagent_policy) {
             (Some(subagents), Some(policy)) => {
-                let host: Arc<dyn tea_core::runtime::SubagentHost> =
-                    Arc::new(TuiSubagentHost::new(
-                        workspace.to_path_buf(),
-                        session.directory().to_path_buf(),
-                        session_id.clone(),
-                        workspace.to_string_lossy().into_owned(),
-                        Arc::clone(&subagents.factory),
-                        Arc::clone(&artifacts),
-                        child_harnesses,
-                        Some(coding_bindings.router.clone()),
-                    ));
+                let host = subagents.build_host(
+                    workspace.to_path_buf(),
+                    session.directory().to_path_buf(),
+                    session_id.clone(),
+                    workspace.to_string_lossy().into_owned(),
+                    Arc::clone(&artifacts),
+                    child_harnesses,
+                    Some(coding_bindings.router.clone()),
+                );
                 let tasks: Arc<dyn tea_core::runtime::TaskRuntime> =
                     Arc::new(SmolTaskRuntime::new());
                 Some(SubagentServices {
@@ -591,7 +1023,8 @@ pub(super) fn rebuild_host_session_metadata(
 
 /// Reopen one durable session with the exact model selected by its immutable
 /// header. The supervisor reconstructs its active revision from the committed
-/// catalog and semantic branch, then the caller may resume any open operation.
+/// catalog and semantic branch without executing it. A caller may later make
+/// an explicit recovery decision, but reopening itself never resumes work.
 pub(super) fn reopen_host_harness(
     input: HostHarnessReopen<'_>,
 ) -> Result<Arc<HostHarness>, AppError> {
@@ -608,9 +1041,48 @@ pub(super) fn reopen_mock_host_harness(
     reopen_host_harness_with_operations(input, super::mock::coding_operations())
 }
 
+/// Reopen a verification-owned harness without reading terminal web
+/// credentials. This remains passive: it reconstructs durable state but never
+/// drives an operation or recovery plan.
+#[cfg(feature = "live-verification")]
+fn reopen_live_verification_host_harness(
+    input: HostHarnessReopen<'_>,
+) -> Result<Arc<HostHarness>, AppError> {
+    reopen_host_harness_with_operations_and_web_credential_source(
+        input,
+        Arc::new(super::nonblocking_operations::NonblockingCodingOperations),
+        WebCapabilityCredentialSource::NoAmbientCredential,
+    )
+}
+
+#[cfg(feature = "live-verification")]
+fn require_live_verification_authoring_mode(harness: &HostHarness) -> Result<(), AppError> {
+    let snapshot = harness.snapshot()?;
+    let header = host_session_header_from_snapshot(&snapshot)?;
+    if header.self_extension_mode != SelfExtensionMode::Author {
+        return Err(AppError::Setup(format!(
+            "live authoring verification requires an author-mode session, found {}",
+            header.self_extension_mode.as_str()
+        )));
+    }
+    Ok(())
+}
+
 fn reopen_host_harness_with_operations(
     input: HostHarnessReopen<'_>,
     coding_operations: Arc<dyn CodingOperations>,
+) -> Result<Arc<HostHarness>, AppError> {
+    reopen_host_harness_with_operations_and_web_credential_source(
+        input,
+        coding_operations,
+        WebCapabilityCredentialSource::TerminalEnvironment,
+    )
+}
+
+fn reopen_host_harness_with_operations_and_web_credential_source(
+    input: HostHarnessReopen<'_>,
+    coding_operations: Arc<dyn CodingOperations>,
+    web_credential_source: WebCapabilityCredentialSource,
 ) -> Result<Arc<HostHarness>, AppError> {
     let HostHarnessReopen {
         tea_home,
@@ -688,7 +1160,7 @@ fn reopen_host_harness_with_operations(
     );
     let extension_state = ExtensionStateBindings::build()?;
     let coding_bindings = coding_capability_bindings_with_operations(workspace, coding_operations)?;
-    let (web_binding, web_binding_ref) = web_capability_binding()?;
+    let (web_binding, web_binding_ref) = web_credential_source.binding()?;
     let mut capability_catalog = PluginCapabilityCatalog::new();
     for binding in extension_state.bindings.iter().cloned() {
         capability_catalog
@@ -707,10 +1179,10 @@ fn reopen_host_harness_with_operations(
     capability_catalog
         .fix_tool_capabilities("web", web_tool_capability_grants(), BTreeSet::new())
         .map_err(|error| AppError::Setup(error.to_string()))?;
-    let persisted_subagent_policy = reopen_subagent_policy(
-        agent_graph.policy.as_ref(),
-        subagents.as_ref().map(|subagents| &subagents.config),
-    )?;
+    let persisted_subagent_policy = match subagents.as_ref() {
+        Some(subagents) => subagents.reopen_policy(agent_graph.policy.as_ref(), &stored_model)?,
+        None => reopen_subagent_policy(agent_graph.policy.as_ref(), None)?,
+    };
     let subagent_services = match (persisted_subagent_policy, subagents.as_ref()) {
         // A later global enablement must not rewrite the immutable surface of
         // a session that was created without optional child services.
@@ -726,7 +1198,7 @@ fn reopen_host_harness_with_operations(
             let resource_limits = HarnessResourceLimits::default();
             let child_harnesses = derive_child_harnesses(
                 Arc::clone(&artifacts),
-                Arc::clone(&provider),
+                subagents.child_seed_provider(&provider),
                 &child_configuration,
                 &policy,
                 &resource_limits,
@@ -735,16 +1207,15 @@ fn reopen_host_harness_with_operations(
                 Some(coding_bindings.references.as_slice()),
                 snapshot.header().created_at_ms,
             )?;
-            let host: Arc<dyn tea_core::runtime::SubagentHost> = Arc::new(TuiSubagentHost::new(
+            let host = subagents.build_host(
                 workspace.to_path_buf(),
                 session.directory().to_path_buf(),
                 session_id.clone(),
                 header.workspace.clone(),
-                Arc::clone(&subagents.factory),
                 Arc::clone(&artifacts),
                 child_harnesses,
                 Some(coding_bindings.router.clone()),
-            ));
+            );
             let tasks: Arc<dyn tea_core::runtime::TaskRuntime> = Arc::new(SmolTaskRuntime::new());
             Some(SubagentServices {
                 policy,
@@ -799,15 +1270,12 @@ fn extension_state_binding(
     limits: ExtensionToolLimits,
 ) -> Result<(ExtensionStateHandle, PluginCapabilityBinding), AppError> {
     let state = ExtensionStateHandle::new();
-    let capability = ExtensionStateCapability::new(extension_id, state.clone())
-        .map_err(|error| AppError::Setup(error.to_string()))?;
-    let binding = PluginCapabilityBinding::new(
+    let binding = PluginCapabilityBinding::new_extension_state(
         extension_id,
-        "extension.state",
         "v1",
         Digest::from_bytes("tea-extension-state-capability-v1"),
         limits,
-        Arc::new(capability),
+        state.clone(),
     )
     .map_err(|error| AppError::Setup(error.to_string()))?;
     Ok((state, binding))
@@ -1173,7 +1641,7 @@ fn web_tool_capability_grants() -> BTreeMap<String, String> {
 /// durable supervisor remains the sole execution and recovery authority.
 pub(super) fn project_host_messages(
     snapshot: &SessionSnapshot,
-) -> Result<Vec<AgentMessage>, AppError> {
+) -> Result<Vec<HostTranscriptMessage>, AppError> {
     let reduction = tea_session::reduce_lane(snapshot.clone(), LaneId::main())
         .map_err(|error| AppError::Setup(error.to_string()))?;
     let entries = snapshot
@@ -1196,8 +1664,8 @@ pub(super) fn project_host_messages(
     let mut messages = Vec::new();
     for entry in branch {
         let message_id = MessageId(messages.len() as u64 + 1);
-        match &entry.body {
-            SessionEntry::UserMessage(user) => messages.push(AgentMessage::User {
+        let message = match &entry.body {
+            SessionEntry::UserMessage(user) => Some(AgentMessage::User {
                 id: message_id,
                 content: user.content.clone(),
             }),
@@ -1240,16 +1708,16 @@ pub(super) fn project_host_messages(
                         })
                     })
                     .collect::<Result<Vec<_>, AppError>>()?;
-                messages.push(AgentMessage::Assistant {
+                Some(AgentMessage::Assistant {
                     id: message_id,
                     content: assistant.content.clone(),
                     tool_calls,
                     stop_reason: None,
                     error_message: assistant.error_message.clone(),
                     opaque_context,
-                });
+                })
             }
-            SessionEntry::ToolResult(result) => messages.push(AgentMessage::ToolResult {
+            SessionEntry::ToolResult(result) => Some(AgentMessage::ToolResult {
                 id: message_id,
                 tool_call_id: ToolCallId::new(result.tool_call_id.clone()).map_err(|error| {
                     AppError::Setup(format!(
@@ -1265,7 +1733,7 @@ pub(super) fn project_host_messages(
                 is_error: result.is_error,
                 failure: None,
             }),
-            SessionEntry::Compaction(compaction) => messages.push(AgentMessage::Assistant {
+            SessionEntry::Compaction(compaction) => Some(AgentMessage::Assistant {
                 id: message_id,
                 content: compaction.summary.clone(),
                 tool_calls: Vec::new(),
@@ -1273,7 +1741,7 @@ pub(super) fn project_host_messages(
                 error_message: None,
                 opaque_context: Vec::new(),
             }),
-            SessionEntry::BranchSummary(summary) => messages.push(AgentMessage::Assistant {
+            SessionEntry::BranchSummary(summary) => Some(AgentMessage::Assistant {
                 id: message_id,
                 content: summary.summary.clone(),
                 tool_calls: Vec::new(),
@@ -1286,7 +1754,13 @@ pub(super) fn project_host_messages(
             | SessionEntry::ToolActivationChanged(_)
             | SessionEntry::HarnessRevisionChanged(_)
             | SessionEntry::PluginMemory(_)
-            | SessionEntry::Custom(_) => {}
+            | SessionEntry::Custom(_) => None,
+        };
+        if let Some(message) = message {
+            messages.push(HostTranscriptMessage {
+                entry_id: entry.header.id.clone(),
+                message,
+            });
         }
     }
     Ok(messages)
@@ -1309,36 +1783,91 @@ async fn stream_host_prompt_to<W: Write>(
     prompt: String,
     output: &mut W,
 ) -> Result<(), AppError> {
-    let mut drive = Box::pin(harness.run_root_prompt(prompt));
+    let recovery = harness.recovery_report()?;
+    if recovery
+        .lanes
+        .iter()
+        .any(|lane| lane.lane_id == LaneId::main())
+    {
+        return Err(AppError::Setup(
+            "durable root recovery requires explicit continuation before accepting a prompt"
+                .into(),
+        ));
+    }
+    let accepted = harness.submit_input(prompt)?;
+    let input_id = accepted.id().clone();
+    let completion = accepted.completion().clone();
+    let mut subscription = subscription;
+    let mut drive = Box::pin(harness.drive_next_input(IdleAuthorization::UserInputOnly));
     loop {
-        if let Err(output_error) = drain_prompt_events_to(&subscription, output) {
-            if let Err(cleanup_error) =
-                settle_prompt_after_output_failure(&harness, &mut drive).await
-            {
-                return Err(AppError::Setup(format!(
-                    "{output_error}; durable root cleanup requires recovery: {cleanup_error}"
-                )));
+        match drain_prompt_events_to(&subscription, output) {
+            Err(output_error) => {
+                if let Err(cleanup_error) =
+                    settle_prompt_after_output_failure(&harness, &mut drive).await
+                {
+                    return Err(AppError::Setup(format!(
+                        "{output_error}; durable root cleanup requires recovery: {cleanup_error}"
+                    )));
+                }
+                return Err(output_error);
             }
-            return Err(output_error);
+            Ok(PromptEventDrain::Resubscribe) => {
+                subscription = harness.subscribe_events()?;
+            }
+            Ok(PromptEventDrain::Drained) => {}
         }
         if let Some(result) = smol::future::poll_once(&mut drive).await {
-            let output_result = drain_prompt_events_to(&subscription, output);
-            let root_result = result.map(|_| ()).map_err(AppError::from);
-            if let Err(cleanup_error) = require_root_settled(&harness) {
-                let completed_diagnostic = match (&output_result, &root_result) {
-                    (Err(output_error), Err(root_error)) => {
-                        format!("{output_error}; root drive failed: {root_error}")
+            let trailing_events = match drain_prompt_events_to(&subscription, output) {
+                Ok(events) => events,
+                Err(output_error) => {
+                    if let Err(cleanup_error) =
+                        settle_prompt_after_output_failure(&harness, &mut drive).await
+                    {
+                        return Err(AppError::Setup(format!(
+                            "{output_error}; durable root cleanup requires recovery: {cleanup_error}"
+                        )));
                     }
-                    (Err(output_error), Ok(())) => output_error.to_string(),
-                    (Ok(()), Err(root_error)) => root_error.to_string(),
-                    (Ok(()), Ok(())) => "root driver returned".into(),
-                };
-                return Err(AppError::Setup(format!(
-                    "{completed_diagnostic}; durable root cleanup requires recovery: {cleanup_error}"
-                )));
+                    return Err(output_error);
+                }
+            };
+            match trailing_events {
+                PromptEventDrain::Drained => {}
+                PromptEventDrain::Resubscribe => {
+                    subscription = harness.subscribe_events()?;
+                    if let Err(output_error) = drain_prompt_events_to(&subscription, output) {
+                        if let Err(cleanup_error) =
+                            settle_prompt_after_output_failure(&harness, &mut drive).await
+                        {
+                            return Err(AppError::Setup(format!(
+                                "{output_error}; durable root cleanup requires recovery: {cleanup_error}"
+                            )));
+                        }
+                        return Err(output_error);
+                    }
+                }
             }
-            output_result?;
-            root_result?;
+            let completion = match result {
+                Ok(IdleDriveOutcome::Inputs { input_ids, .. })
+                    if input_ids.iter().any(|candidate| candidate == &input_id) =>
+                {
+                    completion.wait().await
+                }
+                Ok(IdleDriveOutcome::Inputs { .. }) => {
+                    return Err(AppError::Setup(
+                        "one-shot driver settled without its accepted input".into(),
+                    ));
+                }
+                Ok(outcome) => {
+                    return Err(AppError::Setup(format!(
+                        "one-shot driver did not dispatch its accepted input: {outcome:?}"
+                    )));
+                }
+                Err(error) => match completion.try_result() {
+                    Some(completion) => completion,
+                    None => return Err(AppError::from(error)),
+                },
+            };
+            require_completed_input(&completion)?;
             output
                 .write_all(b"\n")
                 .map_err(|error| AppError::Setup(format!("could not write response: {error}")))?;
@@ -1356,10 +1885,7 @@ async fn settle_prompt_after_output_failure(
     drive: &mut std::pin::Pin<
         Box<
             impl std::future::Future<
-                Output = Result<
-                    tea_core::runtime::DurableOperation,
-                    tea_core::harness::HarnessError,
-                >,
+                Output = Result<IdleDriveOutcome, tea_core::harness::HarnessError>,
             >,
         >,
     >,
@@ -1370,6 +1896,23 @@ async fn settle_prompt_after_output_failure(
             return require_root_settled(harness);
         }
         smol::future::yield_now().await;
+    }
+}
+
+/// One-shot success is tied to the exact input accepted above, never to a
+/// best-effort event stream or a global "idle" observation.
+fn require_completed_input(completion: &InputCompletion) -> Result<(), AppError> {
+    match completion.outcome() {
+        InputOutcome::Operation {
+            outcome: tea_session::OperationOutcome::Completed,
+            ..
+        } => Ok(()),
+        InputOutcome::Operation { outcome, .. } => Err(AppError::Setup(format!(
+            "one-shot input settled with {outcome:?}"
+        ))),
+        InputOutcome::Withdrawn => Err(AppError::Setup(
+            "one-shot input was withdrawn before dispatch".into(),
+        )),
     }
 }
 
@@ -1388,26 +1931,43 @@ pub(super) fn require_root_settled(
     Err(tea_core::harness::HarnessError::RecoveryRequired { plan })
 }
 
+enum PromptEventDrain {
+    Drained,
+    Resubscribe,
+}
+
 fn drain_prompt_events_to<W: Write>(
     subscription: &TeaEventSubscription,
     output: &mut W,
-) -> Result<(), AppError> {
+) -> Result<PromptEventDrain, AppError> {
     let mut wrote = false;
-    while let Ok(event) = subscription.try_recv() {
-        if let TeaEvent::Agent { lane_id, event } = event {
-            if lane_id != LaneId::main() {
+    loop {
+        let event = match subscription.try_recv() {
+            Ok(event) => event,
+            Err(TeaEventTryRecvError::Empty) => break,
+            Err(TeaEventTryRecvError::Lagged | TeaEventTryRecvError::Disconnected) => {
+                return Ok(PromptEventDrain::Resubscribe);
+            }
+        };
+        if let TeaEvent::Preview(PreviewEvent::AssistantText {
+            identity,
+            text,
+            truncated,
+            ..
+        }) = event
+        {
+            if identity.run.lane_id != LaneId::main() {
                 continue;
             }
-            if let AgentEventKind::MessageUpdate {
-                text_delta: Some(text),
-                ..
-            } = event.kind
-            {
-                output.write_all(text.as_bytes()).map_err(|error| {
+            if truncated {
+                output.write_all("…".as_bytes()).map_err(|error| {
                     AppError::Setup(format!("could not write response: {error}"))
                 })?;
-                wrote = true;
             }
+            output.write_all(text.as_bytes()).map_err(|error| {
+                AppError::Setup(format!("could not write response: {error}"))
+            })?;
+            wrote = true;
         }
     }
     if wrote {
@@ -1415,7 +1975,7 @@ fn drain_prompt_events_to<W: Write>(
             .flush()
             .map_err(|error| AppError::Setup(format!("could not flush response: {error}")))?;
     }
-    Ok(())
+    Ok(PromptEventDrain::Drained)
 }
 
 fn epoch_template(
@@ -2284,9 +2844,10 @@ mod tests {
     use std::thread;
     use std::time::{Duration, Instant};
     use tea_core::effect::{NoopEffectGate, RunProvenance};
+    use tea_core::event::AgentEventKind;
     use tea_core::harness::{CandidateHypothesis, HarnessApplyRequest, HarnessFilePatch};
     use tea_core::hooks::NoHooks;
-    use tea_core::runtime::HostedEpochInput;
+    use tea_core::runtime::{ExtensionCommandAdmission, HostedEpochInput};
     use tea_core::scheduler::{
         CancellationToken, ModelEventFuture, ModelEventStream, ModelFuture, ModelRequest,
         ModelStream, ModelStreamEvent,
@@ -2712,23 +3273,41 @@ mod tests {
         let mut results = Vec::new();
         let mut activity = Vec::new();
         while let Ok(event) = subscription.try_recv() {
-            let TeaEvent::Agent { lane_id, event } = event else {
-                continue;
-            };
-            if lane_id != LaneId::main() {
-                continue;
-            }
-            presentation.apply_event(&event);
-            match event.kind {
-                AgentEventKind::ToolExecutionUpdate { update, .. } => {
-                    if let Some(published) = update.activity {
-                        activity.push(published);
+            let terminal_previews = event.terminal_preview_identities();
+            let completed_run = event.completed_observation_run().cloned();
+            match event {
+                TeaEvent::Agent { run, event } if run.lane_id == LaneId::main() => {
+                    presentation.apply_observed_event(&run, &event);
+                    if let AgentEventKind::ToolExecutionEnd {
+                        tool_name, result, ..
+                    } = event.kind
+                    {
+                        if tool_name == "todo" {
+                            results.push(result.content);
+                        }
                     }
                 }
-                AgentEventKind::ToolExecutionEnd {
-                    tool_name, result, ..
-                } if tool_name == "todo" => results.push(result.content),
-                _ => {}
+                TeaEvent::Preview(preview) if preview.identity().run.lane_id == LaneId::main() => {
+                    if let PreviewEvent::ToolProgress {
+                        activity: Some(published),
+                        ..
+                    } = &preview
+                    {
+                        activity.push(published.clone());
+                    }
+                    presentation.apply_preview(&preview);
+                }
+                TeaEvent::Agent { .. }
+                | TeaEvent::Preview(_)
+                | TeaEvent::Session(_)
+                | TeaEvent::Harness(_)
+                | TeaEvent::Artifact(_) => {}
+            }
+            presentation.fence_previews(terminal_previews);
+            if let Some(run) = completed_run {
+                if run.lane_id == LaneId::main() {
+                    presentation.clear_previews_for_run(&run);
+                }
             }
         }
         (results, activity)
@@ -2890,12 +3469,18 @@ mod tests {
         );
 
         // `/todos` prints the same canonical list for an idle human.
-        let printed = harness
+        let printed = match harness
             .dispatch_extension_command("/todos", String::new())
             .expect("/todos dispatches")
-            .result
-            .notice
-            .expect("/todos prints the list");
+        {
+            ExtensionCommandAdmission::Applied(dispatch) => dispatch
+                .result
+                .notice
+                .expect("/todos prints the list"),
+            ExtensionCommandAdmission::Queued { .. } => {
+                panic!("idle /todos command must apply immediately")
+            }
+        };
         assert!(
             printed.contains("- [ ] #7 Durable reopen evidence"),
             "{printed}"
@@ -3039,15 +3624,15 @@ mod tests {
     }
 
     fn durable_test_subagent_config(config: SubagentTuiConfig) -> HostSubagentConfig {
-        HostSubagentConfig {
-            factory: Arc::new(ProviderFactory::new(
+        HostSubagentConfig::terminal(
+            Arc::new(ProviderFactory::new(
                 tea_providers::ProviderRegistry::new(),
                 None,
                 None,
                 std::path::PathBuf::from("/tmp/tea-provider-factory-fixture"),
             )),
             config,
-        }
+        )
     }
 
     #[test]
@@ -3273,19 +3858,19 @@ data: [DONE]
         };
         let configuration = host_configuration(&workspace.to_string_lossy())
             .expect("root host configuration builds");
-        let subagents = HostSubagentConfig {
-            factory: Arc::new(ProviderFactory::new(
+        let subagents = HostSubagentConfig::terminal(
+            Arc::new(ProviderFactory::new(
                 tea_providers::ProviderRegistry::new(),
                 Some(format!("http://{address}/v1")),
                 None,
                 std::path::PathBuf::from("/tmp/tea-provider-factory-fixture"),
             )),
-            config: SubagentTuiConfig {
+            SubagentTuiConfig {
                 provider: Some("local".into()),
                 models: Some(vec!["fixture-local-model".into()]),
                 ..SubagentTuiConfig::default()
             },
-        };
+        );
         let root_provider = Arc::new(RootSubagentScriptProvider::default());
         let harness = create_host_harness(HostHarnessConfig {
             tea_home: &home,
@@ -4200,19 +4785,19 @@ data: [DONE]
         };
         let configuration = host_configuration(&workspace.to_string_lossy())
             .expect("root host configuration builds");
-        let subagents = HostSubagentConfig {
-            factory: Arc::new(ProviderFactory::new(
+        let subagents = HostSubagentConfig::terminal(
+            Arc::new(ProviderFactory::new(
                 tea_providers::ProviderRegistry::new(),
                 Some(format!("http://{address}/v1")),
                 None,
                 std::path::PathBuf::from("/tmp/tea-provider-factory-fixture"),
             )),
-            config: SubagentTuiConfig {
+            SubagentTuiConfig {
                 provider: Some("local".into()),
                 models: Some(vec!["fixture-local-model".into()]),
                 ..SubagentTuiConfig::default()
             },
-        };
+        );
         let harness = create_host_harness(HostHarnessConfig {
             tea_home: &home,
             workspace: &workspace,
@@ -4457,11 +5042,17 @@ data: [DONE]
         let messages = project_host_messages(&after).expect("presentation projection");
         assert!(matches!(
             messages.first(),
-            Some(AgentMessage::User { content, .. }) if content == "retain this durable prompt"
+            Some(HostTranscriptMessage {
+                message: AgentMessage::User { content, .. },
+                ..
+            }) if content == "retain this durable prompt"
         ));
         assert!(matches!(
             messages.get(1),
-            Some(AgentMessage::Assistant { content, .. }) if content == "durable"
+            Some(HostTranscriptMessage {
+                message: AgentMessage::Assistant { content, .. },
+                ..
+            }) if content == "durable"
         ));
 
         drop(reopened);

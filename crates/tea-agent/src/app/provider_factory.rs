@@ -10,6 +10,10 @@ use std::num::NonZeroU64;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tea_core::runtime::{SubagentModel, SubagentPolicy};
+use tea_core::scheduler::{
+    CancellationToken, ModelEventStream, ModelFuture, ModelProvider, ModelRequest, ModelStream,
+    ModelStreamEvent,
+};
 use tea_core::state::ModelDescriptor;
 use tea_providers::{ConfiguredProvider, ProviderConfiguration, ProviderRegistry};
 
@@ -33,6 +37,43 @@ impl From<&ModelDescriptor> for ProviderDescriptorKey {
             model: descriptor.model.clone(),
             revision: descriptor.revision.clone(),
         }
+    }
+}
+
+/// A descriptor-pinned provider port which acquires terminal authority only
+/// when core is about to issue a model request.
+///
+/// Reopening a durable session needs a complete `RuntimeServices` value so it
+/// can resolve the immutable harness, but that read-only operation must not
+/// require a current credential. The terminal validates authority before it
+/// admits a new prompt. This fallback still reports an honest terminal model
+/// error if authority disappears between that validation and dispatch.
+#[derive(Debug)]
+struct LazyProvider {
+    factory: Arc<ProviderFactory>,
+    descriptor: ModelDescriptor,
+}
+
+impl ModelProvider for LazyProvider {
+    fn stream<'a>(
+        &'a self,
+        request: ModelRequest,
+        cancellation: CancellationToken,
+    ) -> ModelFuture<'a> {
+        let configured = self
+            .factory
+            .configured(&self.descriptor)
+            .map(|configured| Arc::clone(&configured.provider));
+        Box::pin(async move {
+            match configured {
+                Ok(provider) => provider.stream(request, cancellation).await,
+                Err(error) => Ok(Box::new(ModelStream {
+                    events: vec![ModelStreamEvent::Error {
+                        message: format!("provider authority is unavailable: {error}"),
+                    }],
+                }) as Box<dyn ModelEventStream>),
+            }
+        })
     }
 }
 
@@ -121,6 +162,65 @@ impl ProviderFactory {
             cache: Mutex::new(BTreeMap::new()),
             compactors: Mutex::new(BTreeMap::new()),
         }
+    }
+
+    /// Validate a terminal-selected descriptor without consulting credentials
+    /// or constructing an adapter.
+    pub(super) fn validate_descriptor(
+        &self,
+        descriptor: &ModelDescriptor,
+    ) -> Result<(), AppError> {
+        if descriptor.provider == mock::PROVIDER_ID {
+            if descriptor.model != mock::DEFAULT_MODEL_ID {
+                return Err(AppError::Setup(format!(
+                    "mock provider only supports model {:?}",
+                    mock::DEFAULT_MODEL_ID
+                )));
+            }
+            return Ok(());
+        }
+        self.registry
+            .resolve_model(&descriptor.provider, descriptor.model.clone())?;
+        Ok(())
+    }
+
+    /// Build a descriptor-pinned provider port without loading credentials.
+    ///
+    /// The returned port resolves the concrete adapter only on its first
+    /// request. `validate_descriptor` retains the closed catalog boundary
+    /// even when no current credential is available.
+    pub(super) fn lazy_provider(
+        self: &Arc<Self>,
+        descriptor: &ModelDescriptor,
+    ) -> Result<Arc<dyn ModelProvider>, AppError> {
+        self.validate_descriptor(descriptor)?;
+        Ok(Arc::new(LazyProvider {
+            factory: Arc::clone(self),
+            descriptor: descriptor.clone(),
+        }))
+    }
+
+    /// Bind a lazy compactor to the same descriptor-pinned provider port.
+    ///
+    /// This keeps automatic compaction from forcing credential lookup during
+    /// session reopen while preserving the exact provider/model boundary once
+    /// an operation actually executes.
+    pub(super) fn lazy_compactor(
+        self: &Arc<Self>,
+        descriptor: &ModelDescriptor,
+    ) -> Result<Arc<ProviderCompactor>, AppError> {
+        let key = ProviderDescriptorKey::from(descriptor);
+        let mut compactors = self
+            .compactors
+            .lock()
+            .map_err(|_| AppError::Setup("provider compactor cache lock is poisoned".into()))?;
+        if let Some(compactor) = compactors.get(&key) {
+            return Ok(Arc::clone(compactor));
+        }
+        let provider = self.lazy_provider(descriptor)?;
+        let compactor = Arc::new(ProviderCompactor::new(descriptor.clone(), provider));
+        compactors.insert(key, Arc::clone(&compactor));
+        Ok(compactor)
     }
 
     /// Resolve the fixed, ordered child model catalog authorized for one root model.
@@ -256,6 +356,7 @@ impl ProviderFactory {
         &self,
         descriptor: &ModelDescriptor,
     ) -> Result<Arc<ConfiguredProvider>, AppError> {
+        self.validate_descriptor(descriptor)?;
         let key = ProviderDescriptorKey::from(descriptor);
         let mut cache = self
             .cache
@@ -626,6 +727,31 @@ mod tests {
         assert!(Arc::ptr_eq(&first_openrouter, &second_openrouter));
         assert_eq!(credentials.loads.load(Ordering::SeqCst), 1);
         assert_eq!(factory.cached_adapter_count(), 2);
+    }
+
+    #[test]
+    fn descriptor_pinned_provider_defers_credential_lookup_until_request_start() {
+        let credentials = Arc::new(RecordingCredentials {
+            loads: AtomicUsize::new(0),
+        });
+        let factory = Arc::new(factory(Arc::clone(&credentials) as Arc<dyn CredentialSource>));
+        let descriptor = root("openrouter", "openai/gpt-5.6-luna");
+
+        let provider = factory
+            .lazy_provider(&descriptor)
+            .expect("the static descriptor is valid without credentials");
+
+        assert_eq!(
+            credentials.loads.load(Ordering::SeqCst),
+            0,
+            "constructing reopen-safe runtime services must not read credentials"
+        );
+        let _request = provider.stream(ModelRequest::default(), CancellationToken::new());
+        assert_eq!(
+            credentials.loads.load(Ordering::SeqCst),
+            1,
+            "the concrete adapter is resolved only when an execution request begins"
+        );
     }
 
     #[cfg(feature = "provider-codex")]

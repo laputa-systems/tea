@@ -8,10 +8,13 @@ use std::time::Duration;
 use tea_core::agent::AgentConfiguration;
 use tea_core::coding::CodingHost;
 use tea_core::compaction::AutomaticCompactionPolicy;
-use tea_core::error::CoreError;
 use tea_core::harness::HarnessError;
-use tea_core::runtime::{HarnessEvent, SessionEvent, TeaEvent, TeaEventSubscription};
+use tea_core::runtime::{
+    HarnessEvent, IdleAuthorization, IdleDriveOutcome, SessionEvent, TeaEvent,
+    TeaEventSubscription, TeaEventTryRecvError, TeaObservationSnapshot,
+};
 use tea_providers::ProviderRegistry;
+use tea_session::{EntryId, LaneId, TurnCheckpointId};
 use tea_tui::Size;
 
 use super::compaction::ProviderCompactor;
@@ -21,24 +24,32 @@ use super::host::host_configuration;
 use super::mock;
 use super::nonblocking_operations::NonblockingCodingOperations;
 use super::provider_factory::ProviderFactory;
-use super::state::{AppState, TranscriptEntry, UiStatus};
+use super::state::{AppState, ToolState, TranscriptEntry, UiStatus};
 use crate::cli::CliOptions;
 use std::sync::Arc;
 use tea_core::state::ThinkingLevel;
 
+pub(super) enum RootTaskOutcome {
+    Drive(IdleDriveOutcome),
+    Recovery,
+}
+
 enum RootTaskCompletion {
-    Settled(Result<(), HarnessError>),
+    Settled(Result<RootTaskOutcome, HarnessError>),
     Disconnected,
 }
 
 pub(super) struct OwnedRootTask {
-    receiver: Receiver<Result<(), HarnessError>>,
+    receiver: Receiver<Result<RootTaskOutcome, HarnessError>>,
     task: smol::Task<()>,
     completion: Option<RootTaskCompletion>,
 }
 
 impl OwnedRootTask {
-    fn new(receiver: Receiver<Result<(), HarnessError>>, task: smol::Task<()>) -> Self {
+    fn new(
+        receiver: Receiver<Result<RootTaskOutcome, HarnessError>>,
+        task: smol::Task<()>,
+    ) -> Self {
         Self {
             receiver,
             task,
@@ -47,7 +58,9 @@ impl OwnedRootTask {
     }
 
     #[cfg(test)]
-    pub(super) fn completed_for_test(receiver: Receiver<Result<(), HarnessError>>) -> Self {
+    pub(super) fn completed_for_test(
+        receiver: Receiver<Result<RootTaskOutcome, HarnessError>>,
+    ) -> Self {
         let task = smol::spawn(async {});
         smol::block_on(async {
             while !task.is_finished() {
@@ -83,16 +96,13 @@ pub struct App {
     /// Lazy host-owned adapter construction for root and future child lanes.
     pub(super) provider_factory: Option<Arc<ProviderFactory>>,
     pub(super) workspace: Option<PathBuf>,
-    /// The idle prompt handed to the current run, retained only to restore local input after a
-    /// failed or cancelled operation. The durable session remains the transcript source of truth.
-    pub(super) submitted_prompt: Option<String>,
-    /// Accepted extension controls held until the current durable operation
-    /// settles. They are host-local presentation requests, never fake user
-    /// messages or mutations of an in-flight provider request.
-    pub(super) queued_extension_commands: Vec<(String, String)>,
     /// Number of front-contiguous semantic entries already written once into
     /// native terminal scrollback for this presentation generation.
     pub(super) committed_entries: usize,
+    /// Durable identities corresponding to committed canonical rows. Local
+    /// terminal-only rows are intentionally excluded, allowing an atomic
+    /// snapshot to retain the EntryId-identical scrollback frontier.
+    pub(super) committed_entry_ids: Vec<EntryId>,
     /// Last semantic projection replacement rendered by this terminal host.
     pub(super) rendered_projection_generation: u64,
     pub(super) quitting: bool,
@@ -116,9 +126,8 @@ impl App {
             registry: ProviderRegistry::new(),
             provider_factory: None,
             workspace: None,
-            submitted_prompt: None,
-            queued_extension_commands: Vec::new(),
             committed_entries: 0,
+            committed_entry_ids: Vec::new(),
             rendered_projection_generation: 0,
             quitting: false,
         }
@@ -179,6 +188,7 @@ impl App {
             ));
         }
         self.assemble_host()?;
+        self.ensure_execution_authority()?;
         let harness = self.ensure_durable_harness()?;
         let subscription = self.durable_subscription.take().ok_or_else(|| {
             AppError::Setup("durable event subscription is not initialized".into())
@@ -298,6 +308,23 @@ impl App {
             .ok_or_else(|| AppError::Setup("provider factory could not initialize".into()))
     }
 
+    /// Verify that the currently selected descriptor still has executable
+    /// terminal authority before durable prompt admission.
+    ///
+    /// Session reopen deliberately installs descriptor-pinned lazy services so
+    /// inspection and restoration do not require credentials. A normal prompt
+    /// must nevertheless fail before its text becomes an accepted input when
+    /// the host cannot currently construct that descriptor's adapter.
+    pub(super) fn ensure_execution_authority(&mut self) -> Result<(), AppError> {
+        let descriptor = self
+            .state
+            .selected_model
+            .clone()
+            .ok_or_else(|| AppError::Setup("select a model first".into()))?;
+        self.provider_factory()?.configured(&descriptor)?;
+        Ok(())
+    }
+
     /// Return terminal-local child authority only for an explicitly enabled
     /// application mode. The factory itself remains lazy: credentials and
     /// model adapters are not touched here.
@@ -312,10 +339,10 @@ impl App {
         if !config.features.subagents {
             return Ok(None);
         }
-        Ok(Some(super::durable::HostSubagentConfig {
-            factory: self.provider_factory()?,
-            config: config.subagents,
-        }))
+        Ok(Some(super::durable::HostSubagentConfig::terminal(
+            self.provider_factory()?,
+            config.subagents,
+        )))
     }
 
     async fn event_loop(&mut self, terminal: &mut TerminalGuard) -> Result<(), AppError> {
@@ -368,7 +395,17 @@ impl App {
             };
             match event {
                 Ok(event) => self.project_durable_event(event),
-                Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
+                Err(TeaEventTryRecvError::Empty) => break,
+                Err(TeaEventTryRecvError::Lagged) => {
+                    self.resubscribe_durable_projection("live updates lagged; refreshed durable state");
+                    break;
+                }
+                Err(TeaEventTryRecvError::Disconnected) => {
+                    self.resubscribe_durable_projection(
+                        "live updates disconnected; refreshed durable state",
+                    );
+                    break;
+                }
             }
         }
     }
@@ -377,37 +414,41 @@ impl App {
     /// tools, and notices never become root transcript rows; only accounting
     /// is safe to aggregate before an explicit `wait_agent` report.
     pub(super) fn project_durable_event(&mut self, event: TeaEvent) {
+        let terminal_previews = event.terminal_preview_identities();
+        let completed_run = event.completed_observation_run().cloned();
         match event {
-            TeaEvent::Agent { lane_id, event } if lane_id == tea_session::LaneId::main() => {
-                self.state.apply_event(&event);
+            TeaEvent::Agent { run, event } if run.lane_id == tea_session::LaneId::main() => {
+                self.state.apply_observed_event(&run, &event);
             }
             TeaEvent::Agent { event, .. } => self.state.apply_background_usage_event(&event),
+            TeaEvent::Preview(preview)
+                if preview.identity().run.lane_id == tea_session::LaneId::main() =>
+            {
+                self.state.apply_preview(&preview);
+            }
+            TeaEvent::Preview(_) => {}
             TeaEvent::Session(SessionEvent::OperationAccepted {
-                sequence, lane_id, ..
+                lane_id, ..
             }) => {
-                // The session writer appended the root user entry before this
-                // event. Child acceptance must not duplicate the root draft in
-                // local history.
+                // Durable input admission is projected directly from the
+                // session snapshot. Observation delivery is lossy, so this
+                // event must never be the sole source of a user transcript
+                // row or input identity.
                 if lane_id == tea_session::LaneId::main() {
-                    if let Some(prompt) = self.submitted_prompt.as_deref() {
-                        // Root acceptance is the durable boundary for the
-                        // submitted prompt. The core epoch receives that user
-                        // entry as context, but intentionally does not emit it
-                        // as a new live `MessageStart`; project it here so the
-                        // prompt moves from the composer into the transcript
-                        // without disappearing during the first redraw.
-                        self.state.push_entry(
-                            Some(sequence.0),
-                            TranscriptEntry::User {
-                                text: prompt.to_owned(),
-                            },
-                        );
-                        self.state.record_history(prompt);
+                    self.bind_current_durable_projection();
+                    if let Err(error) = self.refresh_runtime_input_projection() {
+                        self.state.notice(error.to_string());
                     }
                 }
                 self.refresh_subagent_footer();
             }
-            TeaEvent::Session(_) => self.refresh_subagent_footer(),
+            TeaEvent::Session(_) => {
+                self.bind_current_durable_projection();
+                if let Err(error) = self.refresh_runtime_input_projection() {
+                    self.state.notice(error.to_string());
+                }
+                self.refresh_subagent_footer();
+            }
             TeaEvent::Harness(HarnessEvent::CandidateRejected {
                 stage,
                 code,
@@ -419,6 +460,117 @@ impl App {
             )),
             TeaEvent::Harness(_) | TeaEvent::Artifact(_) => {}
         }
+        self.state.fence_previews(terminal_previews);
+        if let Some(run) = completed_run {
+            if run.lane_id == tea_session::LaneId::main() {
+                self.state.clear_previews_for_run(&run);
+            }
+        }
+    }
+
+    /// Replace a terminal observation subscription after its bounded queue
+    /// reports lag or disconnects. This is a projection-only repair: it never
+    /// starts, resumes, aborts, or otherwise advances durable work.
+    fn resubscribe_durable_projection(&mut self, notice: &str) {
+        let Some(harness) = self.durable_harness.as_ref().cloned() else {
+            return;
+        };
+        let subscription = match harness.subscribe_events() {
+            Ok(subscription) => subscription,
+            Err(error) => {
+                self.state
+                    .notice(format!("{notice}; could not refresh: {error}"));
+                return;
+            }
+        };
+        match self.restore_observation_snapshot(&subscription.snapshot) {
+            Ok(()) => {
+                self.durable_subscription = Some(subscription);
+                if let Err(error) = self.refresh_runtime_input_projection() {
+                    self.state
+                        .notice(format!("{notice}; could not refresh queued inputs: {error}"));
+                    return;
+                }
+                self.state.notice(notice);
+            }
+            Err(error) => self
+                .state
+                .notice(format!("{notice}; could not rebuild projection: {error}")),
+        }
+    }
+
+    /// Rebuild terminal-visible durable rows from the single session prefix
+    /// captured with an event subscription, then layer only bounded root
+    /// previews from that same frontier on top.
+    fn restore_observation_snapshot(
+        &mut self,
+        snapshot: &TeaObservationSnapshot,
+    ) -> Result<(), AppError> {
+        let messages = super::durable::project_host_messages(&snapshot.session)?;
+        let has_durable_projection = self
+            .state
+            .transcript()
+            .iter()
+            .enumerate()
+            .any(|(index, entry)| {
+                self.state.transcript_entry_id(index).is_some()
+                    || requires_durable_entry_id(entry)
+            });
+        let replaced = !messages.is_empty() || has_durable_projection;
+        self.state.clear_previews();
+        if replaced {
+            self.state.restore_durable_messages(&messages);
+        }
+        for preview in &snapshot.view.previews {
+            if preview.identity().run.lane_id == tea_session::LaneId::main() {
+                self.state.apply_preview(preview);
+            }
+        }
+        let reduction = tea_session::reduce_lane(snapshot.session.clone(), tea_session::LaneId::main())
+            .map_err(|error| AppError::Setup(error.to_string()))?;
+        self.state
+            .set_session_id(Some(snapshot.session.header().session_id.to_string()));
+        self.state
+            .set_reported_usage(super::durable::core_usage(&reduction.usage_totals));
+        if replaced {
+            self.reconcile_committed_frontier();
+        }
+        Ok(())
+    }
+
+    /// Attach entry identities to the currently rendered durable prefix
+    /// without replacing it. This is intentionally best-effort presentation
+    /// work; the atomic subscription snapshot remains the resync authority.
+    fn bind_current_durable_projection(&mut self) {
+        let Some(harness) = self.durable_harness.as_ref() else {
+            return;
+        };
+        let Ok(snapshot) = harness.snapshot() else {
+            return;
+        };
+        let Ok(messages) = super::durable::project_host_messages(&snapshot) else {
+            return;
+        };
+        self.state.bind_durable_messages(&messages);
+    }
+
+    /// Keep only the longest exact durable identity prefix already emitted to
+    /// native scrollback. A session branch replacement therefore appends only
+    /// its changed suffix after a resnapshot instead of duplicating stale text.
+    pub(super) fn reconcile_committed_frontier(&mut self) {
+        let mut matching = 0;
+        for index in 0..self.state.transcript().len() {
+            let Some(entry_id) = self.state.transcript_entry_id(index) else {
+                break;
+            };
+            if self.committed_entry_ids.get(matching) != Some(entry_id) {
+                break;
+            }
+            matching = matching.saturating_add(1);
+        }
+        self.committed_entry_ids.truncate(matching);
+        self.committed_entries = matching;
+        self.rendered_projection_generation = self.state.projection_generation();
     }
 
     /// Refresh enabled-only child activity and all-lane accounting from the
@@ -493,35 +645,40 @@ impl App {
                 .take()
                 .expect("completed root task remains owned through reaping");
             match completion {
-                RootTaskCompletion::Settled(Ok(())) => {
-                    self.submitted_prompt = None;
+                RootTaskCompletion::Settled(Ok(outcome)) => {
                     self.state.status = UiStatus::Idle;
-                    if self.quitting {
-                        self.queued_extension_commands.clear();
-                        self.refresh_subagent_footer();
-                        return;
+                    if let Err(error) = self.refresh_runtime_input_projection() {
+                        self.state.notice(error.to_string());
                     }
-                    let queued_continuation = self.apply_queued_extension_commands();
-                    if self.state.queued_message().is_some() {
-                        self.start_queued_prompt();
-                    } else if let Some((harness, extension_id, input)) = queued_continuation {
-                        self.spawn_extension_continuation(harness, extension_id, input);
-                    } else {
-                        self.start_idle_extension_continuation();
+                    let should_continue = matches!(
+                        outcome,
+                        RootTaskOutcome::Recovery
+                            | RootTaskOutcome::Drive(
+                                IdleDriveOutcome::Inputs { .. }
+                                    | IdleDriveOutcome::ExtensionContinuation { .. }
+                            )
+                    );
+                    if should_continue && !self.quitting {
+                        self.start_runtime_idle_drive();
                     }
                     self.refresh_subagent_footer();
                 }
-                RootTaskCompletion::Settled(Err(HarnessError::Core(CoreError::Cancelled))) => {
-                    self.restore_submitted_prompt(
-                        "cancelled; prompt restored for explicit re-submit",
-                    );
-                }
                 RootTaskCompletion::Settled(Err(error)) => {
-                    self.restore_submitted_prompt(format!(
-                        "{error}; prompt restored for explicit re-submit"
-                    ));
+                    self.state.status = UiStatus::Idle;
+                    if let Err(refresh_error) = self.refresh_runtime_input_projection() {
+                        self.state.notice(refresh_error.to_string());
+                    }
+                    if matches!(&error, HarnessError::RecoveryRequired { .. }) {
+                        self.state.notice(
+                            "durable recovery requires /continue; accepted inputs remain queued",
+                        );
+                    } else {
+                        self.state.notice(error.to_string());
+                    }
+                    self.refresh_subagent_footer();
                 }
                 RootTaskCompletion::Disconnected => {
+                    self.state.status = UiStatus::Idle;
                     self.state
                         .notice("durable operation task ended unexpectedly");
                 }
@@ -529,93 +686,65 @@ impl App {
         }
     }
 
-    fn start_queued_prompt(&mut self) {
-        let Some(input) = self.state.take_queued_message() else {
-            return;
+    /// Replace the terminal's combined next-message slot from durable queue
+    /// state. A failed query leaves the prior projection untouched so an
+    /// observer hiccup cannot erase visible accepted input.
+    pub(super) fn refresh_runtime_input_projection(&mut self) -> Result<(), AppError> {
+        let Some(harness) = self.durable_harness.as_ref() else {
+            self.state.clear_queued_inputs();
+            return Ok(());
         };
-        if self.configured_provider.is_none() {
-            self.state.composer_mut().replace_from_editor(input);
-            self.state.notice("select a model first");
-            self.open_model_picker();
-            return;
-        }
-        match self.ensure_durable_harness() {
-            Ok(harness) => {
-                self.submitted_prompt = Some(input.clone());
-                self.spawn_durable_prompt(harness, input);
-            }
-            Err(error) => {
-                self.state.composer_mut().replace_from_editor(input);
-                self.state.notice(error.to_string());
-            }
-        }
+        let inputs = harness
+            .queued_inputs()?
+            .into_iter()
+            .map(|input| (input.id().clone(), input.content().to_owned()))
+            .collect();
+        self.state.set_queued_inputs(inputs);
+        Ok(())
     }
 
-    /// Apply extension controls accepted while an operation was active before
-    /// deciding whether an idle hook may continue it. A queued user prompt
-    /// still takes priority over a returned internal continuation.
-    fn apply_queued_extension_commands(
-        &mut self,
-    ) -> Option<(Arc<super::durable::HostHarness>, String, String)> {
-        let commands = std::mem::take(&mut self.queued_extension_commands);
-        if commands.is_empty() {
-            return None;
+    /// Atomically return every input represented by the combined slot to an
+    /// empty local composer. The projection changes only after the runtime
+    /// commits the all-or-nothing withdrawal.
+    pub(super) fn withdraw_projected_inputs(&mut self) -> Result<bool, AppError> {
+        if !self.state.composer().text().is_empty() {
+            return Ok(false);
         }
-        let Some(harness) = self.durable_harness.as_ref().cloned() else {
-            self.state
-                .notice("discarded queued extension controls without a durable harness");
-            return None;
+        let input_ids = self.state.queued_input_ids().to_vec();
+        if input_ids.is_empty() {
+            return Ok(false);
+        }
+        let Some(harness) = self.durable_harness.as_ref() else {
+            return Ok(false);
         };
-        let mut continuation = None;
-        for (command, arguments) in commands {
-            match harness.dispatch_extension_command(&command, arguments) {
-                Ok(dispatch) => {
-                    if let Some(notice) = dispatch.result.notice {
-                        self.state.extension_notice(notice);
-                    }
-                    if let Some(input) = dispatch.result.internal_input {
-                        if continuation.is_some() {
-                            self.state.notice(
-                                "only one queued extension continuation may start after a run",
-                            );
-                        } else {
-                            continuation = Some((dispatch.extension_id, input));
-                        }
-                    }
-                }
-                Err(error) => self.state.notice(error.to_string()),
-            }
-        }
-        continuation.map(|(extension_id, input)| (harness, extension_id, input))
+        let withdrawn = harness.withdraw_inputs(&input_ids)?;
+        let restored = withdrawn
+            .inputs()
+            .iter()
+            .map(|input| input.content())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        self.state.clear_queued_inputs();
+        self.state.composer_mut().replace_from_editor(restored);
+        self.refresh_runtime_input_projection()?;
+        Ok(true)
     }
 
-    /// Ask resolved extensions whether the just-settled durable operation
-    /// warrants one host-only continuation. Queued user input is handled
-    /// first by `reap_task`, so this cannot leapfrog an explicit user action.
-    fn start_idle_extension_continuation(&mut self) {
+    /// Ask the runtime to make one explicit idle decision. It owns control
+    /// precedence, accepted input batching, and authorized goal continuation;
+    /// the terminal only owns task polling and presentation.
+    pub(super) fn start_runtime_idle_drive(&mut self) {
+        if self.durable_task.is_some() || self.agent_is_active() {
+            return;
+        }
         let Some(harness) = self.durable_harness.as_ref().cloned() else {
             return;
         };
-        match harness.evaluate_idle_extensions() {
-            Ok(Some(continuation)) => {
-                self.spawn_extension_continuation(
-                    harness,
-                    continuation.extension_id,
-                    continuation.input,
-                );
-            }
-            Ok(None) => {}
-            Err(error) => self.state.notice(error.to_string()),
+        if let Err(error) = self.ensure_execution_authority() {
+            self.state.notice(error.to_string());
+            return;
         }
-    }
-
-    fn restore_submitted_prompt(&mut self, notice: impl Into<String>) {
-        if self.state.composer().text().is_empty() {
-            if let Some(prompt) = self.submitted_prompt.take() {
-                self.state.composer_mut().replace_from_editor(prompt);
-            }
-        }
-        self.state.notice(notice);
+        self.spawn_durable_input_drive(harness, IdleAuthorization::AllowExtensionContinuation);
     }
 
     fn redraw(&mut self, terminal: &mut TerminalGuard) -> Result<(), AppError> {
@@ -623,6 +752,7 @@ impl App {
         let size = Size { width, height };
         if self.rendered_projection_generation != self.state.projection_generation() {
             self.committed_entries = 0;
+            self.committed_entry_ids.clear();
             self.rendered_projection_generation = self.state.projection_generation();
         }
 
@@ -635,13 +765,18 @@ impl App {
             return Ok(());
         }
 
-        let stable = render::stable_prefix(self.state.transcript());
+        let stable = self.committable_stable_prefix();
         if stable > self.committed_entries {
             let lines = render::committed_lines(&self.state, self.committed_entries, stable, width);
             terminal
                 .renderer_mut()?
                 .commit(&lines)
                 .map_err(TerminalError::Io)?;
+            for index in self.committed_entries..stable {
+                if let Some(entry_id) = self.state.transcript_entry_id(index) {
+                    self.committed_entry_ids.push(entry_id.clone());
+                }
+            }
             self.committed_entries = stable;
         }
         let presentation =
@@ -653,52 +788,149 @@ impl App {
         Ok(())
     }
 
-    /// Begin one new prompt through the session-owned durable supervisor.
-    pub(super) fn spawn_durable_prompt(
-        &mut self,
-        harness: Arc<super::durable::HostHarness>,
-        input: String,
-    ) {
-        let (sender, receiver) = sync_channel(1);
-        let task = smol::spawn(async move {
-            let _ = sender.send(harness.run_root_prompt(input).await.map(|_| ()));
-        });
-        self.durable_task = Some(OwnedRootTask::new(receiver, task));
-        self.state.status = UiStatus::Active;
-    }
-
-    /// Drive the one recovery plan derived from an opened durable session.
-    pub(super) fn spawn_durable_recovery(&mut self, harness: Arc<super::durable::HostHarness>) {
-        let (sender, receiver) = sync_channel(1);
-        let task = smol::spawn(async move {
-            let _ = sender.send(harness.resume().await.map(|_| ()));
-        });
-        self.durable_task = Some(OwnedRootTask::new(receiver, task));
-        self.state.status = UiStatus::Active;
-    }
-
-    /// Start a continuation through the same session-owned operation path as
-    /// ordinary work. The `input` is retained as host-only context, not as a
-    /// user message in the transcript.
-    pub(super) fn spawn_extension_continuation(
-        &mut self,
-        harness: Arc<super::durable::HostHarness>,
-        extension_id: String,
-        input: String,
-    ) {
-        if self.durable_task.is_some() || harness.is_active() {
-            self.state
-                .notice("extension continuation requires an idle durable harness");
-            return;
+    /// Do not permanently write a canonical row until its durable `EntryId`
+    /// is available. Local welcome and notice rows remain safe to commit
+    /// without an identity; every other stable semantic row waits for the
+    /// next durable binding or atomic snapshot.
+    fn committable_stable_prefix(&self) -> usize {
+        let stable = render::stable_prefix(self.state.transcript());
+        for index in self.committed_entries..stable {
+            if self.state.transcript_entry_id(index).is_none()
+                && requires_durable_entry_id(&self.state.transcript()[index])
+            {
+                return index;
+            }
         }
+        stable
+    }
+
+    /// Poll one runtime-owned idle decision through the terminal's structured
+    /// task boundary. The runtime, not this host, decides whether controls,
+    /// accepted inputs, or an explicitly authorized extension continuation
+    /// run next.
+    pub(super) fn spawn_durable_input_drive(
+        &mut self,
+        harness: Arc<super::durable::HostHarness>,
+        authorization: IdleAuthorization,
+    ) {
         let (sender, receiver) = sync_channel(1);
         let task = smol::spawn(async move {
             let _ = sender.send(
                 harness
-                    .run_extension_continuation(extension_id, input)
+                    .drive_next_input(authorization)
                     .await
-                    .map(|_| ()),
+                    .map(RootTaskOutcome::Drive),
             );
+        });
+        self.durable_task = Some(OwnedRootTask::new(receiver, task));
+        self.state.status = UiStatus::Active;
+    }
+
+    /// Explicitly continue the root recovery plan reported by a previously
+    /// opened durable session. Opening itself remains read-only and never
+    /// calls this path implicitly.
+    pub(super) fn continue_recovery(&mut self) -> Result<(), AppError> {
+        if self.agent_is_active() {
+            self.state.notice("continuation requires an idle durable harness");
+            return Ok(());
+        }
+        let Some(harness) = self.durable_harness.as_ref().cloned() else {
+            self.state.notice("open a durable session before continuing recovery");
+            return Ok(());
+        };
+        let report = harness.recovery_report()?;
+        if !report
+            .lanes
+            .iter()
+            .any(|lane| lane.lane_id == tea_session::LaneId::main())
+        {
+            self.state.notice("the root session has no interrupted operation");
+            return Ok(());
+        }
+        if let Err(error) = self.ensure_execution_authority() {
+            self.state.notice(error.to_string());
+            return Ok(());
+        }
+        self.spawn_durable_recovery(harness);
+        self.state.notice("continuing durable recovery");
+        Ok(())
+    }
+
+    /// Fork a completed root turn from its recorded checkpoint without
+    /// starting work in the new lane. The supervisor validates the historical
+    /// harness boundary and installs fresh inert lane services atomically.
+    pub(super) fn fork_settled_turn(&mut self, arguments: &str) -> Result<(), AppError> {
+        if self.agent_is_active() {
+            self.state.notice("forking requires an idle durable harness");
+            return Ok(());
+        }
+        self.refresh_runtime_input_projection()?;
+        if !self.state.queued_input_ids().is_empty() {
+            self.state
+                .notice("withdraw queued inputs before creating a fork");
+            return Ok(());
+        }
+        let mut words = arguments.split_whitespace();
+        let Some(checkpoint_text) = words.next() else {
+            self.state
+                .notice("usage: /fork <checkpoint-id> [lane-id]");
+            return Ok(());
+        };
+        let lane_text = words.next();
+        if words.next().is_some() {
+            self.state
+                .notice("usage: /fork <checkpoint-id> [lane-id]");
+            return Ok(());
+        }
+        let checkpoint_id = match TurnCheckpointId::new(checkpoint_text.to_owned()) {
+            Ok(checkpoint_id) => checkpoint_id,
+            Err(error) => {
+                self.state
+                    .notice(format!("invalid settled-turn checkpoint ID: {error}"));
+                return Ok(());
+            }
+        };
+        let Some(harness) = self.durable_harness.as_ref().cloned() else {
+            self.state
+                .notice("open a durable session before creating a fork");
+            return Ok(());
+        };
+        let lane_id = match lane_text {
+            Some(lane_text) => match LaneId::new(lane_text.to_owned()) {
+                Ok(lane_id) => lane_id,
+                Err(error) => {
+                    self.state.notice(format!("invalid fork lane ID: {error}"));
+                    return Ok(());
+                }
+            },
+            None => {
+                let snapshot = harness.snapshot()?;
+                match LaneId::new(format!("fork-{}", snapshot.next_sequence().0)) {
+                    Ok(lane_id) => lane_id,
+                    Err(error) => {
+                        return Err(AppError::Setup(format!(
+                            "could not derive a fresh fork lane ID: {error}"
+                        )));
+                    }
+                }
+            }
+        };
+        match harness.fork_settled_turn(checkpoint_id, lane_id) {
+            Ok(fork) => self.state.notice(format!(
+                "forked checkpoint {} into lane {}",
+                fork.checkpoint_id(),
+                fork.lane_id()
+            )),
+            Err(error) => self.state.notice(error.to_string()),
+        }
+        Ok(())
+    }
+
+    /// Drive the one root recovery plan after explicit user authorization.
+    fn spawn_durable_recovery(&mut self, harness: Arc<super::durable::HostHarness>) {
+        let (sender, receiver) = sync_channel(1);
+        let task = smol::spawn(async move {
+            let _ = sender.send(harness.resume().await.map(|_| RootTaskOutcome::Recovery));
         });
         self.durable_task = Some(OwnedRootTask::new(receiver, task));
         self.state.status = UiStatus::Active;
@@ -779,23 +1011,31 @@ impl App {
         } else {
             super::durable::create_host_harness(config)?
         };
-        let session_id = harness.snapshot()?.header().session_id.to_string();
-        self.durable_subscription = Some(harness.subscribe_events()?);
+        let subscription = harness.subscribe_events()?;
+        self.restore_observation_snapshot(&subscription.snapshot)?;
+        self.durable_subscription = Some(subscription);
         self.state
             .set_extension_commands(harness.extension_host_commands()?);
-        self.state.set_session_id(Some(session_id));
         self.durable_harness = Some(Arc::clone(&harness));
+        self.refresh_runtime_input_projection()?;
         self.refresh_subagent_footer();
         Ok(harness)
     }
 
     /// Replace the idle terminal's current durable writer with an existing
-    /// session selected from the explicit workspace-scoped picker. Recovery
-    /// begins immediately when the reducer reports an open operation.
+    /// session selected from the explicit workspace-scoped picker. Reopen is
+    /// read-only restoration: recovery remains paused until `/continue` is an
+    /// explicit user action.
     pub(super) fn reopen_durable_session(&mut self, id: &str) -> Result<(), AppError> {
         if self.agent_is_active() {
             return Err(AppError::Setup(
                 "session changes require an idle durable harness".into(),
+            ));
+        }
+        self.refresh_runtime_input_projection()?;
+        if !self.state.queued_input_ids().is_empty() {
+            return Err(AppError::Setup(
+                "withdraw queued inputs before changing sessions".into(),
             ));
         }
         let configuration = self
@@ -848,30 +1088,40 @@ impl App {
             super::durable::reopen_host_harness(input)?
         };
         self.state.set_thinking_level(harness.thinking_level()?);
-        let snapshot = harness.snapshot()?;
-        self.state
-            .set_session_id(Some(snapshot.header().session_id.to_string()));
-        let messages = super::durable::project_host_messages(&snapshot)?;
-        self.state.restore_messages(&messages);
-        self.durable_subscription = Some(harness.subscribe_events()?);
-        let reduction = tea_session::reduce_lane(snapshot, tea_session::LaneId::main())
-            .map_err(|error| AppError::Setup(error.to_string()))?;
-        self.state.reported_usage = super::durable::core_usage(&reduction.usage_totals);
+        let subscription = harness.subscribe_events()?;
+        self.restore_observation_snapshot(&subscription.snapshot)?;
+        self.durable_subscription = Some(subscription);
         self.state
             .set_extension_commands(harness.extension_host_commands()?);
-        let recovery = reduction.lane_state.active_operation.is_some();
+        let recovery = harness.recovery_report()?;
         self.durable_harness = Some(Arc::clone(&harness));
+        self.refresh_runtime_input_projection()?;
         self.refresh_subagent_footer();
-        self.submitted_prompt = None;
         self.state.close_surface();
-        if recovery {
-            self.spawn_durable_recovery(harness);
-            self.state.notice("resumed durable session recovery");
+        self.state.status = UiStatus::Idle;
+        if recovery.lanes.is_empty() {
+            self.state.notice(format!("opened durable session {id}"));
         } else {
-            self.state.status = UiStatus::Idle;
-            self.state.notice(format!("resumed durable session {id}"));
+            self.state.notice(format!(
+                "opened durable session {id}; {} recovery lane(s) require /continue",
+                recovery.lanes.len()
+            ));
         }
         Ok(())
+    }
+}
+
+/// Only durable semantic rows need an identity before native scrollback
+/// commits them. Local terminal affordances intentionally remain outside the
+/// session branch and can be rendered immediately.
+fn requires_durable_entry_id(entry: &TranscriptEntry) -> bool {
+    match entry {
+        TranscriptEntry::Welcome { .. } | TranscriptEntry::Notice { .. } => false,
+        TranscriptEntry::User { .. } | TranscriptEntry::Error { .. } => true,
+        TranscriptEntry::Assistant { streaming, .. } => !streaming,
+        TranscriptEntry::Tool(tool) => {
+            matches!(tool.state, ToolState::Completed | ToolState::Failed)
+        }
     }
 }
 

@@ -530,6 +530,99 @@ fn recovery_resumes_only_the_missing_suffix_of_a_partially_committed_tool_batch(
 }
 
 #[test]
+fn recovery_keeps_a_later_committed_result_without_reexecuting_it() {
+    smol::block_on(async {
+        let first = ToolCallId::new("recovered-prefix-first").expect("fixture call ID");
+        let second = ToolCallId::new("recovered-prefix-second").expect("fixture call ID");
+        let provider = Arc::new(ScriptedProvider::new([ModelStream {
+            events: vec![
+                ModelStreamEvent::TextDelta("continued after partial recovery".into()),
+                ModelStreamEvent::End(StopReason::Stop),
+            ],
+        }]));
+        let executed = Arc::new(Mutex::new(Vec::new()));
+        let agent = Agent::builder()
+            .model_provider(provider.clone())
+            .tool(Arc::new(EchoTool {
+                calls: Arc::clone(&executed),
+                schema: tea_protocol::JsonValue::parse(r#"{"type":"object"}"#)
+                    .expect("fixture schema"),
+            }))
+            .build();
+        let calls = vec![
+            AgentToolCall {
+                id: first.clone(),
+                name: "echo".into(),
+                arguments: SerializedJson::new("{}"),
+            },
+            AgentToolCall {
+                id: second.clone(),
+                name: "echo".into(),
+                arguments: SerializedJson::new("{}"),
+            },
+        ];
+        let missing = vec![calls[0].clone()];
+        agent.restore_pending_tool_calls(
+            vec![
+                AgentMessage::User {
+                    id: MessageId(1),
+                    content: "recover a partially committed batch".into(),
+                },
+                AgentMessage::Assistant {
+                    id: MessageId(2),
+                    content: String::new(),
+                    tool_calls: calls,
+                    stop_reason: Some(StopReason::ToolUse),
+                    error_message: None,
+                    opaque_context: Vec::new(),
+                },
+                AgentMessage::ToolResult {
+                    id: MessageId(3),
+                    tool_call_id: second.clone(),
+                    tool_name: "echo".into(),
+                    content: "echoed: hello".into(),
+                    details: None,
+                    usage: Box::new(None),
+                    added_tool_names: Vec::new(),
+                    terminate: false,
+                    is_error: false,
+                    failure: None,
+                },
+            ],
+            missing.clone(),
+        )?;
+
+        agent.start_recover_tool_calls(missing)?.drive().await?;
+
+        assert_eq!(
+            executed.lock().expect("tool calls mutex").as_slice(),
+            &[ToolCall {
+                id: first.clone(),
+                name: "echo".into(),
+                arguments: SerializedJson::new("{}"),
+            }]
+        );
+        assert_eq!(provider.requests().len(), 1);
+        let ordered_results = agent.snapshot().messages.iter().filter_map(|message| match message {
+            AgentMessage::ToolResult { tool_call_id, .. } => Some(tool_call_id.clone()),
+            _ => None,
+        }).collect::<Vec<_>>();
+        assert_eq!(ordered_results, vec![first, second]);
+        assert_eq!(
+            agent
+                .snapshot()
+                .messages
+                .iter()
+                .filter(|message| matches!(message, AgentMessage::ToolResult { .. }))
+                .count(),
+            2,
+        );
+        Ok::<(), CoreError>(())
+    })
+    .expect("partial durable prefixes must resume only their unresolved calls");
+}
+
+#[test]
 fn after_tool_metadata_is_preserved_in_the_transcript() {
     smol::block_on(async {
         let call_id = ToolCallId::new("call_metadata").expect("non-empty provider ID");

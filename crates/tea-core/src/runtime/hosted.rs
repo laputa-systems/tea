@@ -482,6 +482,7 @@ mod tests {
             plugin_id: "fixture-plugin".into(),
             tree_id: tea_session::HarnessTreeId::new("fixture-tree").expect("tree ID"),
             requested_capabilities: std::collections::BTreeSet::new(),
+            state_version: None,
         });
         snapshot.spec.hook_bundle_digest = crate::harness::lineage::runtime_hook_bundle_digest(
             services.runtime_policy_identities().hook_bundle_digest,

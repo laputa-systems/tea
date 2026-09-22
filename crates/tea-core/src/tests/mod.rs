@@ -6,7 +6,7 @@ pub(super) use crate::effect::{
     ManualEffectGate,
 };
 pub(super) use crate::error::CoreError;
-pub(super) use crate::event::{AgentEvent, AgentEventKind, EventObserver, ObserverFuture};
+pub(super) use crate::event::{AgentEvent, AgentEventKind, EventObserver};
 pub(super) use crate::hooks::{
     AfterToolCall, AgentLoopTurnUpdate, BeforeToolCall, ContextEnvelope, HookFuture, HookSet,
     Replacement,

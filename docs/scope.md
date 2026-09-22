@@ -16,7 +16,7 @@ process, provider, artifact-store, or promotion authority.
 The terminal uses that durable layer for all prompts. It is not a second
 execution engine.
 
-Luau remains optional and capability-scoped. Its closed v1 bundles can
+Luau remains optional and capability-scoped. Its closed v3 bundles can
 contribute bounded policy but cannot redefine core state transitions, session
 storage, run settlement, or host authority.
 

@@ -196,13 +196,6 @@ added only with a dedicated deterministic fixture.
 `host.should_stop_after_turn` may be a boolean. When true, it stops the run immediately after
 the current `turn_end`, before queue polling or another model request.
 
-`host.observer` may be `{ "hold_agent_end": true }`. The runners register an awaited listener
-that pauses exactly at `agent_end`; after observing that the agent is still active, the fixture
-releases it and verifies idle settlement. Canonical output gains `observer_settlement` with the
-three booleans `agent_end_observed`, `active_before_release`, and `idle_after_release`. This
-closed directive tests listener settlement, not the intentionally separate lossy subscription
-channel.
-
 ### `assertions`
 
 Assertions are intentionally a small projection of the canonical result. They may require

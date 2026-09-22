@@ -32,7 +32,7 @@ pub use ids::{
     EntryId, EpochId, ExperimentId, FailureSignatureId, HarnessCandidateId, HarnessRevisionId,
     HarnessSnapshotId, HarnessTreeId, IdError, IdGenerator, LaneId, ModelHarnessProfileId,
     NormalizedPath, NormalizedPathError, OperationId, ProviderRequestId, RecordId, Sequence,
-    SessionId, StableHookId, StepId, ToolInvocationId, WorkspaceDeltaId, WorkspaceLeaseId,
+    SessionId, StableHookId, StepId, ToolInvocationId, TurnCheckpointId, WorkspaceDeltaId, WorkspaceLeaseId,
     derive_subagent_operation_id,
 };
 pub use jsonl::{
@@ -40,9 +40,12 @@ pub use jsonl::{
     SessionRepair,
 };
 pub use model::*;
-pub use reduction::{Corruption, LaneReduction, RecoveryPlan, reduce_lane};
+pub use reduction::{
+    Corruption, LaneReduction, RecoveryPlan, extension_state_for_lane, reduce_lane,
+};
 pub use store::{
     MemorySession, SessionClock, SessionError, SessionReader, SessionWriter, SystemSessionClock,
+    preview_session_commit,
 };
 pub use tea_protocol::JsonValue;
 pub use verification::{SessionVerification, SessionVerificationError, verify_session};

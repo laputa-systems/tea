@@ -2,11 +2,12 @@ use crate::{
     AgentId, AgentSpawnedFact, AgentTaskFinishedFact, ArtifactId, ArtifactPolicyId, CoreRunId,
     Digest, EntryId, EpochId, HarnessCandidateId, HarnessRevisionId, HarnessSnapshotId, LaneId,
     ModelHarnessProfileId, OperationId, ProviderRequestId, RecordId, Sequence, SessionId,
-    StableHookId, StepId, SubagentPolicyFact, WorkspaceDeltaAppliedFact, WorkspaceDeltaFact,
+    StableHookId, StepId, SubagentPolicyFact, TurnCheckpointId, WorkspaceDeltaAppliedFact,
+    WorkspaceDeltaFact,
 };
 #[cfg(test)]
 use std::cell::Cell;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fmt;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tea_protocol::JsonValue;
@@ -27,7 +28,14 @@ pub(crate) fn take_session_snapshot_clone_count() -> usize {
 /// `BTreeMap`; metadata never carries mutable supervisor pointers.
 pub type Metadata = BTreeMap<String, JsonValue>;
 
-/// The sole on-disk session format supported by Tea.
+/// The unambiguous identity of Tea's sole supported on-disk session format.
+///
+/// A previous discarded format also used version 1. Readers therefore require
+/// this identity in addition to the numeric version and never infer a format
+/// from a directory name or compatible-looking JSON fields.
+pub const SESSION_FORMAT_IDENTITY: &str = "tea-session-jsonl";
+
+/// The sole on-disk session format version supported by Tea.
 pub const SESSION_FORMAT_VERSION: u16 = 1;
 
 /// Header of a JSONL v1 session.
@@ -35,6 +43,8 @@ pub const SESSION_FORMAT_VERSION: u16 = 1;
 pub struct SessionHeader {
     /// The fixed kind discriminator for this format.
     pub kind: String,
+    /// Unambiguous codec identity paired with [`Self::version`].
+    pub format: String,
     /// Current on-disk session format version.
     pub version: u16,
     /// Durable session identity.
@@ -71,7 +81,8 @@ impl SessionHeader {
         created_at_ms: u64,
     ) -> Self {
         Self {
-            kind: "session".into(),
+            kind: "tea-session".into(),
+            format: SESSION_FORMAT_IDENTITY.into(),
             version: SESSION_FORMAT_VERSION,
             session_id,
             created_at_ms,
@@ -155,6 +166,11 @@ impl SessionEntry {
             | Self::ThinkingChanged(_)
             | Self::ToolActivationChanged(_)
             | Self::HarnessRevisionChanged(_) => {}
+        }
+        if let Self::Compaction(entry) = self {
+            if let Some(id) = entry.replacement.artifact_id() {
+                references.push(id);
+            }
         }
         references
     }
@@ -372,6 +388,12 @@ pub struct CompactionEntry {
     pub recovery_index_artifact: Option<ArtifactId>,
     /// Harness revision that produced the checkpoint.
     pub harness_revision_id: Option<HarnessRevisionId>,
+    /// Exact canonical replacement material after hook/policy transformation.
+    pub replacement: PayloadRef,
+    /// Content digest of the exact replacement material.
+    pub replacement_digest: Digest,
+    /// Physical provider request that produced this replacement, when one ran.
+    pub provider_request_id: Option<ProviderRequestId>,
 }
 
 /// A semantic branch summary.
@@ -606,10 +628,16 @@ pub enum LaneRecord {
     ProviderRequestSettled(ProviderRequestSettledRecord),
     /// Tool-effect intent preceding execution.
     ToolStarted(ToolStartedRecord),
-    /// Queue acceptance.
-    QueueEnqueued(QueueEnqueuedRecord),
-    /// Queue cancellation.
-    QueueCancelled(QueueCancelledRecord),
+    /// Accepted user input waiting for explicit dispatch.
+    InputAccepted(InputAcceptedRecord),
+    /// Explicit withdrawal of accepted but not yet dispatched input.
+    InputWithdrawn(InputWithdrawnRecord),
+    /// Terminal settlement for one previously dispatched input.
+    InputSettled(InputSettledRecord),
+    /// A durable extension control accepted while an operation is live.
+    ExtensionControlEnqueued(ExtensionControlEnqueuedRecord),
+    /// A durable extension control applied at the target operation's idle boundary.
+    ExtensionControlApplied(ExtensionControlAppliedRecord),
     /// Deferred semantic write.
     WriteDeferred(WriteDeferredRecord),
     /// Candidate activation obligation.
@@ -641,8 +669,10 @@ impl LaneRecord {
             Self::ProviderRequestStarted(record) => Some(&record.operation_id),
             Self::ProviderRequestSettled(record) => Some(&record.operation_id),
             Self::ToolStarted(record) => Some(&record.operation_id),
-            Self::QueueEnqueued(record) => Some(&record.operation_id),
-            Self::QueueCancelled(record) => Some(&record.operation_id),
+            Self::InputAccepted(_) | Self::InputWithdrawn(_) => None,
+            Self::InputSettled(record) => Some(&record.operation_id),
+            Self::ExtensionControlEnqueued(record) => Some(&record.operation_id),
+            Self::ExtensionControlApplied(_) => None,
             Self::WriteDeferred(record) => Some(&record.operation_id),
             Self::HarnessActivationRequested(record) => Some(&record.operation_id),
             Self::Usage(record) => Some(&record.operation_id),
@@ -690,6 +720,12 @@ pub struct OperationStartedRecord {
     pub kind: OperationKind,
     /// Exact provisioned semantic input to append after acceptance.
     pub original_input: Vec<ProvisionedEntry>,
+    /// Ordered accepted input identities dispatched by this operation.
+    ///
+    /// An empty list denotes a host-created operation that did not dispatch
+    /// the durable input queue. Non-empty membership must correspond exactly
+    /// to `original_input` and previously accepted pending inputs.
+    pub input_ids: Vec<EntryId>,
     /// Harness revision captured before the first effect begins.
     pub initial_harness_revision: HarnessRevisionId,
     /// Immutable model-harness profile selected by the host.
@@ -715,10 +751,17 @@ impl OperationStartedRecord {
             source_leaf_id,
             kind,
             original_input,
+            input_ids: Vec::new(),
             initial_harness_revision,
             model_harness_profile,
             operation_resume_data: BTreeMap::new(),
         }
+    }
+
+    /// Bind this operation to already accepted inputs in their dispatch order.
+    pub fn with_input_ids(mut self, input_ids: Vec<EntryId>) -> Self {
+        self.input_ids = input_ids;
+        self
     }
 }
 
@@ -1000,22 +1043,57 @@ impl ToolStartedRecord {
     }
 }
 
-/// Queue acceptance fact.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct QueueEnqueuedRecord {
-    /// Owning operation.
-    pub operation_id: OperationId,
-    /// Host-provisioned queue item identity.
-    pub queue_item_id: String,
+/// An accepted, not-yet-dispatched user input.
+#[derive(Clone, Debug, PartialEq)]
+pub struct InputAcceptedRecord {
+    /// Lane that owns queue placement and later dispatch.
+    pub lane_id: LaneId,
+    /// Exact user entry to materialize on dispatch.
+    pub entry: ProvisionedEntry,
 }
 
-/// Queue cancellation fact.
+/// Withdrawal of one accepted input before dispatch.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct QueueCancelledRecord {
-    /// Owning operation.
+pub struct InputWithdrawnRecord {
+    /// Lane that owns the accepted input.
+    pub lane_id: LaneId,
+    /// Identity of the accepted entry returned to local composition.
+    pub input_id: EntryId,
+}
+
+/// Terminal settlement of one input dispatched by an operation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InputSettledRecord {
+    /// The terminal operation that dispatched this input.
     pub operation_id: OperationId,
-    /// Existing accepted queue item identity.
-    pub queue_item_id: String,
+    /// A member of the operation's immutable input group.
+    pub input_id: EntryId,
+    /// Exact terminal classification shared with the operation.
+    pub outcome: OperationOutcome,
+}
+
+/// A durable extension control queued against an active operation.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExtensionControlEnqueuedRecord {
+    /// Active operation that must settle before applying this control.
+    pub operation_id: OperationId,
+    /// Stable host-provided control identity.
+    pub control_id: String,
+    /// Extension namespace authorized to consume the control.
+    pub extension_id: String,
+    /// Immutable harness revision whose command contract was accepted.
+    pub harness_revision_id: HarnessRevisionId,
+    /// Extension-defined command name.
+    pub command_name: String,
+    /// Validated command arguments retained independently from private state.
+    pub arguments: JsonValue,
+}
+
+/// A durable proof that a queued extension control reached its idle boundary.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExtensionControlAppliedRecord {
+    /// Previously queued control identity.
+    pub control_id: String,
 }
 
 /// Deferred semantic write fact.
@@ -1102,11 +1180,84 @@ pub enum SessionFact {
     ToolSchemaDeviation(ToolSchemaDeviationFact),
     /// One immutable, redacted core-run trace retained outside model context.
     TraceArtifact(TraceArtifactFact),
+    /// Exact canonical model-request material retained before provider dispatch.
+    ProviderRequestMaterial(ProviderRequestMaterialFact),
+    /// One complete bounded private state value for an extension namespace.
+    ExtensionStateValueSet(ExtensionStateValueSetFact),
+    /// A settled user-turn boundary that may anchor a user-facing fork.
+    TurnCheckpoint(TurnCheckpointFact),
+    /// The durable binding from a fresh lane to one settled turn checkpoint.
+    ForkedLane(ForkedLaneFact),
     /// A durable host-defined fact with no model projection.
     Custom {
         type_name: String,
         payload: JsonValue,
     },
+}
+
+/// Exact model-request material pinned before the physical provider call.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProviderRequestMaterialFact {
+    /// Operation that owns the physical request.
+    pub operation_id: OperationId,
+    /// Epoch that prepared the request.
+    pub epoch_id: EpochId,
+    /// Durable provider request intent identity.
+    pub request_id: ProviderRequestId,
+    /// Exact post-policy request material, inline or immutable artifact-backed.
+    pub request: PayloadRef,
+}
+
+/// One extension's complete lane-local state value.
+///
+/// Storage treats values as opaque owned JSON. Policy code owns the schema,
+/// while the session layer enforces namespace and size boundaries and records
+/// exact values at a settled-turn checkpoint.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExtensionStateValueSetFact {
+    /// Lane whose extension state changes.
+    pub lane_id: LaneId,
+    /// Stable extension namespace identity.
+    pub extension_id: String,
+    /// Immutable extension state schema/version identity.
+    pub state_version: String,
+    /// Complete replacement value for that namespace.
+    pub value: JsonValue,
+}
+
+/// One version-pinned extension state value captured at a turn boundary.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExtensionStateValue {
+    /// Immutable extension state schema/version identity.
+    pub state_version: String,
+    /// Complete owned extension state value.
+    pub value: JsonValue,
+}
+
+/// Durable immutable user-turn boundary.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TurnCheckpointFact {
+    /// Stable checkpoint identity used by later fork facts.
+    pub checkpoint_id: TurnCheckpointId,
+    /// Settled lane whose semantic history is captured.
+    pub lane_id: LaneId,
+    /// Operation that settled the complete logical user turn.
+    pub operation_id: OperationId,
+    /// Exact lane leaf after the completed operation.
+    pub leaf_id: Option<EntryId>,
+    /// Exact complete extension-state map at this boundary.
+    pub extension_state: BTreeMap<String, ExtensionStateValue>,
+}
+
+/// Durable link between a fresh child lane and one settled checkpoint.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ForkedLaneFact {
+    /// Source settled-turn checkpoint.
+    pub checkpoint_id: TurnCheckpointId,
+    /// Fresh lane created at the checkpoint leaf.
+    pub lane_id: LaneId,
+    /// Exact source leaf retained by the preceding lane-creation mutation.
+    pub base_leaf_id: Option<EntryId>,
 }
 
 /// One committed immutable harness-catalog manifest reference.
@@ -1194,7 +1345,12 @@ impl SessionFact {
     /// Return immutable artifact objects pinned by this session-wide fact.
     pub fn artifact_references(&self) -> Vec<ArtifactId> {
         match self {
-            Self::SubagentPolicy(_) | Self::AgentSpawned(_) | Self::WorkspaceDeltaApplied(_) => {
+            Self::SubagentPolicy(_)
+            | Self::AgentSpawned(_)
+            | Self::WorkspaceDeltaApplied(_)
+            | Self::ExtensionStateValueSet(_)
+            | Self::TurnCheckpoint(_)
+            | Self::ForkedLane(_) => {
                 Vec::new()
             }
             Self::WorkspaceDelta(fact) => fact.patch.artifact_id().into_iter().collect(),
@@ -1204,6 +1360,9 @@ impl SessionFact {
                 fact.raw_arguments.artifact_id().into_iter().collect()
             }
             Self::TraceArtifact(fact) => vec![fact.artifact_id],
+            Self::ProviderRequestMaterial(fact) => {
+                fact.request.artifact_id().into_iter().collect()
+            }
             Self::Custom { .. } => Vec::new(),
         }
     }
@@ -1238,6 +1397,65 @@ pub enum SessionMutation {
     Fact(StoredFact),
 }
 
+/// One caller-proposed semantic item in an atomic session commit.
+///
+/// The store assigns the commit sequence, timestamp, entry parentage, and
+/// integrity envelope only after it validates the complete ordered group.
+#[derive(Clone, Debug, PartialEq)]
+pub enum SessionCommitItem {
+    /// Materialize a semantic entry on a lane.
+    Entry {
+        /// Lane whose leaf advances.
+        lane_id: LaneId,
+        /// Caller-provisioned immutable entry identity and body.
+        entry: ProvisionedEntry,
+    },
+    /// Append one operation or effect fact.
+    Record(LaneRecord),
+    /// Append one lane-topology fact.
+    Lane(LaneMutation),
+    /// Append one session-wide fact.
+    Fact(SessionFact),
+}
+
+/// A non-empty, ordered group of facts that becomes visible as one durable
+/// prefix transition.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SessionCommit {
+    items: Vec<SessionCommitItem>,
+}
+
+impl SessionCommit {
+    /// Construct a non-empty semantic commit.
+    pub fn new(items: Vec<SessionCommitItem>) -> Result<Self, crate::SessionError> {
+        if items.is_empty() {
+            return Err(crate::SessionError::InvalidInput {
+                message: "a semantic commit must contain at least one item".into(),
+            });
+        }
+        Ok(Self { items })
+    }
+
+    /// Construct a one-item semantic commit.
+    pub fn one(item: SessionCommitItem) -> Self {
+        Self { items: vec![item] }
+    }
+
+    /// Borrow items in their required durable order.
+    pub fn items(&self) -> &[SessionCommitItem] {
+        &self.items
+    }
+
+    /// Extend this not-yet-submitted commit with one following semantic item.
+    pub fn push(&mut self, item: SessionCommitItem) {
+        self.items.push(item);
+    }
+
+    pub(crate) fn into_items(self) -> Vec<SessionCommitItem> {
+        self.items
+    }
+}
+
 /// One committed JSONL v1 mutation and its integrity envelope.
 #[derive(Clone, Debug, PartialEq)]
 pub struct StoredMutation {
@@ -1251,6 +1469,32 @@ pub struct StoredMutation {
     pub digest: Digest,
     /// The one semantic mutation represented by this line.
     pub mutation: SessionMutation,
+}
+
+/// One completed atomic semantic commit.
+///
+/// Every contained item has the same commit sequence and timestamp. Their
+/// order remains meaningful to the reducer, but none becomes visible after a
+/// crash unless this enclosing JSONL record was written completely.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StoredCommit {
+    /// Session-global sequence allocated for the complete group.
+    pub seq: Sequence,
+    /// One storage-owned clock sample shared by every item.
+    pub timestamp_ms: u64,
+    /// Digest of the committed prefix before this group.
+    pub prev_digest: Digest,
+    /// Digest naming the prefix after the whole group.
+    pub digest: Digest,
+    /// Materialized semantic items in the caller's original order.
+    pub items: Vec<StoredMutation>,
+}
+
+impl StoredCommit {
+    /// Borrow the committed semantic items in their durable order.
+    pub fn items(&self) -> &[StoredMutation] {
+        &self.items
+    }
 }
 
 impl StoredMutation {
@@ -1321,6 +1565,22 @@ impl StoredMutationRef<'_> {
     /// Return the session-global commit sequence.
     pub fn sequence(&self) -> Sequence {
         self.seq
+    }
+
+    pub(crate) fn to_owned(self) -> StoredMutation {
+        let mutation = match self.mutation {
+            SessionMutationRef::Entry(entry) => SessionMutation::Entry(entry.clone()),
+            SessionMutationRef::Record(record) => SessionMutation::Record(record.clone()),
+            SessionMutationRef::Lane(lane) => SessionMutation::Lane(lane.clone()),
+            SessionMutationRef::Fact(fact) => SessionMutation::Fact(fact.clone()),
+        };
+        StoredMutation {
+            seq: self.seq,
+            timestamp_ms: self.timestamp_ms,
+            prev_digest: self.prev_digest,
+            digest: self.digest,
+            mutation,
+        }
     }
 }
 
@@ -1448,10 +1708,23 @@ impl SessionSnapshot {
         self.main_harness_revision.as_ref()
     }
 
-    pub(crate) fn push_mutation(&mut self, stored: StoredMutation) {
+    pub(crate) fn push_commit(&mut self, stored: StoredCommit) {
         self.last_sequence = stored.seq;
         self.last_digest = stored.digest;
-        let location = match stored.mutation {
+        for item in stored.items {
+            let location = self.push_semantic_mutation(item.mutation);
+            self.timeline.push(StoredMutationEnvelope {
+                seq: stored.seq,
+                timestamp_ms: stored.timestamp_ms,
+                prev_digest: stored.prev_digest,
+                digest: stored.digest,
+                location,
+            });
+        }
+    }
+
+    fn push_semantic_mutation(&mut self, mutation: SessionMutation) -> MutationLocation {
+        match mutation {
             SessionMutation::Entry(entry) => {
                 if entry.lane_id == LaneId::main()
                     && let SessionEntry::HarnessRevisionChanged(revision) = &entry.body
@@ -1473,14 +1746,7 @@ impl SessionSnapshot {
                 self.facts.push(fact);
                 MutationLocation::Fact(self.facts.len().saturating_sub(1))
             }
-        };
-        self.timeline.push(StoredMutationEnvelope {
-            seq: stored.seq,
-            timestamp_ms: stored.timestamp_ms,
-            prev_digest: stored.prev_digest,
-            digest: stored.digest,
-            location,
-        });
+        }
     }
 
     fn borrow_mutation(&self, envelope: &StoredMutationEnvelope) -> StoredMutationRef<'_> {
@@ -1539,11 +1805,63 @@ pub struct EffectiveLaneConfiguration {
     pub harness_revision: Option<HarnessRevisionId>,
 }
 
-/// Reduced accepted queue state.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct PendingQueues {
-    /// Accepted but not cancelled queue item IDs by operation.
-    pub items: BTreeMap<OperationId, BTreeSet<String>>,
+/// One accepted input together with its durable queue order.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AcceptedInput {
+    /// Lane that owns this queued input.
+    pub lane_id: LaneId,
+    /// Exact user entry that will materialize on dispatch.
+    pub entry: ProvisionedEntry,
+    /// Commit sequence at which acceptance became durable.
+    pub accepted_sequence: Sequence,
+}
+
+/// Current durable disposition of one accepted input.
+#[derive(Clone, Debug, PartialEq)]
+pub enum InputStatus {
+    /// The input remains accepted and eligible for explicit dispatch.
+    Pending,
+    /// The input was returned to local composition before dispatch.
+    Withdrawn,
+    /// The input belongs to an operation that has not yet terminally settled.
+    Dispatched { operation_id: OperationId },
+    /// The owning operation settled and durably reported this input's outcome.
+    Settled {
+        /// Operation that dispatched and settled this input.
+        operation_id: OperationId,
+        /// Exact terminal classification shared with the operation.
+        outcome: OperationOutcome,
+    },
+}
+
+/// Durable lifecycle view for one accepted input.
+#[derive(Clone, Debug, PartialEq)]
+pub struct InputState {
+    /// Immutable acceptance payload and order.
+    pub accepted: AcceptedInput,
+    /// Current durable lifecycle state.
+    pub status: InputStatus,
+}
+
+/// Pure projection of accepted input state for one lane.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct InputReduction {
+    /// Pending inputs in deterministic acceptance and batch-item order.
+    pub pending_inputs: Vec<AcceptedInput>,
+    /// Every accepted input for this lane keyed by its final entry ID.
+    pub input_states: BTreeMap<EntryId, InputState>,
+}
+
+/// One extension control still waiting for its operation's idle boundary.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PendingExtensionControl {
+    /// Durable acceptance sequence used for source ordering.
+    pub accepted_sequence: Sequence,
+    /// Zero-based durable mutation position used to order controls accepted
+    /// within the same semantic commit.
+    pub accepted_item_index: u64,
+    /// Exact typed control request.
+    pub control: ExtensionControlEnqueuedRecord,
 }
 
 /// A deferred semantic append not yet materialized.

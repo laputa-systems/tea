@@ -204,10 +204,15 @@ impl HarnessSeedBuilder {
             let tree = repository
                 .stage_tree(files, &self.tree_limits)
                 .map_err(|error| HarnessError::invalid_state(error.to_string()))?;
+            let state_version = repository
+                .plugin_descriptor(&tree.id, &source.extension_id, &self.resource_limits)
+                .map_err(|error| HarnessError::invalid_state(error.to_string()))?
+                .state_version;
             let bundle = PluginBundleRef {
                 plugin_id: source.extension_id,
                 tree_id: tree.id,
                 requested_capabilities,
+                state_version,
             };
             match extension.scope {
                 HarnessSeedExtensionScope::Global => global_plugins.push(bundle),

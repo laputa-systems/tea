@@ -3,7 +3,7 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use tea_core::Agent;
-use tea_core::event::{AgentEvent, AgentEventKind, EventObserver, ObserverFuture};
+use tea_core::event::{AgentEvent, AgentEventKind, EventObserver};
 use tea_core::scheduler::{
     CancellationToken, ModelFuture, ModelProvider, ModelRequest, ModelStream, ModelStreamEvent,
 };
@@ -45,11 +45,7 @@ struct RecordingObserver {
 }
 
 impl EventObserver for RecordingObserver {
-    fn observe<'a>(
-        &'a self,
-        event: &'a AgentEvent,
-        _cancellation: CancellationToken,
-    ) -> ObserverFuture<'a> {
+    fn observe(&self, event: &AgentEvent) {
         let record = match &event.kind {
             AgentEventKind::ToolExecutionStart {
                 tool_call_id,
@@ -70,7 +66,6 @@ impl EventObserver for RecordingObserver {
                 .expect("observer record mutex")
                 .push(record);
         }
-        Box::pin(std::future::ready(Ok(())))
     }
 }
 

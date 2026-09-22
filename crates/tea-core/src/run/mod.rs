@@ -24,6 +24,7 @@ use crate::tool::{
     AgentTool, AgentToolResult, ToolCall, ToolFuture, ToolUpdate, project_tool_result_as_text,
 };
 use std::collections::{BTreeMap, BTreeSet};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::TrySendError;
 use std::sync::{Arc, Mutex, Weak};
@@ -53,12 +54,12 @@ type PendingToolUpdate = (ToolCallId, String, ToolUpdate);
 
 /// Tool updates captured by capability callbacks.
 ///
-/// The callback API is synchronous, while lifecycle observers are awaited. The
-/// queue bridges those boundaries without requiring a runtime: callbacks wake
-/// the caller-owned run future, which drains updates as a first-class scheduler
-/// step before polling another tool or settling the current tool. Call IDs are
-/// closed as soon as their futures resolve so late callbacks are ignored, as in
-/// Pi's `executePreparedToolCall` lifecycle.
+/// The callback API is synchronous. The queue bridges tool callbacks to the
+/// caller-owned run future without requiring a runtime: callbacks wake that
+/// future, which drains updates as a first-class scheduler step before polling
+/// another tool or settling the current tool. Call IDs are closed as soon as
+/// their futures resolve so late callbacks are ignored, as in Pi's
+/// `executePreparedToolCall` lifecycle.
 #[derive(Clone, Default)]
 struct PendingToolUpdates {
     state: Arc<Mutex<PendingToolUpdateState>>,
@@ -134,7 +135,7 @@ struct CompletedToolExecution {
 /// This stays private to the core run so a tool/provider path cannot settle an
 /// effect that was never admitted by its configured gate.
 #[derive(Clone)]
-struct EffectTicket {
+pub(crate) struct EffectTicket {
     action: EffectAction,
 }
 
@@ -222,6 +223,51 @@ struct AssistantTurnContinuation {
     thinking_override: Option<ThinkingLevel>,
 }
 
+/// Maximum lifecycle events retained by [`RunHandle::events`].
+///
+/// This is a diagnostic suffix, not an operation-completion or replay log.
+/// Consumers that require complete event observation use a durable host
+/// operation record; consumers that need live best-effort observation use a
+/// bounded [`crate::agent::EventSubscription`].
+pub const RUN_EVENT_DIAGNOSTIC_LIMIT: usize = 256;
+
+/// A bounded diagnostic suffix of one run's lifecycle events.
+///
+/// `events` is in source order. A nonzero `omitted_events` means the earliest
+/// events were dropped, so the retained suffix is not a complete lifecycle
+/// stream.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RunEventDiagnostics {
+    /// Retained lifecycle events in source order.
+    pub events: Vec<AgentEvent>,
+    /// Number of earliest lifecycle events omitted from `events`.
+    pub omitted_events: u64,
+}
+
+impl RunEventDiagnostics {
+    /// Whether this diagnostic value contains every event emitted by the run.
+    pub const fn is_complete(&self) -> bool {
+        self.omitted_events == 0
+    }
+}
+
+impl std::ops::Deref for RunEventDiagnostics {
+    type Target = [AgentEvent];
+
+    fn deref(&self) -> &Self::Target {
+        &self.events
+    }
+}
+
+impl IntoIterator for RunEventDiagnostics {
+    type Item = AgentEvent;
+    type IntoIter = std::vec::IntoIter<AgentEvent>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.events.into_iter()
+    }
+}
+
 /// A handle to the one run currently owning an agent.
 pub struct RunHandle {
     pub(crate) agent: Weak<AgentInner>,
@@ -255,7 +301,10 @@ impl std::fmt::Debug for RunHandle {
 }
 
 impl RunHandle {
-    async fn begin_effect(&self, subject: EffectSubject) -> Result<EffectTicket, CoreError> {
+    pub(crate) async fn begin_effect(
+        &self,
+        subject: EffectSubject,
+    ) -> Result<EffectTicket, CoreError> {
         let effect_id = EffectId(
             self.next_effect_id
                 .fetch_add(1, Ordering::Relaxed)
@@ -274,7 +323,7 @@ impl RunHandle {
         Ok(EffectTicket { action })
     }
 
-    async fn settle_effect(
+    pub(crate) async fn settle_effect(
         &self,
         ticket: EffectTicket,
         outcome: EffectOutcome,
@@ -319,13 +368,16 @@ impl RunHandle {
         self.cancellation.clone()
     }
 
-    /// Return events emitted by this run in their immutable source order.
-    pub fn events(&self) -> Vec<AgentEvent> {
-        self.state
-            .lock()
-            .expect("run state mutex poisoned")
-            .events
-            .clone()
+    /// Return the bounded diagnostic lifecycle-event suffix for this run.
+    ///
+    /// Check [`RunEventDiagnostics::is_complete`] before treating it as a
+    /// complete lifecycle stream.
+    pub fn events(&self) -> RunEventDiagnostics {
+        let state = self.state.lock().expect("run state mutex poisoned");
+        RunEventDiagnostics {
+            events: state.events.iter().cloned().collect(),
+            omitted_events: state.omitted_event_count,
+        }
     }
 
     /// Drive a complete caller-owned run.
@@ -443,7 +495,7 @@ impl RunHandle {
     }
 
     /// Settle automatic compaction cancellation without adding a synthetic
-    /// assistant message to the pre-transaction transcript.
+    /// assistant message to the retained transcript.
     async fn settle_compaction_boundary_cancellation(&self) {
         let Some(agent) = self.agent.upgrade() else {
             let _ = self.finish(RunPhase::Cancelled, StopReason::Cancelled, None);
@@ -526,6 +578,7 @@ impl RunHandle {
             // Recovered assistant calls use the normal tool scheduler and the
             // same post-turn continuation procedure as fresh model output.
             let mut tool_batch = self.execute_tool_calls(&agent, &tool_calls).await?;
+            crate::agent::order_recovered_tool_results(&agent);
             if let Some(prior_all_terminate) = self.recovery_prior_all_terminate {
                 tool_batch.all_terminate &= prior_all_terminate;
             }
@@ -1227,7 +1280,7 @@ impl RunHandle {
                     agent,
                     crate::hooks::ContextEnvelope {
                         version: context.version as u16,
-                        messages: source_messages,
+                        messages: source_messages.clone(),
                         host_messages: context.host_messages.clone(),
                     },
                 )
@@ -1335,12 +1388,37 @@ impl RunHandle {
         };
         let source_history_revision = context.source_history_revision;
         let canonical_source_bytes = crate::compaction::messages_bytes(&context.messages);
-        let replacement = match compactor
-            .compact_automatic(context, request, self.cancellation.clone())
-            .await
-        {
+        let canonical_source_messages = context.messages.clone();
+        let request_port = crate::compaction::CoreCompactionRequestPort::new(
+            self,
+            operation.clone(),
+        );
+        let compact_result = compactor
+            .compact_automatic_with_requests(
+                context,
+                request,
+                self.cancellation.clone(),
+                &request_port,
+            )
+            .await;
+        let port_result = request_port
+            .settle_unfinished(self.cancellation.is_cancelled())
+            .await;
+        let replacement = match compact_result {
             Ok(replacement) => replacement,
             Err(error) => {
+                if let Err(port_error) = port_result {
+                    let message = crate::tool::truncate_middle(&port_error.to_string(), 1024);
+                    self.emit_compaction_lifecycle(
+                        agent,
+                        crate::compaction::CompactionLifecycleRecord::Terminal {
+                            id: operation.id,
+                            outcome: crate::compaction::CompactionTerminalOutcome::Failed,
+                        },
+                    )
+                    .await?;
+                    return Err(CoreError::AutomaticCompaction { reason, message });
+                }
                 if self.cancellation.is_cancelled() {
                     self.policy
                         .lock()
@@ -1394,6 +1472,18 @@ impl RunHandle {
                 return Err(CoreError::AutomaticCompaction { reason, message });
             }
         };
+        if let Err(error) = port_result {
+            let message = crate::tool::truncate_middle(&error.to_string(), 1024);
+            self.emit_compaction_lifecycle(
+                agent,
+                crate::compaction::CompactionLifecycleRecord::Terminal {
+                    id: operation.id,
+                    outcome: crate::compaction::CompactionTerminalOutcome::Failed,
+                },
+            )
+            .await?;
+            return Err(CoreError::AutomaticCompaction { reason, message });
+        }
         if self.cancellation.is_cancelled() {
             self.policy
                 .lock()
@@ -1705,13 +1795,15 @@ impl RunHandle {
             },
         )
         .await?;
-        if let Err(error) = crate::compaction::commit_replacement(
+        if let Err(error) = crate::compaction::commit_replacement_durably(
             agent,
-            self.id(),
-            &self.cancellation,
-            source_history_revision,
+            self,
+            operation.clone(),
+            canonical_source_messages,
             replacement.messages,
-        ) {
+        )
+        .await
+        {
             if matches!(error, CoreError::Cancelled) {
                 self.policy
                     .lock()
@@ -1759,6 +1851,22 @@ impl RunHandle {
             },
         )
         .await?;
+        if self.cancellation.is_cancelled() {
+            self.policy
+                .lock()
+                .expect("run policy mutex poisoned")
+                .compaction_cancelled = true;
+            self.emit(
+                agent,
+                AgentEventKind::AutomaticCompactionEnd {
+                    reason,
+                    retry_provider_request,
+                    outcome: AutomaticCompactionOutcome::Cancelled,
+                },
+            )
+            .await?;
+            return Err(CoreError::Cancelled);
+        }
         // A committed automatic compaction is a kernel-owned context
         // replacement. Permit exactly its expected rebase at the next
         // provider boundary; hook-originated domain or discontinuity changes
@@ -1965,7 +2073,7 @@ impl RunHandle {
                     .await?;
                 }
                 ModelStreamEvent::TextDelta(delta) => {
-                    let (message, message_id, first_delta) = {
+                    let (message_id, first_delta) = {
                         let mut state = agent.state.lock().expect("agent state mutex poisoned");
                         let first_delta = assistant_id.is_none();
                         let id = *assistant_id.get_or_insert_with(|| state.allocate_message_id());
@@ -1980,17 +2088,8 @@ impl RunHandle {
                             });
                         }
                         assistant_text.push_str(&delta);
-                        state.partial_response = Some(assistant_text.clone());
-                        let message = AgentMessage::Assistant {
-                            id,
-                            content: assistant_text.clone(),
-                            tool_calls: Vec::new(),
-                            stop_reason: None,
-                            error_message: None,
-                            opaque_context: opaque_context.clone(),
-                        };
-                        state.replace_last_message(message.clone());
-                        (message, id, first_delta)
+                        state.append_partial_response_delta(&delta);
+                        (id, first_delta)
                     };
                     if first_delta {
                         self.emit(
@@ -2011,8 +2110,8 @@ impl RunHandle {
                     self.emit(
                         agent,
                         AgentEventKind::MessageUpdate {
-                            message,
-                            text_delta: Some(delta),
+                            message_id,
+                            text_delta: delta,
                         },
                     )
                     .await?;
@@ -2277,7 +2376,8 @@ impl RunHandle {
     /// Request cancellation. This operation is idempotent after settlement.
     ///
     /// A running handle is settled by [`Self::drive`] so its terminal events
-    /// remain ordered and observers remain awaited. An un-driven handle has no
+    /// remain ordered and synchronous observers receive every terminal event.
+    /// An un-driven handle has no
     /// active caller-owned future, so it settles immediately.
     pub fn abort(&self) -> Result<(), CoreError> {
         self.cancellation.cancel();
@@ -2373,7 +2473,11 @@ impl RunHandle {
             sequence: EventSequence(state.event_count),
             kind,
         };
-        state.events.push(event.clone());
+        if state.events.len() == RUN_EVENT_DIAGNOSTIC_LIMIT {
+            let _ = state.events.pop_front();
+            state.omitted_event_count = state.omitted_event_count.saturating_add(1);
+        }
+        state.events.push_back(event.clone());
         event
     }
 
@@ -2384,32 +2488,8 @@ impl RunHandle {
     ) -> Result<AgentEvent, CoreError> {
         let event = self.record_event(kind);
 
-        // Lossless subscriptions use an explicitly caller-owned unbounded
-        // queue. Publish this copy before awaited observers so a live host is
-        // not held behind an arbitrary observer future. Sending to one cannot
-        // drop for capacity and does not wait for the receiver to drain; a
-        // disconnected receiver is cleaned up after this event.
-        let lossless_subscribers = agent
-            .lossless_subscribers
-            .lock()
-            .expect("lossless subscriber mutex poisoned")
-            .clone();
-        let mut disconnected = Vec::new();
-        for registration in lossless_subscribers {
-            if registration.sender.send(event.clone()).is_err() {
-                disconnected.push(registration.id);
-            }
-        }
-        if !disconnected.is_empty() {
-            agent
-                .lossless_subscribers
-                .lock()
-                .expect("lossless subscriber mutex poisoned")
-                .retain(|registration| !disconnected.contains(&registration.id));
-        }
-
-        // Clone a registration snapshot before awaiting callbacks. This avoids
-        // retaining the registry mutex across an await and defines reentrant
+        // Clone a registration snapshot before callbacks. This avoids retaining
+        // the registry mutex across callbacks and defines reentrant
         // subscribe/unsubscribe precisely: changes apply to the next event.
         let observers = agent
             .observers
@@ -2417,13 +2497,17 @@ impl RunHandle {
             .expect("observer mutex poisoned")
             .clone();
         for registration in observers {
-            registration
-                .observer
-                .observe(&event, self.cancellation.clone())
-                .await?;
+            // Event state and observer registration locks have both been
+            // released. An observer is advisory: its panic cannot rewrite an
+            // already-recorded event or veto this run's committed outcome.
+            let _ = catch_unwind(AssertUnwindSafe(|| {
+                registration
+                    .observer
+                    .observe(&event);
+            }));
         }
         // These subscriptions deliberately have a distinct contract from
-        // awaited observers. Snapshot their registrations so a receiver can
+        // synchronous observers. Snapshot their registrations so a receiver can
         // drop itself while delivery is in progress, then use `try_send` so a
         // slow receiver never holds the run open.
         let subscribers = agent
@@ -2437,8 +2521,9 @@ impl RunHandle {
                 Ok(()) => {}
                 Err(TrySendError::Full(_)) => {
                     registration
-                        .dropped
-                        .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                        .lagged
+                        .store(true, std::sync::atomic::Ordering::Release);
+                    disconnected.push(registration.id);
                 }
                 Err(TrySendError::Disconnected(_)) => disconnected.push(registration.id),
             }

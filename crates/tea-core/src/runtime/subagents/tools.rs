@@ -863,7 +863,11 @@ fn status_fields(status: &SubagentStatus) -> Vec<(&'static str, JsonValue)> {
         ("agent_id", JsonValue::String(status.agent_id.to_string())),
         (
             "task_id",
-            JsonValue::String(status.operation_id.to_string()),
+            status
+                .operation_id
+                .as_ref()
+                .map(|operation_id| JsonValue::String(operation_id.to_string()))
+                .unwrap_or(JsonValue::Null),
         ),
         ("task_name", JsonValue::String(status.task_name.clone())),
         ("model", JsonValue::String(model_label(status))),

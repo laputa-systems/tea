@@ -12,9 +12,7 @@
 
 local core = {}
 
---- Durable state kind. State is a normalized snapshot, never an operation log.
-core.STATE_KIND = "todo.state.v1"
-
+-- State is one normalized snapshot, never an operation log.
 core.MAX_ITEMS = 128
 core.MAX_DEPTH = 8
 core.MAX_TEXT_CHARS = 200

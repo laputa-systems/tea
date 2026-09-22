@@ -76,6 +76,10 @@ prompt:
 tea --provider <provider> --model <model> --prompt <text>
 ~~~
 
+The one-shot driver accepts one durable input, explicitly drives that input,
+and waits for that input's own durable completion. It never treats a dropped
+preview subscription or a globally idle-looking session as completion.
+
 `tea --provider mock` selects the built-in safe playground model without
 credentials. It returns randomized Markdown, code-block, and no-op `edit`
 fixtures; its `edit` tool reports a successful preview but never reads or
@@ -92,12 +96,19 @@ identity. Each is a v1 session directory with its colocated object store.
 
 - /resume opens the durable session picker and reopens a selected durable session.
 - /new creates a new durable session.
+- /continue explicitly resumes a root recovery plan reported by an opened session.
+- /fork `<checkpoint-id>` [`<lane-id>`] creates an inert lane from one recorded,
+  settled root-turn checkpoint.
 - /models selects the provider/model and then opens the reasoning-effort picker; the footer continuously shows context, cost, and token accounting.
 
 The selected provider/model is sealed in each session's durable header. Opening
-Tea without an explicit model starts unselected; `/resume` restores and
-configures the model required by the selected session rather than consulting a
-global preference.
+Tea without an explicit model starts unselected; `/resume` restores the exact
+model required by the selected session rather than consulting a global
+preference. Selection and reopening install descriptor-pinned lazy services,
+so listing, opening, inspection, and transcript restoration do not require a
+working credential. The terminal checks execution authority immediately before
+admitting text or explicit recovery work; a failure leaves the local draft
+untouched.
 
 The `/resume` picker omits the durable session currently attached to the host;
 it only offers other saved sessions. Selecting a model through `/models` is a
@@ -106,6 +117,17 @@ two-step flow: choose the provider/model, then choose its reasoning effort.
 Normal composer input always starts or continues the managed harness. During an
 active operation, the terminal projects durable session and live harness events
 into the transcript without owning their state.
+
+Reopening is passive. It restores committed rows and reports interrupted lanes,
+but it never starts model work, tools, goal continuation, child work, or a
+forked lane. Incomplete previews are discarded. A reported root interruption
+blocks a new prompt until the user explicitly selects `/continue`; unsafe tool
+effects remain blocked until the host reconciles their durable evidence.
+
+`/fork` accepts only a recorded settled-turn checkpoint. The new lane inherits
+the checkpoint's historical configuration and source state, but never pending
+inputs, controls, effects, active handles, child ownership, or goal execution
+authority. Forking rejects a busy root or any queued terminal input.
 
 ## Optional subagents
 
@@ -140,12 +162,12 @@ active child tasks.
 
 ## Bundled goal extension
 
-`/goal` is a bundled ABI-v2 Luau extension, not a native terminal command. Its
+`/goal` is a bundled ABI-v3 Luau extension, not a native terminal command. Its
 source is pinned in the immutable harness revision like every other extension,
 so reopening a session uses the persisted source rather than the binary's
 current bundled files. `/goal`, `/goal <objective>`, `/goal edit <objective>`,
 `/goal pause`, `/goal resume`, and `/goal clear` operate on the extension's
-external-only `goal.state.v1` `PluginMemory` value. Status reports include the
+private bounded `goal` extension-state value. Status reports include the
 objective, status, goal-associated token use, budget when present, and active
 time.
 
@@ -154,6 +176,10 @@ previous one settles. While an operation is live, accepted goal controls are
 queued; after settlement they are applied before the idle continuation decision.
 This avoids mutating an in-flight provider request while ensuring a queued pause
 or clear prevents the next automatic goal turn.
+
+The runtime applies controls, then accepted user input, then at most one goal
+continuation under fresh process-local host authorization. The terminal has no
+goal scheduler and opening a session grants no continuation authority.
 
 Composer history is scoped to the active durable session. The terminal rebuilds
 it from that session's accepted user-message entries when a session is resumed;
@@ -169,12 +195,19 @@ submitting it. `Esc` or `Ctrl+C` cancels the search and restores the draft that
 was present before it opened; another `Ctrl+R` advances to the next older
 match.
 
-While an operation is active, normal submitted composer input becomes one visible
-local next-message slot. Later submissions append to that slot, separated by a
-blank line. After the operation settles, the terminal starts the next durable
-prompt with the combined text. Press `Up` with an empty composer to return that
-queued text to the editor; with any editor text present, history navigation keeps
-the current draft and never discards it.
+The composer owns only unsubmitted text. Submitting normal text first creates a
+durable accepted input with a stable ID and completion endpoint; the runtime,
+not the terminal, controls placement, batching, dispatch, settlement, and
+extension-control precedence. The visible `Queued next` slot is only a combined
+projection of ordered pending input IDs and their text, with entries separated
+by a blank line.
+
+Press `Up` with an empty composer to atomically withdraw every ID represented
+by that slot before restoring the combined text. If any input is already
+dispatched, the withdrawal fails as a whole and neither the composer nor the
+visible slot changes. With editor text present, `Up` remains history/visual-line
+navigation and never discards a draft. Provider-authority, recovery, or durable
+admission failures also preserve the draft before it becomes accepted input.
 
 ## Presentation boundary
 
@@ -182,6 +215,15 @@ AppState, render, and the terminal decoder are local UI code. They may be
 rebuilt at any time from the durable snapshot and live event subscription.
 They cannot modify an operation, synthesize a completed effect, or change a
 harness revision.
+
+Subscription registration captures one atomic durable session snapshot plus a
+bounded live-preview view. Assistant/tool previews are coalescible and fenced
+by lane, operation, epoch, run, and subject identity; semantic completion
+always wins. If the bounded subscription reports lag or disconnects, the
+terminal discards transient previews, subscribes again, and rebuilds from that
+new atomic snapshot without advancing work. Durable `EntryId` identities retain
+only the longest matching committed scrollback prefix, so resnapshotting cannot
+duplicate old rows or re-emit a replaced suffix.
 
 The fixed footer keeps the `{provider}/{model} · effort <level>` identity on
 its own wrapped line, followed by calm context and usage stats. Once a durable

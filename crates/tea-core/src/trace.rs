@@ -12,8 +12,7 @@
 //! their sink in [`tea_trace::RedactingSink`] before persistence.
 
 use crate::effect::RunProvenance;
-use crate::event::{AgentEvent, AgentEventKind, EventObserver, ObserverFuture};
-use crate::scheduler::CancellationToken;
+use crate::event::{AgentEvent, AgentEventKind, EventObserver};
 use crate::state::{AgentMessage, MessageId, StopReason, ToolCallId};
 use std::collections::BTreeMap;
 use std::sync::Mutex;
@@ -22,9 +21,11 @@ use tea_trace::{
     Tool, TraceEvent, TraceProvenance, TraceSink, Turn,
 };
 
-/// An awaited core observer that records a compact linear trace episode.
+/// A synchronous, non-vetoing core observer that records a compact trace episode.
 ///
-/// One observer may be attached to an agent and reused for multiple runs.  A
+/// One observer may be attached to an agent and reused for multiple runs. It
+/// must return promptly, so a sink that can block belongs behind a bounded
+/// host queue rather than in this callback. A
 /// new [`AgentEventKind::AgentStart`] starts a new episode in the supplied
 /// sink.  The episode identifier is supplied by the host because the core
 /// does not own session or persistence identity.
@@ -114,13 +115,8 @@ impl<S: TraceSink> TraceObserver<S> {
 }
 
 impl<S: TraceSink + Send + 'static> EventObserver for TraceObserver<S> {
-    fn observe<'a>(
-        &'a self,
-        event: &'a AgentEvent,
-        _cancellation: CancellationToken,
-    ) -> ObserverFuture<'a> {
+    fn observe(&self, event: &AgentEvent) {
         self.record(event);
-        Box::pin(std::future::ready(Ok(())))
     }
 }
 
@@ -178,17 +174,6 @@ impl<S: TraceSink> TraceObserver<S> {
                         .cache_domain_fingerprint
                         .or(Some(pending.logical_cache_domain_fingerprint));
                     state.sink.append(TraceEvent::from(compaction));
-                } else if let Some(compaction_id) = state.last_committed_compaction.take() {
-                    // Compatibility for callers that emit only the adapter
-                    // observation and not the newer logical-layout event.
-                    let mut compaction = Compaction::new(
-                        compaction_id,
-                        CompactionStage::PostCompactionRequestObserved,
-                    );
-                    compaction.post_compaction_turn_index = Some(trace_turn_index(turn_id.0));
-                    compaction.serialized_request_bytes = observation.serialized_request_bytes;
-                    compaction.cache_domain_fingerprint = observation.cache_domain_fingerprint;
-                    state.sink.append(TraceEvent::from(compaction));
                 }
             }
             AgentEventKind::CompactionStart { .. }
@@ -232,14 +217,13 @@ impl<S: TraceSink> TraceObserver<S> {
                     cache_evidence: state.pending_cache_evidence.remove(&turn_id.0),
                 });
             }
-            AgentEventKind::MessageStart { message }
-            | AgentEventKind::MessageUpdate { message, .. }
-            | AgentEventKind::MessageEnd { message } => {
+            AgentEventKind::MessageStart { message } | AgentEventKind::MessageEnd { message } => {
                 if let AgentMessage::Assistant { error_message, .. } = message {
                     state.error = error_message.clone();
                 }
                 record_message(&mut state.current_turn, message);
             }
+            AgentEventKind::MessageUpdate { .. } => {}
             AgentEventKind::ToolExecutionStart {
                 tool_call_id,
                 tool_name,
@@ -781,8 +765,7 @@ mod tests {
             sequence: crate::event::EventSequence(1),
             kind,
         };
-        smol::block_on(observer.observe(&event, CancellationToken::new()))
-            .expect("trace observer is best effort");
+        observer.observe(&event);
     }
 
     #[test]

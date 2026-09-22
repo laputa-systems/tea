@@ -18,7 +18,7 @@ return function(call)
         method = "get",
         arguments = {},
     })
-    local state, unreadable = core.validate_state((stored or {})[core.STATE_KIND])
+    local state, unreadable = core.validate_state(stored)
     if state == nil then
         -- Corrupt durable state must never look like an empty plan.
         return {
@@ -46,8 +46,8 @@ return function(call)
         coroutine.yield({
             kind = "capability",
             capability = "extension.state",
-            method = "append",
-            arguments = { kind = core.STATE_KIND, content = next_state },
+            method = "replace",
+            arguments = { value = next_state },
         })
         state = next_state
         return nil

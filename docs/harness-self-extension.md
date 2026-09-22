@@ -20,8 +20,13 @@ SelfExtensionMode is stored in session metadata before execution begins:
 - author permits bounded authoring;
 - adaptive permits the host-approved adaptive policy.
 
-All modes use the same v1 ABI and catalog. There is no reload command and no
-mutable extension registry outside the durable harness.
+All modes use the immutable harness catalog and the selected Luau ABI. ABI v3
+is required for an extension that requests `extension.state`: it declares one
+portable `state_version`, which becomes part of the closed bundle and snapshot
+identity. Candidate validation rejects changing or removing an existing
+stateful extension instead of silently resetting, migrating, or reinterpreting
+its private state. There is no reload command and no mutable extension registry
+outside the durable harness.
 
 The checked-in coding builtins follow this same rule. A candidate can edit a
 builtin's Luau source—for example, `read/handler.luau` formatting or schema—and

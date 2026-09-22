@@ -1,4 +1,5 @@
 use super::compaction::ProviderCompactor;
+use super::durable::HostTranscriptMessage;
 use super::state::ContextEstimate;
 use super::*;
 use crate::terminal::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -13,7 +14,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use tea_core::compaction::{
     AutomaticCompactionReason, AutomaticCompactionRequest, CompactionContext, Compactor,
-    OverflowRecovery, ProviderContext,
+    ProviderContext,
 };
 use tea_core::scheduler::{
     CancellationToken, ModelFuture, ModelProvider, ModelRequest, ModelStream, ModelStreamEvent,
@@ -189,7 +190,6 @@ fn cli_help_accepts_short_and_long_forms() {
         CliOptions::parse_command(["tea", "-V"].map(OsString::from)),
         Ok(CliCommand::Version)
     );
-    assert!(CliOptions::help_text().contains("--provider <id>"));
 }
 
 #[test]
@@ -213,7 +213,9 @@ fn new_reaps_a_completed_task_but_never_drops_a_pending_task_receiver() {
     );
 
     sender
-        .send(Ok(()))
+        .send(Ok(super::runtime::RootTaskOutcome::Drive(
+            tea_core::runtime::IdleDriveOutcome::Idle,
+        )))
         .expect("test task completion is delivered");
     app.dispatch_command("/new")
         .expect("completed task is reaped first");
@@ -901,7 +903,6 @@ fn cli_parses_explicit_tea_home() {
         options.tea_home(),
         Some(std::path::Path::new("/tmp/tea-test"))
     );
-    assert!(CliOptions::help_text().contains("--tea-home <path>"));
 }
 
 #[test]
@@ -1206,35 +1207,30 @@ fn disabled_subagent_reopen_rejects_before_provider_setup_or_prior_harness_remov
 }
 
 #[test]
-fn event_projection_keeps_streaming_text_as_one_raw_line() {
-    let mut state = AppState::new();
-    let message = AgentMessage::Assistant {
-        id: MessageId(2),
-        content: "hello".into(),
-        tool_calls: Vec::new(),
-        stop_reason: None,
-        error_message: None,
-        opaque_context: Vec::new(),
-    };
-    state.apply_event(&tea_core::event::AgentEvent {
-        run_id: tea_core::state::RunId(1),
-        sequence: tea_core::event::EventSequence(1),
-        kind: tea_core::event::AgentEventKind::MessageUpdate {
-            message: message.clone(),
-            text_delta: Some("hel".into()),
-        },
-    });
-    state.apply_event(&tea_core::event::AgentEvent {
-        run_id: tea_core::state::RunId(1),
-        sequence: tea_core::event::EventSequence(2),
-        kind: tea_core::event::AgentEventKind::MessageUpdate {
-            message,
-            text_delta: Some("lo".into()),
-        },
-    });
-    assert_eq!(state.transcript().len(), 1);
+fn preview_projection_keeps_streaming_text_as_one_run_scoped_line() {
+    let mut app = App::new(CliOptions::default());
+    let run = tea_core::runtime::ObservationRun::new(
+        LaneId::main(),
+        tea_session::OperationId::new("preview-projection-operation")
+            .expect("fixture operation ID is valid"),
+        tea_session::EpochId::new("preview-projection-epoch")
+            .expect("fixture epoch ID is valid"),
+        tea_core::state::RunId(1),
+    );
+    let identity = tea_core::runtime::PreviewIdentity::assistant(run, MessageId(2));
+    for (sequence, text) in [(1, "hel"), (2, "lo")] {
+        app.project_durable_event(tea_core::runtime::TeaEvent::Preview(
+            tea_core::runtime::PreviewEvent::AssistantText {
+                identity: identity.clone(),
+                sequence: tea_core::event::EventSequence(sequence),
+                text: text.into(),
+                truncated: false,
+            },
+        ));
+    }
+    assert_eq!(app.state().transcript().len(), 1);
     assert!(matches!(
-        &state.transcript()[0],
+        &app.state().transcript()[0],
         TranscriptEntry::Assistant { text, streaming: true } if text == "hello"
     ));
 }
@@ -1508,7 +1504,13 @@ fn child_events_update_aggregate_usage_without_entering_root_transcript() {
     let mut app = App::new(CliOptions::default());
     let child_lane = LaneId::new("child-agent-event").expect("child lane is valid");
     app.project_durable_event(tea_core::runtime::TeaEvent::Agent {
-        lane_id: child_lane,
+        run: tea_core::runtime::ObservationRun::new(
+            child_lane,
+            tea_session::OperationId::new("child-agent-operation")
+                .expect("child operation ID is valid"),
+            tea_session::EpochId::new("child-agent-epoch").expect("child epoch ID is valid"),
+            tea_core::state::RunId(9),
+        ),
         event: tea_core::event::AgentEvent {
             run_id: tea_core::state::RunId(9),
             sequence: tea_core::event::EventSequence(1),
@@ -1531,26 +1533,283 @@ fn child_events_update_aggregate_usage_without_entering_root_transcript() {
 }
 
 #[test]
-fn accepted_root_prompt_enters_the_live_transcript() {
+fn terminal_preview_fence_rejects_a_late_update_after_message_end() {
     let mut app = App::new(CliOptions::default());
-    app.submitted_prompt = Some("accepted prompt".into());
-    let operation_id =
-        tea_session::OperationId::new("operation-test").expect("test operation ID is portable");
-    app.project_durable_event(tea_core::runtime::TeaEvent::Session(
-        tea_core::runtime::SessionEvent::OperationAccepted {
-            sequence: tea_session::Sequence(7),
-            lane_id: tea_session::LaneId::main(),
-            operation_id,
+    let run = tea_core::runtime::ObservationRun::new(
+        LaneId::main(),
+        tea_session::OperationId::new("preview-fence-operation")
+            .expect("fixture operation ID is valid"),
+        tea_session::EpochId::new("preview-fence-epoch").expect("fixture epoch ID is valid"),
+        tea_core::state::RunId(17),
+    );
+    let message_id = MessageId(23);
+    let identity = tea_core::runtime::PreviewIdentity::assistant(run.clone(), message_id);
+
+    app.project_durable_event(tea_core::runtime::TeaEvent::Preview(
+        tea_core::runtime::PreviewEvent::AssistantText {
+            identity: identity.clone(),
+            sequence: tea_core::event::EventSequence(1),
+            text: "partial".into(),
+            truncated: false,
+        },
+    ));
+    assert_eq!(
+        app.state().transcript(),
+        &[TranscriptEntry::Assistant {
+            text: "partial".into(),
+            streaming: true,
+        }]
+    );
+
+    app.project_durable_event(tea_core::runtime::TeaEvent::Agent {
+        run: run.clone(),
+        event: tea_core::event::AgentEvent {
+            run_id: tea_core::state::RunId(17),
+            sequence: tea_core::event::EventSequence(2),
+            kind: tea_core::event::AgentEventKind::MessageEnd {
+                message: AgentMessage::Assistant {
+                    id: message_id,
+                    content: "settled".into(),
+                    tool_calls: Vec::new(),
+                    stop_reason: None,
+                    error_message: None,
+                    opaque_context: Vec::new(),
+                },
+            },
+        },
+    });
+    app.project_durable_event(tea_core::runtime::TeaEvent::Agent {
+        run: run.clone(),
+        event: tea_core::event::AgentEvent {
+            run_id: tea_core::state::RunId(17),
+            sequence: tea_core::event::EventSequence(3),
+            kind: tea_core::event::AgentEventKind::AgentEnd {
+                messages: Vec::new(),
+            },
+        },
+    });
+    app.project_durable_event(tea_core::runtime::TeaEvent::Preview(
+        tea_core::runtime::PreviewEvent::AssistantText {
+            identity,
+            sequence: tea_core::event::EventSequence(4),
+            text: " late".into(),
+            truncated: false,
         },
     ));
 
     assert_eq!(
         app.state().transcript(),
-        &[TranscriptEntry::User {
-            text: "accepted prompt".into(),
-        }]
+        &[TranscriptEntry::Assistant {
+            text: "settled".into(),
+            streaming: false,
+        }],
+        "a coalesced preview must not revive a semantic-final row after its run ends"
     );
-    assert_eq!(app.state().history, ["accepted prompt"]);
+}
+
+#[test]
+fn durable_resnapshot_keeps_only_the_entry_id_identical_scrollback_frontier() {
+    let mut app = App::new(CliOptions::default());
+    let user_id = EntryId::new("frontier-user").expect("fixture entry ID is valid");
+    let previous_assistant_id =
+        EntryId::new("frontier-assistant-previous").expect("fixture entry ID is valid");
+    let replacement_assistant_id =
+        EntryId::new("frontier-assistant-replacement").expect("fixture entry ID is valid");
+    let user = AgentMessage::User {
+        id: MessageId(31),
+        content: "keep this committed user row".into(),
+    };
+    let previous = AgentMessage::Assistant {
+        id: MessageId(32),
+        content: "old answer".into(),
+        tool_calls: Vec::new(),
+        stop_reason: None,
+        error_message: None,
+        opaque_context: Vec::new(),
+    };
+    let replacement = AgentMessage::Assistant {
+        id: MessageId(33),
+        content: "replacement answer".into(),
+        tool_calls: Vec::new(),
+        stop_reason: None,
+        error_message: None,
+        opaque_context: Vec::new(),
+    };
+    app.state.restore_durable_messages(&[
+        HostTranscriptMessage {
+            entry_id: user_id.clone(),
+            message: user.clone(),
+        },
+        HostTranscriptMessage {
+            entry_id: previous_assistant_id.clone(),
+            message: previous,
+        },
+    ]);
+    app.committed_entries = 2;
+    app.committed_entry_ids = vec![user_id.clone(), previous_assistant_id];
+
+    app.state.restore_durable_messages(&[
+        HostTranscriptMessage {
+            entry_id: user_id.clone(),
+            message: user,
+        },
+        HostTranscriptMessage {
+            entry_id: replacement_assistant_id,
+            message: replacement,
+        },
+    ]);
+    app.reconcile_committed_frontier();
+
+    assert_eq!(app.committed_entries, 1);
+    assert_eq!(app.committed_entry_ids, vec![user_id]);
+}
+
+#[test]
+fn accepted_inputs_project_to_one_runtime_owned_next_message_slot() {
+    let mut app = App::new(CliOptions::default());
+    let first = EntryId::new("accepted-input-one").expect("fixture entry ID is valid");
+    let second = EntryId::new("accepted-input-two").expect("fixture entry ID is valid");
+    app.state.set_queued_inputs(vec![
+        (first.clone(), "first instruction".into()),
+        (second.clone(), "second instruction".into()),
+    ]);
+    assert_eq!(
+        app.state.queued_message(),
+        Some("first instruction\n\nsecond instruction")
+    );
+    assert_eq!(app.state.queued_input_ids(), &[first, second]);
+    assert!(app.state().transcript().is_empty());
+    assert!(app.state().composer().text().is_empty());
+}
+
+#[test]
+fn runtime_owned_withdrawal_restores_the_combined_slot_and_settles_each_input() {
+    let tea_home = test_tea_home("runtime-owned-withdrawal");
+    let options = CliOptions::parse(
+        [
+            "tea",
+            "--tea-home",
+            tea_home.to_str().expect("UTF-8 test Tea home"),
+            "--provider",
+            mock::PROVIDER_ID,
+        ]
+        .map(OsString::from),
+    )
+    .expect("mock options parse");
+    let mut app = App::new(options);
+    app.assemble_host().expect("mock host assembles");
+    let harness = app
+        .ensure_durable_harness()
+        .expect("durable mock harness creates");
+    let first = harness
+        .submit_input("first accepted input")
+        .expect("first input accepts");
+    let second = harness
+        .submit_input("second accepted input")
+        .expect("second input accepts");
+    app.refresh_runtime_input_projection()
+        .expect("terminal projection refreshes");
+
+    app.state.composer_mut().replace_from_editor("unfinished draft");
+    assert!(
+        !app
+            .withdraw_projected_inputs()
+            .expect("nonempty composer does not withdraw")
+    );
+    assert_eq!(
+        harness
+            .queued_inputs()
+            .expect("durable inputs remain readable")
+            .len(),
+        2,
+        "a draft keeps every accepted input in the runtime queue"
+    );
+
+    app.state.composer_mut().clear();
+    assert!(
+        app.withdraw_projected_inputs()
+            .expect("empty composer withdraws the combined slot")
+    );
+    assert_eq!(
+        app.state().composer().text(),
+        "first accepted input\n\nsecond accepted input"
+    );
+    assert!(
+        app.state().queued_input_ids().is_empty(),
+        "terminal clears its projection only after the runtime commits withdrawal"
+    );
+    assert!(
+        harness
+            .queued_inputs()
+            .expect("durable queue reads after withdrawal")
+            .is_empty()
+    );
+    for accepted in [&first, &second] {
+        assert!(matches!(
+            accepted.completion().try_result(),
+            Some(completion)
+                if matches!(completion.outcome(), tea_core::runtime::InputOutcome::Withdrawn)
+        ));
+    }
+
+    drop(harness);
+    drop(app);
+    let _ = fs::remove_dir_all(tea_home);
+}
+
+#[test]
+fn stale_combined_slot_does_not_partially_withdraw_runtime_inputs() {
+    let tea_home = test_tea_home("runtime-withdrawal-atomicity");
+    let options = CliOptions::parse(
+        [
+            "tea",
+            "--tea-home",
+            tea_home.to_str().expect("UTF-8 test Tea home"),
+            "--provider",
+            mock::PROVIDER_ID,
+        ]
+        .map(OsString::from),
+    )
+    .expect("mock options parse");
+    let mut app = App::new(options);
+    app.assemble_host().expect("mock host assembles");
+    let harness = app
+        .ensure_durable_harness()
+        .expect("durable mock harness creates");
+    let first = harness
+        .submit_input("already withdrawn elsewhere")
+        .expect("first input accepts");
+    let second = harness
+        .submit_input("must remain pending")
+        .expect("second input accepts");
+    app.refresh_runtime_input_projection()
+        .expect("terminal projection refreshes");
+    let projected_ids = app.state().queued_input_ids().to_vec();
+
+    harness
+        .withdraw_inputs(&[first.id().clone()])
+        .expect("independent withdrawal commits");
+    assert!(
+        app.withdraw_projected_inputs().is_err(),
+        "the stale all-input request must fail rather than withdrawing the still-pending suffix"
+    );
+    assert!(app.state().composer().text().is_empty());
+    assert_eq!(app.state().queued_input_ids(), projected_ids.as_slice());
+    assert_eq!(
+        harness
+            .queued_inputs()
+            .expect("durable queue remains readable")
+            .iter()
+            .map(|input| input.id())
+            .collect::<Vec<_>>(),
+        vec![second.id()],
+        "runtime preserves the later input when the combined withdrawal is invalid"
+    );
+    assert!(second.completion().try_result().is_none());
+
+    drop(harness);
+    drop(app);
+    let _ = fs::remove_dir_all(tea_home);
 }
 
 #[test]
@@ -2125,26 +2384,22 @@ fn reverse_history_search_renders_highlighted_session_message_excerpts() {
 }
 
 #[test]
-fn queued_message_coalesces_and_restores_only_into_an_empty_composer() {
+fn queued_message_projection_retains_ids_until_runtime_replaces_it() {
     let mut state = AppState::new();
-    state.queue_message("first instruction".into());
-    state.queue_message("second instruction".into());
+    let first = EntryId::new("queued-projection-one").expect("fixture entry ID is valid");
+    let second = EntryId::new("queued-projection-two").expect("fixture entry ID is valid");
+    state.set_queued_inputs(vec![
+        (first.clone(), "first instruction".into()),
+        (second.clone(), "second instruction".into()),
+    ]);
     assert_eq!(
         state.queued_message(),
         Some("first instruction\n\nsecond instruction")
     );
-
-    state.composer_mut().replace_from_editor("live draft");
-    assert!(!state.restore_queued_message());
-    assert_eq!(state.composer().text(), "live draft");
-
-    state.composer_mut().clear();
-    assert!(state.restore_queued_message());
-    assert_eq!(
-        state.composer().text(),
-        "first instruction\n\nsecond instruction"
-    );
+    assert_eq!(state.queued_input_ids(), &[first, second]);
+    state.clear_queued_inputs();
     assert_eq!(state.queued_message(), None);
+    assert!(state.queued_input_ids().is_empty());
 }
 
 #[test]
@@ -2378,15 +2633,8 @@ fn a_published_activity_survives_the_rest_of_its_root_operation() {
     state.apply_event(&projection_event(
         4,
         tea_core::event::AgentEventKind::MessageUpdate {
-            message: AgentMessage::Assistant {
-                id: MessageId(2),
-                content: "thinking".into(),
-                tool_calls: Vec::new(),
-                stop_reason: None,
-                error_message: None,
-                opaque_context: Vec::new(),
-            },
-            text_delta: Some("thinking".into()),
+            message_id: MessageId(2),
+            text_delta: "thinking".into(),
         },
     ));
     state.apply_event(&tool_update(5, "bash", "compiling", None));

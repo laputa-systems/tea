@@ -2,6 +2,7 @@ use crate::editor::Editor;
 use crate::terminal::{
     KeyCode, KeyEvent, KeyEventKind, KeyModifiers, TerminalEvent, TerminalGuard,
 };
+use tea_core::runtime::ExtensionCommandAdmission;
 
 use super::commands;
 use super::error::AppError;
@@ -145,7 +146,18 @@ impl App {
             KeyCode::End if key.modifiers.contains(KeyModifiers::CONTROL) => {}
             KeyCode::End => self.state.composer_mut().end(),
             KeyCode::Up => {
-                if self.state.restore_queued_message() {
+                let restored = if self.state.composer().text().is_empty() {
+                    match self.withdraw_projected_inputs() {
+                        Ok(restored) => restored,
+                        Err(error) => {
+                            self.state.notice(error.to_string());
+                            return Ok(());
+                        }
+                    }
+                } else {
+                    false
+                };
+                if restored {
                     self.state.notice("queued message restored");
                 } else {
                     let width = terminal.size()?.0;
@@ -254,11 +266,12 @@ impl App {
     }
 
     pub(super) fn submit_composer(&mut self) -> Result<(), AppError> {
-        let input = self.state.composer_mut().take();
+        let input = self.state.composer().text().to_owned();
         if input.trim().is_empty() {
             return Ok(());
         }
         if input.starts_with('/') {
+            let input = self.state.composer_mut().take();
             self.dispatch_command(&input)
         } else {
             // A saved model can remain visible when its provider cannot be configured (for
@@ -266,36 +279,58 @@ impl App {
             // in that error state so Enter does not discard the draft or open an unrelated picker;
             // slash commands, including `/models`, remain the explicit recovery path.
             if self.configured_provider.is_none() && self.state.selected_model.is_some() {
-                self.state.composer_mut().replace_from_editor(input);
                 return Ok(());
             }
-            if self.agent_is_active() {
-                self.state.queue_message(input);
-                self.state.notice("next message queued");
-                return Ok(());
-            }
-            let input = if self.state.queued_message().is_some() {
-                self.state.queue_message(input);
-                self.state
-                    .take_queued_message()
-                    .expect("a queued message was just stored")
-            } else {
-                input
-            };
             if self.configured_provider.is_none() {
                 self.state.notice("select a model first");
                 self.open_model_picker();
-            } else {
-                match self.ensure_durable_harness() {
-                    Ok(harness) => {
-                        self.submitted_prompt = Some(input.clone());
-                        self.spawn_durable_prompt(harness, input);
-                    }
-                    Err(error) => {
-                        self.state.composer_mut().replace_from_editor(input);
-                        self.state.notice(error.to_string());
-                    }
+                return Ok(());
+            }
+            // Provider authority is checked before admission for every text
+            // submission, including an active run. A failure therefore leaves
+            // the exact draft in the composer rather than creating a durable
+            // input that cannot currently execute.
+            if let Err(error) = self.ensure_execution_authority() {
+                self.state.notice(error.to_string());
+                return Ok(());
+            }
+            let was_active = self.agent_is_active();
+            let harness = match self.ensure_durable_harness() {
+                Ok(harness) => harness,
+                Err(error) => {
+                    self.state.notice(error.to_string());
+                    return Ok(());
                 }
+            };
+            let recovery = match harness.recovery_report() {
+                Ok(recovery) => recovery,
+                Err(error) => {
+                    self.state.notice(error.to_string());
+                    return Ok(());
+                }
+            };
+            if recovery
+                .lanes
+                .iter()
+                .any(|lane| lane.lane_id == tea_session::LaneId::main())
+            {
+                self.state
+                    .notice("durable recovery requires /continue before accepting a prompt");
+                return Ok(());
+            }
+            if let Err(error) = harness.submit_input(input) {
+                self.state.notice(error.to_string());
+                return Ok(());
+            }
+            self.state.composer_mut().take();
+            if let Err(error) = self.refresh_runtime_input_projection() {
+                self.state.notice(error.to_string());
+                return Ok(());
+            }
+            if was_active {
+                self.state.notice("next message queued");
+            } else {
+                self.start_runtime_idle_drive();
             }
             Ok(())
         }
@@ -390,6 +425,16 @@ impl App {
                     self.state.notice(error.to_string());
                 }
             }
+            "/continue" => {
+                if let Err(error) = self.continue_recovery() {
+                    self.state.notice(error.to_string());
+                }
+            }
+            "/fork" => {
+                if let Err(error) = self.fork_settled_turn(&arguments) {
+                    self.state.notice(error.to_string());
+                }
+            }
             "/new" => {
                 if let Err(error) = self.new_session() {
                     self.state.notice(error.to_string());
@@ -453,22 +498,18 @@ impl App {
                 return Ok(());
             }
         };
-        if self.agent_is_active() {
-            self.queued_extension_commands
-                .push((command.to_owned(), arguments));
-            self.state
-                .notice(format!("{command} queued until the active run settles"));
-            return Ok(());
-        }
         match harness.dispatch_extension_command(command, arguments) {
-            Ok(dispatch) => {
+            Ok(ExtensionCommandAdmission::Applied(dispatch)) => {
                 if let Some(notice) = dispatch.result.notice {
                     self.state.extension_notice(notice);
                 }
-                if let Some(input) = dispatch.result.internal_input {
-                    self.spawn_extension_continuation(harness, dispatch.extension_id, input);
+                if dispatch.result.internal_input.is_some() {
+                    self.start_runtime_idle_drive();
                 }
             }
+            Ok(ExtensionCommandAdmission::Queued { control_id }) => self.state.notice(format!(
+                "{command} queued as durable control {control_id} until the active run settles"
+            )),
             Err(error) => self.state.notice(error.to_string()),
         }
         Ok(())
@@ -480,7 +521,7 @@ fn help_surface_lines(
 ) -> Vec<String> {
     const GROUPS: &[(&str, &[&str])] = &[
         ("General", &["/help"]),
-        ("Session", &["/new", "/resume"]),
+        ("Session", &["/new", "/resume", "/continue", "/fork"]),
         ("Runtime", &["/models"]),
     ];
 

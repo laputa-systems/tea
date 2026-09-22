@@ -173,31 +173,6 @@ fn full_value(result: &AgentToolResult, details: JsonValue) -> JsonValue {
     ])
 }
 
-/// Return the stable model-facing content encoded by a retained projection.
-pub(crate) fn projection_content(
-    projection: &JsonValue,
-) -> Result<(String, Option<String>), ToolResultRetentionError> {
-    let content = projection
-        .get("content")
-        .and_then(JsonValue::as_str)
-        .ok_or_else(|| ToolResultRetentionError::Policy {
-            message: "tool-result model projection has no string content".into(),
-        })?
-        .to_owned();
-    let details = projection
-        .get("details")
-        .filter(|details| !details.is_null())
-        .map(|details| {
-            details
-                .to_json_string()
-                .map_err(|error| ToolResultRetentionError::Encode {
-                    message: error.to_string(),
-                })
-        })
-        .transpose()?;
-    Ok((content, details))
-}
-
 fn inline_projection(content: &str, details: JsonValue) -> JsonValue {
     JsonValue::object([
         ("content", JsonValue::String(content.into())),

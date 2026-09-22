@@ -13,8 +13,8 @@ use crate::run::RunHandle;
 use crate::scheduler::{CancellationToken, ModelProvider};
 use crate::state::{AgentMessage, AgentPhase, AgentSnapshot, AgentState, ModelDescriptor};
 use crate::tool::ToolRegistry;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{Receiver, Sender, SyncSender, TryRecvError, channel, sync_channel};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, sync_channel};
 use std::sync::{Arc, Mutex, RwLock};
 use std::task::{Poll, Waker};
 
@@ -52,7 +52,7 @@ pub(crate) struct AgentInner {
     /// Volatile prompt-layout continuity shared by host-created agents when
     /// a live session spans multiple durable operations.
     pub(crate) prompt_layout_ledger: Arc<crate::measurement::PromptLayoutLedger>,
-    /// Awaited observers in registration order.
+    /// Synchronous observers in registration order.
     pub(crate) observers: Mutex<Vec<ObserverRegistration>>,
     /// Monotonic process-local observer registrations.
     pub(crate) next_observer_id: AtomicU64,
@@ -60,10 +60,6 @@ pub(crate) struct AgentInner {
     pub(crate) subscribers: Mutex<Vec<SubscriberRegistration>>,
     /// Monotonic process-local non-blocking subscription registrations.
     pub(crate) next_subscriber_id: AtomicU64,
-    /// Lossless live event subscribers that do not participate in settlement.
-    pub(crate) lossless_subscribers: Mutex<Vec<LosslessSubscriberRegistration>>,
-    /// Monotonic process-local lossless subscription registrations.
-    pub(crate) next_lossless_subscriber_id: AtomicU64,
     /// Monotonic process-local run IDs.
     pub(crate) next_run_id: AtomicU64,
     /// Wakers awaiting the post-settlement idle boundary.
@@ -190,13 +186,13 @@ impl std::fmt::Debug for AgentConfiguration {
     }
 }
 
-/// An owned registration for an awaited lifecycle observer.
+/// An owned registration for a synchronous lifecycle observer.
 ///
 /// Dropping this value removes the observer.  The removal affects events that
 /// have not yet begun observer delivery; an observer snapshot already being
 /// delivered remains stable for that event.  This makes unsubscribe from an
 /// observer callback safe and deterministic without holding the registry lock
-/// across an awaited callback.
+/// across a callback.
 #[must_use = "drop the subscription to unsubscribe, or retain it for the desired observation lifetime"]
 pub struct ObserverSubscription {
     agent: std::sync::Weak<AgentInner>,
@@ -230,36 +226,54 @@ pub(crate) struct ObserverRegistration {
 /// A bounded, non-blocking lifecycle-event subscription.
 ///
 /// Unlike [`ObserverSubscription`], receiving events from this subscription
-/// never keeps an agent run active. A full queue drops the new event and
-/// increments [`Self::dropped_events`], preserving source order for events
-/// that are retained without creating backpressure in the run loop.
+/// never keeps an agent run active. A full queue latches an explicit lag
+/// failure, so callers cannot mistake a retained prefix for a complete stream.
 #[must_use = "drop the subscription to stop receiving events"]
 pub struct EventSubscription {
     agent: std::sync::Weak<AgentInner>,
     id: u64,
     receiver: Receiver<crate::event::AgentEvent>,
-    dropped: Arc<AtomicU64>,
+    lagged: Arc<AtomicBool>,
 }
 
 impl std::fmt::Debug for EventSubscription {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("EventSubscription")
             .field("id", &self.id)
-            .field("dropped_events", &self.dropped_events())
+            .field("lagged", &self.is_lagged())
             .finish_non_exhaustive()
     }
 }
 
 impl EventSubscription {
     /// Return the next queued event without waiting.
-    pub fn try_recv(&self) -> Result<crate::event::AgentEvent, TryRecvError> {
-        self.receiver.try_recv()
+    pub fn try_recv(&self) -> Result<crate::event::AgentEvent, EventSubscriptionTryRecvError> {
+        if self.is_lagged() {
+            return Err(EventSubscriptionTryRecvError::Lagged);
+        }
+        match self.receiver.try_recv() {
+            Ok(event) => Ok(event),
+            Err(TryRecvError::Empty) => Err(EventSubscriptionTryRecvError::Empty),
+            Err(TryRecvError::Disconnected) => Err(EventSubscriptionTryRecvError::Disconnected),
+        }
     }
 
-    /// Number of events discarded because this subscription's queue was full.
-    pub fn dropped_events(&self) -> u64 {
-        self.dropped.load(Ordering::Acquire)
+    /// Return whether this subscription has irreversibly missed an event.
+    pub fn is_lagged(&self) -> bool {
+        self.lagged.load(Ordering::Acquire)
     }
+}
+
+/// Nonblocking receive failure for a bounded core event subscription.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EventSubscriptionTryRecvError {
+    /// No event is available now.
+    Empty,
+    /// The bounded queue overflowed. Discard the subscription and obtain a
+    /// fresh authoritative agent snapshot before presenting further state.
+    Lagged,
+    /// The agent dropped its event source.
+    Disconnected,
 }
 
 impl Drop for EventSubscription {
@@ -271,62 +285,12 @@ impl Drop for EventSubscription {
     }
 }
 
-/// A lossless, unbounded lifecycle-event subscription.
-///
-/// Unlike [`EventSubscription`], this subscription never drops an event because
-/// of queue capacity. Events are enqueued in the core's sequence order and
-/// publishing does not wait for the receiver to drain them or for an executor
-/// task to run. The queue is intentionally unbounded: unread events consume
-/// caller-owned memory until they are drained or this subscription is dropped.
-/// Dropping the subscription releases the receiver and unregisters it from the
-/// agent; subsequent sends are harmless.
-#[must_use = "drop the subscription to stop receiving events"]
-pub struct LosslessEventSubscription {
-    agent: std::sync::Weak<AgentInner>,
-    id: u64,
-    receiver: Receiver<crate::event::AgentEvent>,
-}
-
-impl std::fmt::Debug for LosslessEventSubscription {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("LosslessEventSubscription")
-            .field("id", &self.id)
-            .finish_non_exhaustive()
-    }
-}
-
-impl LosslessEventSubscription {
-    /// Return the next queued event without waiting.
-    pub fn try_recv(&self) -> Result<crate::event::AgentEvent, TryRecvError> {
-        self.receiver.try_recv()
-    }
-}
-
-impl Drop for LosslessEventSubscription {
-    fn drop(&mut self) {
-        if let Some(agent) = self.agent.upgrade() {
-            let mut subscribers = agent
-                .lossless_subscribers
-                .lock()
-                .expect("lossless subscriber mutex poisoned");
-            subscribers.retain(|registration| registration.id != self.id);
-        }
-    }
-}
-
 /// One bounded non-blocking event subscription retained by the agent.
 #[derive(Clone)]
 pub(crate) struct SubscriberRegistration {
     pub(crate) id: u64,
     pub(crate) sender: SyncSender<crate::event::AgentEvent>,
-    pub(crate) dropped: Arc<AtomicU64>,
-}
-
-/// One unbounded lossless event subscription retained by the agent.
-#[derive(Clone)]
-pub(crate) struct LosslessSubscriberRegistration {
-    pub(crate) id: u64,
-    pub(crate) sender: Sender<crate::event::AgentEvent>,
+    pub(crate) lagged: Arc<AtomicBool>,
 }
 
 impl std::fmt::Debug for Agent {
@@ -477,8 +441,8 @@ impl Agent {
     /// durable supervisor that has an explicit recovery plan instead uses this
     /// narrow method and must immediately start the exact matching
     /// [`Self::start_recover_tool_calls`] path. The final assistant turn may
-    /// be followed by a source-order prefix of already committed tool results;
-    /// only its remaining suffix is eligible for recovery. Every preceding
+    /// be followed by any subset of already committed tool results;
+    /// only unresolved calls are eligible for recovery. Every preceding
     /// relationship is validated by the normal transcript validator.
     pub fn restore_pending_tool_calls(
         &self,
@@ -587,12 +551,13 @@ impl Agent {
         Arc::clone(&self.configuration_snapshot().hooks)
     }
 
-    /// Register an awaited lifecycle observer.
+    /// Register a synchronous, non-vetoing lifecycle observer.
     ///
-    /// Observers are invoked in registration order for every future event and
-    /// are awaited as part of the run.  Keep the returned subscription alive
-    /// for as long as observation is wanted; dropping it unsubscribes.  A
-    /// registration made from an observer callback begins with the next event.
+    /// Observers are invoked in registration order for every future event.
+    /// They must return promptly and cannot change a run's outcome; callback
+    /// panics are ignored. Keep the returned subscription alive for as long as
+    /// observation is wanted; dropping it unsubscribes. A registration made
+    /// from an observer callback begins with the next event.
     pub fn subscribe(&self, observer: Arc<dyn EventObserver>) -> ObserverSubscription {
         let id = self
             .inner
@@ -613,10 +578,10 @@ impl Agent {
     /// Subscribe to a bounded, non-blocking copy of future lifecycle events.
     ///
     /// This is separate from [`Self::subscribe`]. Events are sent after
-    /// awaited observer delivery with a bounded `try_send`; a slow consumer
+    /// synchronous observer delivery with a bounded `try_send`; a slow consumer
     /// can neither delay settlement nor cause a background task. When the
-    /// queue is full, the new event is dropped and
-    /// [`EventSubscription::dropped_events`] records it.
+    /// queue is full, [`EventSubscription::try_recv`] permanently reports
+    /// [`EventSubscriptionTryRecvError::Lagged`].
     pub fn subscribe_nonblocking(&self, capacity: std::num::NonZeroUsize) -> EventSubscription {
         let id = self
             .inner
@@ -624,7 +589,7 @@ impl Agent {
             .fetch_add(1, Ordering::Relaxed)
             .saturating_add(1);
         let (sender, receiver) = sync_channel(capacity.get());
-        let dropped = Arc::new(AtomicU64::new(0));
+        let lagged = Arc::new(AtomicBool::new(false));
         self.inner
             .subscribers
             .lock()
@@ -632,47 +597,20 @@ impl Agent {
             .push(SubscriberRegistration {
                 id,
                 sender,
-                dropped: Arc::clone(&dropped),
+                lagged: Arc::clone(&lagged),
             });
         EventSubscription {
             agent: Arc::downgrade(&self.inner),
             id,
             receiver,
-            dropped,
-        }
-    }
-
-    /// Subscribe to an unbounded, lossless copy of future lifecycle events.
-    ///
-    /// This path is separate from [`Self::subscribe_nonblocking`]. Every event
-    /// is sent in sequence order while the receiver is alive; no bounded
-    /// overflow or hidden lossy fallback exists. The unbounded queue is owned
-    /// by the caller, so a receiver that is not drained retains every event and
-    /// can grow without limit. Dropping the returned subscription releases that
-    /// queued memory, unregisters the receiver, and never delays run settlement.
-    pub fn subscribe_lossless(&self) -> LosslessEventSubscription {
-        let id = self
-            .inner
-            .next_lossless_subscriber_id
-            .fetch_add(1, Ordering::Relaxed)
-            .saturating_add(1);
-        let (sender, receiver) = channel();
-        self.inner
-            .lossless_subscribers
-            .lock()
-            .expect("lossless subscriber mutex poisoned")
-            .push(LosslessSubscriberRegistration { id, sender });
-        LosslessEventSubscription {
-            agent: Arc::downgrade(&self.inner),
-            id,
-            receiver,
+            lagged,
         }
     }
 
     /// Resolve after the active run has fully settled and the agent is idle.
     ///
-    /// In particular, awaited observers for the terminal `AgentEnd` event
-    /// run before this future resolves.
+    /// In particular, synchronous observers receive the terminal `AgentEnd`
+    /// event before this future resolves.
     pub async fn wait_for_idle(&self) {
         std::future::poll_fn(|context| {
             if self.is_idle() {
@@ -1119,14 +1057,13 @@ fn validate_recovery_tool_batch(
         return Err(recovery_transition("assistant-not-tool-use", operation));
     }
     let settled_results = &messages[assistant_index.saturating_add(1)..];
-    if settled_results.len() >= tool_calls.len()
-        || tool_calls.get(settled_results.len()..) != Some(recovery_calls)
-    {
+    if settled_results.len() >= tool_calls.len() {
         return Err(recovery_transition("assistant-tool-mismatch", operation));
     }
 
+    let mut settled_ids = std::collections::BTreeSet::new();
     let mut prior_all_terminate = true;
-    for (call, message) in tool_calls.iter().zip(settled_results) {
+    for message in settled_results {
         let AgentMessage::ToolResult {
             tool_call_id,
             tool_name,
@@ -1136,10 +1073,15 @@ fn validate_recovery_tool_batch(
         else {
             return Err(recovery_transition("non-result-after-assistant", operation));
         };
-        if tool_call_id != &call.id || tool_name != &call.name {
-            return Err(recovery_transition("result-prefix-mismatch", operation));
+        if !tool_calls.iter().any(|call| &call.id == tool_call_id && &call.name == tool_name)
+            || !settled_ids.insert(tool_call_id.clone()) {
+            return Err(recovery_transition("committed-result-mismatch", operation));
         }
         prior_all_terminate &= *terminate;
+    }
+    let expected = tool_calls.iter().filter(|call| !settled_ids.contains(&call.id)).cloned().collect::<Vec<_>>();
+    if expected != recovery_calls {
+        return Err(recovery_transition("assistant-tool-mismatch", operation));
     }
 
     let mut settled_transcript = messages.to_vec();
@@ -1150,9 +1092,24 @@ fn validate_recovery_tool_batch(
     else {
         unreachable!("assistant index was selected from assistant messages");
     };
-    settled_calls.truncate(settled_results.len());
+    settled_calls.retain(|call| settled_ids.contains(&call.id));
     Agent::validate_messages(&settled_transcript)?;
     Ok(prior_all_terminate)
+}
+
+pub(crate) fn order_recovered_tool_results(agent: &AgentInner) {
+    let mut state = agent.state.lock().expect("agent state mutex poisoned");
+    let Some(assistant_index) = state.messages.iter().rposition(|message| matches!(message, AgentMessage::Assistant { .. })) else {
+        return;
+    };
+    let AgentMessage::Assistant { tool_calls, .. } = &state.messages[assistant_index] else { unreachable!() };
+    let positions = tool_calls.iter().enumerate().map(|(index, call)| (call.id.clone(), index))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    state.messages[assistant_index.saturating_add(1)..].sort_by_key(|message| match message {
+        AgentMessage::ToolResult { tool_call_id, .. } => positions.get(tool_call_id).copied().unwrap_or(usize::MAX),
+        _ => usize::MAX,
+    });
+    state.history_revision = state.history_revision.saturating_add(1);
 }
 
 fn recovery_transition(from: &'static str, operation: &'static str) -> CoreError {

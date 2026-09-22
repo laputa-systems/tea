@@ -11,7 +11,7 @@ Start with [docs/overview.md](docs/overview.md). The main routes are:
   the repository.
 - [Default coding profile](docs/default-coding-profile.md) and
   [provider adapters](docs/provider-adapters.md) for optional runtime layers.
-- [Tracing](docs/trace.md) and [Luau ABI v1](docs/luau-abi-v1.md) for
+- [Tracing](docs/trace.md) and [Luau ABI v3](docs/luau-abi-v3.md) for
   optional observability and policy layers.
 - [Terminal host](docs/tui.md) for the repository-owned `tea` TUI.
 - [Durable subagents](docs/subagents.md) for the optional asynchronous
@@ -21,7 +21,7 @@ Start with [docs/overview.md](docs/overview.md). The main routes are:
 - [fixture format](crates/tea-core/fixtures/fixture-format.md) and
   [fixture guide](crates/tea-core/fixtures/README.md)
   for fixture-based contract work.
-- [Luau ABI v1](docs/luau-abi-v1.md) for the optional capability-scoped
+- [Luau ABI v3](docs/luau-abi-v3.md) for the optional capability-scoped
   policy plane.
 
 ## Working contract

@@ -2,7 +2,7 @@
   "format_version": 1,
   "kind": "declarative_parity_fixture",
   "id": "length-stop-no-tools",
-  "description": "A length-stopped assistant reply without tool calls is terminal and retains its exact stop reason.",
+  "description": "A length-stopped assistant reply without tool calls retains its stop reason and continues on the next turn.",
   "setup": {
     "system_prompt": "Reply concisely.",
     "model": { "provider": "fixture", "id": "length" },
@@ -10,16 +10,28 @@
     "tools": []
   },
   "actions": [{ "kind": "prompt", "text": "Write a long answer." }],
-  "model_script": [{
-    "chunks": [
-      { "kind": "text_delta", "text": "partial answer" },
-      {
-        "kind": "done",
-        "stop_reason": "length",
-        "usage": { "input": 2, "output": 5, "cache_read": 0, "cache_write": 0, "total_tokens": 7 }
-      }
-    ]
-  }],
+  "model_script": [
+    {
+      "chunks": [
+        { "kind": "text_delta", "text": "partial answer" },
+        {
+          "kind": "done",
+          "stop_reason": "length",
+          "usage": { "input": 2, "output": 5, "cache_read": 0, "cache_write": 0, "total_tokens": 7 }
+        }
+      ]
+    },
+    {
+      "chunks": [
+        { "kind": "text_delta", "text": "completed response" },
+        {
+          "kind": "done",
+          "stop_reason": "stop",
+          "usage": { "input": 7, "output": 3, "cache_read": 0, "cache_write": 0, "total_tokens": 10 }
+        }
+      ]
+    }
+  ],
   "stream_comparison": "exact",
   "host": { "tools": [] },
   "assertions": { "outcome": "completed" }

@@ -1,12 +1,11 @@
 use std::collections::VecDeque;
 use std::env;
 use std::future::Future;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::task::{Poll, Waker};
+use std::task::Poll;
 use tea_core::Agent;
 use tea_core::error::CoreError;
-use tea_core::event::{AgentEvent, AgentEventKind, EventObserver, ObserverFuture};
+use tea_core::event::{AgentEvent, AgentEventKind};
 use tea_core::hooks::{
     AfterToolCall, AgentLoopTurnUpdate, BeforeToolCall, ContextEnvelope, HookFuture, HookSet,
     Replacement,
@@ -39,54 +38,6 @@ struct FixtureHooks {
     /// pre-conversion request envelope. Normal parity output remains byte-for-
     /// byte stable unless `TEA_QUALITY_CAPTURE=1` is set.
     request_contexts: Option<Arc<Mutex<Vec<ContextEnvelope>>>>,
-}
-
-/// A deterministic, explicitly held `agent_end` observer used to prove that terminal
-/// settlement waits for listeners. It has no timers or background executor authority.
-#[derive(Debug, Default)]
-struct FixtureObserverGate {
-    reached: AtomicBool,
-    released: AtomicBool,
-    waker: Mutex<Option<Waker>>,
-}
-
-impl FixtureObserverGate {
-    fn release(&self) {
-        self.released.store(true, Ordering::Release);
-        if let Some(waker) = self
-            .waker
-            .lock()
-            .expect("fixture observer gate mutex poisoned")
-            .take()
-        {
-            waker.wake();
-        }
-    }
-}
-
-impl EventObserver for FixtureObserverGate {
-    fn observe<'a>(
-        &'a self,
-        event: &'a AgentEvent,
-        _cancellation: CancellationToken,
-    ) -> ObserverFuture<'a> {
-        let hold_agent_end = matches!(event.kind, AgentEventKind::AgentEnd { .. });
-        Box::pin(std::future::poll_fn(move |context| {
-            if !hold_agent_end {
-                return Poll::Ready(Ok(()));
-            }
-            self.reached.store(true, Ordering::Release);
-            if self.released.load(Ordering::Acquire) {
-                Poll::Ready(Ok(()))
-            } else {
-                *self
-                    .waker
-                    .lock()
-                    .expect("fixture observer gate mutex poisoned") = Some(context.waker().clone());
-                Poll::Pending
-            }
-        }))
-    }
 }
 
 impl HookSet for FixtureHooks {
@@ -384,7 +335,6 @@ pub(super) async fn run_fixture(fixture: Fixture) -> Result<JsonValue, String> {
         after_tool_replace,
         context_hooks,
         should_stop_after_turn,
-        hold_agent_end_observer,
         tools,
         streams,
         last_usage,
@@ -402,16 +352,6 @@ pub(super) async fn run_fixture(fixture: Fixture) -> Result<JsonValue, String> {
     let quality_request_contexts =
         quality_capture_requests.then(|| Arc::new(Mutex::new(Vec::new())));
     let active_queue_target = Arc::new(Mutex::new(None));
-    let observer_gate = hold_agent_end_observer.then(|| Arc::new(FixtureObserverGate::default()));
-    if observer_gate.is_some()
-        && actions
-            .iter()
-            .filter(|action| matches!(action, FixtureAction::Prompt(_) | FixtureAction::Continue))
-            .count()
-            != 1
-    {
-        return Err("host.observer.hold_agent_end requires exactly one run-starting action".into());
-    }
     let mut builder = Agent::builder()
         .system_prompt(system_prompt.clone())
         .model(ModelDescriptor {
@@ -442,9 +382,6 @@ pub(super) async fn run_fixture(fixture: Fixture) -> Result<JsonValue, String> {
             builder = builder.host_message(SerializedJson::new(message.clone()));
         }
     }
-    if let Some(observer_gate) = &observer_gate {
-        builder = builder.observer(Arc::clone(observer_gate) as Arc<dyn EventObserver>);
-    }
     for tool in tools {
         builder = builder.tool(Arc::new(FixtureTool {
             name: tool.name,
@@ -464,7 +401,6 @@ pub(super) async fn run_fixture(fixture: Fixture) -> Result<JsonValue, String> {
     let mut event_sequence = 0;
     let mut turn_offset = 0;
     let mut outcome = "completed";
-    let mut observer_active_before_release = None;
     for action in actions {
         let run = match action {
             FixtureAction::Steer(input) => {
@@ -484,33 +420,7 @@ pub(super) async fn run_fixture(fixture: Fixture) -> Result<JsonValue, String> {
             // Rust library preserves its typed error for direct callers; this
             // closed parity adapter normalizes that API distinction only after
             // confirming the run settled with the equivalent terminal reason.
-            let drive_result = if let Some(observer_gate) = &observer_gate {
-                let mut driving = Box::pin(run.drive());
-                std::future::poll_fn(|context| match driving.as_mut().poll(context) {
-                    Poll::Ready(_) => Poll::Ready(Err(
-                        "run settled before its held agent_end observer was released".to_owned(),
-                    )),
-                    Poll::Pending if observer_gate.reached.load(Ordering::Acquire) => {
-                        Poll::Ready(Ok(()))
-                    }
-                    Poll::Pending => {
-                        context.waker().wake_by_ref();
-                        Poll::Pending
-                    }
-                })
-                .await?;
-                let active = !matches!(agent.snapshot().phase, AgentPhase::Idle);
-                if !active {
-                    return Err(
-                        "agent became idle before its held agent_end observer was released".into(),
-                    );
-                }
-                observer_active_before_release = Some(active);
-                observer_gate.release();
-                driving.await
-            } else {
-                run.drive().await
-            };
+            let drive_result = run.drive().await;
             match drive_result {
                 Ok(()) => outcome = "completed",
                 Err(CoreError::Cancelled) => outcome = "cancelled",
@@ -522,6 +432,12 @@ pub(super) async fn run_fixture(fixture: Fixture) -> Result<JsonValue, String> {
                 Err(error) => return Err(core_error(error)),
             }
             let run_events = run.events();
+            if !run_events.is_complete() {
+                return Err(format!(
+                    "fixture run event diagnostics omitted {} events",
+                    run_events.omitted_events
+                ));
+            }
             let turns_in_run = run_events
                 .iter()
                 .filter(|event| matches!(event.kind, AgentEventKind::TurnStart { .. }))
@@ -666,19 +582,6 @@ pub(super) async fn run_fixture(fixture: Fixture) -> Result<JsonValue, String> {
                     .map(|(request, context)| normalize_quality_request(request, context))
                     .collect::<Result<Vec<_>, _>>()?,
             ),
-        ));
-    }
-    if observer_gate.is_some() {
-        result_fields.push((
-            "observer_settlement",
-            JsonValue::object([
-                ("agent_end_observed", JsonValue::from(true)),
-                (
-                    "active_before_release",
-                    JsonValue::from(observer_active_before_release == Some(true)),
-                ),
-                ("idle_after_release", JsonValue::from(true)),
-            ]),
         ));
     }
     Ok(JsonValue::object(result_fields))

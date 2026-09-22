@@ -357,8 +357,11 @@ fn lifecycle_balance_matrix_covers_success_tool_turn_and_model_error() {
             while let Ok(event) = subscription.try_recv() {
                 retained.push(event);
             }
-            assert_eq!(subscription.dropped_events(), 0);
-            assert_eq!(retained, run.events());
+            assert_eq!(retained, run.events().events);
+            assert_eq!(
+                subscription.try_recv(),
+                Err(tea_core::agent::EventSubscriptionTryRecvError::Empty)
+            );
             assert_clean_idle(&agent);
         }
     });

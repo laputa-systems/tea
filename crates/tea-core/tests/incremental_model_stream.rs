@@ -15,7 +15,7 @@ use tea_core::scheduler::{
     CancellationToken, ModelEventFuture, ModelEventStream, ModelFuture, ModelProvider,
     ModelRequest, ModelStreamEvent,
 };
-use tea_core::state::{RunPhase, StopReason};
+use tea_core::state::{AgentMessage, RunPhase, StopReason, MAX_PARTIAL_RESPONSE_BYTES};
 
 #[derive(Debug, Default)]
 struct Gate {
@@ -54,27 +54,25 @@ impl Future for GateEnd {
 }
 
 struct GatedStream {
-    phase: u8,
+    deltas: Vec<String>,
+    next_delta: usize,
+    emitted_end: bool,
     gate: Arc<Gate>,
 }
 
 impl ModelEventStream for GatedStream {
     fn next_event<'a>(&'a mut self, _cancellation: CancellationToken) -> ModelEventFuture<'a> {
-        match self.phase {
-            0 => {
-                self.phase = 1;
-                Box::pin(std::future::ready(Ok(Some(ModelStreamEvent::TextDelta(
-                    "first delta".into(),
-                )))))
-            }
-            1 => {
-                self.phase = 2;
-                Box::pin(GateEnd {
-                    gate: Arc::clone(&self.gate),
-                })
-            }
-            _ => Box::pin(std::future::ready(Ok(None))),
+        if let Some(delta) = self.deltas.get(self.next_delta).cloned() {
+            self.next_delta = self.next_delta.saturating_add(1);
+            return Box::pin(std::future::ready(Ok(Some(ModelStreamEvent::TextDelta(delta)))));
         }
+        if !self.emitted_end {
+            self.emitted_end = true;
+            return Box::pin(GateEnd {
+                gate: Arc::clone(&self.gate),
+            });
+        }
+        Box::pin(std::future::ready(Ok(None)))
     }
 }
 
@@ -84,8 +82,17 @@ struct GatedProvider {
 
 impl GatedProvider {
     fn new(gate: Arc<Gate>) -> Self {
+        Self::with_deltas(gate, ["first delta".into()])
+    }
+
+    fn with_deltas(gate: Arc<Gate>, deltas: impl IntoIterator<Item = String>) -> Self {
         Self {
-            source: Mutex::new(Some(GatedStream { phase: 0, gate })),
+            source: Mutex::new(Some(GatedStream {
+                deltas: deltas.into_iter().collect(),
+                next_delta: 0,
+                emitted_end: false,
+                gate,
+            })),
         }
     }
 }
@@ -123,13 +130,23 @@ fn delta_is_visible_while_the_provider_stream_is_still_open() {
     assert_eq!(snapshot.partial_response.as_deref(), Some("first delta"));
     assert!(snapshot.is_streaming);
     assert_eq!(run.snapshot().phase, RunPhase::Running);
+    let message_start_id = run
+        .events()
+        .iter()
+        .find_map(|event| match &event.kind {
+            AgentEventKind::MessageStart {
+                message: AgentMessage::Assistant { id, .. },
+            } => Some(*id),
+            _ => None,
+        })
+        .expect("streaming assistant message starts");
     assert!(run.events().iter().any(|event| {
         matches!(
             &event.kind,
             AgentEventKind::MessageUpdate {
-                text_delta: Some(delta),
-                ..
-            } if delta == "first delta"
+                message_id,
+                text_delta: delta,
+            } if *message_id == message_start_id && delta == "first delta"
         )
     }));
 
@@ -139,6 +156,94 @@ fn delta_is_visible_while_the_provider_stream_is_still_open() {
     assert_eq!(run.snapshot().phase, RunPhase::Succeeded);
     assert!(!agent.snapshot().is_streaming);
     assert_eq!(agent.snapshot().partial_response, None);
+}
+
+#[test]
+fn message_updates_are_deltas_while_final_assistant_content_remains_complete() {
+    let gate = Arc::new(Gate::default());
+    let deltas = ["one ".to_owned(), "two ".to_owned(), "three".to_owned()];
+    let provider = Arc::new(GatedProvider::with_deltas(Arc::clone(&gate), deltas.clone()));
+    let agent = Agent::builder()
+        .model_provider(provider as Arc<dyn ModelProvider>)
+        .build();
+    let run = Arc::new(agent.start_prompt("stream several deltas").unwrap());
+    let executor = smol::Executor::new();
+    let driving_run = Arc::clone(&run);
+    let drive = executor.spawn(async move { driving_run.drive().await });
+
+    assert!(executor.try_tick());
+    let snapshot = agent.snapshot();
+    let message_id = match snapshot.messages.last() {
+        Some(AgentMessage::Assistant { id, content, .. }) => {
+            assert!(content.is_empty(), "live assistant content stays out of snapshots");
+            *id
+        }
+        other => panic!("expected live assistant placeholder, got {other:?}"),
+    };
+    assert_eq!(snapshot.partial_response.as_deref(), Some("one two three"));
+    let updates = run
+        .events()
+        .into_iter()
+        .filter_map(|event| match event.kind {
+            AgentEventKind::MessageUpdate {
+                message_id: update_id,
+                text_delta: delta,
+            } => Some((update_id, delta)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        updates,
+        vec![
+            (message_id, "one ".into()),
+            (message_id, "two ".into()),
+            (message_id, "three".into()),
+        ]
+    );
+
+    gate.release();
+    assert!(executor.try_tick());
+    assert_eq!(smol::block_on(drive), Ok(()));
+    assert!(matches!(
+        agent.snapshot().messages.last(),
+        Some(AgentMessage::Assistant { content, .. }) if content == "one two three"
+    ));
+}
+
+#[test]
+fn live_partial_response_is_bounded_without_truncating_the_final_message() {
+    let gate = Arc::new(Gate::default());
+    let response = "x".repeat(MAX_PARTIAL_RESPONSE_BYTES.saturating_add(17));
+    let provider = Arc::new(GatedProvider::with_deltas(
+        Arc::clone(&gate),
+        [response.clone()],
+    ));
+    let agent = Agent::builder()
+        .model_provider(provider as Arc<dyn ModelProvider>)
+        .build();
+    let run = Arc::new(agent.start_prompt("stream a long delta").unwrap());
+    let executor = smol::Executor::new();
+    let driving_run = Arc::clone(&run);
+    let drive = executor.spawn(async move { driving_run.drive().await });
+
+    assert!(executor.try_tick());
+    let snapshot = agent.snapshot();
+    assert_eq!(
+        snapshot.partial_response.as_deref(),
+        Some(&response[response.len() - MAX_PARTIAL_RESPONSE_BYTES..])
+    );
+    assert!(snapshot
+        .partial_response
+        .as_ref()
+        .is_some_and(|partial| partial.len() <= MAX_PARTIAL_RESPONSE_BYTES));
+
+    gate.release();
+    assert!(executor.try_tick());
+    assert_eq!(smol::block_on(drive), Ok(()));
+    assert!(matches!(
+        agent.snapshot().messages.last(),
+        Some(AgentMessage::Assistant { content, .. }) if content == &response
+    ));
 }
 
 #[test]

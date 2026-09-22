@@ -299,6 +299,7 @@ fn descriptor(
             })
             .collect(),
         lifecycle_hook_ids: policy.resume_hook_ids().map_err(extension_error)?,
+        state_version: policy.state_version().map(str::to_owned),
     })
 }
 
@@ -401,7 +402,7 @@ fn load_policy(
     let manifest = parse_manifest(manifest, source)?;
     let bundle = bundle_from_manifest(&manifest, source)?;
     let requested_capabilities = manifest.requested_capabilities.clone();
-    LuaPolicy::load_bundle_with_limits(
+    let policy = LuaPolicy::load_bundle_with_limits(
         bundle,
         PolicyLimits {
             max_source_bytes: manifest.limits.max_source_bytes,
@@ -409,8 +410,13 @@ fn load_policy(
             max_interrupt_checks: manifest.limits.max_interrupt_checks,
         },
     )
-    .map(|policy| (policy, requested_capabilities))
-    .map_err(extension_error)
+    .map_err(extension_error)?;
+    if requested_capabilities.contains("extension.state") != policy.state_version().is_some() {
+        return Err(ExtensionError::new(
+            "extension.state requires a v3 state_version declaration, and state_version requires extension.state",
+        ));
+    }
+    Ok((policy, requested_capabilities))
 }
 
 fn bundle_from_manifest(
@@ -646,7 +652,7 @@ mod tests {
             files: [
                 (
                     "manifest.json".into(),
-                    r#"{"schema_version":1,"abi_version":1,"id":"fixture.engine","entrypoint":"main.luau","modules":["main.luau"],"requested_capabilities":[]}"#.into(),
+                    r#"{"schema_version":1,"abi_version":3,"id":"fixture.engine","entrypoint":"main.luau","modules":["main.luau"],"requested_capabilities":[]}"#.into(),
                 ),
                 (
                     "main.luau".into(),
@@ -674,5 +680,57 @@ mod tests {
             }]
         );
         assert!(descriptor.tools.is_empty());
+    }
+
+    #[test]
+    fn state_capability_requires_a_v3_version_pinned_contract() {
+        let limits = ExtensionLimits {
+            max_source_bytes: 4096,
+            max_memory_bytes: 1_048_576,
+            max_interrupt_checks: 1_000,
+        };
+        let missing_version = ExtensionSourceTree {
+            extension_id: "fixture.state".into(),
+            files: [
+                (
+                    "manifest.json".into(),
+                    r#"{"schema_version":1,"abi_version":3,"id":"fixture.state","entrypoint":"main.luau","modules":["main.luau"],"requested_capabilities":["extension.state"]}"#.into(),
+                ),
+                (
+                    "main.luau".into(),
+                    r#"return { prompt_sections = {} }"#.into(),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+            expected_capabilities: Some(BTreeSet::from(["extension.state".into()])),
+            limits,
+        };
+        let error = LuauExtensionEngine
+            .describe(&missing_version)
+            .expect_err("state capability without a pinned version must fail");
+        assert!(error.to_string().contains("state_version"));
+
+        let version_without_state = ExtensionSourceTree {
+            extension_id: "fixture.version".into(),
+            files: [
+                (
+                    "manifest.json".into(),
+                    r#"{"schema_version":1,"abi_version":3,"id":"fixture.version","entrypoint":"main.luau","modules":["main.luau"],"requested_capabilities":[]}"#.into(),
+                ),
+                (
+                    "main.luau".into(),
+                    r#"return { state_version = "fixture.v1", prompt_sections = {} }"#.into(),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+            expected_capabilities: Some(BTreeSet::new()),
+            limits,
+        };
+        let error = LuauExtensionEngine
+            .describe(&version_without_state)
+            .expect_err("a version declaration cannot create a hidden state namespace");
+        assert!(error.to_string().contains("state_version"));
     }
 }

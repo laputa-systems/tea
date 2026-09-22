@@ -126,7 +126,9 @@ run concurrently while the session writer remains serialized.
 `AgentId`, child `LaneId`, `WorkspaceLeaseId`, child `OperationId`, and
 `WorkspaceDeltaId` are deterministic hashes of their durable parents and
 content. The spawn tool's durable idempotency key participates in `AgentId`, so
-replaying one intent resolves to the same child instead of creating another.
+one admitted intent cannot create duplicate children. An interrupted intent is
+retained as evidence, not a checkpoint: it never authorizes a second handoff
+or resumed child drive, and further child work requires a new root tool intent.
 Timestamps, process counters, nicknames, and temporary paths never define
 correctness-critical identity.
 
@@ -180,7 +182,8 @@ has no durable side effect.
 `list_agents` is parallel-safe and returns the current operation's children in
 `task_name`, then `agent_id`, order. It returns identities, configuration,
 state, usage, and delta metadata, but not reports, reasoning, intermediate
-messages, tool output, patch bytes, or physical paths.
+messages, tool output, patch bytes, or physical paths. A retained spawn-only
+child reports `task_id: null` rather than fabricating an accepted operation.
 
 `interrupt_agent` is sequential and settles cancellation. It is idempotent,
 rejects the root and foreign-operation children, aborts and joins live work,
@@ -243,7 +246,7 @@ Only a prior `WorkspaceDeltaApplied` fact provides the idempotent success path.
 
 ## Durable ordering and visibility
 
-A successful spawn commits in this order:
+A successful spawn publishes this ordered group as one atomic semantic commit:
 
 ```text
 parent ToolStarted
@@ -257,8 +260,10 @@ task-runtime acceptance
 parent tool result
 ```
 
-The immediate result is a durable child handle in `running` or its replayed
-terminal state. It does not wait for inference completion.
+The task-runtime handoff follows that group; a failure to hand off does not
+turn the committed assignment into a restart checkpoint. The immediate result
+is a durable child handle in `running`. It does not wait for inference
+completion.
 
 Child completion commits in this order:
 
@@ -266,9 +271,9 @@ Child completion commits in this order:
 final assistant entry
 child OperationFinished
 workspace finalization
-patch artifact and optional WorkspaceDelta fact
+patch artifact when files changed
 inline-or-artifact report
-AgentTaskFinished fact
+optional WorkspaceDelta fact with AgentTaskFinished fact
 operational cleanup
 wait visibility
 ```
@@ -305,38 +310,55 @@ returns a typed recovery error instead of claiming that the root is closed.
 
 ## Recovery
 
-Coordinator memory is a cache rebuilt from the session snapshot, the pure
-agent-graph reduction, durable workspace metadata, and `SubagentHost::reopen`.
-Recovery is deterministic at every spawn and completion prefix:
+Opening is passive. It reconstructs the session, graph, and recovery report
+without a provider request, tool call, child task handoff, workspace reopen,
+finalization, cleanup, or delta application. A durable terminal child is made
+immediately queryable from its retained report and optional delta; opening does
+not reactivate its host workspace.
 
-| Durable prefix | Recovery action |
-| --- | --- |
-| Spawn intent only | Resume the same deterministic spawn |
-| Lease, no lane | Reuse lease and create lane |
-| Lane, no spawn fact | Complete graph binding |
-| Spawn fact, no child operation | Accept the original child operation |
-| Open child operation | Reopen its workspace and resume |
-| Finished operation, no delta | Finalize workspace |
-| Delta, no terminal fact | Retain report and finish |
-| Terminal fact, remaining worktree | Cleanup only |
-| Ambiguous apply | Require explicit recovery inspection |
+An explicit root continuation first rejects every unresolved root unsafe tool
+effect. It also rejects an unresolved child tool effect before that child is
+reopened, finalized, cleaned, or made eligible for application. The host must
+record explicit reconciliation for that effect. An interrupted child provider
+attempt is instead durably classified as interrupted with unknown usage; Tea
+does not issue a replacement provider request.
 
-An `apply_agent_changes` `ToolStarted` without its result is an ambiguous apply:
-resume returns typed recovery-required without appending a generic tool error or
-calling the mutation port again. Children are restored before a resumed root
-can wait on them. A terminal with
-subagents disabled refuses to execute a subagent-enabled session, while
-read-only session commands remain available. Export refuses unresolved active
-workspace leases. Missing required live workspace state is a typed recovery
-error, not a synthesized clean state.
+Inspection of a passive child needs no credentials or child services. To
+reconcile an indeterminate child tool result, the host first registers fresh,
+matching lane authority and then calls `SessionSupervisor::reconcile_tool_result`;
+it must not start that lane to obtain the authority.
+Generic `SessionSupervisor::run_lane_prompt` and `SessionSupervisor::resume_lane`
+also reject graph-bound child lanes, so registering that authority cannot bypass
+the interruption boundary.
+
+Only after those gates may explicit continuation reconcile an accepted open
+child. It reopens the isolated lease through `SubagentHost::reopen`, records a
+truthful interrupted child outcome, retains any finalized `WorkspaceDelta`, and
+then performs cleanup. It never reinstalls a child task, resumes a child epoch,
+replays the old `spawn_agent`, or applies a child delta. A spawn-only child
+remains inspectable as `Spawned`; the old assignment cannot be accepted later.
+New work requires a new `spawn_agent` decision and therefore a new durable
+identity.
+
+Both child admission and child terminal retention are atomic semantic groups:
+an admitted child has its lane, configuration, graph fact, operation, and
+assignment together, while a new delta and its `AgentTaskFinished` fact become
+visible together. Legacy incomplete workspace/lane evidence is retained and
+refused as a restart source. A terminal with subagents disabled refuses to
+execute a subagent-enabled session, while read-only session commands remain
+available. Export refuses unresolved active workspace leases. Missing required
+live workspace state during explicit reconciliation is a typed recovery error,
+not a synthesized clean state.
 
 ## Verification requirements
 
 All orchestration tests use scripted providers, fake host/task ports,
 deterministic clocks and IDs, fault injection, and temporary Git repositories;
 no real inference or credentials are required. Focused evidence covers strict
-configuration, policy and graph corruption, JSONL fixed points, concurrent lane
-execution, provenance, prompt layout, spawn replay and capacity, wait ordering,
-structured interruption and root cleanup, Git isolation and binary deltas,
-application classification, recovery prefixes, report retention, feature-off
-prompt/tool bytes, and feature-off PTY output.
+configuration, policy and graph corruption, JSONL fixed points, sixteen
+simultaneously provider-entered child lanes with a rejected seventeenth
+admission, provenance, prompt layout, atomic spawn/terminal groups, wait
+ordering, structured interruption and root cleanup, Git isolation and binary
+deltas, application classification, passive reopen, explicit child
+reconciliation, report retention, feature-off prompt/tool bytes, and
+feature-off PTY output.

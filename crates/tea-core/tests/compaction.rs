@@ -4,6 +4,9 @@ use tea_core::compaction::{
     CompactionContext, CompactionError, CompactionFuture, CompactionLifecycleRecord,
     CompactionResult, CompactionTerminalOutcome, Compactor,
 };
+use tea_core::effect::{
+    DurableWriteRequest, EffectAction, EffectFuture, EffectGate, EffectOutcome, EffectSubject,
+};
 use tea_core::error::CoreError;
 use tea_core::event::{AgentEventKind, CompactionOutcome};
 use tea_core::scheduler::{
@@ -64,6 +67,33 @@ impl Compactor for DuplicateMessage {
 struct FailingCompactor;
 
 struct TimedOutCompactor;
+
+struct AbortAfterReplacementAdmission {
+    agent: Arc<Mutex<Option<Agent>>>,
+}
+
+impl EffectGate for AbortAfterReplacementAdmission {
+    fn before<'a>(&'a self, action: EffectAction) -> EffectFuture<'a> {
+        if matches!(
+            action.subject(),
+            EffectSubject::DurableWrite {
+                write: DurableWriteRequest::CompactionReplacement { .. },
+            }
+        ) {
+            self.agent
+                .lock()
+                .expect("fixture agent slot mutex")
+                .as_ref()
+                .expect("fixture agent is installed before compaction")
+                .abort();
+        }
+        Box::pin(std::future::ready(Ok(())))
+    }
+
+    fn after<'a>(&'a self, _action: EffectAction, _outcome: EffectOutcome) -> EffectFuture<'a> {
+        Box::pin(std::future::ready(Ok(())))
+    }
+}
 
 impl Compactor for FailingCompactor {
     fn compact<'a>(
@@ -261,6 +291,49 @@ fn compaction_rejects_an_active_run_and_cancellation_preserves_history() {
         ));
         assert_eq!(agent.snapshot().messages, original);
     });
+}
+
+#[test]
+fn cancellation_after_durable_replacement_admission_keeps_live_context_consistent() {
+    smol::block_on(async {
+        let agent_slot = Arc::new(Mutex::new(None));
+        let gate = Arc::new(AbortAfterReplacementAdmission {
+            agent: Arc::clone(&agent_slot),
+        });
+        let agent = Agent::builder()
+            .model_provider(provider_with_answers(&["answer"]))
+            .compactor(Arc::new(KeepFirstMessage))
+            .effect_gate(gate)
+            .build();
+        *agent_slot.lock().expect("fixture agent slot mutex") = Some(agent.clone());
+        agent.start_prompt("prompt")?.drive().await?;
+        let source = agent.snapshot().messages;
+
+        let compaction = agent.start_compaction()?;
+        assert!(matches!(
+            compaction.drive().await,
+            Err(CoreError::Cancelled)
+        ));
+
+        assert_eq!(agent.snapshot().messages, vec![source[0].clone()]);
+        assert!(compaction.events().iter().any(|event| matches!(
+            event.kind,
+            AgentEventKind::CompactionLifecycle {
+                record: CompactionLifecycleRecord::Terminal {
+                    outcome: CompactionTerminalOutcome::Committed,
+                    ..
+                }
+            }
+        )));
+        assert!(matches!(
+            compaction.events().last().map(|event| &event.kind),
+            Some(AgentEventKind::CompactionEnd {
+                outcome: CompactionOutcome::Cancelled
+            })
+        ));
+        Ok::<(), CoreError>(())
+    })
+    .expect("post-admission cancellation settles after replacement publication");
 }
 
 #[test]

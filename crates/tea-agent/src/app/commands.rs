@@ -21,7 +21,17 @@ const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         name: "/resume",
-        help: "pick and resume a durable session",
+        help: "pick and open a durable session",
+        allowed_while_active: false,
+    },
+    CommandSpec {
+        name: "/continue",
+        help: "explicitly continue an interrupted durable operation",
+        allowed_while_active: false,
+    },
+    CommandSpec {
+        name: "/fork",
+        help: "fork a settled turn checkpoint into a new lane",
         allowed_while_active: false,
     },
     CommandSpec {
@@ -66,8 +76,9 @@ mod tests {
                 .iter()
                 .all(|other| other.name != command.name));
         }
-        assert_eq!(COMMANDS.len(), 4);
+        assert_eq!(COMMANDS.len(), 6);
         assert!(find("/models").is_some_and(|command| !command.allowed_while_active));
+        assert!(find("/fork").is_some_and(|command| !command.allowed_while_active));
         assert!(find("/model").is_none());
         assert!(find("/thinking").is_none());
         assert!(find("/session").is_none());

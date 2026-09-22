@@ -85,21 +85,75 @@ your executor. The same agent may be reused only after the run has settled.
 Call `agent.abort()` from the host to request structured cancellation, then
 await the run or `agent.wait_for_idle()`.
 
-For a live host projection that cannot tolerate event loss, subscribe before
-starting the run:
+For a bounded live host projection, subscribe before starting the run and
+handle lag by taking a fresh snapshot:
 
 ```rust
-let events = agent.subscribe_lossless();
+let events = agent.subscribe_nonblocking(std::num::NonZeroUsize::new(256).unwrap());
 let run = agent.start_prompt("Say hello.")?;
 smol::block_on(run.drive())?;
-while let Ok(event) = events.try_recv() {
-    println!("{event:?}");
+loop {
+    match events.try_recv() {
+        Ok(event) => println!("{event:?}"),
+        Err(tea_core::agent::EventSubscriptionTryRecvError::Lagged) => {
+            println!("Refreshed state: {:?}", agent.snapshot());
+            break;
+        }
+        Err(_) => break,
+    }
 }
 ```
 
-This subscription uses an explicitly unbounded standard-library queue. Unread
-events retain caller-owned memory until drained or the subscription is dropped;
-the existing `subscribe_nonblocking` API remains the bounded best-effort path.
+The queue is bounded and reports lag explicitly. The driven run's return value
+is its completion mechanism; do not infer completion from an observation stream.
+
+## Use durable input ownership
+
+The runnable offline example uses immutable harness construction, the same
+Agent engine, and an independent accepted-input completion handle:
+
+```sh
+cargo run -p tea-core --example session --locked
+```
+
+After constructing a `SessionSupervisor` from explicit services and persistence:
+
+```rust,ignore
+let input = runtime.submit_input("Say hello.")?;
+runtime.drive_next_input(IdleAuthorization::UserInputOnly).await?;
+let result = input.completion().wait().await;
+```
+
+The example uses `MemorySession` and makes no crash-durability claim. Supply a
+fresh explicit `JsonlSession` and artifact store for file persistence. Reopen
+only restores committed state; inspect `recovery_report()` before an explicit
+`resume().await`. Queued inputs and goals never dispatch automatically on open.
+
+A one-shot CLI invocation uses the same durable runtime:
+
+```sh
+tea --tea-home /tmp/tea-example-data --cwd /tmp/tea-example-workspace \
+  --provider mock --prompt "Say hello."
+```
+
+Create fresh disposable directories before that example. `/continue` explicitly
+resumes interrupted work in the terminal. A fork accepts a recorded settled-turn
+checkpoint and does not roll back workspace files. An embedding selects that
+durable identity rather than an arbitrary entry ID:
+
+```rust,ignore
+use tea_session::{LaneId, TurnCheckpointId};
+
+let fork = runtime.fork_settled_turn(
+    TurnCheckpointId::new("recorded-checkpoint")?,
+    LaneId::new("review-alternative")?,
+)?;
+assert_eq!(fork.lane_id().as_str(), "review-alternative");
+```
+
+The root lane must be idle. The fork starts with the checkpoint's history,
+historical harness configuration, and private extension-state snapshot, but no
+queued input, effects, live handles, child ownership, or execution authority.
 
 ## Add manual compaction explicitly
 
@@ -213,7 +267,7 @@ For durable host integration, begin with [the durable harness](durable-harness.m
 and [harness recovery](harness-recovery.md). For the pure core request, tool,
 queue, hook, and terminal contracts, read [runtime semantics](semantics.md).
 For an optional capability-scoped Luau policy, start with
-[Luau ABI v1](luau-abi-v1.md); a scripting VM is not required for ordinary Rust
+[Luau ABI v3](luau-abi-v3.md); a scripting VM is not required for ordinary Rust
 agents.
 
 If another control plane already owns its session, first seed and resolve an

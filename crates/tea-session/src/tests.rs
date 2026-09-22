@@ -1,4 +1,5 @@
 use super::*;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 #[derive(Debug)]
@@ -8,6 +9,666 @@ impl SessionClock for FixedSessionClock {
     fn now_ms(&self) -> u64 {
         self.0
     }
+}
+
+#[test]
+fn semantic_commit_is_one_atomic_prefix_transition() {
+    let lane = LaneId::main();
+    let first = ProvisionedEntry::user(
+        EntryId::new("atomic-first").expect("valid entry ID"),
+        "first committed input",
+    );
+    let second = ProvisionedEntry::user(
+        EntryId::new("atomic-second").expect("valid entry ID"),
+        "second committed input",
+    );
+    let commit = SessionCommit::new(vec![
+        SessionCommitItem::Entry {
+            lane_id: lane.clone(),
+            entry: first,
+        },
+        SessionCommitItem::Entry {
+            lane_id: lane.clone(),
+            entry: second,
+        },
+    ])
+    .expect("nonempty semantic commit");
+
+    let mut memory = MemorySession::create(SessionHeader::new(
+        SessionId::new("atomic-memory").expect("valid session ID"),
+        "workspace-test",
+        Metadata::new(),
+    ))
+    .expect("memory session creates");
+    let stored = memory.commit(commit.clone()).expect("memory commit succeeds");
+    assert_eq!(stored.seq, Sequence(1));
+    assert_eq!(stored.items.len(), 2);
+    assert_eq!(
+        memory.snapshot().expect("snapshot succeeds").last_sequence(),
+        Sequence(1),
+        "all semantic items share one durable commit sequence"
+    );
+
+    let directory = temporary_session_directory("atomic-jsonl");
+    let mut jsonl = JsonlSession::create(
+        &directory,
+        SessionHeader::new(
+            SessionId::new("atomic-jsonl").expect("valid session ID"),
+            "workspace-test",
+            Metadata::new(),
+        ),
+        DurabilityMode::Development,
+    )
+    .expect("JSONL session creates");
+    let before = std::fs::read(directory.join("session.jsonl")).expect("prefix reads");
+    let invalid = SessionCommit::new(vec![
+        SessionCommitItem::Entry {
+            lane_id: LaneId::new("not-yet-created").expect("valid lane ID"),
+            entry: ProvisionedEntry::user(
+                EntryId::new("invalid-first").expect("valid entry ID"),
+                "must not persist",
+            ),
+        },
+        SessionCommitItem::Lane(LaneMutation::Created {
+            lane_id: LaneId::new("not-yet-created").expect("valid lane ID"),
+            base_leaf_id: None,
+        }),
+    ])
+    .expect("nonempty invalid semantic commit");
+    assert!(matches!(jsonl.commit(invalid), Err(SessionError::Corruption(_))));
+    assert_eq!(
+        std::fs::read(directory.join("session.jsonl")).expect("prefix reads"),
+        before,
+        "a rejected mixed transition never exposes a partial semantic prefix"
+    );
+
+    let stored = jsonl.commit(commit).expect("JSONL commit succeeds");
+    assert_eq!(stored.seq, Sequence(1));
+    assert_eq!(stored.items.len(), 2);
+    assert_eq!(
+        std::fs::read_to_string(directory.join("session.jsonl"))
+            .expect("JSONL reads")
+            .lines()
+            .count(),
+        2,
+        "header plus exactly one atomic commit envelope"
+    );
+    drop(jsonl);
+    let reopened = JsonlSession::open(&directory, DurabilityMode::Development)
+        .expect("atomic prefix reopens");
+    assert_eq!(
+        reopened
+            .snapshot()
+            .expect("snapshot succeeds")
+            .entries()
+            .len(),
+        2
+    );
+    drop(reopened);
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+#[test]
+fn preview_session_commit_validates_a_new_lane_without_persisting_it() {
+    let session = MemorySession::create(SessionHeader::new(
+        SessionId::new("commit-preview").expect("valid session ID"),
+        "workspace-test",
+        Metadata::new(),
+    ))
+    .expect("memory session creates");
+    let snapshot = session.snapshot().expect("snapshot succeeds");
+    let branch = LaneId::new("preview-branch").expect("valid lane ID");
+    let commit = SessionCommit::new(vec![SessionCommitItem::Lane(LaneMutation::Created {
+        lane_id: branch.clone(),
+        base_leaf_id: None,
+    })])
+    .expect("nonempty prospective commit");
+
+    let projected = preview_session_commit(&snapshot, &commit, branch.clone(), 42)
+        .expect("valid lane creation previews");
+    assert_eq!(projected.lane_state.lane_id, branch);
+    assert_eq!(snapshot.last_sequence(), Sequence(0));
+    assert!(snapshot.lane_mutations().is_empty());
+
+    let invalid = SessionCommit::new(vec![
+        SessionCommitItem::Entry {
+            lane_id: LaneId::new("not-created-yet").expect("valid lane ID"),
+            entry: ProvisionedEntry::user(
+                EntryId::new("preview-invalid-entry").expect("valid entry ID"),
+                "must stay uncommitted",
+            ),
+        },
+        SessionCommitItem::Lane(LaneMutation::Created {
+            lane_id: LaneId::new("not-created-yet").expect("valid lane ID"),
+            base_leaf_id: None,
+        }),
+    ])
+    .expect("nonempty prospective commit");
+    assert!(preview_session_commit(&snapshot, &invalid, LaneId::main(), 42).is_err());
+}
+
+#[test]
+fn settled_unadmitted_provider_request_does_not_reappear_in_recovery() {
+    let lane = LaneId::main();
+    let operation_id = OperationId::new("unadmitted-provider-operation").expect("valid operation ID");
+    let epoch_id = EpochId::new("unadmitted-provider-epoch").expect("valid epoch ID");
+    let step_id = StepId::new("unadmitted-provider-step").expect("valid step ID");
+    let request_id =
+        ProviderRequestId::new("unadmitted-provider-request").expect("valid request ID");
+    let mut session = MemorySession::create(SessionHeader::new(
+        SessionId::new("unadmitted-provider-recovery").expect("valid session ID"),
+        "workspace-test",
+        Metadata::new(),
+    ))
+    .expect("memory session creates");
+
+    session
+        .commit(
+            SessionCommit::new(vec![
+                SessionCommitItem::Record(LaneRecord::operation_started(
+                    OperationStartedRecord::new(
+                        operation_id.clone(),
+                        lane.clone(),
+                        None,
+                        OperationKind::Run,
+                        Vec::new(),
+                        HarnessRevisionId::new("unadmitted-provider-revision")
+                            .expect("valid revision ID"),
+                        ModelHarnessProfileId::new("unadmitted-provider-profile")
+                            .expect("valid profile ID"),
+                    ),
+                )),
+                SessionCommitItem::Record(LaneRecord::EpochStarted(EpochStartedRecord {
+                    id: epoch_id.clone(),
+                    operation_id: operation_id.clone(),
+                    epoch_index: 0,
+                    source_leaf_id: None,
+                    harness_revision_id: HarnessRevisionId::new("unadmitted-provider-revision")
+                        .expect("valid revision ID"),
+                    harness_snapshot_id: HarnessSnapshotId::new("unadmitted-provider-snapshot")
+                        .expect("valid snapshot ID"),
+                    model_harness_profile: ModelHarnessProfileId::new("unadmitted-provider-profile")
+                        .expect("valid profile ID"),
+                    core_run_id: CoreRunId::new("unadmitted-provider-core-run")
+                        .expect("valid core run ID"),
+                    epoch_resume_data: BTreeMap::new(),
+                })),
+                SessionCommitItem::Record(LaneRecord::StepAttempted(StepAttemptedRecord {
+                    id: step_id.clone(),
+                    operation_id: operation_id.clone(),
+                    epoch_id: epoch_id.clone(),
+                    kind: StepKind::Assistant,
+                    attempt: 1,
+                    result_entry_id: EntryId::new("unadmitted-provider-result")
+                        .expect("valid result entry ID"),
+                    reason: None,
+                })),
+                SessionCommitItem::Record(LaneRecord::ProviderRequestStarted(
+                    ProviderRequestStartedRecord {
+                        request_id: request_id.clone(),
+                        operation_id: operation_id.clone(),
+                        epoch_id: epoch_id.clone(),
+                        step_id,
+                        physical_attempt: 1,
+                        model_harness_profile: ModelHarnessProfileId::new(
+                            "unadmitted-provider-profile",
+                        )
+                        .expect("valid profile ID"),
+                        request_surface_digest: Digest::from_bytes(b"unadmitted-provider"),
+                        idempotency_key: None,
+                    },
+                )),
+            ])
+            .expect("nonempty pre-admission commit"),
+        )
+        .expect("unadmitted provider intent commits");
+    assert_eq!(
+        reduce_lane(session.snapshot().expect("snapshot succeeds"), lane.clone())
+            .expect("unadmitted prefix reduces")
+            .recovery_plan,
+        Some(RecoveryPlan::ProviderRequestNotAdmitted {
+            request_id: request_id.clone(),
+        })
+    );
+
+    session
+        .append_record(LaneRecord::ProviderRequestSettled(
+            ProviderRequestSettledRecord {
+                request_id,
+                operation_id: operation_id.clone(),
+                outcome: JsonValue::object([
+                    ("status", JsonValue::String("not_invoked".into())),
+                    ("outcome_known", JsonValue::Bool(true)),
+                ]),
+                provider_error: None,
+                usage: None,
+                response_artifact: None,
+                classification: ProviderSettlementClassification::Interrupted,
+            },
+        ))
+        .expect("explicit recovery closes the unadmitted intent");
+
+    assert_eq!(
+        reduce_lane(session.snapshot().expect("snapshot succeeds"), lane)
+            .expect("settled prefix reduces")
+            .recovery_plan,
+        Some(RecoveryPlan::ResumeOperation { operation_id }),
+        "a settled unadmitted intent must not request the same recovery again"
+    );
+}
+
+#[test]
+fn compaction_rejects_a_noncompleted_provider_replacement() {
+    let mut session = MemorySession::create(SessionHeader::new(
+        SessionId::new("incomplete-compaction-session").expect("valid session ID"),
+        "workspace-test",
+        Metadata::new(),
+    ))
+    .expect("memory session creates");
+
+    assert_rejected_provider_compaction(
+        &mut session,
+        provider_linked_compaction_commit(
+            StepKind::Compaction,
+            ProviderSettlementClassification::Interrupted,
+        ),
+    );
+}
+
+#[test]
+fn compaction_rejects_a_noncompaction_provider_replacement() {
+    let mut session = MemorySession::create(SessionHeader::new(
+        SessionId::new("wrong-step-compaction-session").expect("valid session ID"),
+        "workspace-test",
+        Metadata::new(),
+    ))
+    .expect("memory session creates");
+
+    assert_rejected_provider_compaction(
+        &mut session,
+        provider_linked_compaction_commit(
+            StepKind::Assistant,
+            ProviderSettlementClassification::Completed,
+        ),
+    );
+}
+
+#[test]
+fn compaction_rejects_reusing_a_provider_replacement() {
+    let mut session = MemorySession::create(SessionHeader::new(
+        SessionId::new("duplicate-provider-compaction-session").expect("valid session ID"),
+        "workspace-test",
+        Metadata::new(),
+    ))
+    .expect("memory session creates");
+    let request_id =
+        ProviderRequestId::new("incomplete-compaction-request").expect("valid request ID");
+    let replacement = JsonValue::String("second replacement must not apply".into());
+    let mut invalid = provider_linked_compaction_commit(
+        StepKind::Compaction,
+        ProviderSettlementClassification::Completed,
+    );
+    invalid.push(SessionCommitItem::Entry {
+        lane_id: LaneId::main(),
+        entry: ProvisionedEntry {
+            id: EntryId::new("duplicate-provider-compaction-entry").expect("valid entry ID"),
+            body: SessionEntry::Compaction(CompactionEntry {
+                covered_from: None,
+                covered_to: None,
+                retained_tail_boundary: None,
+                summary: "must not apply twice".into(),
+                strategy_id: "duplicate-provider-compaction".into(),
+                recovery_index_artifact: None,
+                harness_revision_id: None,
+                replacement: PayloadRef::Inline(replacement.clone()),
+                replacement_digest: Digest::from_bytes(
+                    replacement.to_json_string().expect("canonical replacement"),
+                ),
+                provider_request_id: Some(request_id),
+            }),
+        },
+    });
+
+    assert_rejected_provider_compaction(&mut session, invalid);
+}
+
+fn assert_rejected_provider_compaction(session: &mut MemorySession, invalid: SessionCommit) {
+    assert!(matches!(session.commit(invalid), Err(SessionError::Corruption(_))));
+    assert_eq!(
+        session
+            .snapshot()
+            .expect("rejected compaction leaves snapshot readable")
+            .last_sequence(),
+        Sequence(0)
+    );
+}
+
+fn provider_linked_compaction_commit(
+    step_kind: StepKind,
+    classification: ProviderSettlementClassification,
+) -> SessionCommit {
+    let lane = LaneId::main();
+    let operation_id = OperationId::new("incomplete-compaction-operation").expect("valid operation ID");
+    let epoch_id = EpochId::new("incomplete-compaction-epoch").expect("valid epoch ID");
+    let request_id =
+        ProviderRequestId::new("incomplete-compaction-request").expect("valid request ID");
+    let replacement = JsonValue::String("replacement that must not apply".into());
+    SessionCommit::new(vec![
+        SessionCommitItem::Record(LaneRecord::operation_started(OperationStartedRecord::new(
+            operation_id.clone(),
+            lane.clone(),
+            None,
+            OperationKind::Run,
+            Vec::new(),
+            HarnessRevisionId::new("incomplete-compaction-revision").expect("valid revision ID"),
+            ModelHarnessProfileId::new("incomplete-compaction-profile")
+                .expect("valid profile ID"),
+        ))),
+        SessionCommitItem::Record(LaneRecord::EpochStarted(EpochStartedRecord {
+            id: epoch_id.clone(),
+            operation_id: operation_id.clone(),
+            epoch_index: 0,
+            source_leaf_id: None,
+            harness_revision_id: HarnessRevisionId::new("incomplete-compaction-revision")
+                .expect("valid revision ID"),
+            harness_snapshot_id: HarnessSnapshotId::new("incomplete-compaction-snapshot")
+                .expect("valid snapshot ID"),
+            model_harness_profile: ModelHarnessProfileId::new("incomplete-compaction-profile")
+                .expect("valid profile ID"),
+            core_run_id: CoreRunId::new("incomplete-compaction-core-run")
+                .expect("valid core run ID"),
+            epoch_resume_data: BTreeMap::new(),
+        })),
+        SessionCommitItem::Record(LaneRecord::StepAttempted(StepAttemptedRecord {
+            id: StepId::new("incomplete-compaction-step").expect("valid step ID"),
+            operation_id: operation_id.clone(),
+            epoch_id: epoch_id.clone(),
+            kind: step_kind,
+            attempt: 1,
+            result_entry_id: EntryId::new("incomplete-compaction-result")
+                .expect("valid result entry ID"),
+            reason: None,
+        })),
+        SessionCommitItem::Record(LaneRecord::ProviderRequestStarted(
+            ProviderRequestStartedRecord {
+                request_id: request_id.clone(),
+                operation_id: operation_id.clone(),
+                epoch_id: epoch_id.clone(),
+                step_id: StepId::new("incomplete-compaction-step").expect("valid step ID"),
+                physical_attempt: 1,
+                model_harness_profile: ModelHarnessProfileId::new("incomplete-compaction-profile")
+                    .expect("valid profile ID"),
+                request_surface_digest: Digest::from_bytes(b"incomplete-compaction-request"),
+                idempotency_key: None,
+            },
+        )),
+        SessionCommitItem::Fact(SessionFact::ProviderRequestMaterial(
+            ProviderRequestMaterialFact {
+                operation_id: operation_id.clone(),
+                epoch_id: epoch_id.clone(),
+                request_id: request_id.clone(),
+                request: PayloadRef::Inline(JsonValue::String("exact request".into())),
+            },
+        )),
+        SessionCommitItem::Record(LaneRecord::ProviderRequestSettled(
+            ProviderRequestSettledRecord {
+                request_id: request_id.clone(),
+                operation_id,
+                outcome: JsonValue::String("cancelled".into()),
+                provider_error: None,
+                usage: None,
+                response_artifact: None,
+                classification,
+            },
+        )),
+        SessionCommitItem::Entry {
+            lane_id: lane,
+            entry: ProvisionedEntry {
+                id: EntryId::new("incomplete-compaction-entry").expect("valid entry ID"),
+                body: SessionEntry::Compaction(CompactionEntry {
+                    covered_from: None,
+                    covered_to: None,
+                    retained_tail_boundary: None,
+                    summary: "must not alter context".into(),
+                    strategy_id: "incomplete-compaction".into(),
+                    recovery_index_artifact: None,
+                    harness_revision_id: None,
+                    replacement: PayloadRef::Inline(replacement.clone()),
+                    replacement_digest: Digest::from_bytes(
+                        replacement.to_json_string().expect("canonical replacement"),
+                    ),
+                    provider_request_id: Some(request_id),
+                }),
+            },
+        },
+    ])
+    .expect("nonempty provider-linked compaction commit")
+}
+
+#[test]
+fn settled_input_control_checkpoint_and_fork_preserve_exact_lane_state() {
+    let lane = LaneId::main();
+    let input = ProvisionedEntry::user(
+        EntryId::new("checkpoint-input").expect("valid entry ID"),
+        "queued before dispatch",
+    );
+    let operation_id = OperationId::new("checkpoint-operation").expect("valid operation ID");
+    let revision = HarnessRevisionId::new("checkpoint-revision").expect("valid revision ID");
+    let profile =
+        ModelHarnessProfileId::new("checkpoint-profile").expect("valid profile ID");
+    let control_id = "checkpoint-control".to_owned();
+    let second_control_id = "another-checkpoint-control".to_owned();
+    let extension_id = "checkpoint.extension".to_owned();
+    let checkpoint_id = TurnCheckpointId::new("checkpoint-turn").expect("valid checkpoint ID");
+    let state_value = JsonValue::object([("enabled", JsonValue::Bool(true))]);
+    let state = ExtensionStateValue {
+        state_version: "state.v1".into(),
+        value: state_value.clone(),
+    };
+    let directory = temporary_session_directory("checkpoint-session");
+    let mut session = JsonlSession::create(
+        &directory,
+        SessionHeader::new(
+            SessionId::new("checkpoint-session").expect("valid session ID"),
+            "workspace-test",
+            Metadata::new(),
+        ),
+        DurabilityMode::Strict,
+    )
+    .expect("JSONL session creates");
+
+    session
+        .commit(
+            SessionCommit::new(vec![SessionCommitItem::Record(LaneRecord::InputAccepted(
+                InputAcceptedRecord {
+                    lane_id: lane.clone(),
+                    entry: input.clone(),
+                },
+            ))])
+            .expect("nonempty accepted-input commit"),
+        )
+        .expect("input accepts");
+    session
+        .commit(
+            SessionCommit::new(vec![
+                SessionCommitItem::Record(LaneRecord::OperationStarted(
+                    OperationStartedRecord::new(
+                        operation_id.clone(),
+                        lane.clone(),
+                        None,
+                        OperationKind::Run,
+                        vec![input.clone()],
+                        revision.clone(),
+                        profile,
+                    )
+                    .with_input_ids(vec![input.id.clone()]),
+                )),
+                SessionCommitItem::Entry {
+                    lane_id: lane.clone(),
+                    entry: input.clone(),
+                },
+                SessionCommitItem::Record(LaneRecord::ExtensionControlEnqueued(
+                    ExtensionControlEnqueuedRecord {
+                        operation_id: operation_id.clone(),
+                        control_id: control_id.clone(),
+                        extension_id: extension_id.clone(),
+                        harness_revision_id: revision.clone(),
+                        command_name: "pause".into(),
+                        arguments: JsonValue::Object(BTreeMap::new()),
+                    },
+                )),
+                SessionCommitItem::Record(LaneRecord::ExtensionControlEnqueued(
+                    ExtensionControlEnqueuedRecord {
+                        operation_id: operation_id.clone(),
+                        control_id: second_control_id.clone(),
+                        extension_id: extension_id.clone(),
+                        harness_revision_id: revision.clone(),
+                        command_name: "clear".into(),
+                        arguments: JsonValue::Object(BTreeMap::new()),
+                    },
+                )),
+            ])
+            .expect("nonempty dispatch commit"),
+        )
+        .expect("input dispatches and control queues");
+    assert_eq!(
+        reduce_lane(session.snapshot().expect("snapshot succeeds"), lane.clone())
+            .expect("queued controls reduce")
+            .pending_extension_controls
+            .iter()
+            .map(|control| control.control.control_id.as_str())
+            .collect::<Vec<_>>(),
+        [control_id.as_str(), second_control_id.as_str()],
+        "controls accepted in one semantic group retain item source order"
+    );
+    session
+        .commit(
+            SessionCommit::new(vec![
+                SessionCommitItem::Record(LaneRecord::OperationFinished(
+                    OperationFinishedRecord {
+                        operation_id: operation_id.clone(),
+                        outcome: OperationOutcome::Completed,
+                    },
+                )),
+                SessionCommitItem::Record(LaneRecord::InputSettled(InputSettledRecord {
+                    operation_id: operation_id.clone(),
+                    input_id: input.id.clone(),
+                    outcome: OperationOutcome::Completed,
+                })),
+                SessionCommitItem::Fact(SessionFact::ExtensionStateValueSet(
+                    ExtensionStateValueSetFact {
+                        lane_id: lane.clone(),
+                        extension_id: extension_id.clone(),
+                        state_version: state.state_version.clone(),
+                        value: state_value,
+                    },
+                )),
+                SessionCommitItem::Record(LaneRecord::ExtensionControlApplied(
+                    ExtensionControlAppliedRecord {
+                        control_id: control_id.clone(),
+                    },
+                )),
+                SessionCommitItem::Record(LaneRecord::ExtensionControlApplied(
+                    ExtensionControlAppliedRecord {
+                        control_id: second_control_id,
+                    },
+                )),
+                SessionCommitItem::Fact(SessionFact::TurnCheckpoint(TurnCheckpointFact {
+                    checkpoint_id: checkpoint_id.clone(),
+                    lane_id: lane.clone(),
+                    operation_id: operation_id.clone(),
+                    leaf_id: Some(input.id.clone()),
+                    extension_state: BTreeMap::from([(extension_id.clone(), state.clone())]),
+                })),
+            ])
+            .expect("nonempty settlement commit"),
+        )
+        .expect("settlement cleanup produces a checkpoint");
+
+    let reduced = reduce_lane(session.snapshot().expect("snapshot succeeds"), lane.clone())
+        .expect("main lane reduces");
+    assert_eq!(
+        reduced.input_reduction.input_states[&input.id].status,
+        InputStatus::Settled {
+            operation_id: operation_id.clone(),
+            outcome: OperationOutcome::Completed,
+        }
+    );
+    assert!(reduced.input_reduction.pending_inputs.is_empty());
+    assert!(reduced.pending_extension_controls.is_empty());
+    assert_eq!(reduced.extension_state[&extension_id], state);
+
+    let dirty_branch = LaneId::new("checkpoint-dirty-branch").expect("valid lane ID");
+    let dirty_fork = SessionCommit::new(vec![
+        SessionCommitItem::Lane(LaneMutation::Created {
+            lane_id: dirty_branch.clone(),
+            base_leaf_id: Some(input.id.clone()),
+        }),
+        SessionCommitItem::Fact(SessionFact::ExtensionStateValueSet(
+            ExtensionStateValueSetFact {
+                lane_id: dirty_branch.clone(),
+                extension_id: extension_id.clone(),
+                state_version: "state.dirty".into(),
+                value: JsonValue::Bool(false),
+            },
+        )),
+        SessionCommitItem::Fact(SessionFact::ForkedLane(ForkedLaneFact {
+            checkpoint_id: checkpoint_id.clone(),
+            lane_id: dirty_branch.clone(),
+            base_leaf_id: Some(input.id.clone()),
+        })),
+    ])
+    .expect("nonempty dirty fork commit");
+    assert!(
+        preview_session_commit(
+            &session.snapshot().expect("snapshot succeeds"),
+            &dirty_fork,
+            dirty_branch,
+            0,
+        )
+        .is_err(),
+        "a fork must be the first use of its freshly created lane"
+    );
+
+    let branch = LaneId::new("checkpoint-branch").expect("valid lane ID");
+    session
+        .commit(
+            SessionCommit::new(vec![
+                SessionCommitItem::Lane(LaneMutation::Created {
+                    lane_id: branch.clone(),
+                    base_leaf_id: Some(input.id.clone()),
+                }),
+                SessionCommitItem::Fact(SessionFact::ForkedLane(ForkedLaneFact {
+                    checkpoint_id,
+                    lane_id: branch.clone(),
+                    base_leaf_id: Some(input.id.clone()),
+                })),
+            ])
+            .expect("nonempty fork commit"),
+        )
+        .expect("fork commits");
+    session
+        .append_fact(SessionFact::ExtensionStateValueSet(
+            ExtensionStateValueSetFact {
+                lane_id: lane,
+                extension_id: extension_id.clone(),
+                state_version: "state.v2".into(),
+                value: JsonValue::object([("enabled", JsonValue::Bool(false))]),
+            },
+        ))
+        .expect("parent state advances after fork");
+
+    drop(session);
+    let reopened = JsonlSession::open(&directory, DurabilityMode::Strict)
+        .expect("JSONL session reopens after checkpoint and fork");
+    assert_eq!(
+        extension_state_for_lane(&reopened.snapshot().expect("snapshot succeeds"), branch)
+            .expect("fork state reduces")[&extension_id],
+        state,
+        "later parent state cannot leak through a settled checkpoint fork"
+    );
+    drop(reopened);
+    let _ = std::fs::remove_dir_all(&directory);
 }
 
 #[test]
@@ -141,7 +802,8 @@ fn append_rejects_a_user_entry_that_disagrees_with_its_accepted_operation_input(
 fn jsonl_writes_the_exact_v1_header_golden_fixture() {
     let directory = temporary_session_directory("v1-header-golden");
     let header = SessionHeader {
-        kind: "session".into(),
+        kind: "tea-session".into(),
+        format: SESSION_FORMAT_IDENTITY.into(),
         version: SESSION_FORMAT_VERSION,
         session_id: SessionId::new("fixture-session").expect("valid session ID"),
         created_at_ms: 1_700_000_000_000,
@@ -166,7 +828,8 @@ fn jsonl_writes_the_exact_v1_header_golden_fixture() {
 fn jsonl_writes_the_exact_v1_user_message_golden_fixture() {
     let directory = temporary_session_directory("v1-user-message-golden");
     let header = SessionHeader {
-        kind: "session".into(),
+        kind: "tea-session".into(),
+        format: SESSION_FORMAT_IDENTITY.into(),
         version: SESSION_FORMAT_VERSION,
         session_id: SessionId::new("fixture-session").expect("valid session ID"),
         created_at_ms: 1_700_000_000_000,
@@ -205,7 +868,8 @@ fn jsonl_writes_exact_v1_fixtures_for_every_mutation_family() {
     let mut session = JsonlSession::create_with_clock(
         &directory,
         SessionHeader {
-            kind: "session".into(),
+            kind: "tea-session".into(),
+            format: SESSION_FORMAT_IDENTITY.into(),
             version: SESSION_FORMAT_VERSION,
             session_id: SessionId::new("fixture-session").expect("valid session ID"),
             created_at_ms: 1_700_000_000_000,
@@ -485,6 +1149,39 @@ fn jsonl_rejects_an_unsupported_header_before_reading_or_repairing_records() {
         std::fs::read(&path).expect("fixture remains readable"),
         fixture,
         "unsupported formats are never interpreted or repaired"
+    );
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+#[test]
+fn jsonl_rejects_the_retired_v1_header_identity_before_replay() {
+    let directory = temporary_session_directory("retired-v1-identity");
+    let session = JsonlSession::create(
+        &directory,
+        SessionHeader::new(
+            SessionId::new("retired-v1-identity").expect("valid session ID"),
+            "workspace-test",
+            Metadata::new(),
+        ),
+        DurabilityMode::Strict,
+    )
+    .expect("session layout creates");
+    drop(session);
+    let path = directory.join("session.jsonl");
+    let retired = b"{\"kind\":\"session\",\"version\":1}\n";
+    std::fs::write(&path, retired).expect("retired header writes");
+
+    assert!(matches!(
+        JsonlSession::open(&directory, DurabilityMode::Strict),
+        Err(SessionError::UnsupportedFormat {
+            observed_version: Some(1),
+            ..
+        })
+    ));
+    assert_eq!(
+        std::fs::read(&path).expect("retired header remains readable"),
+        retired,
+        "an incompatible identity is never replayed or repaired"
     );
     let _ = std::fs::remove_dir_all(&directory);
 }
@@ -1068,6 +1765,13 @@ fn generated_mixed_medium_session_fixture_measures_replay_and_verification() {
                                 strategy_id: "generated-mixed-compaction".into(),
                                 recovery_index_artifact: None,
                                 harness_revision_id: Some(revision),
+                                replacement: PayloadRef::Inline(JsonValue::String(
+                                    "generated mixed replacement".into(),
+                                )),
+                                replacement_digest: Digest::from_bytes(
+                                    b"\"generated mixed replacement\"",
+                                ),
+                                provider_request_id: None,
                             }),
                         },
                     )
@@ -1900,7 +2604,7 @@ fn reducer_derives_interrupted_tool_recovery_without_replaying_never_policy() {
         reduce_lane(session.snapshot().expect("snapshot succeeds"), lane).expect("prefix is valid");
     assert_eq!(
         reduction.recovery_plan,
-        Some(RecoveryPlan::SynthesizeInterruptedToolResult {
+        Some(RecoveryPlan::ReconcileToolEffect {
             result_entry_id: result_entry,
         })
     );
@@ -1990,7 +2694,7 @@ fn jsonl_reopen_preserves_tool_intent_and_derives_the_same_recovery_plan() {
         .expect("durable prefix reduces");
     assert_eq!(
         reduction.recovery_plan,
-        Some(RecoveryPlan::SynthesizeInterruptedToolResult {
+        Some(RecoveryPlan::ReconcileToolEffect {
             result_entry_id: result_id,
         })
     );
@@ -2200,6 +2904,11 @@ fn jsonl_reopen_fixed_point_covers_compaction_harness_activation_and_core_rollov
                     strategy_id: "fixed-point-compaction".into(),
                     recovery_index_artifact: None,
                     harness_revision_id: Some(revision_a.clone()),
+                    replacement: PayloadRef::Inline(JsonValue::String(
+                        "fixed-point replacement".into(),
+                    )),
+                    replacement_digest: Digest::from_bytes(b"\"fixed-point replacement\""),
+                    provider_request_id: None,
                 }),
             },
         )
@@ -2882,7 +3591,7 @@ fn jsonl_rejects_a_semantically_valid_payload_tampered_after_commit() {
             mutation_kind: Some(ref kind),
             ref message,
             ..
-        }) if kind == "entry" && message == "record digest mismatch"
+        }) if kind == "commit" && message == "commit digest mismatch"
     ));
     let _ = std::fs::remove_dir_all(&directory);
 }
@@ -3141,7 +3850,7 @@ fn jsonl_rejects_integrity_chain_corruption_at_a_deterministic_boundary() {
                             mutation_kind: Some(kind),
                             message,
                             ..
-                        }) if *sequence == Sequence(2) && kind == "entry" && message.contains("non-consecutive sequence")
+                        }) if *sequence == Sequence(2) && kind == "commit" && message.contains("non-consecutive sequence")
                     ),
                     "the decoded sequence and mutation kind remain available for a transition error: {result:?}"
                 );
@@ -3195,8 +3904,8 @@ fn jsonl_rejects_noncanonical_and_invalid_v1_wire_forms_at_their_first_line() {
             "duplicate key",
             header
                 .replace(
-                    r#""kind":"session","metadata"#,
-                    r#""kind":"session","kind":"session","metadata"#,
+                    r#""kind":"tea-session","metadata"#,
+                    r#""kind":"tea-session","kind":"tea-session","metadata"#,
                 )
                 .into_bytes(),
             1,
@@ -3205,8 +3914,8 @@ fn jsonl_rejects_noncanonical_and_invalid_v1_wire_forms_at_their_first_line() {
             "reordered fields",
             header
                 .replace(
-                    r#""initial_lane":"main","kind":"session""#,
-                    r#""kind":"session","initial_lane":"main""#,
+                    r#""initial_lane":"main","kind":"tea-session""#,
+                    r#""kind":"tea-session","initial_lane":"main""#,
                 )
                 .into_bytes(),
             1,
@@ -3244,7 +3953,7 @@ fn jsonl_rejects_noncanonical_and_invalid_v1_wire_forms_at_their_first_line() {
             "invalid digest spelling",
             header
                 .replace(
-                    "df2cdbd7aa4eb3c4be5f4fedcd7fffe8632adf8770a38960ed633860f7ab1ad6",
+                    "598fa9999974359e9a79d0e99e99480b68bfbc767f6fc6884293c58a1f34e010",
                     "z".repeat(64).as_str(),
                 )
                 .into_bytes(),
@@ -3690,7 +4399,7 @@ fn jsonl_rejects_unknown_nested_mutation_fields_even_when_the_digest_still_match
     assert!(matches!(
         JsonlSession::open(&directory, DurabilityMode::Strict),
         Err(SessionError::Format { line: 2, ref message, .. })
-            if message == "mutation does not match the v1 schema"
+            if message == "commit does not match the v1 schema"
     ));
     let _ = std::fs::remove_dir_all(&directory);
 }

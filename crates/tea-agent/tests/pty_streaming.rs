@@ -718,9 +718,6 @@ fn enabled_subagents_hide_child_streaming_and_cleanup_before_ctrl_c_exit() {
 
     terminal
         .send_key(terminal.deadline(Duration::from_secs(3)), Key::Ctrl('c'))
-        .expect("clear the prompt restored by structured cancellation");
-    terminal
-        .send_key(terminal.deadline(Duration::from_secs(3)), Key::Ctrl('c'))
         .expect("exit after structured cancellation has settled");
     assert_eq!(
         terminal
@@ -951,6 +948,121 @@ fn real_binary_renders_streamed_text_before_the_fixture_settles() {
 }
 
 #[test]
+fn terminal_up_atomically_restores_runtime_owned_pending_inputs() {
+    let _lock = PTY_TEST_LOCK.lock().expect("PTY test lock is not poisoned");
+    let tea_home = pty_tea_home("runtime-owned-withdrawal");
+    let fixture = StreamingFixture::start();
+    let scenario = Scenario::new("runtime-owned queued input withdrawal")
+        .expect("valid scenario label")
+        .command(CommandSpec::new(env!("CARGO_BIN_EXE_tea")).args([
+            "--provider",
+            LOCAL_PROVIDER,
+            "--model",
+            FIXTURE_MODEL,
+            "--local-base-url",
+            fixture.url.as_str(),
+            "--tea-home",
+            tea_home.to_str().expect("UTF-8 test path"),
+        ]))
+        .size(Size::new(COLUMNS, ROWS).expect("constant terminal size"))
+        .environment(TestEnv::hermetic().expect("create hermetic test environment"))
+        .protocol_profile(ProtocolProfile::xterm_minimal_v1());
+    let mut terminal = PtyTest::spawn(scenario).expect("real tea binary should start in a PTY");
+    let baseline = terminal.terminal_baseline();
+
+    terminal
+        .wait_for_screen(
+            terminal.deadline(Duration::from_secs(3)),
+            "local model readiness",
+            |screen| screen.contains(&format!("{LOCAL_PROVIDER}/{FIXTURE_MODEL}")),
+        )
+        .expect("terminal should become ready");
+    terminal
+        .send_text(
+            terminal.deadline(Duration::from_secs(3)),
+            "held first input",
+        )
+        .expect("first input types");
+    terminal
+        .send_key(terminal.deadline(Duration::from_secs(3)), Key::Enter)
+        .expect("first input submits");
+    fixture.wait_for_first_delta();
+    terminal
+        .wait_for_screen(
+            terminal.deadline(Duration::from_secs(3)),
+            "held first response",
+            |screen| screen.contains("first"),
+        )
+        .expect("first provider preview should render");
+
+    terminal
+        .send_text(
+            terminal.deadline(Duration::from_secs(3)),
+            "durably queued follow-up",
+        )
+        .expect("follow-up types while the root operation is active");
+    terminal
+        .send_key(terminal.deadline(Duration::from_secs(3)), Key::Enter)
+        .expect("follow-up accepts into the runtime queue");
+    terminal
+        .wait_for_screen(
+            terminal.deadline(Duration::from_secs(3)),
+            "runtime-projected next input",
+            |screen| screen.contains("Queued next: durably queued follow-up"),
+        )
+        .expect("active submission should render the runtime-owned queue slot");
+
+    terminal
+        .send_key(terminal.deadline(Duration::from_secs(3)), Key::Up)
+        .expect("withdraw queued input with empty composer");
+    terminal
+        .wait_for_screen(
+            terminal.deadline(Duration::from_secs(3)),
+            "withdrawn runtime input in composer",
+            |screen| {
+                screen.contains("durably queued follow-up")
+                    && screen.contains("queued message restored")
+                    && !screen.contains("Queued next: durably queued follow-up")
+            },
+        )
+        .expect("Up should atomically remove the projection before restoring composition text");
+
+    fixture.release();
+    terminal
+        .wait_for_screen(
+            terminal.deadline(Duration::from_secs(3)),
+            "first operation settles without the withdrawn follow-up",
+            |screen| {
+                screen.contains("first")
+                    && screen.contains("second")
+                    && !screen.contains("Queued next: durably queued follow-up")
+                    && !screen.contains("Thinking")
+            },
+        )
+        .expect("withdrawn input must not start another provider request after settlement");
+
+    terminal
+        .send_key(terminal.deadline(Duration::from_secs(3)), Key::Ctrl('c'))
+        .expect("clear restored composer text");
+    terminal
+        .send_key(terminal.deadline(Duration::from_secs(3)), Key::Ctrl('c'))
+        .expect("exit terminal");
+    assert_eq!(
+        terminal
+            .wait_for_exit(terminal.deadline(Duration::from_secs(3)))
+            .expect("wait for tea exit"),
+        ExitStatus::Code(0)
+    );
+    terminal
+        .assert_terminal_restored(&baseline)
+        .expect("terminal modes restore after queue withdrawal");
+    terminal
+        .finish(terminal.deadline(Duration::from_secs(3)))
+        .expect("reap tea");
+    let _ = fs::remove_dir_all(tea_home);
+}
+
+#[test]
 fn real_binary_keeps_native_multiline_editing_and_history_inside_a_pty() {
     let _lock = PTY_TEST_LOCK.lock().expect("PTY test lock is not poisoned");
     let scenario = Scenario::new("native composer interaction")
@@ -1056,9 +1168,8 @@ fn real_binary_keeps_native_multiline_editing_and_history_inside_a_pty() {
             |screen| {
                 screen.row(3).is_some_and(|row| row.starts_with('─'))
                     && screen.row(4).is_some_and(|row| row.starts_with("  /help"))
-                    // Bundled extension commands fill the menu to its row cap.
-                    && screen.row(8).is_some_and(|row| row.starts_with("  /goal"))
-                    && screen.row(9).is_some_and(|row| row.starts_with("  /todos"))
+                    && screen.row(8).is_some_and(|row| row.starts_with("  /fork"))
+                    && screen.row(9).is_some_and(|row| row.starts_with("  /new"))
                     && screen
                         .row(11)
                         .is_some_and(|row| row.starts_with("↑↓ Navigate"))
@@ -1110,6 +1221,8 @@ fn real_binary_keeps_native_multiline_editing_and_history_inside_a_pty() {
                 screen.row(0).is_some_and(|row| row.starts_with("┃"))
                     && screen.contains("General")
                     && screen.contains("show keybindings and commands")
+                    && screen.contains("/continue")
+                    && screen.contains("/fork")
                     && screen.row(14).is_some_and(|row| row.starts_with('─'))
                     && screen
                         .row(15)
@@ -1235,7 +1348,7 @@ fn real_binary_reopens_tool_detail_after_escape_in_a_pty() {
 }
 
 #[test]
-fn mock_keeps_submitted_user_message_visible_after_acceptance() {
+fn mock_cancellation_keeps_the_settled_input_without_restoring_a_local_prompt() {
     let _lock = PTY_TEST_LOCK.lock().expect("PTY test lock is not poisoned");
     let tea_home = pty_tea_home("mock-submitted-message");
     let scenario = Scenario::new("mock submitted message")
@@ -1291,13 +1404,10 @@ fn mock_keeps_submitted_user_message_visible_after_acceptance() {
             "cancelled submitted message",
             |screen| {
                 screen.contains("submitted user message")
-                    && screen.contains("cancelled; prompt restored for explicit re-submit")
+                    && !screen.contains("prompt restored for explicit re-submit")
             },
         )
-        .expect("settled cancel redraw must preserve the submitted user message");
-    terminal
-        .send_key(terminal.deadline(Duration::from_secs(3)), Key::Ctrl('c'))
-        .expect("clear restored prompt");
+        .expect("settled cancellation keeps the durable input without recreating a local draft");
     terminal
         .send_key(terminal.deadline(Duration::from_secs(3)), Key::Ctrl('c'))
         .expect("exit mock terminal");

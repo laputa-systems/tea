@@ -38,3 +38,11 @@ pub use state::{
     AppState, NoticeSeverity, ToolProjection, ToolState, TranscriptEntry, UiStatus, UiSurface,
 };
 pub use support::format_usage;
+
+#[cfg(feature = "live-verification")]
+pub(crate) use durable::{
+    create_live_verification_authoring_harness, create_live_verification_child_harness,
+    create_live_verification_compaction_harness, create_live_verification_harness,
+    reopen_live_verification_authoring_harness, reopen_live_verification_compaction_harness,
+    reopen_live_verification_harness, run_live_verification_one_shot,
+};

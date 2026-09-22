@@ -1,70 +1,98 @@
-# Durable harness
+# Durable runtime
 
-The durable harness is Tea's only terminal execution path. It joins a
-single-writer v1 session, immutable artifacts, a resolved harness revision, a
-model-harness profile, and the executor-neutral core into one auditable
-operation boundary.
+`SessionSupervisor` is the common durable execution boundary for Rust hosts,
+one-shot CLI and terminal prompts. It combines one serialized `SessionWriter`,
+immutable artifacts and harness lineage with the executor-neutral Agent.
 
-The relevant layers are intentionally narrow:
+```text
+host operations -> SessionSupervisor -> same Agent FSM
+                         |
+                 atomic SessionCommit
+                         |
+              JSONL / immutable artifacts
+```
 
-~~~text
-tea-agent terminal
-  -> tea_core::runtime::SessionSupervisor
-      -> tea-session semantic log and immutable objects
-      -> tea_core::harness::HarnessResolver catalog, snapshots, candidates, revisions
-      -> tea-core provider/tool execution
-      -> redacted trace artifact
-~~~
+## Direct operations
 
-Before an effect crosses into the core, `SessionSupervisor` records the durable
-operation and epoch. Provider requests and tool calls use the effect gate, so
-intent and settled outcome are represented in session state. Reconnect state is
-derived from one atomic session snapshot plus post-commit live events.
+`submit_input` records accepted text and returns an `AcceptedInput`; its
+`completion()` is independently reliable. `drive_next_input` consumes accepted
+input under explicit host authorization, processing pending controls before
+user input and user input before any authorized goal continuation. The host
+owns polling; acceptance never secretly spawns work. `withdraw_inputs`
+atomically withdraws only inputs that have not been dispatched.
 
-Every epoch resolves the committed revision through `HarnessResolver`. The active
-runtime services, prompt sections, tools, hooks, capability bindings, artifact policy,
-and model-harness profile are all immutable for that epoch. A candidate can
-change the next boundary only after validation and durable activation.
+```rust
+let accepted = supervisor.submit_input("review the change")?;
+let drive = supervisor
+    .drive_next_input(IdleAuthorization::UserInputOnly)
+    .await?;
+let completion = accepted.completion().wait().await;
 
-`HarnessResolver` owns only provider-independent immutable repository and
-extension resolution state. `SessionSupervisor` supplies the selected lane's
-`RuntimeServices` when resolving and constructing an epoch, so root and child
-lanes may use different providers, compactors, workspace tool registries and
-prompt-layout ledgers without hiding a mutable session-global service template.
+// A terminal can restore a combined undispatched slot atomically.
+let queued = supervisor.submit_input("add this to the same draft")?;
+let restored = supervisor.withdraw_inputs(&[queued.id().clone()])?;
+```
 
-Runtime policy identities are owned by `RuntimeServices`. `HarnessSeedBuilder`
-copies those identities into the immutable snapshot, and `HarnessResolver`
-checks them again before both `SessionSupervisor` and `HostedEpoch` construct an
-agent. This keeps the executable hook, automatic-compaction, tool-projection,
-and tool-failure policies paired with the snapshot metadata that names them;
-the built-in defaults have stable identities as well.
+`QueuedInput` projection comes from `queued_inputs`; no host retains an
+authoritative duplicate queue. `dispatch_extension_command` reports either an
+immediate `ExtensionCommandAdmission::Applied` or a durable `Queued` control.
+Hosts use the same `drive_next_input` call to apply queued controls and make an
+explicit headless goal-continuation decision.
 
-Tool names, descriptions, and schemas form the provider surface. Scheduling and
-cancellation controls (`execution_mode`, exclusive-batch, and cancellation
-settlement) are host-only execution policy: they have a separate immutable
-digest, are retained in snapshots and catalogs, and produce a distinct candidate
-surface diff without changing the provider-surface digest.
+`run_root_prompt` is the ordinary convenience path. `resume` explicitly
+continues an interrupted operation after the recovery gate. `abort_root`
+requests cancellation; `cancel_and_join` and `close` await owned settlement
+while the host keeps polling its drive. Snapshot/subscription is observation,
+not the operation result channel.
 
-Resolved ABI-v2 extensions may also contribute terminal host commands and one
-idle callback. Command declarations are immutable revision data; the terminal
-uses them for slash completion and help, while the generic runtime invokes their
-sandboxed handler with only command text and that extension's current durable
-state. Extension-local state is append-only `PluginMemory`, reduced to the
-latest value per local kind and fixed to external-only/session retention. The
-extension never receives the raw session writer or another extension's state.
+`fork_settled_turn` accepts a recorded checkpoint ID, a fresh lane ID and fresh
+host services. It restores the historical configuration/harness/private state
+at that boundary without inheriting queued input, children or execution
+permission. Conversation branching does not revert files.
 
-After an operation has settled and the lane is idle, the terminal applies any
-queued extension controls, then asks resolved idle callbacks whether one
-internal continuation is warranted. A continuation is accepted through the
-ordinary root-lane `SessionSupervisor` operation path and is stored as host-only model
-context, not as a user message. Cancellation and failed operations do not
-produce automatic retries; one settled operation may request at most one
-continuation.
+## Source-pinned execution
 
-The supervisor persists a content-redacted v1 trace artifact before it records
-the epoch's terminal outcome. Trace provenance joins the operation, epoch,
-core-run ID, revision, snapshot, and profile. See [trace](trace.md) and
-[artifact recovery](artifact-recovery.md).
+Every epoch resolves its immutable revision through `HarnessResolver`.
+Prompts, tools, hooks, grants, artifact policy and model-harness profile remain
+pinned throughout that invocation. A candidate may become active only through
+a validated durable activation at a safe boundary. Runtime policy identities
+are checked against immutable snapshot metadata before Agent construction.
 
-There is no terminal direct-core run path, separate extension registry, or
-shadow session store.
+The resolver owns provider-independent source/revision state. Each lane gets
+explicit `RuntimeServices`, including its own provider, compactor, tools and
+prompt-layout ledger. Tool declaration bytes and host execution/cancellation
+policy have separate digests. An extension cannot expand host grants.
+
+When a lane's durable ancestry selects a model through `ModelChanged`, its
+`RuntimeServices` descriptor must match the exact provider, model and revision
+before create, reopen, lane registration or execution. Historical epochs use
+the selection at their recorded source leaf rather than a later lane change.
+
+ABI-v3 extensions contribute bounded tools/prompts/hooks/commands/idle policy
+and one private whole state value per namespace. State versions prevent
+incompatible source from silently reinterpreting persisted state. Queued goal
+pause/clear controls are runtime-owned; headless hosts get the same precedence
+as the terminal.
+
+## Effects and observation
+
+The effect gate commits request/tool intent before dispatch and outcome before
+successful completion. Complete assistant tool decisions are durable before
+their tools run. Required artifact bytes publish before references. Model
+context pairs concurrent results in source order.
+
+`TeaEventSubscription` atomically captures committed state plus labelled
+bounded live previews and registers for subsequent updates. Preview loss is
+allowed; semantic overflow explicitly requires resnapshot. Reliable input
+completion remains independent. Trace records diagnostics under an explicit
+failure policy and never grants execution authority.
+
+Reopening reconstructs committed state and reports interruptions. It does not
+execute or require working provider credentials. See [recovery](harness-recovery.md),
+[architecture](architecture.md), [subagents](subagents.md), and
+[verification](verification.md).
+
+For caller-owned external persistence, `RuntimeServices::prepare_hosted_epoch`
+builds the same Agent with the caller's explicit `EffectGate`. Unsupported
+session-dependent policies are rejected. This seam does not pretend an
+in-memory run is crash durable.
