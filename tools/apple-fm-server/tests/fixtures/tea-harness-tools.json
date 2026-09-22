@@ -1,0 +1,447 @@
+{
+  "_provenance": {
+    "what": "The `tools` array of one real Chat Completions request from the tea terminal host.",
+    "how": "Regenerate by running the server with --dump-requests and pointing tea at it:",
+    "command": "uv run python -m apple_fm_server --port 8765 --dump-requests /tmp/fmdump   # then\\ntea -p 'hi' --provider local --model apple-foundation-models --local-base-url http://127.0.0.1:8765/v1 --local-context-window 4096",
+    "tea_git_sha": "52094eb",
+    "taken": "2026-09-21"
+  },
+  "tools": [
+    {
+      "function": {
+        "description": "Inspect a regular workspace file. Use offset and limit for large files. Set includeDigest=true before a conditional edit when you need a complete-file BLAKE3 precondition.",
+        "name": "read",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "includeDigest": {
+              "description": "Include the complete-file BLAKE3 digest.",
+              "type": "boolean"
+            },
+            "limit": {
+              "description": "Maximum number of lines.",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "offset": {
+              "description": "One-indexed line at which to begin.",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "path": {
+              "description": "In-workspace file path.",
+              "maxLength": 4096,
+              "type": "string"
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "type": "object"
+        }
+      },
+      "type": "function"
+    },
+    {
+      "function": {
+        "description": "Run a bounded foreground bash command in the workspace with the host-selected environment. Use this for commands and ordinary directory or text searches.",
+        "name": "bash",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "command": {
+              "description": "Bash command to run.",
+              "minLength": 1,
+              "type": "string"
+            },
+            "timeout": {
+              "description": "Optional timeout in seconds; omitted commands still receive a finite host timeout.",
+              "exclusiveMinimum": 0,
+              "maximum": 2147.483647,
+              "type": "number"
+            }
+          },
+          "required": [
+            "command"
+          ],
+          "type": "object"
+        }
+      },
+      "type": "function"
+    },
+    {
+      "function": {
+        "description": "Create, replace, or precisely modify workspace files in one validated transaction. Each files[] entry uses exactly one of edits or content. Exact edits require an existing file; content creates an absent file or completely replaces an existing regular file. A new file's parent directory must already exist; use bash to create directories first.",
+        "name": "edit",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "files": {
+              "items": {
+                "additionalProperties": false,
+                "oneOf": [
+                  {
+                    "required": [
+                      "edits"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "content"
+                    ]
+                  }
+                ],
+                "properties": {
+                  "content": {
+                    "description": "Complete desired content; creates an absent file only when its parent directory already exists, or replaces an existing file.",
+                    "type": "string"
+                  },
+                  "edits": {
+                    "items": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "newText": {
+                          "type": "string"
+                        },
+                        "oldText": {
+                          "minLength": 1,
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "oldText",
+                        "newText"
+                      ],
+                      "type": "object"
+                    },
+                    "maxItems": 64,
+                    "minItems": 1,
+                    "type": "array"
+                  },
+                  "expectedDigest": {
+                    "description": "Optional complete-file BLAKE3 precondition for an existing target.",
+                    "maxLength": 64,
+                    "minLength": 64,
+                    "type": "string"
+                  },
+                  "path": {
+                    "description": "In-workspace target path.",
+                    "maxLength": 4096,
+                    "minLength": 1,
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "path"
+                ],
+                "type": "object"
+              },
+              "maxItems": 32,
+              "minItems": 1,
+              "type": "array"
+            }
+          },
+          "required": [
+            "files"
+          ],
+          "type": "object"
+        }
+      },
+      "type": "function"
+    },
+    {
+      "function": {
+        "description": "Efficiently locate workspace files with Tea's bounded, deterministic glob search. It is faster and more predictable than repeatedly spawning shell find commands.",
+        "name": "find",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "limit": {
+              "description": "Maximum returned paths; defaults to and cannot exceed 1000.",
+              "maximum": 1000,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "path": {
+              "description": "In-workspace directory to search; defaults to the workspace root.",
+              "type": "string"
+            },
+            "pattern": {
+              "description": "Glob such as *.rs or src/**/*.luau.",
+              "maxLength": 4096,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "pattern"
+          ],
+          "type": "object"
+        }
+      },
+      "type": "function"
+    },
+    {
+      "function": {
+        "description": "Retrieve web evidence. Pass query to discover relevant sources and receive their cleaned content in the same call. Pass urls to retrieve known sources together; batch independent known URLs in one urls array rather than making sequential calls.",
+        "name": "web",
+        "parameters": {
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "enum": [
+                    "developer",
+                    "web"
+                  ]
+                },
+                "limit": {
+                  "maximum": 8,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "query": {
+                  "maxLength": 500,
+                  "minLength": 1,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "query"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "urls": {
+                  "items": {
+                    "maxLength": 8192,
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "maxItems": 8,
+                  "minItems": 1,
+                  "type": "array",
+                  "uniqueItems": true
+                }
+              },
+              "required": [
+                "urls"
+              ],
+              "type": "object"
+            }
+          ]
+        }
+      },
+      "type": "function"
+    },
+    {
+      "function": {
+        "description": "Read or update the durable plan. No arguments reads the whole list. Send `updates` to report status changes; the extension handles hierarchy, recursive transitions, and the next actionable task. Send `markdown` only to create or restructure the plan, keeping existing #IDs and omitting the id for a new task. The complete document returned by a read can be edited and sent back unchanged as markdown.",
+        "name": "todo",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "markdown": {
+              "maxLength": 32768,
+              "type": "string"
+            },
+            "updates": {
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "id": {
+                    "minimum": 1,
+                    "type": "integer"
+                  },
+                  "reason": {
+                    "maxLength": 300,
+                    "type": "string"
+                  },
+                  "status": {
+                    "enum": [
+                      "pending",
+                      "in_progress",
+                      "done",
+                      "blocked",
+                      "dropped"
+                    ]
+                  }
+                },
+                "required": [
+                  "id",
+                  "status"
+                ],
+                "type": "object"
+              },
+              "maxItems": 128,
+              "minItems": 1,
+              "type": "array"
+            }
+          },
+          "type": "object"
+        }
+      },
+      "type": "function"
+    },
+    {
+      "function": {
+        "description": "Read the current durable goal state.",
+        "name": "get_goal",
+        "parameters": {
+          "type": "object"
+        }
+      },
+      "type": "function"
+    },
+    {
+      "function": {
+        "description": "Create a durable long-running goal only for an explicitly requested persistent objective, when none is unfinished.",
+        "name": "create_goal",
+        "parameters": {
+          "properties": {
+            "objective": {
+              "type": "string"
+            },
+            "token_budget": {
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "objective"
+          ],
+          "type": "object"
+        }
+      },
+      "type": "function"
+    },
+    {
+      "function": {
+        "description": "Mark the active goal complete only after verification, or blocked only after the same blocker recurs for three consecutive goal turns.",
+        "name": "update_goal",
+        "parameters": {
+          "properties": {
+            "blocker": {
+              "type": "string"
+            },
+            "status": {
+              "enum": [
+                "complete",
+                "blocked"
+              ]
+            }
+          },
+          "required": [
+            "status"
+          ],
+          "type": "object"
+        }
+      },
+      "type": "function"
+    },
+    {
+      "function": {
+        "description": "Read one bounded page from a durable tea-artifact locator. This returns the requested page directly and never creates another artifact locator.",
+        "name": "tea_artifact_read",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "artifact_id": {
+              "type": "string"
+            },
+            "maximum_bytes": {
+              "minimum": 1,
+              "type": "integer"
+            },
+            "offset": {
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "artifact_id"
+          ],
+          "type": "object"
+        }
+      },
+      "type": "function"
+    },
+    {
+      "function": {
+        "description": "Search a durable tea artifact with a literal query and return bounded contexts.",
+        "name": "tea_artifact_search",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "artifact_id": {
+              "type": "string"
+            },
+            "context_bytes": {
+              "minimum": 1,
+              "type": "integer"
+            },
+            "maximum_results": {
+              "minimum": 1,
+              "type": "integer"
+            },
+            "query": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "artifact_id",
+            "query"
+          ],
+          "type": "object"
+        }
+      },
+      "type": "function"
+    },
+    {
+      "function": {
+        "description": "Search durable session history, including compacted semantic entries and referenced artifacts, with bounded results.",
+        "name": "tea_history_search",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "entry_type": {
+              "type": "string"
+            },
+            "error_only": {
+              "type": "boolean"
+            },
+            "maximum_results": {
+              "minimum": 1,
+              "type": "integer"
+            },
+            "operation_id": {
+              "type": "string"
+            },
+            "sequence_end": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "sequence_start": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "text": {
+              "type": "string"
+            },
+            "tool_name": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "text"
+          ],
+          "type": "object"
+        }
+      },
+      "type": "function"
+    }
+  ]
+}

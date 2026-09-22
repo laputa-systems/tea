@@ -1,0 +1,19 @@
+# Standalone sidecar, not part of the tea workspace: no cargo crate depends on
+# it, and `apple-fm-sdk` never enters a tea build. See README.md.
+[project]
+name = "apple-fm-server"
+version = "0.1.0"
+description = "OpenAI-compatible Chat Completions server backed by Apple on-device Foundation Models"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "apple-fm-sdk>=0.2.1; sys_platform == 'darwin' and platform_machine == 'arm64'",
+]
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+# The package is imported from this directory (`uv run python -m apple_fm_server`);
+# it is deliberately not installed as a wheel, so no build backend is needed.
+[tool.uv]
+package = false

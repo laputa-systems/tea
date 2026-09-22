@@ -38,6 +38,7 @@ through the durable harness for every prompt.
 - [Default coding profile](default-coding-profile.md)
 - [Provider adapters](provider-adapters.md)
 - [Codex provider](codex-provider.md)
+- [Local provider with Apple Foundation Models](local-provider.md)
 - [Web retrieval](web.md)
 - [Compaction](compaction.md)
 - [Durable subagents](subagents.md)

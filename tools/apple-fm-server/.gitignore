@@ -1,0 +1,4 @@
+# This sidecar's uv environment and test caches are local, like the Cargo target
+# directory: nothing here is a source artifact.
+.venv/
+.pytest_cache/
