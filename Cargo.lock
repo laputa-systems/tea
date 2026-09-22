@@ -1131,7 +1131,6 @@ dependencies = [
  "smol",
  "tea-core",
  "tea-http",
- "tea-luau",
  "tea-protocol",
  "tea-session",
 ]

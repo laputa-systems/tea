@@ -9,7 +9,6 @@ target/ptytest-failures/
 /evals/baselines.local.json
 /evals/results/
 /evals/.workspaces/
-/evals/pi_shootout/sdk/node_modules/
 
 __pycache__/
 

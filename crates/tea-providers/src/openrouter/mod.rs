@@ -1306,7 +1306,7 @@ data: [DONE]
                         .into_iter()
                         .map(|name| ToolDefinition {
                             name: name.into(),
-                            description: format!("shootout {name} capability"),
+                            description: format!("test {name} capability"),
                             schema: JsonValue::object([("type", JsonValue::from("object"))]),
                             execution_mode: ToolExecutionMode::Sequential,
                             requires_exclusive_batch: false,

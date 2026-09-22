@@ -77,8 +77,8 @@ pub(super) fn build_payload(
     let mut payload = json_value!({
         "model": config.model.clone(),
         "messages": chat_messages,
-        // Match the Pi shootout's explicit retention policy so the captured
-        // OpenRouter request has the same storage semantics as its comparator.
+        // Disable server-side retention so the captured OpenRouter request
+        // keeps explicit storage semantics.
         "store": false,
         "stream": true,
         "stream_options": json_value!({"include_usage": true}),
@@ -114,8 +114,8 @@ pub(super) fn build_payload(
         object.insert("tools".to_owned(), JsonValue::Array(tools));
         // Require OpenRouter to select an endpoint that honors every supplied
         // tool parameter unless a controlled embedding explicitly supplies a
-        // different routing object. The shootout uses that override on both
-        // harnesses; ordinary Tea operation keeps this established default.
+        // different routing object. Ordinary Tea operation keeps this
+        // established default.
         object.insert(
             "provider".to_owned(),
             config

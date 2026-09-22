@@ -66,8 +66,7 @@ def main() -> int:
     }
     direct_prohibited = {
         # Provider diagnostics are intentionally converted into the durable
-        # `tea-session::ProviderErrorRecord` at the adapter boundary. The
-        # feature-gated `tea-eval` binary also owns a direct `tea-luau` edge.
+        # `tea-session::ProviderErrorRecord` at the adapter boundary.
         # Adapters must not otherwise reach the terminal or trace layers.
         "tea-providers": {"tea-trace", "tea-agent"},
         "tea-luau": {"tea-session", "tea-trace", "tea-providers", "tea-agent"},

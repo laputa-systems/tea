@@ -162,9 +162,8 @@ pub struct OpenRouterConfig {
     pub(super) stall_timeout: Duration,
     pub(super) retry_policy: RetryPolicy,
     // An explicit policy is optional so regular Tea/OpenRouter operation keeps
-    // its established `require_parameters` behavior. The shootout supplies a
-    // controlled policy to both native harnesses instead of changing that
-    // production default.
+    // its established `require_parameters` behavior. Callers may supply a
+    // controlled policy instead of changing that production default.
     pub(super) provider_routing: Option<JsonValue>,
     /// Optional model-facing tool allowlist. The host may retain additional
     /// durable execution tools while exposing only a closed subset to the

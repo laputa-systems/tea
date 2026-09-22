@@ -1,4 +1,4 @@
-.PHONY: lint test test-linux tui local-install local-model local quality-fast quality-resources quality-compaction pi-shootout pi-shootout-static pi-shootout-tea-static pi-shootout-serious pi-shootout-static-serious pi-shootout-plan pi-shootout-static-plan pi-shootout-check
+.PHONY: lint test test-linux tui local-install local-model local quality-fast quality-resources quality-compaction
 
 lint:
 	cargo fmt --all
@@ -96,78 +96,3 @@ quality-resources:
 
 quality-compaction:
 	PYTHONDONTWRITEBYTECODE=1 python3 -m evals.quality compaction --out /tmp/tea-compaction-quality
-
-# This is an explicit, provider-opt-in one-task experiment. The model is fixed
-# for v0 so a typo cannot silently compare a different model.
-PI_SHOOTOUT_TASK ?= express-3936-medium
-PI_SHOOTOUT_PROVIDER ?= openrouter
-PI_SHOOTOUT_MODEL ?= deepseek/deepseek-v4-flash-0731
-PI_SHOOTOUT_THINKING ?= high
-PI_SHOOTOUT_MAX_OUTPUT_TOKENS ?= unlimited
-ifeq ($(PI_SHOOTOUT_TASK),express-4205-hard)
-PI_SHOOTOUT_TIMEOUT_SECONDS ?= 1800
-else
-PI_SHOOTOUT_TIMEOUT_SECONDS ?= 900
-endif
-PI_SHOOTOUT_REPEATS ?= 3
-# Each repeat is an isolated lane. Keep the lane count explicit in evidence;
-# by default a two-repeat invocation starts two complete repeats in parallel.
-PI_SHOOTOUT_PARALLEL_REPEATS ?= $(PI_SHOOTOUT_REPEATS)
-PI_SHOOTOUT_SEED ?= 20260823
-PI_SHOOTOUT_CACHE_ROOT ?= /tmp/tea-pi-shootout-cache
-PI_SHOOTOUT_WORKSPACE_ROOT ?= /tmp/tea-pi-shootout-workspaces
-PI_SHOOTOUT_OUT ?= /tmp/tea-pi-shootout
-PI_SHOOTOUT_TEA_ONLY ?= 0
-PI_SHOOTOUT_BASELINE_ARGS = $(if $(filter 1 true yes,$(PI_SHOOTOUT_TEA_ONLY)),--tea-only,)
-
-PI_SHOOTOUT_ARGS = --task "$(PI_SHOOTOUT_TASK)" --provider "$(PI_SHOOTOUT_PROVIDER)" --model "$(PI_SHOOTOUT_MODEL)" --thinking "$(PI_SHOOTOUT_THINKING)" --max-output-tokens "$(PI_SHOOTOUT_MAX_OUTPUT_TOKENS)" --timeout-seconds "$(PI_SHOOTOUT_TIMEOUT_SECONDS)" --repeats "$(PI_SHOOTOUT_REPEATS)" --parallel-repeats "$(PI_SHOOTOUT_PARALLEL_REPEATS)" --seed "$(PI_SHOOTOUT_SEED)" --cache-root "$(PI_SHOOTOUT_CACHE_ROOT)" --workspace-root "$(PI_SHOOTOUT_WORKSPACE_ROOT)" --out "$(PI_SHOOTOUT_OUT)" $(PI_SHOOTOUT_BASELINE_ARGS)
-
-pi-shootout-plan:
-	@command -v node >/dev/null 2>&1 || { echo "missing required command: node" >&2; exit 1; }
-	@command -v npm >/dev/null 2>&1 || { echo "missing required command: npm" >&2; exit 1; }
-	@command -v curl >/dev/null 2>&1 || { echo "missing required command: curl" >&2; exit 1; }
-	@command -v git >/dev/null 2>&1 || { echo "missing required command: git" >&2; exit 1; }
-	@node -e 'const [major, minor] = process.versions.node.split(".").map(Number); if (major < 22 || (major === 22 && minor < 19)) process.exit(1)' || { echo "node >=22.19.0 is required" >&2; exit 1; }
-	PYTHONDONTWRITEBYTECODE=1 python3 -m evals.pi_shootout plan $(PI_SHOOTOUT_ARGS)
-
-pi-shootout-static-plan:
-	@command -v node >/dev/null 2>&1 || { echo "missing required command: node" >&2; exit 1; }
-	@command -v npm >/dev/null 2>&1 || { echo "missing required command: npm" >&2; exit 1; }
-	@command -v curl >/dev/null 2>&1 || { echo "missing required command: curl" >&2; exit 1; }
-	@command -v git >/dev/null 2>&1 || { echo "missing required command: git" >&2; exit 1; }
-	@node -e 'const [major, minor] = process.versions.node.split(".").map(Number); if (major < 22 || (major === 22 && minor < 19)) process.exit(1)' || { echo "node >=22.19.0 is required" >&2; exit 1; }
-	PYTHONDONTWRITEBYTECODE=1 python3 -m evals.pi_shootout plan $(PI_SHOOTOUT_ARGS) --static-only
-
-pi-shootout-check:
-	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest evals.pi_shootout.test_contract evals.pi_shootout.test_report evals.pi_shootout.test_compare
-	npm --prefix evals/pi_shootout/sdk ci
-	npm --prefix evals/pi_shootout/sdk run check
-	npm --prefix evals/pi_shootout/sdk test
-	cargo test -p tea-providers --lib --features eval-runner --locked
-	cargo test -p tea-providers --bin tea-eval --features eval-runner --locked
-	cargo test -p tea-session --locked jsonl_reopen_fixed_point_covers_compaction_harness_activation_and_core_rollover
-	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest evals.quality.test_coding_cases
-
-pi-shootout: pi-shootout-plan
-	@command -v vault >/dev/null 2>&1 || { echo "missing required command: vault (expected: vault OPENROUTER_API_KEY -- <adapter>)" >&2; exit 1; }
-	npm --prefix evals/pi_shootout/sdk ci
-	cargo build -p tea-providers --bin tea-eval --features eval-runner --locked
-	PYTHONDONTWRITEBYTECODE=1 python3 -m evals.pi_shootout run $(PI_SHOOTOUT_ARGS)
-
-pi-shootout-static: pi-shootout-static-plan
-	@command -v vault >/dev/null 2>&1 || { echo "missing required command: vault (expected: vault OPENROUTER_API_KEY -- <adapter>)" >&2; exit 1; }
-	npm --prefix evals/pi_shootout/sdk ci
-	cargo build -p tea-providers --bin tea-eval --features eval-runner --locked
-	PYTHONDONTWRITEBYTECODE=1 python3 -m evals.pi_shootout run $(PI_SHOOTOUT_ARGS) --static-only
-
-pi-shootout-tea-static:
-	$(MAKE) pi-shootout-static PI_SHOOTOUT_TEA_ONLY=1
-
-# Three repeats are intentionally a smoke/diagnostic workflow. The named
-# serious target uses seven counterbalanced repeats and is the minimum run
-# class from which the report may support a strict efficiency conclusion.
-pi-shootout-serious:
-	$(MAKE) pi-shootout PI_SHOOTOUT_REPEATS=7
-
-pi-shootout-static-serious:
-	$(MAKE) pi-shootout-static PI_SHOOTOUT_REPEATS=7
