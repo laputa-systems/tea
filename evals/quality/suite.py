@@ -20,6 +20,7 @@ import tempfile
 from typing import Any, Iterable, Mapping
 
 from .trace import coerce_trace, extract_metrics
+from .toolchain import pinned_toolchain
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -461,7 +462,7 @@ def _environment() -> dict[str, Any]:
     return {
         "python": sys.version.split()[0],
         "platform": platform.platform(),
-        "rust_toolchain": "nightly-2026-07-24",
+        "rust_toolchain": pinned_toolchain(ROOT),
         "cwd": str(ROOT),
         "ambient_environment_forwarded": ["PATH", "LANG", "LC_ALL"],
     }
@@ -555,7 +556,7 @@ def inspect_environment() -> dict[str, Any]:
         "core": {
             "rust": {
                 "adapter": str(RUST_ADAPTER.relative_to(ROOT)),
-                "toolchain": "nightly-2026-07-24",
+                "toolchain": pinned_toolchain(ROOT),
                 "tui": False,
                 "ambient_discovery": False,
                 "network": False,
@@ -588,7 +589,6 @@ def run_rust_allocation_probe(out: Path | None = None) -> dict[str, Any]:
 
     command = [
         "cargo",
-        "+nightly-2026-07-24",
         "bench",
         "-p",
         "tea-core",

@@ -5,14 +5,15 @@ script_dir=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 repo_root=$(CDPATH= cd -- "$script_dir/../../.." && pwd)
 fixture_dir="$script_dir/declarative"
 expected_dir="$script_dir/expected"
-rust_toolchain="nightly-2026-07-24"
 
+# rust-toolchain.toml is the single source of truth; plain `cargo` under the
+# repository root resolves the pinned nightly through the rustup shim.
 command -v jq >/dev/null 2>&1 || {
   echo "Rust fixture check: jq is required" >&2
   exit 2
 }
 
-cargo "+$rust_toolchain" build -q -p tea-core --features fixture-runner --bin tea-fixtures
+(cd "$repo_root" && cargo build -q -p tea-core --features fixture-runner --bin tea-fixtures)
 rust_runner="$repo_root/target/debug/tea-fixtures"
 
 temp_dir=$(mktemp -d "${TMPDIR:-/tmp}/pi-rust-fixtures.XXXXXX")

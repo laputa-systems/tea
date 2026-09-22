@@ -3,25 +3,28 @@
 Start with the nearest relevant hard judge and broaden only when its evidence
 supports the change.
 
-For the durable v1 surface, the focused checks are:
+For the durable v1 surface, the focused checks are (`rust-toolchain.toml` is
+the single source of truth for the pinned nightly; plain `cargo` resolves it
+through the rustup shim):
 
 ~~~sh
-cargo +nightly-2026-07-24 test -p tea-session --lib --locked
-cargo +nightly-2026-07-24 test -p tea-providers --locked
-cargo +nightly-2026-07-24 test -p tea-luau --locked
-cargo +nightly-2026-07-24 test -p tea-core --locked
-cargo +nightly-2026-07-24 test -p tea-agent --lib --locked
-cargo +nightly-2026-07-24 test -p tea-agent --features pty-harness --test pty_streaming --locked
+cargo test -p tea-session --lib --locked
+cargo test -p tea-providers --locked
+cargo test -p tea-luau --locked
+cargo test -p tea-core --locked
+cargo test -p tea-agent --lib --locked
+cargo test -p tea-agent --features pty-harness --test pty_streaming --locked
 ./crates/tea-core/fixtures/run.sh
 python3 scripts/check-crate-graph.py
+scripts/check-toolchain-pin.sh
 git diff --check
 ~~~
 
 For the default coding builtins, begin with the narrow checks:
 
 ~~~sh
-cargo +nightly-2026-07-24 test -p tea-core --test coding_capabilities --locked
-cargo +nightly-2026-07-24 test -p tea-luau builtins::tests::coding_builtins_are_closed_single_tool_extensions_with_fixed_grants --lib --locked
+cargo test -p tea-core --test coding_capabilities --locked
+cargo test -p tea-luau builtins::tests::coding_builtins_are_closed_single_tool_extensions_with_fixed_grants --lib --locked
 ~~~
 
 They prove the four independent Luau builtins and the trusted workspace,

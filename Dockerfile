@@ -100,11 +100,18 @@ ENV PATH="/opt/llvm-musl/bin:/root/.cargo/bin:$PATH" \
     CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER="/opt/llvm-musl/bin/clang" \
     CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER="/opt/llvm-musl/bin/clang"
 
-RUN rustup toolchain install nightly-2026-07-24 \
+# rust-toolchain.toml is the single source of truth for the pinned nightly.
+# Copy it before the full source copy and derive the channel from it, so the
+# toolchain install cannot drift from the pin every other entry point
+# resolves through the rustup shim.
+COPY rust-toolchain.toml /tmp/rust-toolchain.toml
+RUN channel="$(sed -n 's/^channel *= *"\([^"]*\)".*/\1/p' /tmp/rust-toolchain.toml | head -n 1)" \
+    && test -n "$channel" \
+    && rustup toolchain install "$channel" \
       --target x86_64-unknown-linux-musl \
       --target aarch64-unknown-linux-musl \
       --component rust-src \
-      --component llvm-tools-preview
+      --component llvm-tools
 
 RUN host_libdir="$(rustc --print target-libdir)" \
     && ln -sf /usr/lib/libc.so "$host_libdir/libc.so"

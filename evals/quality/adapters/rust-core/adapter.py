@@ -16,9 +16,17 @@ import sys
 from typing import Any
 
 
+# The adapter runs as a standalone script (invoked by path, not as a module),
+# so it cannot use a package-relative import for the shared pin reader. The
+# repository root is its own ancestor; exposing it on `sys.path` keeps
+# `rust-toolchain.toml` the single source of truth instead of duplicating the
+# channel here.
+sys.path.insert(0, str(Path(__file__).resolve().parents[4]))
+from evals.quality.toolchain import pinned_toolchain  # noqa: E402
+
+
 PROTOCOL = "tea-quality-adapter/v1"
 ADAPTER = "rust-core"
-TOOLCHAIN = "nightly-2026-07-24"
 
 
 class ContractError(Exception):
@@ -66,13 +74,13 @@ def explicit_fixture(root: Path, value: str) -> Path:
     return path
 
 
-def check_toolchain(root: Path) -> None:
-    toolchain = root / "rust-toolchain.toml"
-    if not toolchain.is_file():
-        raise ContractError(f"missing Rust toolchain pin: {toolchain}")
-    marker = 'channel = "' + TOOLCHAIN + '"'
-    if marker not in toolchain.read_text(encoding="utf-8"):
-        raise ContractError(f"rust-toolchain.toml does not pin {TOOLCHAIN}")
+def check_toolchain(root: Path) -> str:
+    """Return the pinned channel, rejecting a missing or malformed pin."""
+
+    try:
+        return pinned_toolchain(root)
+    except ValueError as error:
+        raise ContractError(str(error)) from error
 
 
 def run_runner(root: Path, fixture: Path) -> tuple[int, Any]:
@@ -82,9 +90,6 @@ def run_runner(root: Path, fixture: Path) -> tuple[int, Any]:
     check_toolchain(root)
     completed = subprocess.run(
         [
-            "rustup",
-            "run",
-            TOOLCHAIN,
             "cargo",
             "run",
             "--quiet",
@@ -121,6 +126,7 @@ def main() -> int:
     try:
         request = read_request()
         root = repository_root()
+        channel = check_toolchain(root)
         input_fixture = explicit_fixture(root, request["fixture"])
         status, result = run_runner(root, input_fixture)
         response = {
@@ -129,7 +135,7 @@ def main() -> int:
             "metadata": {
                 "crate": "tea-core",
                 "runner": "crates/tea-core/src/bin/tea-fixtures.rs",
-                "toolchain": TOOLCHAIN,
+                "toolchain": channel,
                 "fixture_sha256": hashlib.sha256(input_fixture.read_bytes()).hexdigest(),
                 "tui": False,
                 "ambient_discovery": False,

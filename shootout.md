@@ -2003,16 +2003,16 @@ npm --prefix evals/pi_shootout/sdk ci
 npm --prefix evals/pi_shootout/sdk run check
 npm --prefix evals/pi_shootout/sdk test
 
-cargo +nightly-2026-07-24 test \
+cargo test \
     -p tea-providers \
     --bin tea-eval \
     --locked
 
-cargo +nightly-2026-07-24 test -p tea-core --locked
-cargo +nightly-2026-07-24 test -p tea-luau --locked
-cargo +nightly-2026-07-24 test -p tea-agent --lib --locked
+cargo test -p tea-core --locked
+cargo test -p tea-luau --locked
+cargo test -p tea-agent --lib --locked
 
-cargo +nightly-2026-07-24 test \
+cargo test \
     -p tea-agent \
     --features pty-harness \
     --test pty_streaming \

@@ -1,9 +1,10 @@
 //! Small, dependency-free Luau benchmark and isolation harness.
 //!
-//! Run it with the repository's pinned toolchain:
+//! Run it with the repository's pinned toolchain (`rust-toolchain.toml`
+//! resolves it for plain `cargo`):
 //!
 //! ```text
-//! cargo +nightly-2026-07-24 run -p tea-luau --example v1_luau_benchmark --release
+//! cargo run -p tea-luau --example v1_luau_benchmark --release
 //! ```
 //!
 //! The output is observational evidence, not a pass/fail performance gate. Wall-clock

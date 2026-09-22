@@ -26,8 +26,8 @@ comparison.
 
 ## Recorded local baseline
 
-On the current Apple Silicon development machine, using
-`nightly-2026-07-24` in the debug test profile, the long fixture produced
+On the current Apple Silicon development machine, using the pinned nightly
+in `rust-toolchain.toml` with the debug test profile, the long fixture produced
 4,109,117 bytes of JSONL. Buffered append took 588 ms and validated reopen
 took 809 ms. `/usr/bin/time -l` reported a 46,481,408-byte maximum resident
 set size for the process. The strict fixture took 207 ms for 32 mutations,

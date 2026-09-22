@@ -3,7 +3,9 @@ set -euo pipefail
 
 eval_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 
-# This is an opt-in executable integration, not a core runtime dependency. Pin the same nightly
-# declared by rust-toolchain.toml; do not fall back to stable Rust.
+# This is an opt-in executable integration, not a core runtime dependency. The
+# pinned nightly in rust-toolchain.toml is the single source of truth; plain
+# `cargo` here resolves it through the rustup shim. Do not fall back to
+# stable Rust.
 cd "$eval_root"
-exec cargo +nightly-2026-07-24 run --quiet -p tea-core --features eval-runner --bin tea-eval -- "$@"
+exec cargo run --quiet -p tea-core --features eval-runner --bin tea-eval -- "$@"

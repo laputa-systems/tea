@@ -4,12 +4,15 @@ lint:
 	cargo fmt --all
 	cargo clippy --fix --allow-dirty --all-targets --all-features -- --deny warnings
 
-# Run the pinned, deterministic suite. The PTY tests use a loopback streaming
-# fixture or no model request at all; neither reaches a real provider. The
-# focused terminal behavior tests cover the host presentation contract.
+# Run the pinned, deterministic suite. Plain `cargo` resolves the pin in
+# rust-toolchain.toml through the rustup shim; do not hardcode the nightly
+# channel here (see scripts/check-toolchain-pin.sh).
+# The PTY tests use a loopback streaming fixture or no model request at all;
+# neither reaches a real provider. The focused terminal behavior tests cover
+# the host presentation contract.
 test:
-	rustup run nightly-2026-07-24 cargo test --workspace --locked
-	rustup run nightly-2026-07-24 cargo test -p tea-agent --features pty-harness --test pty_streaming --locked
+	cargo test --workspace --locked
+	cargo test -p tea-agent --features pty-harness --test pty_streaming --locked
 
 # Build and run the deterministic suite inside Linux AArch64. Docker's
 # platform selection also makes this usable from an x86_64 or Apple host.
@@ -140,21 +143,21 @@ pi-shootout-check:
 	npm --prefix evals/pi_shootout/sdk ci
 	npm --prefix evals/pi_shootout/sdk run check
 	npm --prefix evals/pi_shootout/sdk test
-	cargo +nightly-2026-07-24 test -p tea-providers --lib --features eval-runner --locked
-	cargo +nightly-2026-07-24 test -p tea-providers --bin tea-eval --features eval-runner --locked
-	cargo +nightly-2026-07-24 test -p tea-session --locked jsonl_reopen_fixed_point_covers_compaction_harness_activation_and_core_rollover
+	cargo test -p tea-providers --lib --features eval-runner --locked
+	cargo test -p tea-providers --bin tea-eval --features eval-runner --locked
+	cargo test -p tea-session --locked jsonl_reopen_fixed_point_covers_compaction_harness_activation_and_core_rollover
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest evals.quality.test_coding_cases
 
 pi-shootout: pi-shootout-plan
 	@command -v vault >/dev/null 2>&1 || { echo "missing required command: vault (expected: vault OPENROUTER_API_KEY -- <adapter>)" >&2; exit 1; }
 	npm --prefix evals/pi_shootout/sdk ci
-	cargo +nightly-2026-07-24 build -p tea-providers --bin tea-eval --features eval-runner --locked
+	cargo build -p tea-providers --bin tea-eval --features eval-runner --locked
 	PYTHONDONTWRITEBYTECODE=1 python3 -m evals.pi_shootout run $(PI_SHOOTOUT_ARGS)
 
 pi-shootout-static: pi-shootout-static-plan
 	@command -v vault >/dev/null 2>&1 || { echo "missing required command: vault (expected: vault OPENROUTER_API_KEY -- <adapter>)" >&2; exit 1; }
 	npm --prefix evals/pi_shootout/sdk ci
-	cargo +nightly-2026-07-24 build -p tea-providers --bin tea-eval --features eval-runner --locked
+	cargo build -p tea-providers --bin tea-eval --features eval-runner --locked
 	PYTHONDONTWRITEBYTECODE=1 python3 -m evals.pi_shootout run $(PI_SHOOTOUT_ARGS) --static-only
 
 pi-shootout-tea-static:

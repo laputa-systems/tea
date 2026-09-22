@@ -7,12 +7,13 @@ loss or retain recovery evidence.
 
 ## Build the repository
 
-The checked-in toolchain is required; do not substitute stable Rust.
+The checked-in toolchain is required; do not substitute stable Rust. Plain
+`cargo` resolves the pin in `rust-toolchain.toml` through the rustup shim.
 
 ```bash
 git clone <repository-url> tea
 cd tea
-cargo +nightly-2026-07-24 test --workspace
+cargo test --workspace
 ```
 
 For an application in the same checkout, depend on the core and choose the

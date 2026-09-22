@@ -10,6 +10,8 @@ import subprocess
 import tempfile
 import unittest
 
+from evals.quality.toolchain import pinned_toolchain
+
 
 ROOT = Path(__file__).resolve().parents[3]
 FIXTURE = "crates/tea-core/fixtures/declarative/single-turn-text.json"
@@ -44,7 +46,7 @@ class AdapterProtocolTest(unittest.TestCase):
         self.assertEqual(status, 0)
         self.assertEqual(response["protocol"], "tea-quality-adapter/v1")
         self.assertEqual(response["adapter"], "rust-core")
-        self.assertEqual(response["metadata"]["toolchain"], "nightly-2026-07-24")
+        self.assertEqual(response["metadata"]["toolchain"], pinned_toolchain(ROOT))
         self.assertEqual(response["result"]["fixture_id"], "single-turn-text")
 
     def test_quality_case_is_lowered_before_runner_invocation(self) -> None:

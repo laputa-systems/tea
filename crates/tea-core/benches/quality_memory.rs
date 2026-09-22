@@ -1,7 +1,8 @@
 //! Allocation and timing probe for the concrete Rust harness hot path.
 //!
-//! Run with the repository's pinned nightly:
-//! `cargo +nightly-2026-07-24 bench -p tea-core --bench quality_memory`.
+//! Run with the repository's pinned nightly (`rust-toolchain.toml` resolves
+//! it for plain `cargo`):
+//! `cargo bench -p tea-core --bench quality_memory`.
 //! Rustybench reports allocation count, allocated bytes, and peak live bytes;
 //! this is intentionally a diagnostic companion to the cross-process peak-RSS
 //! values recorded by `python3 -m evals.quality fast`.

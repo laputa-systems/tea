@@ -2,7 +2,8 @@
 
 This executable is a thin JSON process boundary around the existing
 [`tea-fixtures`](../../../../crates/tea-core/src/bin/tea-fixtures.rs)
-binary. It uses the repository's pinned `nightly-2026-07-24` toolchain and
+binary. It uses the repository's pinned toolchain (`rust-toolchain.toml`)
+and
 does not instantiate a TUI, provider, policy runtime, or ambient workspace
 capability.
 

@@ -30,9 +30,10 @@ model stream, tool definitions, and explicit capabilities. It uses Miniserde to 
 and a caller-owned Smol block_on only as the executable's test driver; the core library owns
 neither an executor nor filesystem capability.
 
-Run one fixture from the repository root:
+Run one fixture from the repository root (plain `cargo` resolves the pinned
+nightly in `rust-toolchain.toml` through the rustup shim):
 
-    cargo +nightly-2026-07-24 run -p tea-core --features fixture-runner \
+    cargo run -p tea-core --features fixture-runner \
       --bin tea-fixtures -- crates/tea-core/fixtures/declarative/single-turn-text.json
 
 The runner supports queued actions, text, tool continuation, deterministic

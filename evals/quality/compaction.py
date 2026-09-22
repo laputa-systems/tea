@@ -16,12 +16,12 @@ import subprocess
 from typing import Any, Iterable
 
 from .continuation import run_continuation_fixtures
+from .toolchain import pinned_toolchain
 
 
 ROOT = Path(__file__).resolve().parents[2]
 BASELINE = Path(__file__).resolve().parent / "cases" / "compaction" / "baseline.json"
 SCHEMA = "tea-compaction-quality/v1"
-TOOLCHAIN = "nightly-2026-07-24"
 
 
 class CompactionQualityError(ValueError):
@@ -204,10 +204,10 @@ def _load_baseline() -> dict[str, Any]:
 
 
 def _run_target(target: str) -> dict[str, Any]:
+    # Plain `cargo` resolves the pinned nightly in rust-toolchain.toml through
+    # the rustup shim. The resolved channel is recorded alongside the command
+    # so the artifact still names the toolchain that produced it.
     command = [
-        "rustup",
-        "run",
-        TOOLCHAIN,
         "cargo",
         "test",
         "-p",
@@ -228,6 +228,7 @@ def _run_target(target: str) -> dict[str, Any]:
     )
     return {
         "command": command,
+        "toolchain": pinned_toolchain(ROOT),
         "exit_code": completed.returncode,
         "stdout_sha256": hashlib.sha256(completed.stdout.encode("utf-8")).hexdigest(),
         "stderr_sha256": hashlib.sha256(completed.stderr.encode("utf-8")).hexdigest(),
