@@ -8,24 +8,187 @@
 
 use super::{
     FinalizeSubagentRequest, SessionSupervisor, SubagentCoordinator, WorkspaceFinalization,
-    child_operation_outcome, open_epoch, subagent_entry_id, subagent_host_stage_error,
+    child_operation_outcome, open_epoch, retain_tool_result_with_projection, subagent_entry_id,
+    subagent_host_stage_error, tool_result_entry,
 };
 use crate::harness::{HarnessError, SubagentRecoveryStage};
+use crate::runtime::subagents::{
+    ApplyAgentChangesResult, SpawnedAgentHandle, apply_result_value, parse_apply_delta_id_value,
+    spawn_result_value,
+};
+use crate::state::ToolCallId;
+use crate::tool::AgentToolResult;
 use std::sync::Arc;
 use tea_protocol::JsonValue;
 use tea_session::{
     AgentGraphNode, EpochFinishReason, EpochFinishedRecord, LaneRecord,
     OperationFinishedRecord, OperationId, OperationOutcome, PayloadRef, ProvisionedEntry,
-    RecoveryPlan, SessionCommit, SessionCommitItem, SessionWriter, reduce_agent_graph, reduce_lane,
+    RecoveryPlan, SessionCommit, SessionCommitItem, SessionEntry, SessionSnapshot, SessionWriter,
+    ToolStartedRecord, reduce_agent_graph, reduce_lane,
 };
 
 const INTERRUPTED_CHILD_REPORT: &str =
     "Child execution was interrupted before it reached a settled report. Tea did not resume the prior assignment.";
 
+/// An ordinary tool result reconstructed from a stronger, already committed
+/// child fact. The host effect itself is never replayed here.
+struct CommittedChildToolOutcome {
+    started: ToolStartedRecord,
+    result: AgentToolResult,
+}
+
 impl<S> SessionSupervisor<S>
 where
     S: SessionWriter + Send + 'static,
 {
+    /// Restore ordinary root tool-result entries when a stronger child fact
+    /// already proves the exact effect outcome.
+    ///
+    /// This handles only a fully accepted `spawn_agent` assignment and an
+    /// `apply_agent_changes` intent with an exact `WorkspaceDeltaApplied`
+    /// fact. In particular, a prepared-only child, conflict, rollback,
+    /// indeterminate host outcome, or any mismatched fact remains unresolved
+    /// for explicit host reconciliation. This method contacts no child host,
+    /// creates no task, and never reapplies a workspace delta.
+    pub(crate) fn reconcile_committed_child_tool_outcomes(
+        &self,
+        lane_id: &tea_session::LaneId,
+    ) -> Result<(), HarnessError> {
+        if lane_id != &self.root_lane_id {
+            return Ok(());
+        }
+        let lane = self.lane(lane_id)?;
+        let mut session = self.session_lock()?;
+        let snapshot = session.snapshot()?;
+        let outcomes = self.committed_child_tool_outcomes(&snapshot, lane_id)?;
+        if outcomes.is_empty() {
+            return Ok(());
+        }
+
+        let mut items = Vec::with_capacity(outcomes.len());
+        for outcome in outcomes {
+            let configuration =
+                self.configuration_for_revision(&lane, &outcome.started.harness_revision_id)?;
+            let retained = retain_tool_result_with_projection(
+                self.artifacts.as_ref(),
+                configuration.artifact_policy_config(),
+                &outcome.result,
+                &outcome.result,
+            )
+            .map_err(|error| HarnessError::invalid_state(error.to_string()))?;
+            let entry = tool_result_entry(
+                &outcome.result,
+                &outcome.result,
+                &outcome.started.tool_name,
+                retained,
+            )
+            .map_err(|error| HarnessError::invalid_state(error.to_string()))?;
+            items.push(SessionCommitItem::Entry {
+                lane_id: lane_id.clone(),
+                entry: ProvisionedEntry {
+                    id: outcome.started.result_entry_id,
+                    body: SessionEntry::ToolResult(entry),
+                },
+            });
+        }
+        session.commit(SessionCommit::new(items)?)?;
+        Ok(())
+    }
+
+    fn committed_child_tool_outcomes(
+        &self,
+        snapshot: &SessionSnapshot,
+        lane_id: &tea_session::LaneId,
+    ) -> Result<Vec<CommittedChildToolOutcome>, HarnessError> {
+        let graph = reduce_agent_graph(snapshot)
+            .map_err(|error| HarnessError::invalid_state(error.to_string()))?;
+        let mut outcomes = Vec::new();
+        for stored in snapshot.records() {
+            let LaneRecord::ToolStarted(started) = &stored.record else {
+                continue;
+            };
+            if snapshot
+                .entries()
+                .iter()
+                .any(|entry| entry.header.id == started.result_entry_id)
+            {
+                continue;
+            }
+            let value = match started.tool_name.as_str() {
+                "spawn_agent" => self.committed_spawn_result(snapshot, lane_id, started, &graph),
+                "apply_agent_changes" => {
+                    self.committed_apply_result(lane_id, started, &graph)
+                }
+                _ => None,
+            };
+            let Some(value) = value else {
+                continue;
+            };
+            outcomes.push(CommittedChildToolOutcome {
+                started: started.clone(),
+                result: committed_child_tool_result(started, value)?,
+            });
+        }
+        Ok(outcomes)
+    }
+
+    fn committed_spawn_result(
+        &self,
+        snapshot: &SessionSnapshot,
+        lane_id: &tea_session::LaneId,
+        started: &ToolStartedRecord,
+        graph: &tea_session::AgentGraphReduction,
+    ) -> Option<JsonValue> {
+        let agent_id = tea_session::AgentId::derive(
+            &snapshot.header().session_id,
+            lane_id,
+            &started.operation_id,
+            &started.idempotency_key,
+        );
+        let node = graph.agents.get(&agent_id)?;
+        let operation_id = node.operation_id.clone()?;
+        (node.spawned.parent_lane_id == *lane_id
+            && node.spawned.parent_operation_id == started.operation_id
+            && node.spawned.spawn_tool_call_id == started.tool_call_id)
+            .then(|| {
+                spawn_result_value(&SpawnedAgentHandle {
+                    agent_id,
+                    operation_id,
+                    task_name: node.spawned.task_name.clone(),
+                    state: node.state.clone(),
+                })
+            })
+    }
+
+    fn committed_apply_result(
+        &self,
+        lane_id: &tea_session::LaneId,
+        started: &ToolStartedRecord,
+        graph: &tea_session::AgentGraphReduction,
+    ) -> Option<JsonValue> {
+        let delta_id = parse_apply_delta_id_value(&started.effective_args).ok()?;
+        let node = graph.agents.values().find(|node| {
+            node.spawned.parent_lane_id == *lane_id
+                && node.spawned.parent_operation_id == started.operation_id
+                && node
+                    .workspace_delta
+                    .as_ref()
+                    .is_some_and(|delta| delta.delta_id == delta_id)
+        })?;
+        let delta = node.workspace_delta.as_ref()?;
+        let applied = node.applied.as_ref()?;
+        (applied.delta_id == delta_id
+            && applied.target_lane_id == *lane_id
+            && applied.tool_call_id == started.tool_call_id
+            && applied.changed_paths == delta.changed_paths)
+            .then(|| {
+                apply_result_value(ApplyAgentChangesResult::Applied {
+                    delta_id: applied.delta_id.clone(),
+                    changed_paths: applied.changed_paths.clone(),
+                })
+            })
+    }
+
     /// Reconcile children of the currently open root operation after the
     /// caller explicitly elects to continue that root operation.
     ///
@@ -317,4 +480,23 @@ where
         session.commit(SessionCommit::new(items)?)?;
         Ok(())
     }
+}
+
+fn committed_child_tool_result(
+    started: &ToolStartedRecord,
+    value: JsonValue,
+) -> Result<AgentToolResult, HarnessError> {
+    Ok(AgentToolResult {
+        tool_call_id: ToolCallId::new(started.tool_call_id.clone())
+            .map_err(|error| HarnessError::invalid_state(error.to_string()))?,
+        content: value
+            .to_json_string()
+            .map_err(|error| HarnessError::invalid_state(error.to_string()))?,
+        details: None,
+        usage: None,
+        added_tool_names: Vec::new(),
+        terminate: false,
+        is_error: false,
+        failure: None,
+    })
 }

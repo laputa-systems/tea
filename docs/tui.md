@@ -114,9 +114,10 @@ The `/resume` picker omits the durable session currently attached to the host;
 it only offers other saved sessions. Selecting a model through `/models` is a
 two-step flow: choose the provider/model, then choose its reasoning effort.
 
-Normal composer input always starts or continues the managed harness. During an
-active operation, the terminal projects durable session and live harness events
-into the transcript without owning their state.
+Normal composer input is first accepted into the managed harness's durable
+queue. When the root lane is idle, the terminal explicitly asks the runtime to
+drive the next eligible input; during an active operation it only projects
+durable session and live harness events without owning their state.
 
 Reopening is passive. It restores committed rows and reports interrupted lanes,
 but it never starts model work, tools, goal continuation, child work, or a

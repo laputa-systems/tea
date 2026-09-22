@@ -16,7 +16,10 @@ pub use tools::{
     child_subagent_tool_definitions, root_subagent_tool_definitions,
     root_subagent_tool_presentations, root_subagent_tool_surface_digest,
 };
-pub(crate) use tools::{ROOT_SUBAGENT_TOOL_NAMES, root_subagent_runtime_tools};
+pub(crate) use tools::{
+    ROOT_SUBAGENT_TOOL_NAMES, apply_result_value, parse_apply_delta_id_value,
+    root_subagent_runtime_tools, spawn_result_value,
+};
 pub use types::{
     ApplyAgentChangesResult, ApplyWorkspaceDeltaRequest, FinalizeSubagentRequest,
     InterruptAgentResult, PrepareSubagentRequest, PreparedSubagent, ReopenSubagentRequest,

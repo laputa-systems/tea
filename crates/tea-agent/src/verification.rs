@@ -26,11 +26,15 @@ use tea_session::SessionEntry;
 
 pub(crate) mod scenarios_compaction;
 pub(crate) mod scenarios_children;
+pub(crate) mod scenarios_evolution;
 pub use scenarios_compaction::{
     LiveCompactionScenario, LiveCompactionScenarioOutcome, run_live_compaction_scenario,
 };
 pub use scenarios_children::{
     LiveChildScenario, LiveChildScenarioOutcome, run_live_child_scenario,
+};
+pub use scenarios_evolution::{
+    LiveEvolutionScenario, LiveEvolutionScenarioOutcome, run_live_evolution_scenario,
 };
 
 /// The sole provider identifier accepted by live verification.

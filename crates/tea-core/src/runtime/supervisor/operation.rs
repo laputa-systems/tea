@@ -408,7 +408,7 @@ where
         authoring_authorized: bool,
     ) -> Result<AcceptedInput, HarnessError> {
         let lane = self.root_lane()?;
-        let input_id = {
+        let (input_id, completion, sequence) = {
             let _gate = self.operation_gate_lock()?;
             self.ensure_open()?;
             let mut session = self.session_lock()?;
@@ -429,21 +429,27 @@ where
                     tea_protocol::JsonValue::Bool(true),
                 );
             }
-            session.commit(SessionCommit::one(SessionCommitItem::Record(
+            // Install the local endpoint before the durable admission. A
+            // concurrent drive may settle immediately after this commit, so a
+            // post-commit status query would make successful admission appear
+            // to fail if that query itself could not run.
+            let completion = self.input_completions.register(input_id.clone());
+            let stored = session.commit(SessionCommit::one(SessionCommitItem::Record(
                 LaneRecord::InputAccepted(InputAcceptedRecord {
                     lane_id: lane.lane_id.clone(),
                     entry,
                 }),
             )))?;
-            input_id
+            (input_id, completion, stored.seq)
         };
-        let completion = self
-            .input_completion_handle(&input_id)?
-            .ok_or_else(|| {
-                HarnessError::invalid_state(format!(
-                    "accepted input {input_id} disappeared before its completion handle was installed",
-                ))
-            })?;
+        // Observation is lossy and never changes the outcome of the committed
+        // admission. Consumers refresh `queued_inputs` from durable state.
+        let _ = self.publish_event(tea_core::runtime::TeaEvent::Session(
+            tea_core::runtime::SessionEvent::InputQueueChanged {
+                sequence,
+                lane_id: lane.lane_id.clone(),
+            },
+        ));
         Ok(AcceptedInput::new(input_id, completion))
     }
 
@@ -528,7 +534,7 @@ where
             ));
         }
         let lane = self.root_lane()?;
-        let withdrawn = {
+        let (withdrawn, sequence) = {
             let mut session = self.session_lock()?;
             let snapshot = session.snapshot()?;
             let reduction = reduce_lane(snapshot, lane.lane_id.clone())?;
@@ -564,9 +570,18 @@ where
                     }))
                 })
                 .collect();
-            session.commit(SessionCommit::new(records)?)?;
-            inputs
+            let stored = session.commit(SessionCommit::new(records)?)?;
+            (inputs, stored.seq)
         };
+        // Publish before waking local completion waiters so callback code
+        // cannot observe a withdrawal before the subscription has a durable
+        // queue-change signal to consume.
+        let _ = self.publish_event(tea_core::runtime::TeaEvent::Session(
+            tea_core::runtime::SessionEvent::InputQueueChanged {
+                sequence,
+                lane_id: lane.lane_id.clone(),
+            },
+        ));
         for input in &withdrawn {
             self.input_completions
                 .settle(InputCompletion::withdrawn(input.input_id.clone()));

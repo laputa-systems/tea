@@ -427,13 +427,14 @@ impl App {
                 self.state.apply_preview(&preview);
             }
             TeaEvent::Preview(_) => {}
-            TeaEvent::Session(SessionEvent::OperationAccepted {
-                lane_id, ..
-            }) => {
-                // Durable input admission is projected directly from the
-                // session snapshot. Observation delivery is lossy, so this
-                // event must never be the sole source of a user transcript
-                // row or input identity.
+            TeaEvent::Session(
+                SessionEvent::InputQueueChanged { lane_id, .. }
+                | SessionEvent::OperationAccepted { lane_id, .. },
+            ) => {
+                // Durable queue membership and input dispatch are projected
+                // directly from the session snapshot. Observation delivery is
+                // lossy, so this event never supplies a user transcript row
+                // or input identity itself.
                 if lane_id == tea_session::LaneId::main() {
                     self.bind_current_durable_projection();
                     if let Err(error) = self.refresh_runtime_input_projection() {

@@ -4,7 +4,10 @@
 //! immutable harness configuration come from the checkpoint leaf, while its
 //! extension state begins at the checkpoint's exact private-state snapshot.
 
-use super::{LaneRuntime, SessionSupervisor, thinking_level_from_name, validate_reserved_host_tool_names};
+use super::{
+    LaneRuntime, SessionSupervisor, thinking_level_from_name, validate_reserved_host_tool_names,
+    validate_runtime_model_selection,
+};
 use crate::harness::HarnessError;
 use crate::runtime::RuntimeServices;
 use std::sync::Arc;
@@ -201,21 +204,7 @@ fn services_for_fork_lane(
     mut services: RuntimeServices,
     reduction: &tea_session::LaneReduction,
 ) -> Result<RuntimeServices, HarnessError> {
-    match (
-        &reduction.effective_configuration.model,
-        services.model_descriptor(),
-    ) {
-        (None, None) => {}
-        (Some(expected), Some(actual))
-            if actual.provider == expected.provider
-                && actual.model == expected.model
-                && actual.revision == expected.revision => {}
-        _ => {
-            return Err(HarnessError::invalid_state(
-                "fork runtime services model does not match the checkpoint's historical model selection",
-            ));
-        }
-    }
+    validate_runtime_model_selection(&services, reduction)?;
     if let Some(level) = reduction.effective_configuration.thinking_level.as_deref() {
         services = services.thinking_level(thinking_level_from_name(level)?);
     }
@@ -452,6 +441,6 @@ mod tests {
         let error = services_for_fork_lane(mismatched, &projected)
             .expect_err("fork must not execute historical configuration with another model");
 
-        assert!(error.to_string().contains("historical model selection"));
+        assert!(error.to_string().contains("durable model selection"));
     }
 }

@@ -1,7 +1,7 @@
 use super::*;
 use crate::runtime::{
     ExtensionCommandAdmission, IdleAuthorization, IdleDriveOutcome, InputDisposition,
-    InputOutcome, SessionSupervisorReopenInput,
+    InputOutcome, SessionEvent, SessionSupervisorReopenInput, TeaEvent,
 };
 use crate::harness::extension::{
     ExtensionCapabilityBindings, ExtensionCommandInput, ExtensionCommandResult,
@@ -296,6 +296,71 @@ fn accepted_inputs_preserve_atomic_withdrawal_and_own_terminal_handles() {
             Some(InputOutcome::Withdrawn),
         ));
     }
+}
+
+#[test]
+fn queued_input_changes_reach_a_subscriber_registered_before_nonexecuting_admission() {
+    let provider = Arc::new(QueuedProvider {
+        streams: Mutex::new(VecDeque::new()),
+    });
+    let store = Arc::new(MemoryArtifactStore::default());
+    let (runtime, _) = build_runtime("runtime-input-queue-observation", provider, store);
+    let subscription = runtime
+        .subscribe_events()
+        .expect("subscription captures the initial queue snapshot");
+    assert!(
+        runtime
+            .queued_inputs()
+            .expect("queue projects before admission")
+            .is_empty()
+    );
+
+    let accepted = runtime
+        .submit_input("observe this queued input")
+        .expect("input accepts without executing");
+    let accepted_sequence = runtime
+        .snapshot()
+        .expect("accepted snapshot reads")
+        .last_sequence();
+    assert_ne!(subscription.snapshot.view.sequence, accepted_sequence);
+    assert!(matches!(
+        subscription.try_recv().expect("accepted input change is observed"),
+        TeaEvent::Session(SessionEvent::InputQueueChanged { sequence, lane_id })
+            if sequence == accepted_sequence && lane_id == LaneId::main()
+    ));
+    assert_eq!(
+        runtime
+            .queued_inputs()
+            .expect("queue projects after admission")
+            .iter()
+            .map(|input| input.content())
+            .collect::<Vec<_>>(),
+        vec!["observe this queued input"],
+        "the event asks consumers to refresh durable queued input projection"
+    );
+
+    runtime
+        .withdraw_inputs(&[accepted.id().clone()])
+        .expect("queued input withdraws without executing");
+    let withdrawn_sequence = runtime
+        .snapshot()
+        .expect("withdrawn snapshot reads")
+        .last_sequence();
+    assert!(matches!(
+        subscription.try_recv().expect("withdrawal change is observed"),
+        TeaEvent::Session(SessionEvent::InputQueueChanged { sequence, lane_id })
+            if sequence == withdrawn_sequence && lane_id == LaneId::main()
+    ));
+    assert!(
+        runtime
+            .queued_inputs()
+            .expect("queue projects after withdrawal")
+            .is_empty()
+    );
+    assert!(matches!(
+        accepted.completion().try_result(),
+        Some(completion) if matches!(completion.outcome(), InputOutcome::Withdrawn)
+    ));
 }
 
 #[test]

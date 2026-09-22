@@ -1683,6 +1683,47 @@ fn accepted_inputs_project_to_one_runtime_owned_next_message_slot() {
 }
 
 #[test]
+fn input_queue_change_event_refreshes_the_runtime_owned_next_message_slot() {
+    let tea_home = test_tea_home("input-queue-change-event");
+    let options = CliOptions::parse(
+        [
+            "tea",
+            "--tea-home",
+            tea_home.to_str().expect("UTF-8 test Tea home"),
+            "--provider",
+            mock::PROVIDER_ID,
+        ]
+        .map(OsString::from),
+    )
+    .expect("mock options parse");
+    let mut app = App::new(options);
+    app.assemble_host().expect("mock host assembles");
+    let harness = app
+        .ensure_durable_harness()
+        .expect("durable mock harness creates");
+    let accepted = harness
+        .submit_input("refresh this durable queue")
+        .expect("input accepts");
+
+    app.project_durable_event(tea_core::runtime::TeaEvent::Session(
+        tea_core::runtime::SessionEvent::InputQueueChanged {
+            sequence: tea_session::Sequence(1),
+            lane_id: LaneId::main(),
+        },
+    ));
+
+    assert_eq!(
+        app.state().queued_message(),
+        Some("refresh this durable queue")
+    );
+    assert_eq!(app.state().queued_input_ids(), &[accepted.id().clone()]);
+
+    drop(harness);
+    drop(app);
+    let _ = fs::remove_dir_all(tea_home);
+}
+
+#[test]
 fn runtime_owned_withdrawal_restores_the_combined_slot_and_settles_each_input() {
     let tea_home = test_tea_home("runtime-owned-withdrawal");
     let options = CliOptions::parse(

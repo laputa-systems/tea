@@ -46,6 +46,7 @@ use tea_session::{
 };
 
 mod recovery_tests;
+mod child_outcome_recovery_tests;
 mod process_recovery_tests;
 mod input_queue_tests;
 mod compaction_tests;

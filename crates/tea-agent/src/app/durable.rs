@@ -30,7 +30,7 @@ use tea_core::harness::{
     HarnessResolver, HarnessResourceLimits, HarnessSeedBuilder, HarnessSeedExtension,
     HarnessSeedExtensionScope, ModelHarnessProfile, PluginCapabilityBinding,
     PluginCapabilityCatalog, SelfExtensionMode, ToolPresentationDescriptor,
-    SELF_EXTENSION_MODE_METADATA_KEY,
+    SELF_EXTENSION_MODE_METADATA_KEY, SELF_EXTENSION_V1_CONCISE,
 };
 use tea_core::runtime::{
     HarnessIdentity, RuntimeServices, SessionSupervisor, SessionSupervisorInput,
@@ -634,6 +634,9 @@ fn create_host_harness_with_operations_and_mode(
         None
     };
     let created_at_ms = now_ms()?;
+    let self_extension_addendum = self_extension_mode
+        .exposes_control_tool()
+        .then(|| SELF_EXTENSION_V1_CONCISE.to_owned());
 
     // Session identity is only an opaque directory/name key. A collision is
     // still rejected by `JsonlSession::create`; retrying preserves the rule
@@ -771,6 +774,7 @@ fn create_host_harness_with_operations_and_mode(
             resource_limits.clone(),
             template.runtime_policy_identities(),
         )
+        .self_extension_addendum(self_extension_addendum.clone())
         .extensions(extensions)
         .capability_bindings(capability_references)
         .trusted_tool_presentations(root_presentations)

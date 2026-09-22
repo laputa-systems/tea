@@ -431,29 +431,7 @@ where
                 Err(message) => return Ok(recoverable_error(call, message)),
             };
             match self.coordinator.spawn(call.clone(), context, request).await {
-                Ok(handle) => Ok(AgentToolResult {
-                    tool_call_id: call.id,
-                    content: JsonValue::object([
-                        ("agent_id", JsonValue::String(handle.agent_id.to_string())),
-                        (
-                            "task_id",
-                            JsonValue::String(handle.operation_id.to_string()),
-                        ),
-                        ("task_name", JsonValue::String(handle.task_name)),
-                        (
-                            "state",
-                            JsonValue::String(agent_state_name(&handle.state).into()),
-                        ),
-                    ])
-                    .to_json_string()
-                    .expect("fixed spawn result is JSON encodable"),
-                    details: None,
-                    usage: None,
-                    added_tool_names: Vec::new(),
-                    terminate: false,
-                    is_error: false,
-                    failure: None,
-                }),
+                Ok(handle) => Ok(json_result(call, spawn_result_value(&handle))),
                 Err(error) => Ok(recoverable_error(call, error.to_string())),
             }
         })
@@ -662,6 +640,15 @@ fn parse_interrupt_target(call: &ToolCall) -> Result<String, String> {
 fn parse_apply_delta_id(call: &ToolCall) -> Result<WorkspaceDeltaId, String> {
     let value = JsonValue::parse(call.arguments.as_str())
         .map_err(|_| "apply_agent_changes arguments must be valid JSON".to_owned())?;
+    parse_apply_delta_id_value(&value)
+}
+
+/// Validate the durable `apply_agent_changes` argument object without
+/// reconstructing a volatile [`ToolCall`].
+///
+/// Recovery uses this to match a committed `WorkspaceDeltaApplied` fact to
+/// the exact durable intent. It does not authorize a host workspace action.
+pub(crate) fn parse_apply_delta_id_value(value: &JsonValue) -> Result<WorkspaceDeltaId, String> {
     let object = value
         .as_object()
         .ok_or_else(|| "apply_agent_changes arguments must be a JSON object".to_owned())?;
@@ -735,6 +722,23 @@ fn json_result(call: ToolCall, value: JsonValue) -> AgentToolResult {
     }
 }
 
+/// Project a durably accepted child assignment into the stable
+/// `spawn_agent` result shape.
+pub(crate) fn spawn_result_value(handle: &SpawnedAgentHandle) -> JsonValue {
+    JsonValue::object([
+        ("agent_id", JsonValue::String(handle.agent_id.to_string())),
+        (
+            "task_id",
+            JsonValue::String(handle.operation_id.to_string()),
+        ),
+        ("task_name", JsonValue::String(handle.task_name.clone())),
+        (
+            "state",
+            JsonValue::String(agent_state_name(&handle.state).into()),
+        ),
+    ])
+}
+
 fn wait_result_value(result: WaitAgentsResult) -> JsonValue {
     JsonValue::object([
         (
@@ -755,7 +759,9 @@ fn wait_result_value(result: WaitAgentsResult) -> JsonValue {
     ])
 }
 
-fn apply_result_value(result: ApplyAgentChangesResult) -> JsonValue {
+/// Project a classified child workspace application into the stable
+/// `apply_agent_changes` result shape.
+pub(crate) fn apply_result_value(result: ApplyAgentChangesResult) -> JsonValue {
     match result {
         ApplyAgentChangesResult::Applied {
             delta_id,

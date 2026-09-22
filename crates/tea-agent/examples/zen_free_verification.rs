@@ -11,10 +11,11 @@ use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use tea_agent::verification::{
-    LiveChildScenario, LiveCompactionScenario, run_controlled_recovery_live_case,
-    run_headless_live_case, run_live_child_scenario, run_live_compaction_scenario,
-    ControlledRecoveryLiveCase, FreeZenCatalogEvidence, HeadlessLiveCase, RestrictedZenFactory,
-    VerificationConsumer, ZEN_FREE_MODEL_ID, ZEN_PROVIDER_ID, ZEN_RESPONSES_ENDPOINT,
+    LiveChildScenario, LiveCompactionScenario, LiveEvolutionScenario,
+    run_controlled_recovery_live_case, run_headless_live_case, run_live_child_scenario,
+    run_live_compaction_scenario, run_live_evolution_scenario, ControlledRecoveryLiveCase,
+    FreeZenCatalogEvidence, HeadlessLiveCase, RestrictedZenFactory, VerificationConsumer,
+    ZEN_FREE_MODEL_ID, ZEN_PROVIDER_ID, ZEN_RESPONSES_ENDPOINT,
 };
 use tea_protocol::JsonValue;
 
@@ -545,12 +546,38 @@ fn run_live_cases(
                 };
             }
             if case.id == "luau-activation-rollback" {
-                return LiveOutcome {
-                    status: "BLOCKED",
-                    detail: Some(
-                        "this executable requires a dedicated core scenario adapter; it refuses to mislabel a root transport prompt as a Luau activation and rollback run"
-                            .into(),
-                    ),
+                let candidate_evaluator = factory.consumer(VerificationConsumer::CandidateEvaluation);
+                return match run_live_evolution_scenario(LiveEvolutionScenario {
+                    tea_home: &tea_home,
+                    workspace: &workspace,
+                    candidate_evaluator: &candidate_evaluator,
+                    activation_prompt: evolution_activation_prompt(),
+                    use_prompt: evolution_use_prompt(),
+                    rollback_prompt: evolution_rollback_prompt(),
+                }) {
+                    Ok(outcome)
+                        if outcome.candidate_activated
+                            && outcome.revised_source_used
+                            && outcome.state_retained_across_rollback
+                            && outcome.rollback_activated
+                            && outcome.durable_state_verified => LiveOutcome {
+                                status: "SEMANTIC_PASSED",
+                                detail: Some(
+                                    "author-mode candidate activation, revised stateful-tool use, immutable rollback, and passive reopen all satisfied their durable oracle"
+                                        .into(),
+                                ),
+                            },
+                    Ok(_) => LiveOutcome {
+                        status: "FAILED",
+                        detail: Some(
+                            "Luau evolution did not satisfy its immutable source, state, rollback, and reopen oracle"
+                                .into(),
+                        ),
+                    },
+                    Err(error) => LiveOutcome {
+                        status: "FAILED",
+                        detail: Some(format!("guarded evolution transport failed: {error}")),
+                    },
                 };
             }
             let consumer = factory.consumer(case.consumer);
@@ -752,13 +779,25 @@ fn live_prompt(case_id: &str) -> &'static str {
             "This is a disposable public compaction transport verification. Do not use tools. Reply exactly READY."
         }
         "luau-activation-rollback" => {
-            "This is a disposable public Luau activation transport verification. Do not use tools. Reply exactly READY."
+            evolution_activation_prompt()
         }
         "isolated-children" => {
             "This is a disposable public child-lane verification. Delegate the one isolated task of replacing the only line in fixture.txt from before to after. Wait for its report, then explicitly apply its reported delta. Do not access paths outside this workspace."
         }
         _ => "This is a disposable public Tea verification fixture. Do not use tools. Reply exactly READY.",
     }
+}
+
+fn evolution_activation_prompt() -> &'static str {
+    "This is a disposable public immutable-harness verification. Use tea_harness to inspect the active revision and read plugins/todo/prompts.luau. Apply one minimal valid upsert of that same source that preserves the todo extension's behavior and state_version while adding the exact harmless comment `-- live verification evolution marker`. Supply the required bounded hypothesis and an empty registry_operations array. The apply call must be the only tool call in its assistant batch. Do not access paths outside the immutable harness source."
+}
+
+fn evolution_use_prompt() -> &'static str {
+    "This is a disposable public post-activation verification. Use the todo tool exactly once to create a one-item todo plan whose text is `public evolution state marker`. Do not invoke tea_harness or access paths outside this workspace."
+}
+
+fn evolution_rollback_prompt() -> &'static str {
+    "This is a disposable public immutable-harness rollback verification. Use tea_harness status and list to identify the current activated revision and the original initial revision. Stage a rollback from the current revision to that original revision with the required bounded hypothesis. The rollback call must be the only tool call in its assistant batch. Do not access paths outside the immutable harness source."
 }
 
 fn case_index(cases: &[VerificationCase], case: &VerificationCase) -> usize {

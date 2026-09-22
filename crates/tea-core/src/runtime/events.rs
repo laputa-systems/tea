@@ -319,6 +319,16 @@ impl TeaEvent {
 /// Durable session state change observed only after its commit succeeds.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SessionEvent {
+    /// Accepted input queue membership changed without starting model work.
+    ///
+    /// The event intentionally carries neither input identities nor text;
+    /// consumers refresh the durable `queued_inputs` projection instead.
+    InputQueueChanged {
+        /// Global sequence of the accepted-input or withdrawal commit.
+        sequence: Sequence,
+        /// Owning lane.
+        lane_id: LaneId,
+    },
     /// A caller-visible operation and its original user entry are durable.
     OperationAccepted {
         /// Global sequence of the user-entry commit that completed acceptance.
@@ -359,7 +369,8 @@ pub enum SessionEvent {
 impl SessionEvent {
     fn sequence(&self) -> Sequence {
         match self {
-            Self::OperationAccepted { sequence, .. }
+            Self::InputQueueChanged { sequence, .. }
+            | Self::OperationAccepted { sequence, .. }
             | Self::EpochStarted { sequence, .. }
             | Self::OperationFinished { sequence, .. } => *sequence,
         }
