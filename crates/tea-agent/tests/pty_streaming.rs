@@ -30,6 +30,14 @@ const DISABLED_STARTUP_OUTPUT_DIGEST: &str =
 // depend on another test thread receiving CPU time.
 static PTY_TEST_LOCK: Mutex<()> = Mutex::new(());
 
+/// Serialize PTY scenarios. The lock guards no data, so a panicking scenario
+/// must not poison it and turn every later scenario into a false failure.
+fn pty_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    PTY_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 fn pty_tea_home(label: &str) -> std::path::PathBuf {
     static NEXT_HOME: AtomicU64 = AtomicU64::new(1);
     let home = std::env::temp_dir().join(format!(
@@ -496,7 +504,7 @@ fn assert_no_operational_worktrees(tea_home: &Path) {
 
 #[test]
 fn enabled_subagent_footer_is_visible_in_the_mutable_idle_tail() {
-    let _lock = PTY_TEST_LOCK.lock().expect("PTY test lock is not poisoned");
+    let _lock = pty_test_lock();
     let tea_home = pty_tea_home("subagent-footer");
     fs::write(
         tea_home.join("config.toml"),
@@ -548,7 +556,7 @@ fn enabled_subagent_footer_is_visible_in_the_mutable_idle_tail() {
 
 #[test]
 fn ctrl_c_commits_the_final_status_tail_before_returning_to_the_shell() {
-    let _lock = PTY_TEST_LOCK.lock().expect("PTY test lock is not poisoned");
+    let _lock = pty_test_lock();
     let tea_home = pty_tea_home("status-exit");
     let scenario = Scenario::new("status survives Ctrl-C")
         .expect("valid scenario label")
@@ -591,7 +599,7 @@ fn ctrl_c_commits_the_final_status_tail_before_returning_to_the_shell() {
 
 #[test]
 fn explicitly_disabled_subagents_match_missing_config_presentation_and_output_bytes() {
-    let _lock = PTY_TEST_LOCK.lock().expect("PTY test lock is not poisoned");
+    let _lock = pty_test_lock();
     let missing = capture_mock_idle_startup("subagents-missing", None);
     let explicitly_disabled = capture_mock_idle_startup(
         "subagents-disabled",
@@ -621,7 +629,7 @@ fn explicitly_disabled_subagents_match_missing_config_presentation_and_output_by
 
 #[test]
 fn enabled_subagents_hide_child_streaming_and_cleanup_before_ctrl_c_exit() {
-    let _lock = PTY_TEST_LOCK.lock().expect("PTY test lock is not poisoned");
+    let _lock = pty_test_lock();
     let tea_home = pty_tea_home("subagent-lifecycle");
     let workspace = create_git_workspace(&tea_home);
     fs::write(
@@ -789,7 +797,7 @@ fn start_overflow_fixture() -> StreamingFixture {
 
 #[test]
 fn real_binary_renders_streamed_text_before_the_fixture_settles() {
-    let _lock = PTY_TEST_LOCK.lock().expect("PTY test lock is not poisoned");
+    let _lock = pty_test_lock();
     let fixture = StreamingFixture::start();
     let scenario = Scenario::new("streaming provider fixture")
         .expect("valid scenario label")
@@ -949,7 +957,7 @@ fn real_binary_renders_streamed_text_before_the_fixture_settles() {
 
 #[test]
 fn terminal_up_atomically_restores_runtime_owned_pending_inputs() {
-    let _lock = PTY_TEST_LOCK.lock().expect("PTY test lock is not poisoned");
+    let _lock = pty_test_lock();
     let tea_home = pty_tea_home("runtime-owned-withdrawal");
     let fixture = StreamingFixture::start();
     let scenario = Scenario::new("runtime-owned queued input withdrawal")
@@ -983,6 +991,16 @@ fn terminal_up_atomically_restores_runtime_owned_pending_inputs() {
             "held first input",
         )
         .expect("first input types");
+    // `wait_for_first_delta` blocks without reading the PTY. Drain the
+    // per-keystroke redraws first so tea cannot stall on a full PTY buffer
+    // before it submits.
+    terminal
+        .wait_for_screen(
+            terminal.deadline(Duration::from_secs(3)),
+            "typed first input",
+            |screen| screen.contains("held first input"),
+        )
+        .expect("first input should reach the composer before submission");
     terminal
         .send_key(terminal.deadline(Duration::from_secs(3)), Key::Enter)
         .expect("first input submits");
@@ -1064,7 +1082,7 @@ fn terminal_up_atomically_restores_runtime_owned_pending_inputs() {
 
 #[test]
 fn real_binary_keeps_native_multiline_editing_and_history_inside_a_pty() {
-    let _lock = PTY_TEST_LOCK.lock().expect("PTY test lock is not poisoned");
+    let _lock = pty_test_lock();
     let scenario = Scenario::new("native composer interaction")
         .expect("valid scenario label")
         .command(CommandSpec::new(env!("CARGO_BIN_EXE_tea")).args([
@@ -1272,7 +1290,7 @@ fn real_binary_keeps_native_multiline_editing_and_history_inside_a_pty() {
 
 #[test]
 fn real_binary_reopens_tool_detail_after_escape_in_a_pty() {
-    let _lock = PTY_TEST_LOCK.lock().expect("PTY test lock is not poisoned");
+    let _lock = pty_test_lock();
     let tea_home = pty_tea_home("tool-detail-reopen");
     let scenario = Scenario::new("tool detail reopen")
         .expect("valid scenario label")
@@ -1349,7 +1367,7 @@ fn real_binary_reopens_tool_detail_after_escape_in_a_pty() {
 
 #[test]
 fn mock_cancellation_keeps_the_settled_input_without_restoring_a_local_prompt() {
-    let _lock = PTY_TEST_LOCK.lock().expect("PTY test lock is not poisoned");
+    let _lock = pty_test_lock();
     let tea_home = pty_tea_home("mock-submitted-message");
     let scenario = Scenario::new("mock submitted message")
         .expect("valid scenario label")
@@ -1404,6 +1422,7 @@ fn mock_cancellation_keeps_the_settled_input_without_restoring_a_local_prompt() 
             "cancelled submitted message",
             |screen| {
                 screen.contains("submitted user message")
+                    && screen.contains("turn cancelled; input kept in the session")
                     && !screen.contains("prompt restored for explicit re-submit")
             },
         )
@@ -1428,7 +1447,7 @@ fn mock_cancellation_keeps_the_settled_input_without_restoring_a_local_prompt() 
 
 #[test]
 fn real_binary_keeps_an_overflowing_settled_transcript_in_main_screen_flow() {
-    let _lock = PTY_TEST_LOCK.lock().expect("PTY test lock is not poisoned");
+    let _lock = pty_test_lock();
     let fixture = start_overflow_fixture();
     let scenario = Scenario::new("overflowing transcript fixture")
         .expect("valid scenario label")
@@ -1622,7 +1641,7 @@ impl TodoActivityFixture {
 
 #[test]
 fn real_binary_shows_the_live_todo_plan_in_the_activity_region() {
-    let _lock = PTY_TEST_LOCK.lock().expect("PTY test lock is not poisoned");
+    let _lock = pty_test_lock();
     let tea_home = pty_tea_home("todo-activity");
     let fixture = TodoActivityFixture::start();
     let scenario = Scenario::new("todo activity presentation")

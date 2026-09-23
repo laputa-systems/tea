@@ -58,12 +58,19 @@ pub(super) fn extension_state_commit_item(
             "extension state value exceeds the {MAX_EXTENSION_STATE_VALUE_BYTES}-byte limit"
         )));
     }
+    // Commit the canonical decode of the encoded value, not the producer's
+    // representation. `JsonValue` equality distinguishes numeric forms (Luau
+    // yields `Signed(1)`, the codec decodes `Unsigned(1)`), so this keeps the
+    // live reduction identical to the state a reopen reconstructs.
+    let value = tea_protocol::JsonValue::parse(&encoded).map_err(|_| {
+        HarnessError::invalid_state("extension state value does not decode canonically")
+    })?;
     Ok(SessionCommitItem::Fact(SessionFact::ExtensionStateValueSet(
         ExtensionStateValueSetFact {
             lane_id,
             extension_id: extension_id.to_owned(),
             state_version: state_version.to_owned(),
-            value: update.value,
+            value,
         },
     )))
 }
@@ -182,30 +189,6 @@ impl<S> SessionSupervisor<S>
 where
     S: SessionWriter + Send + 'static,
 {
-    /// Persist a replacement selected by one immutable harness revision.
-    ///
-    /// The extension callback runs before this method. Rechecking the active
-    /// revision under the session writer prevents a closed generation from
-    /// committing a result after a newer harness activation.
-    pub(super) fn append_extension_state_update_for_revision(
-        &self,
-        lane: &LaneRuntime,
-        expected_revision: &HarnessRevisionId,
-        extension_id: &str,
-        state_version: &str,
-        update: ExtensionStateUpdate,
-    ) -> Result<(), HarnessError> {
-        self.commit_extension_state_update_for_revision(
-            lane,
-            expected_revision,
-            extension_id,
-            state_version,
-            None,
-            false,
-            update,
-        )
-    }
-
     /// Persist a callback result only when its observed whole state is still
     /// current on the same immutable harness revision.
     pub(super) fn append_extension_state_update_if_state_matches(
@@ -223,7 +206,6 @@ where
             extension_id,
             state_version,
             observed_state,
-            true,
             update,
         )
     }
@@ -235,7 +217,6 @@ where
         extension_id: &str,
         state_version: &str,
         observed_state: Option<&ExtensionStateValue>,
-        require_state_match: bool,
         update: ExtensionStateUpdate,
     ) -> Result<(), HarnessError> {
         let item = extension_state_commit_item(
@@ -260,9 +241,7 @@ where
                 existing.state_version,
             )));
         }
-        if require_state_match
-            && reduction.extension_state.get(extension_id) != observed_state
-        {
+        if reduction.extension_state.get(extension_id) != observed_state {
             return Err(HarnessError::invalid_state(format!(
                 "extension state for {extension_id} changed while its callback was evaluating"
             )));
@@ -463,6 +442,31 @@ mod tests {
     }
 
     #[test]
+    fn state_commit_item_commits_the_value_reopen_will_decode() {
+        let produced = JsonValue::object([
+            ("next_id", JsonValue::Number(tea_protocol::JsonNumber::Signed(2))),
+            ("offset", JsonValue::Number(tea_protocol::JsonNumber::Signed(-1))),
+        ]);
+        let reopened = JsonValue::parse(&produced.to_json_string().expect("value encodes"))
+            .expect("encoded value decodes");
+        assert_ne!(produced, reopened, "the codec normalizes non-negative integers");
+
+        let SessionCommitItem::Fact(SessionFact::ExtensionStateValueSet(fact)) =
+            extension_state_commit_item(
+                LaneId::main(),
+                "todo",
+                "todo.v1",
+                ExtensionStateUpdate { value: produced },
+            )
+            .expect("bounded state value commits")
+        else {
+            panic!("state update commits one extension state fact");
+        };
+
+        assert_eq!(fact.value, reopened);
+    }
+
+    #[test]
     fn closed_epoch_generation_is_rejected_after_same_revision_starts_another_operation() {
         let lane = LaneId::main();
         let revision = HarnessRevisionId::new("state-generation-revision")
@@ -491,12 +495,13 @@ mod tests {
             BTreeMap::new(),
         ))
         .expect("memory session creates");
+        let revision_entry = tea_session::EntryId::new("state-generation-revision-entry")
+            .expect("fixture entry ID");
         session
             .append_entry(
                 &lane,
                 ProvisionedEntry {
-                    id: tea_session::EntryId::new("state-generation-revision-entry")
-                        .expect("fixture entry ID"),
+                    id: revision_entry.clone(),
                     body: SessionEntry::HarnessRevisionChanged(HarnessRevisionChangedEntry {
                         revision_id: revision.clone(),
                         snapshot_id: snapshot_id.clone(),
@@ -513,6 +518,7 @@ mod tests {
             &revision,
             &snapshot_id,
             &profile,
+            &revision_entry,
         );
         validate_active_extension_state_generation(
             &session.snapshot().expect("snapshot succeeds"),
@@ -548,6 +554,7 @@ mod tests {
             &revision,
             &snapshot_id,
             &profile,
+            &revision_entry,
         );
 
         let snapshot = session.snapshot().expect("snapshot succeeds");
@@ -572,6 +579,7 @@ mod tests {
         revision: &HarnessRevisionId,
         snapshot_id: &HarnessSnapshotId,
         profile: &ModelHarnessProfileId,
+        source_leaf: &tea_session::EntryId,
     ) {
         session
             .commit(
@@ -580,7 +588,7 @@ mod tests {
                         OperationStartedRecord::new(
                             operation_id.clone(),
                             lane.clone(),
-                            None,
+                            Some(source_leaf.clone()),
                             OperationKind::Run,
                             Vec::new(),
                             revision.clone(),
@@ -592,7 +600,7 @@ mod tests {
                             id: epoch_id.clone(),
                             operation_id: operation_id.clone(),
                             epoch_index: 0,
-                            source_leaf_id: None,
+                            source_leaf_id: Some(source_leaf.clone()),
                             harness_revision_id: revision.clone(),
                             harness_snapshot_id: snapshot_id.clone(),
                             model_harness_profile: profile.clone(),

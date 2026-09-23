@@ -34,7 +34,7 @@ use tea_core::harness::{
 };
 use tea_core::runtime::{
     HarnessIdentity, RuntimeServices, SessionSupervisor, SessionSupervisorInput,
-    SessionSupervisorReopenInput, SubagentModel, SubagentPolicy, SubagentServices, IdleAuthorization,
+    SessionSupervisorReopenInput, SubagentPolicy, SubagentServices, IdleAuthorization,
     IdleDriveOutcome, InputCompletion, InputOutcome, PreviewEvent, TeaEvent,
     TeaEventSubscription, TeaEventTryRecvError,
 };
@@ -51,7 +51,7 @@ use tea_session::{
     HarnessRevisionChangedEntry, JsonlSession, LaneId, ModelChangedEntry, PayloadRef,
     ProvisionedEntry, SessionEntry, SessionFact, SessionHeader, SessionId, SessionSnapshot,
     SessionWriter, SubagentModelRecord, SubagentPolicyFact, ThinkingChangedEntry,
-    SESSION_FORMAT_VERSION,
+    SESSION_FORMAT_IDENTITY, SESSION_FORMAT_VERSION, SESSION_HEADER_KIND,
 };
 
 use super::super::build_info;
@@ -147,6 +147,7 @@ pub(super) struct HostHarnessReopen<'a> {
 #[derive(Clone, Copy)]
 enum WebCapabilityCredentialSource {
     TerminalEnvironment,
+    #[cfg(feature = "live-verification")]
     NoAmbientCredential,
 }
 
@@ -156,6 +157,7 @@ impl WebCapabilityCredentialSource {
     ) -> Result<(PluginCapabilityBinding, CapabilityBindingRef), AppError> {
         match self {
             Self::TerminalEnvironment => web_capability_binding(),
+            #[cfg(feature = "live-verification")]
             Self::NoAmbientCredential => web_capability_binding_with_tinyfish_api_key(None),
         }
     }
@@ -209,7 +211,7 @@ impl HostSubagentConfig {
                     ));
                 }
                 let policy = SubagentPolicy {
-                    models: vec![SubagentModel {
+                    models: vec![tea_core::runtime::SubagentModel {
                         descriptor: child_model.clone(),
                         display_name: child_model.model.clone(),
                         context_window: None,
@@ -242,7 +244,10 @@ impl HostSubagentConfig {
         root_model: &ModelDescriptor,
     ) -> Result<Option<SubagentPolicy>, AppError> {
         match self {
-            Self::Terminal { config, .. } => reopen_subagent_policy(fact, Some(config)),
+            Self::Terminal { config, .. } => {
+                let _ = root_model;
+                reopen_subagent_policy(fact, Some(config))
+            }
             #[cfg(feature = "live-verification")]
             Self::LiveVerification { .. } => {
                 let Some(fact) = fact else {
@@ -847,7 +852,7 @@ fn create_host_harness_with_operations_and_mode(
             },
         )?;
         let manager = Arc::new(
-            HarnessResolver::new(repository, Default::default())
+            HarnessResolver::new(repository, authoring_capability_ceiling(self_extension_mode))
                 .capability_catalog(capability_catalog)
                 .reserved_extension_command_names(super::commands::names())
                 .self_extension_mode(self_extension_mode),
@@ -1235,7 +1240,7 @@ fn reopen_host_harness_with_operations_and_web_credential_source(
                 Arc::clone(&artifacts),
                 Arc::new(LuauExtensionEngine),
             ),
-            Default::default(),
+            authoring_capability_ceiling(header.self_extension_mode),
         )
         .capability_catalog(capability_catalog)
         .reserved_extension_command_names(super::commands::names())
@@ -1293,6 +1298,25 @@ fn web_capability_binding() -> Result<(PluginCapabilityBinding, CapabilityBindin
         .and_then(|value| value.into_string().ok())
         .filter(|value| !value.trim().is_empty());
     web_capability_binding_with_tinyfish_api_key(tinyfish_api_key.as_deref())
+}
+
+/// Frozen capability ceiling for candidates authored in one host session.
+///
+/// Validation checks every session plugin in a candidate snapshot, including
+/// the seeded coding builtins, so an authoring session must admit exactly the
+/// capabilities the operator seed already grants them; per-plugin bindings
+/// still stop a candidate from attaching that authority to new source. A
+/// non-authoring session keeps the empty ceiling its persisted catalog records.
+fn authoring_capability_ceiling(mode: SelfExtensionMode) -> BTreeSet<String> {
+    if !mode.exposes_control_tool() {
+        return BTreeSet::new();
+    }
+    BTreeSet::from([
+        PROCESS_CAPABILITY_V1.to_owned(),
+        WORKSPACE_MUTATE_CAPABILITY_V1.to_owned(),
+        WORKSPACE_READ_CAPABILITY_V1.to_owned(),
+        WORKSPACE_SEARCH_CAPABILITY_V1.to_owned(),
+    ])
 }
 
 /// Build the web binding from an optional caller-provided TinyFish credential.
@@ -2670,7 +2694,10 @@ fn host_session_header_from_snapshot(
     snapshot: &SessionSnapshot,
 ) -> Result<HostSessionHeader, AppError> {
     let header = snapshot.header();
-    if header.kind != "session" || header.version != SESSION_FORMAT_VERSION {
+    if header.kind != SESSION_HEADER_KIND
+        || header.format != SESSION_FORMAT_IDENTITY
+        || header.version != SESSION_FORMAT_VERSION
+    {
         return Err(AppError::Setup("unsupported durable session format".into()));
     }
     host_session_metadata(
@@ -3492,16 +3519,17 @@ mod tests {
         assert!(printed.starts_with("TODO · "), "{printed}");
 
         // Todo durability is independent of model context: one normalized
-        // snapshot per mutating call lives in the extension-state namespace,
-        // and no conversation message carries that document. Compaction, which
-        // only rewrites conversation messages, therefore cannot lose the plan.
+        // whole-value replacement per mutating call lives in the todo
+        // extension's private state namespace, and no conversation message
+        // carries that document. Compaction, which only derives conversation
+        // context, therefore cannot lose the plan.
         let snapshot = harness.snapshot().expect("settled snapshot reads");
         let snapshots = snapshot
-            .entries()
+            .facts()
             .iter()
-            .filter(|entry| match &entry.body {
-                SessionEntry::PluginMemory(memory) => {
-                    memory.plugin_id == "todo" && memory.kind == "todo.state.v1"
+            .filter(|stored| match &stored.fact {
+                SessionFact::ExtensionStateValueSet(state) => {
+                    state.extension_id == "todo" && state.state_version == "todo.v1"
                 }
                 _ => false,
             })

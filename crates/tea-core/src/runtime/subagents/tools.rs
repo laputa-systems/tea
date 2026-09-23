@@ -8,8 +8,8 @@
 
 use super::{
     ApplyAgentChangesResult, InterruptAgentResult, SpawnAgentRequest, SubagentCoordinator,
-    SubagentPolicy, SubagentPolicyError, SubagentStatus, WaitAgentsRequest, WaitAgentsResult,
-    WaitReturnWhen, WaitedSubagent,
+    SpawnedAgentHandle, SubagentPolicy, SubagentPolicyError, SubagentStatus, WaitAgentsRequest,
+    WaitAgentsResult, WaitReturnWhen, WaitedSubagent,
 };
 use crate::harness::ToolPresentationDescriptor;
 use crate::tool::{

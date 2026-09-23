@@ -28,6 +28,9 @@ pub(crate) fn take_session_snapshot_clone_count() -> usize {
 /// `BTreeMap`; metadata never carries mutable supervisor pointers.
 pub type Metadata = BTreeMap<String, JsonValue>;
 
+/// The `kind` discriminator carried by every Tea session header.
+pub const SESSION_HEADER_KIND: &str = "tea-session";
+
 /// The unambiguous identity of Tea's sole supported on-disk session format.
 ///
 /// A previous discarded format also used version 1. Readers therefore require
@@ -81,7 +84,7 @@ impl SessionHeader {
         created_at_ms: u64,
     ) -> Self {
         Self {
-            kind: "tea-session".into(),
+            kind: SESSION_HEADER_KIND.into(),
             format: SESSION_FORMAT_IDENTITY.into(),
             version: SESSION_FORMAT_VERSION,
             session_id,

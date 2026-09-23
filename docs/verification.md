@@ -14,6 +14,8 @@ cargo test -p tea-luau --locked
 cargo test -p tea-core --locked
 cargo test -p tea-agent --lib --locked
 cargo test -p tea-agent --features pty-harness --test pty_streaming --locked
+cargo test -p tea-agent --features live-verification --lib --locked
+cargo test -p tea-providers --all-features --locked
 ./crates/tea-core/fixtures/run.sh
 python3 scripts/check-crate-graph.py
 scripts/check-toolchain-pin.sh
@@ -114,12 +116,14 @@ the one restricted factory's providers into the feature-only terminal harness
 and sends only public synthetic prompts. It performs a workspace read/edit and
 host-side exit oracle, a distinct terminal one-shot completion with an exact
 synthetic response oracle, and controlled cancellation after durable provider
-admission followed by passive reopen and a fresh exact continuation. The report
-still remains `BLOCKED` for whole-suite semantic live acceptance: forced
-compaction, Luau activation/rollback, and child orchestration deliberately
-remain blocked until dedicated core scenario adapters exist. Those cases send
-no root transport as a substitute. A missing credential or any setup rejection
-remains `BLOCKED` and sends no inference. The required cases and executable
+admission followed by passive reopen and a fresh exact continuation. Forced
+compaction, Luau activation/rollback, and child orchestration each run through
+a dedicated scenario adapter in `tea_agent::verification`
+(`run_live_compaction_scenario`, `run_live_evolution_scenario`,
+`run_live_child_scenario`) with its own durable oracle; none substitutes a root
+transport prompt. Each adapter also has a feature-gated scripted-provider test
+under `--features live-verification`. A missing credential or any setup
+rejection remains `BLOCKED` and sends no inference. The required cases and executable
 provider-free counterparts are
 synthetic coding (`cargo test -p tea-core --test coding_capabilities --locked`),
 headless/one-shot and interrupted reopen (the `tea-fixtures` executable run

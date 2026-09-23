@@ -75,6 +75,9 @@ impl ModelProvider for QueuedProvider {
     }
 }
 
+/// Holds every request open until its run is cancelled, then settles like a
+/// conforming provider: the port hands providers the run's cancellation scope
+/// and the core joins the stream rather than abandoning it.
 struct BlockingProvider {
     started: Arc<AtomicUsize>,
 }
@@ -83,10 +86,15 @@ impl ModelProvider for BlockingProvider {
     fn stream<'a>(
         &'a self,
         _request: ModelRequest,
-        _cancellation: CancellationToken,
+        cancellation: CancellationToken,
     ) -> ModelFuture<'a> {
         self.started.fetch_add(1, Ordering::SeqCst);
-        Box::pin(std::future::pending())
+        Box::pin(async move {
+            cancellation.cancelled().await;
+            Ok(Box::new(ModelStream {
+                events: vec![ModelStreamEvent::End(StopReason::Cancelled)],
+            }) as _)
+        })
     }
 }
 

@@ -742,6 +742,35 @@ impl AppState {
         }
     }
 
+    /// Append each durable user message that has no projected row yet.
+    ///
+    /// Dispatched inputs join model context as committed history, so the core
+    /// never emits a `MessageStart` for them; the committed entry is their only
+    /// source. Matching on `EntryId` makes this idempotent, and a row appended
+    /// here carries its identity into the committed scrollback frontier.
+    pub(super) fn append_unprojected_user_messages(&mut self, messages: &[HostTranscriptMessage]) {
+        for durable in messages {
+            let AgentMessage::User { content, .. } = &durable.message else {
+                continue;
+            };
+            if self
+                .transcript_entry_ids
+                .iter()
+                .any(|identity| identity.as_ref() == Some(&durable.entry_id))
+            {
+                continue;
+            }
+            self.record_history(content);
+            self.push_entry_with_id(
+                None,
+                Some(durable.entry_id.clone()),
+                TranscriptEntry::User {
+                    text: content.clone(),
+                },
+            );
+        }
+    }
+
     /// Return the durable identity aligned with one presentation row.
     pub(super) fn transcript_entry_id(&self, index: usize) -> Option<&EntryId> {
         self.transcript_entry_ids

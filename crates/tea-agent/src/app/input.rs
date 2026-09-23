@@ -251,7 +251,7 @@ impl App {
         Ok(())
     }
 
-    fn handle_control_c(&mut self) {
+    pub(super) fn handle_control_c(&mut self) {
         if self.durable_task.is_some() || self.agent_is_active() {
             self.request_root_abort(true);
             self.state.slash_completion = None;
@@ -302,21 +302,28 @@ impl App {
                     return Ok(());
                 }
             };
-            let recovery = match harness.recovery_report() {
-                Ok(recovery) => recovery,
-                Err(error) => {
-                    self.state.notice(error.to_string());
+            // The recovery report reads committed state only, so the root
+            // operation this process is live-driving looks exactly like an
+            // interrupted one. Gate only idle submissions; an input queued
+            // behind live work still cannot bypass recovery, because the
+            // runtime refuses to dispatch onto an open lane.
+            if !was_active {
+                let recovery = match harness.recovery_report() {
+                    Ok(recovery) => recovery,
+                    Err(error) => {
+                        self.state.notice(error.to_string());
+                        return Ok(());
+                    }
+                };
+                if recovery
+                    .lanes
+                    .iter()
+                    .any(|lane| lane.lane_id == tea_session::LaneId::main())
+                {
+                    self.state
+                        .notice("durable recovery requires /continue before accepting a prompt");
                     return Ok(());
                 }
-            };
-            if recovery
-                .lanes
-                .iter()
-                .any(|lane| lane.lane_id == tea_session::LaneId::main())
-            {
-                self.state
-                    .notice("durable recovery requires /continue before accepting a prompt");
-                return Ok(());
             }
             if let Err(error) = harness.submit_input(input) {
                 self.state.notice(error.to_string());

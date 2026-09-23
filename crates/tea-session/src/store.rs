@@ -703,7 +703,7 @@ impl MemorySession {
         mut header: SessionHeader,
         clock: Arc<dyn SessionClock>,
     ) -> Result<Self, SessionError> {
-        if header.kind != "tea-session"
+        if header.kind != crate::SESSION_HEADER_KIND
             || header.format != crate::SESSION_FORMAT_IDENTITY
             || header.version != SESSION_FORMAT_VERSION
         {

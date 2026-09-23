@@ -102,12 +102,23 @@ where
     ) -> Result<Vec<CommittedChildToolOutcome>, HarnessError> {
         let graph = reduce_agent_graph(snapshot)
             .map_err(|error| HarnessError::invalid_state(error.to_string()))?;
+        let lane_operations = snapshot
+            .records()
+            .iter()
+            .filter_map(|stored| match &stored.record {
+                LaneRecord::OperationStarted(operation) if &operation.lane_id == lane_id => {
+                    Some(&operation.id)
+                }
+                _ => None,
+            })
+            .collect::<std::collections::BTreeSet<_>>();
         let mut outcomes = Vec::new();
         for stored in snapshot.records() {
             let LaneRecord::ToolStarted(started) = &stored.record else {
                 continue;
             };
-            if snapshot
+            if !lane_operations.contains(&started.operation_id)
+                || snapshot
                 .entries()
                 .iter()
                 .any(|entry| entry.header.id == started.result_entry_id)

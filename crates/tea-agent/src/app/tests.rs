@@ -1683,6 +1683,95 @@ fn accepted_inputs_project_to_one_runtime_owned_next_message_slot() {
 }
 
 #[test]
+fn idle_redrive_with_no_eligible_work_leaves_the_terminal_idle() {
+    let tea_home = test_tea_home("idle-redrive-no-work");
+    let options = CliOptions::parse(
+        [
+            "tea",
+            "--tea-home",
+            tea_home.to_str().expect("UTF-8 test Tea home"),
+            "--provider",
+            mock::PROVIDER_ID,
+        ]
+        .map(OsString::from),
+    )
+    .expect("mock options parse");
+    let mut app = App::new(options);
+    app.assemble_host().expect("mock host assembles");
+    let harness = app
+        .ensure_durable_harness()
+        .expect("durable mock harness creates");
+
+    // A settled batch asks the runtime whether more work is eligible. With an
+    // empty queue the answer is synchronous, so the very next key (Ctrl-C to
+    // clear, then exit) must not be consumed as an abort of a phantom task.
+    app.start_runtime_idle_drive();
+
+    assert!(
+        app.durable_task.is_none(),
+        "an immediately idle drive holds no task"
+    );
+    assert!(!app.agent_is_active());
+    assert_eq!(app.state().status(), &super::state::UiStatus::Idle);
+
+    drop(harness);
+    drop(app);
+    let _ = fs::remove_dir_all(tea_home);
+}
+
+#[test]
+fn cancelled_dispatched_input_remains_a_visible_user_row() {
+    let tea_home = test_tea_home("cancelled-dispatched-input");
+    let options = CliOptions::parse(
+        [
+            "tea",
+            "--tea-home",
+            tea_home.to_str().expect("UTF-8 test Tea home"),
+            "--provider",
+            mock::PROVIDER_ID,
+        ]
+        .map(OsString::from),
+    )
+    .expect("mock options parse");
+    let mut app = App::new(options);
+    app.assemble_host().expect("mock host assembles");
+    for character in "submitted user message".chars() {
+        app.state_mut()
+            .composer_mut()
+            .insert(character)
+            .expect("composer accepts text");
+    }
+    app.submit_composer().expect("submission is accepted");
+    app.handle_control_c();
+    smol::block_on(async {
+        while app.durable_task.is_some() {
+            app.drain_events();
+            app.reap_task();
+            smol::future::yield_now().await;
+        }
+    });
+    app.drain_events();
+    assert_eq!(
+        app.state().footer_notice(),
+        Some((super::runtime::CANCELLED_TURN_SETTLED_NOTICE, false))
+    );
+
+    let user_rows = app
+        .state()
+        .transcript()
+        .iter()
+        .filter(|entry| {
+            matches!(entry, TranscriptEntry::User { text } if text == "submitted user message")
+        })
+        .count();
+    assert_eq!(user_rows, 1, "{:#?}", app.state().transcript());
+    assert!(app.state().composer().text().is_empty());
+
+    drop(app);
+    let _ = fs::remove_dir_all(tea_home);
+}
+
+#[test]
 fn input_queue_change_event_refreshes_the_runtime_owned_next_message_slot() {
     let tea_home = test_tea_home("input-queue-change-event");
     let options = CliOptions::parse(

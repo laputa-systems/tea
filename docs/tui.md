@@ -117,7 +117,21 @@ two-step flow: choose the provider/model, then choose its reasoning effort.
 Normal composer input is first accepted into the managed harness's durable
 queue. When the root lane is idle, the terminal explicitly asks the runtime to
 drive the next eligible input; during an active operation it only projects
-durable session and live harness events without owning their state.
+durable session and live harness events without owning their state. Input
+accepted behind an active operation appears in the single `Queued next` slot;
+`Up` on an empty composer withdraws it atomically. A user row enters the
+transcript only when the runtime dispatches that input and commits its user
+entry (`SessionEvent::OperationAccepted`); the row carries that entry's
+identity, so a later resnapshot cannot duplicate it in scrollback. When the
+runtime reports that nothing else is eligible, the terminal holds no task, so
+the next Ctrl+C clears the draft or exits rather than cancelling phantom work.
+
+Ctrl+C during an operation requests cancellation. The dispatched input remains
+committed history: once the operation settles the footer reads
+`turn cancelled; input kept in the session`, and no local draft is restored.
+The `/continue` gate for an interrupted root applies to idle submissions only;
+the operation this process is actively driving is not an interruption, and an
+input queued behind it still cannot dispatch onto an open lane.
 
 Reopening is passive. It restores committed rows and reports interrupted lanes,
 but it never starts model work, tools, goal continuation, child work, or a

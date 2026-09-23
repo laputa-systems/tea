@@ -1286,14 +1286,13 @@ fn compaction_replacement_message(
             added_tool_names,
             terminate,
             is_error,
-            failure,
+            // `failure` is deliberately not encoded. It is the run-local host
+            // classification behind the tool circuit breaker: never
+            // model-visible and never stored in `ToolResultEntry`, so durable
+            // reconstruction always yields `None`. Encoding it would make a
+            // live source mismatch its own committed history.
             ..
         } => {
-            if failure.is_some() {
-                return Err(HarnessError::invalid_state(
-                    "compaction replacement cannot retain an unprojected host tool failure",
-                ));
-            }
             Ok(object([
                 (
                     "added_tool_names",
@@ -1327,9 +1326,13 @@ fn compaction_replacement_message(
                 ("tool_name", JsonValue::String(tool_name.clone())),
                 (
                     "usage",
+                    // `ToolResultEntry` stores a non-optional usage, so an
+                    // unreported value reopens as all-`None` fields rather
+                    // than `None`. Both mean nothing was reported.
                     usage
                         .as_ref()
                         .as_ref()
+                        .filter(|usage| usage.is_reported())
                         .map(compaction_replacement_usage)
                         .unwrap_or(JsonValue::Null),
                 ),
@@ -1946,6 +1949,56 @@ mod tests {
                 &encode_compaction_replacement(&decoded).expect("decoded replacement encodes"),
             )
             .expect("decoded replacement digest"),
+        );
+    }
+
+    #[test]
+    fn compaction_replacement_encodes_a_live_tool_failure_like_its_durable_reconstruction() {
+        let failed = |failure| AgentMessage::ToolResult {
+            id: MessageId(1),
+            tool_call_id: ToolCallId::new("failed-read").expect("fixture call ID"),
+            tool_name: "read".into(),
+            content: "no such file".into(),
+            details: None,
+            usage: Box::new(None),
+            added_tool_names: Vec::new(),
+            terminate: false,
+            is_error: true,
+            failure,
+        };
+        let live = encode_compaction_replacement(&[failed(Some(
+            crate::tool::ToolFailure::recoverable(),
+        ))])
+        .expect("a retained live tool failure can be compacted");
+        let durable = encode_compaction_replacement(&[failed(None)])
+            .expect("the durable reconstruction encodes");
+
+        assert_eq!(
+            live, durable,
+            "host failure classification is neither persisted nor model-visible"
+        );
+    }
+
+    #[test]
+    fn compaction_replacement_encodes_unreported_tool_usage_like_its_durable_reconstruction() {
+        let result = |usage| AgentMessage::ToolResult {
+            id: MessageId(1),
+            tool_call_id: ToolCallId::new("usage-free-call").expect("fixture call ID"),
+            tool_name: "read".into(),
+            content: "contents".into(),
+            details: None,
+            usage: Box::new(usage),
+            added_tool_names: Vec::new(),
+            terminate: false,
+            is_error: false,
+            failure: None,
+        };
+
+        assert_eq!(
+            encode_compaction_replacement(&[result(None)]).expect("live result encodes"),
+            encode_compaction_replacement(&[result(Some(Usage::default()))])
+                .expect("durable reconstruction encodes"),
+            "`ToolResultEntry` stores a non-optional usage, so unknown usage reopens as all-None"
         );
     }
 

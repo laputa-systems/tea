@@ -47,6 +47,12 @@ pub(crate) struct TuiSubagentHost {
     engine: GitWorkspaceEngine,
     leases: Mutex<BTreeMap<WorkspaceLeaseId, GitWorkspaceLease>>,
     deltas: Mutex<BTreeMap<WorkspaceDeltaId, GitWorkspaceDelta>>,
+    /// One gate per lease around blocking Git work. Dropping a cancelled
+    /// child future does not stop its `smol::unblock` Git process, so root
+    /// settlement can otherwise finalize or clean the same lease concurrently
+    /// and collide on its private index. Finalization is idempotent once
+    /// serialized: a later caller observes the committed result ref.
+    lease_git_gates: Mutex<BTreeMap<WorkspaceLeaseId, Arc<Mutex<()>>>>,
 }
 
 /// Child-model authority used only while reconstructing lane-local services.
@@ -177,7 +183,21 @@ impl TuiSubagentHost {
             engine: GitWorkspaceEngine,
             leases: Mutex::new(BTreeMap::new()),
             deltas: Mutex::new(BTreeMap::new()),
+            lease_git_gates: Mutex::new(BTreeMap::new()),
         }
+    }
+
+    fn lease_git_gate(
+        &self,
+        workspace_lease_id: &WorkspaceLeaseId,
+    ) -> Result<Arc<Mutex<()>>, SubagentHostError> {
+        Ok(Arc::clone(
+            self.lease_git_gates
+                .lock()
+                .map_err(|_| host_error("subagent workspace gate map is poisoned"))?
+                .entry(workspace_lease_id.clone())
+                .or_default(),
+        ))
     }
 
     async fn prepare_workspace(
@@ -235,7 +255,7 @@ impl TuiSubagentHost {
             ChildProviderSource::Factory(factory) => {
                 let configured = factory.configured(&model.descriptor).map_err(app_error)?;
                 let compactor = factory.compactor(&configured).map_err(app_error)?;
-                (configured.provider, Some(compactor))
+                (Arc::clone(&configured.provider), Some(compactor))
             }
             #[cfg(feature = "live-verification")]
             ChildProviderSource::LiveVerification {
@@ -360,9 +380,15 @@ impl SubagentHost for TuiSubagentHost {
         Box::pin(async move {
             let lease = self.lookup_lease(&request.workspace)?;
             let engine = self.engine;
-            let finalization = smol::unblock(move || engine.finalize(&lease))
-                .await
-                .map_err(workspace_error)?;
+            let gate = self.lease_git_gate(&request.workspace.id)?;
+            let finalization = smol::unblock(move || {
+                // The gate guards no data, so a panicked holder cannot
+                // invalidate the next caller's idempotent finalization.
+                let _serialized = gate.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                engine.finalize(&lease)
+            })
+            .await
+            .map_err(workspace_error)?;
             match finalization {
                 GitWorkspaceFinalization::NoChanges { .. } => Ok(WorkspaceFinalization::NoChanges),
                 GitWorkspaceFinalization::Delta(delta) => {
@@ -507,7 +533,9 @@ impl SubagentHost for TuiSubagentHost {
             // Cleanup is valid after a restart even when no process-local
             // prepare/reopen call repopulated `leases`. Its authority is the
             // session-owned deterministic lease path, never an ambient tree.
+            let gate = self.lease_git_gate(&workspace_lease_id)?;
             smol::unblock(move || {
+                let _serialized = gate.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 engine.cleanup_durable_lease(&workspace, &session_directory, &workspace_lease_id)
             })
             .await
@@ -683,6 +711,59 @@ mod tests {
             .expect("ambiguous reopened apply is classified"),
             WorkspaceApplyOutcome::Indeterminate { .. }
         ));
+    }
+
+    #[test]
+    fn concurrent_finalizations_of_one_lease_serialize_to_one_delta() {
+        // Structured cancellation drops a child task whose blocking Git
+        // finalization keeps running; root settlement then finalizes the same
+        // lease. Both must observe one result instead of racing Git's index
+        // lock. Several leases make the unserialized race reliably visible.
+        let repository = TestRepository::new();
+        let session_id = SessionId::new("host-finalize-race").expect("session ID is valid");
+        let artifacts: Arc<dyn ArtifactStore> =
+            Arc::new(tea_session::MemoryArtifactStore::default());
+        let host = reopened_host(&repository, session_id.clone(), artifacts);
+        for attempt in 0..8 {
+            let agent_id =
+                AgentId::new(format!("agent-finalize-race-{attempt}")).expect("agent ID is valid");
+            let workspace_lease_id = WorkspaceLeaseId::derive(&agent_id);
+            let lease = GitWorkspaceEngine
+                .prepare(WorkspaceLeaseRequest {
+                    repository: repository.root.clone(),
+                    session_directory: repository.session.clone(),
+                    session_id: session_id.clone(),
+                    agent_id: agent_id.clone(),
+                    workspace_lease_id: workspace_lease_id.clone(),
+                    logical_workspace_label: "logical repository".into(),
+                })
+                .expect("child workspace prepares");
+            fs::write(lease.worktree_path().join("tracked.txt"), "child result\n")
+                .expect("child edit writes");
+            host.leases
+                .lock()
+                .expect("lease map is available")
+                .insert(workspace_lease_id.clone(), lease);
+            let request = || FinalizeSubagentRequest {
+                agent_id: agent_id.clone(),
+                workspace: CoreWorkspaceLease {
+                    id: workspace_lease_id.clone(),
+                    logical_workspace: "logical repository".into(),
+                },
+            };
+
+            let (first, second) = smol::block_on(smol::future::zip(
+                host.finalize(request()),
+                host.finalize(request()),
+            ));
+
+            let (Ok(WorkspaceFinalization::Delta(first)), Ok(WorkspaceFinalization::Delta(second))) =
+                (first, second)
+            else {
+                panic!("both finalizations of one lease settle to its delta");
+            };
+            assert_eq!(first.id, second.id);
+        }
     }
 
     #[test]

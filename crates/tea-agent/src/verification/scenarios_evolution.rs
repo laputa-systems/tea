@@ -24,7 +24,9 @@ pub struct LiveEvolutionScenario<'a> {
     pub workspace: &'a Path,
     /// Guarded consumer that actually evaluates and authors the candidate.
     pub candidate_evaluator: &'a RestrictedZenConsumer,
-    /// Public request that instructs the model to inspect and apply one bounded Luau edit.
+    /// Public request that instructs the model to inspect and apply one bounded
+    /// candidate. Operator-pinned global plugins such as `todo` are not
+    /// editable, so the checked-in prompt adds a capability-free session plugin.
     pub activation_prompt: &'a str,
     /// Public request that exercises the resulting stateful extension after activation.
     pub use_prompt: &'a str,
@@ -166,6 +168,9 @@ fn run_evolution_scenario(
     let state_retained_across_rollback = state_before_rollback == todo_state(&rolled_back_snapshot)?;
     let session_id = rolled_back_snapshot.header().session_id.to_string();
     smol::block_on(harness.close()).map_err(|error| LiveVerificationError::new(error.to_string()))?;
+    // Closing joins work; only dropping the last handle releases the single
+    // session writer that the passive reopen below must acquire.
+    drop(harness);
 
     let reopened = crate::app::reopen_live_verification_authoring_harness(
         tea_home,
@@ -268,4 +273,254 @@ fn todo_state(snapshot: &SessionSnapshot) -> Result<Option<tea_protocol::JsonVal
         )
     });
     Ok(has_durable_fact.then(|| state.value.clone()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+    use tea_core::scheduler::{
+        CancellationToken, ModelFuture, ModelProvider, ModelRequest, ModelStream, ModelStreamEvent,
+    };
+    use tea_core::state::{AgentToolCall, SerializedJson, StopReason, ToolCallId};
+    use tea_protocol::JsonValue;
+
+    const MARKER: &str = "live verification evolution marker";
+
+    /// Scripted candidate evaluator for the three evolution operations. It
+    /// derives each `base_revision` from the latest `tea_harness` status
+    /// result in the request context, exactly as a model must.
+    #[derive(Default)]
+    struct EvolutionScriptProvider {
+        requests: AtomicUsize,
+        initial_revision: Mutex<Option<String>>,
+        /// Whether each request's system prompt carried the authored section.
+        marker_in_prompt: Mutex<Vec<bool>>,
+    }
+
+    fn latest_status_revision(context: &str) -> Option<String> {
+        fn visit(value: &JsonValue, found: &mut Option<String>) {
+            match value {
+                JsonValue::String(text) => {
+                    if let Ok(JsonValue::Object(fields)) = JsonValue::parse(text) {
+                        if fields.get("operation").and_then(JsonValue::as_str) == Some("status") {
+                            if let Some(revision) =
+                                fields.get("active_revision").and_then(JsonValue::as_str)
+                            {
+                                *found = Some(revision.to_owned());
+                            }
+                        }
+                    }
+                }
+                JsonValue::Array(values) => values.iter().for_each(|value| visit(value, found)),
+                JsonValue::Object(fields) => fields.values().for_each(|value| visit(value, found)),
+                JsonValue::Null | JsonValue::Bool(_) | JsonValue::Number(_) => {}
+            }
+        }
+        let mut found = None;
+        for line in context.lines() {
+            if let Ok(value) = JsonValue::parse(line) {
+                visit(&value, &mut found);
+            }
+        }
+        if found.is_none() {
+            visit(&JsonValue::parse(context).ok()?, &mut found);
+        }
+        found
+    }
+
+    /// The authoring ceiling admits no capability, so the candidate adds a
+    /// new capability-free session plugin rather than editing a builtin: the
+    /// operator-pinned `todo` and capability-bearing coding builtins are both
+    /// rejected by candidate validation.
+    fn marker_plugin_files() -> Vec<JsonValue> {
+        let upsert = |path: &str, content: String| {
+            JsonValue::object([
+                ("operation", JsonValue::String("upsert".into())),
+                ("path", JsonValue::String(path.into())),
+                ("content", JsonValue::String(content)),
+            ])
+        };
+        vec![
+            upsert(
+                "plugins/evolution_marker/manifest.json",
+                r#"{"schema_version":1,"abi_version":3,"id":"evolution_marker","entrypoint":"init.luau","modules":["init.luau"],"requested_capabilities":[]}"#.into(),
+            ),
+            upsert(
+                "plugins/evolution_marker/init.luau",
+                format!(
+                    "return {{ prompt_sections = {{{{ id = \"evolution_marker\", content = \"{MARKER}\" }}}} }}\n"
+                ),
+            ),
+        ]
+    }
+
+    fn hypothesis() -> JsonValue {
+        JsonValue::object([
+            ("failure_signature", JsonValue::String("scripted evolution counterpart".into())),
+            ("expected_effect", JsonValue::String("behavior-preserving marker".into())),
+            ("regression_risk", JsonValue::String("none; comment only".into())),
+        ])
+    }
+
+    fn tool_call(index: usize, name: &str, arguments: JsonValue) -> ModelStream {
+        ModelStream {
+            events: vec![
+                ModelStreamEvent::ToolCall(AgentToolCall {
+                    id: ToolCallId::new(format!("evolution-call-{index}")).expect("fixture call ID"),
+                    name: name.into(),
+                    arguments: SerializedJson::new(
+                        arguments.to_json_string().expect("fixture arguments encode"),
+                    ),
+                }),
+                ModelStreamEvent::End(StopReason::ToolUse),
+            ],
+        }
+    }
+
+    fn text(content: &str) -> ModelStream {
+        ModelStream {
+            events: vec![
+                ModelStreamEvent::TextDelta(content.into()),
+                ModelStreamEvent::End(StopReason::Stop),
+            ],
+        }
+    }
+
+    impl ModelProvider for EvolutionScriptProvider {
+        fn stream<'a>(
+            &'a self,
+            request: ModelRequest,
+            _cancellation: CancellationToken,
+        ) -> ModelFuture<'a> {
+            let index = self.requests.fetch_add(1, Ordering::SeqCst);
+            self.marker_in_prompt
+                .lock()
+                .expect("prompt observation slot")
+                .push(request.system_prompt.contains(MARKER));
+            let status = || JsonValue::object([("operation", JsonValue::String("status".into()))]);
+            let current = || {
+                latest_status_revision(&request.context)
+                    .expect("the preceding status result names the active revision")
+            };
+            let stream = match index {
+                // Activation: inspect, then apply one behavior-preserving edit.
+                0 => tool_call(index, "tea_harness", status()),
+                1 => {
+                    let base = current();
+                    *self.initial_revision.lock().expect("initial revision slot") =
+                        Some(base.clone());
+                    tool_call(
+                        index,
+                        "tea_harness",
+                        JsonValue::object([
+                            ("operation", JsonValue::String("apply".into())),
+                            ("base_revision", JsonValue::String(base)),
+                            ("hypothesis", hypothesis()),
+                            ("files", JsonValue::Array(marker_plugin_files())),
+                            (
+                                "registry_operations",
+                                JsonValue::Array(vec![JsonValue::object([
+                                    ("operation", JsonValue::String("add".into())),
+                                    ("plugin_id", JsonValue::String("evolution_marker".into())),
+                                ])]),
+                            ),
+                        ]),
+                    )
+                }
+                2 => text("activated"),
+                // Use: one stateful todo call under the activated revision.
+                3 => tool_call(
+                    index,
+                    "todo",
+                    JsonValue::object([(
+                        "markdown",
+                        JsonValue::String("- [ ] public evolution state marker".into()),
+                    )]),
+                ),
+                4 => text("used"),
+                // Rollback: inspect, then roll back to the original revision.
+                5 => tool_call(index, "tea_harness", status()),
+                6 => {
+                    let initial = self
+                        .initial_revision
+                        .lock()
+                        .expect("initial revision slot")
+                        .clone()
+                        .expect("activation recorded the initial revision");
+                    tool_call(
+                        index,
+                        "tea_harness",
+                        JsonValue::object([
+                            ("operation", JsonValue::String("rollback".into())),
+                            ("base_revision", JsonValue::String(current())),
+                            ("target_revision", JsonValue::String(initial)),
+                            ("hypothesis", hypothesis()),
+                        ]),
+                    )
+                }
+                7 => text("rolled back"),
+                other => panic!("evolution script received unexpected request {other}"),
+            };
+            Box::pin(std::future::ready(Ok(Box::new(stream) as _)))
+        }
+    }
+
+    fn temporary_directory(label: &str) -> std::path::PathBuf {
+        static NEXT: AtomicUsize = AtomicUsize::new(1);
+        let path = std::env::temp_dir().join(format!(
+            "tea-live-evolution-{label}-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed),
+        ));
+        fs::create_dir_all(&path).expect("temporary verification directory creates");
+        path
+    }
+
+    #[test]
+    fn deterministic_evolution_fixture_uses_the_same_durable_oracles() {
+        let provider = Arc::new(EvolutionScriptProvider::default());
+        let evaluator = super::super::RestrictedZenConsumer {
+            model: ModelDescriptor {
+                provider: super::super::ZEN_PROVIDER_ID.into(),
+                model: super::super::ZEN_FREE_MODEL_ID.into(),
+                revision: None,
+            },
+            provider: provider.clone(),
+            role: VerificationConsumer::CandidateEvaluation,
+        };
+        let tea_home = temporary_directory("home");
+        let workspace = temporary_directory("workspace");
+
+        let outcome = run_live_evolution_scenario(LiveEvolutionScenario {
+            tea_home: &tea_home,
+            workspace: &workspace,
+            candidate_evaluator: &evaluator,
+            activation_prompt: "scripted activation",
+            use_prompt: "scripted use",
+            rollback_prompt: "scripted rollback",
+        })
+        .expect("deterministic provider satisfies the durable evolution scenario");
+
+        assert_eq!(
+            outcome,
+            LiveEvolutionScenarioOutcome {
+                candidate_activated: true,
+                revised_source_used: true,
+                state_retained_across_rollback: true,
+                rollback_activated: true,
+                durable_state_verified: true,
+            }
+        );
+        assert_eq!(provider.requests.load(Ordering::SeqCst), 8);
+        assert_eq!(
+            *provider.marker_in_prompt.lock().expect("prompt observations"),
+            vec![false, false, true, true, true, true, true, false],
+            "only epochs under the activated revision carry the authored section"
+        );
+        fs::remove_dir_all(tea_home).expect("temporary Tea home removes");
+        fs::remove_dir_all(workspace).expect("temporary workspace removes");
+    }
 }

@@ -14,7 +14,7 @@ use std::sync::Arc;
 use tea_core::scheduler::ModelProvider;
 use tea_core::state::ModelDescriptor;
 use tea_session::{
-    AgentState, LaneId, LaneRecord, OperationOutcome, SessionFact, SessionMutationRef,
+    LaneId, LaneRecord, OperationOutcome, SessionFact, SessionMutationRef,
     SessionSnapshot, reduce_agent_graph,
 };
 
@@ -265,7 +265,7 @@ mod tests {
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tea_core::scheduler::{
-        CancellationToken, ModelEventStream, ModelFuture, ModelRequest, ModelStream,
+        CancellationToken, ModelFuture, ModelRequest, ModelStream,
         ModelStreamEvent,
     };
     use tea_core::state::{AgentToolCall, SerializedJson, StopReason, ToolCallId};

@@ -1,11 +1,10 @@
 use std::collections::VecDeque;
 use std::env;
-use std::future::Future;
 use std::sync::{Arc, Mutex};
 use std::task::Poll;
 use tea_core::Agent;
 use tea_core::error::CoreError;
-use tea_core::event::{AgentEvent, AgentEventKind};
+use tea_core::event::AgentEventKind;
 use tea_core::hooks::{
     AfterToolCall, AgentLoopTurnUpdate, BeforeToolCall, ContextEnvelope, HookFuture, HookSet,
     Replacement,
@@ -442,7 +441,7 @@ pub(super) async fn run_fixture(fixture: Fixture) -> Result<JsonValue, String> {
                 .iter()
                 .filter(|event| matches!(event.kind, AgentEventKind::TurnStart { .. }))
                 .count() as u64;
-            for event in &run_events {
+            for event in run_events.iter() {
                 // Provider-request observation is an internal bridge for
                 // durable/runtime consumers. Declarative fixtures retain the
                 // established agent lifecycle grammar; their separate request

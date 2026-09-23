@@ -29,6 +29,9 @@ use crate::cli::CliOptions;
 use std::sync::Arc;
 use tea_core::state::ThinkingLevel;
 
+/// Footer notice once a user-cancelled root operation has fully settled.
+pub(super) const CANCELLED_TURN_SETTLED_NOTICE: &str = "turn cancelled; input kept in the session";
+
 pub(super) enum RootTaskOutcome {
     Drive(IdleDriveOutcome),
     Recovery,
@@ -387,7 +390,7 @@ impl App {
         Ok(())
     }
 
-    fn drain_events(&mut self) {
+    pub(super) fn drain_events(&mut self) {
         loop {
             let event = match self.durable_subscription.as_ref() {
                 Some(subscription) => subscription.try_recv(),
@@ -434,9 +437,9 @@ impl App {
                 // Durable queue membership and input dispatch are projected
                 // directly from the session snapshot. Observation delivery is
                 // lossy, so this event never supplies a user transcript row
-                // or input identity itself.
+                // or input identity itself; it only prompts the refresh.
                 if lane_id == tea_session::LaneId::main() {
-                    self.bind_current_durable_projection();
+                    self.project_dispatched_user_messages();
                     if let Err(error) = self.refresh_runtime_input_projection() {
                         self.state.notice(error.to_string());
                     }
@@ -553,6 +556,23 @@ impl App {
             return;
         };
         self.state.bind_durable_messages(&messages);
+    }
+
+    /// Bind the rendered durable prefix, then append user rows for inputs the
+    /// runtime has dispatched since. Accepted-but-queued inputs stay in the
+    /// next-message slot until their dispatch commits a user entry.
+    fn project_dispatched_user_messages(&mut self) {
+        let Some(harness) = self.durable_harness.as_ref() else {
+            return;
+        };
+        let Ok(snapshot) = harness.snapshot() else {
+            return;
+        };
+        let Ok(messages) = super::durable::project_host_messages(&snapshot) else {
+            return;
+        };
+        self.state.bind_durable_messages(&messages);
+        self.state.append_unprojected_user_messages(&messages);
     }
 
     /// Keep only the longest exact durable identity prefix already emitted to
@@ -673,6 +693,14 @@ impl App {
                         self.state.notice(
                             "durable recovery requires /continue; accepted inputs remain queued",
                         );
+                    } else if matches!(
+                        &error,
+                        HarnessError::Core(tea_core::error::CoreError::Cancelled)
+                    ) {
+                        // The dispatched input is already committed history;
+                        // cancellation settles the turn without restoring a
+                        // local draft for re-submission.
+                        self.state.notice(CANCELLED_TURN_SETTLED_NOTICE);
                     } else {
                         self.state.notice(error.to_string());
                     }
@@ -814,14 +842,33 @@ impl App {
         harness: Arc<super::durable::HostHarness>,
         authorization: IdleAuthorization,
     ) {
+        let mut drive = Box::pin(async move {
+            harness
+                .drive_next_input(authorization)
+                .await
+                .map(RootTaskOutcome::Drive)
+        });
+        // Deciding that nothing is eligible is synchronous: the runtime
+        // reduces its durable queue, applies settled controls, and evaluates
+        // bounded idle hooks before any await. Poll once so an immediately
+        // idle answer never holds a task, which would otherwise turn the
+        // user's next Ctrl-C into an abort of work that does not exist.
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        let ready = match std::future::Future::poll(drive.as_mut(), &mut context) {
+            std::task::Poll::Ready(Ok(RootTaskOutcome::Drive(IdleDriveOutcome::Idle))) => {
+                self.state.status = UiStatus::Idle;
+                return;
+            }
+            std::task::Poll::Ready(result) => Some(result),
+            std::task::Poll::Pending => None,
+        };
         let (sender, receiver) = sync_channel(1);
         let task = smol::spawn(async move {
-            let _ = sender.send(
-                harness
-                    .drive_next_input(authorization)
-                    .await
-                    .map(RootTaskOutcome::Drive),
-            );
+            let result = match ready {
+                Some(result) => result,
+                None => drive.await,
+            };
+            let _ = sender.send(result);
         });
         self.durable_task = Some(OwnedRootTask::new(receiver, task));
         self.state.status = UiStatus::Active;

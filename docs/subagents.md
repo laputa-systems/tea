@@ -308,6 +308,19 @@ shutdown cascade through the supervisor and join all children before returning
 success. If a durable effect boundary cannot be safely settled, shutdown
 returns a typed recovery error instead of claiming that the root is closed.
 
+Cancelling a child task drops its future, but blocking Git work it already
+started keeps running. The terminal host therefore serializes finalization and
+cleanup per workspace lease: root settlement waits for an in-flight
+finalization and then takes the idempotent path through the committed result
+ref, instead of racing it on the lease's private index.
+
+An explicit root continuation also restores a root tool result that was lost
+after a stronger child fact committed: a fully accepted `spawn_agent`
+assignment, or an `apply_agent_changes` intent with its exact
+`WorkspaceDeltaApplied` fact. Restoration contacts no host, starts no task, and
+never reapplies a delta; a prepared-only, conflicting, rolled-back,
+indeterminate, or mismatched effect still requires explicit reconciliation.
+
 ## Recovery
 
 Opening is passive. It reconstructs the session, graph, and recovery report

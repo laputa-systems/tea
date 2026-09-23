@@ -1,4 +1,4 @@
-/target/
+target/
 /.runtime/
 .DS_Store
 
@@ -13,3 +13,4 @@ target/ptytest-failures/
 __pycache__/
 
 .env
+

@@ -6,7 +6,7 @@ prompt. Pending and blocked checks are never passes.
 ## Baseline
 
 - Starting commit: `6e157cd181646e4a1adfa771c72687235a112955`; clean worktree.
-- Pinned toolchain: `nightly-2026-09-15`, rustc
+- Pinned toolchain: the single `rust-toolchain.toml` channel, rustc
   `1.100.0-nightly (574ff7d98 2026-09-14)`.
 - Native macOS AArch64; Docker reports Linux AArch64 available.
 - Baseline `cargo test --workspace --locked`: PASS (2026-09-21);
@@ -181,27 +181,27 @@ alternate screen, geometry, history/search/pickers/tool detail/status.
 
 | Area | Required evidence | Current result |
 | --- | --- | --- |
-| Execution | One run/lane, same engine across modes/children, source ordering, schema/grants, cancellation boundaries, no late updates, joins | Focused recovery, arbitrary committed tool subsets, and scripted Rust example PASS; final integration pending |
-| Inputs/goals | Durable queue/membership/withdrawal, own completion, headless pause/continue, terminal errors | Queue/control tests 6/6 and completion tests 3/3 PASS; final integration pending |
-| Storage | Shared memory/file atomic batches, missing/corrupt objects, every partial write/publication, poisoned writer, repair, second writer | `tea-session --lib`: 74 PASS, 5 explicitly ignored resource fixtures run separately |
-| Restart | Subprocess kill/reopen, zero calls on open/idle, explicit safe continuation, no repeated committed effects, unsafe gate, no child restart | Two genuine SIGKILL tests PASS; focused recovery tests PASS; final integration pending |
-| Context | Raw preservation, compaction success/failure, interruption pairing, reproducible requests, stable prefixes | Durable compaction/reopen and source-order context regressions PASS; final integration pending |
-| Fork/state/evolution | Valid/invalid anchors, historical selection/state, no inherited execution, bounded namespace/state compatibility, author/evaluate/activate/rollback/NoChange, stale generation, helper | Fork/state tests PASS; exact generation guard and ABI3-only migration in progress |
-| Observation | Snapshot race, preview coalescing/loss/fences, committed completion, slow/reentrant/throwing observers, explicit lag/resnapshot, bounded memory | Bounded preview/subscription and stream tests PASS; non-vetoing callback refinement in progress |
-| Terminal | Existing PTY oracle, queue/recovery/fork, stable scrollback, modal/resize, disabled identity, control safety, busy switch | Baseline FAIL described above; changed queue/recovery/fork tests in progress |
-| Children | Deterministic 16 concurrency, ceilings/provenance, worktrees, explicit report/apply, conflict/rollback/indeterminate, no restart | Focused 16-child, atomic spawn/report, interruption and non-resurrection tests PASS; final integration pending |
-| Workspace | `cargo test --workspace --locked` | Baseline PASS; final pending |
-| PTY | `cargo test -p tea-agent --features pty-harness --test pty_streaming --locked` | Baseline FAIL; final pending |
-| Fixtures | `./crates/tea-core/fixtures/run.sh` | PASS: 30/30; rerun after final integration |
-| Boundaries | `python3 scripts/check-crate-graph.py`, optional features including Zen, prohibited deps, `git diff --check` | Graph, provider-free entrypoint audit, diff check PASS; final feature integration pending |
-| Platform/resources | Native macOS and Linux AArch64 Docker; identical binary/startup/idle/replay/large-history fixtures before/after | Pending |
-| Live guard | Exact official free identity/API/endpoint/input/output/cache charges/terms, injected restricted factory, offline no-network rejects, redirect/fallback refusal | Python audit tests 5/5 and Zen redirect tests PASS; Rust feature integration pending; zero inference attempts |
-| Live coding | Synthetic read/edit/test actual files/exit oracle and deterministic counterpart | Pending |
-| Live invocation | Headless Rust plus separate one-shot CLI, same engine and own completion, deterministic counterparts | Pending |
-| Live recovery | Controlled interruption, passive reopen, explicit safe continuation, committed-state oracle, deterministic counterpart | Pending |
-| Live compaction | Forced bounded synthetic history, executable critical-fact oracle, deterministic counterpart | Pending |
-| Live evolution | Synthetic Luau validate/activate/use/rollback with real source/state checks, deterministic counterpart | Pending |
-| Live children | One/two isolated assignments, explicit reports/parent apply, deterministic counterpart | Pending |
+| Execution | One run/lane, same engine across modes/children, source ordering, schema/grants, cancellation boundaries, no late updates, joins | PASS: workspace suite; cooperative-cancellation fork close/join (`closing_the_supervisor_cancels_and_joins_a_live_fork_lane`) |
+| Inputs/goals | Durable queue/membership/withdrawal, own completion, headless pause/continue, terminal errors | PASS: queue/control/completion tests; TUI user rows projected on dispatch, idle re-drive holds no task, live-turn queueing not gated as recovery |
+| Storage | Shared memory/file atomic batches, missing/corrupt objects, every partial write/publication, poisoned writer, repair, second writer | PASS: `tea-session --lib` 79 (74 + 5 ignored resource fixtures run separately); host header check uses `SESSION_HEADER_KIND` |
+| Restart | Subprocess kill/reopen, zero calls on open/idle, explicit safe continuation, no repeated committed effects, unsafe gate, no child restart | PASS: SIGKILL tests; explicit continuation restores committed spawn/apply results without host effects (`child_outcome_recovery_tests`) |
+| Context | Raw preservation, compaction success/failure, interruption pairing, reproducible requests, stable prefixes | PASS: compaction encoder matches durable reconstruction (host `failure`, unreported usage); ungated provider strategy fails closed |
+| Fork/state/evolution | Valid/invalid anchors, historical selection/state, no inherited execution, bounded namespace/state compatibility, author/evaluate/activate/rollback/NoChange, stale generation, helper | PASS: generation guard (revision-only writer removed); ABI v3-only bundles; committed state equals reopen decode; authoring ceiling admits seeded grants; scripted evolution activate/use/rollback/reopen |
+| Observation | Snapshot race, preview coalescing/loss/fences, committed completion, slow/reentrant/throwing/dropped observers, explicit lag/resnapshot, bounded memory | PASS: non-vetoing observers; fenced tool previews keep a content-free activity remnant |
+| Terminal | Existing PTY oracle, queue/recovery/fork, stable scrollback, modal/resize, disabled identity, control safety, busy switch | PASS: PTY 11/11 (run 3x); shared PTY lock no longer poisons later scenarios |
+| Children | Deterministic 16 concurrency, ceilings/provenance, worktrees, explicit report/apply, conflict/rollback/indeterminate, no restart | PASS: 16-child test; per-lease Git serialization (`concurrent_finalizations_of_one_lease_serialize_to_one_delta`); one-shot cleanup 12/12 (was flaky) |
+| Workspace | `cargo test --workspace --locked` | PASS: 731 passed, 0 failed, 7 ignored |
+| PTY | `cargo test -p tea-agent --features pty-harness --test pty_streaming --locked` | PASS: 11/11 |
+| Fixtures | `./crates/tea-core/fixtures/run.sh` | PASS: 29/29 (`awaited-agent-end-observer` fixture deleted with its superseded API) |
+| Boundaries | `python3 scripts/check-crate-graph.py`, optional features including Zen, prohibited deps, `git diff --check` | PASS: crate graph; `cargo check --all-targets` for all feature sets, zero warnings; `tea-providers --all-features` 115; `live-verification` lib 197; entrypoint audit; toolchain pin; no new dependencies |
+| Platform/resources | Native macOS and Linux AArch64 Docker; identical binary/startup/idle/replay/large-history fixtures before/after | PASS: `make test-linux` exit 0 (workspace + PTY 11/11). Release baseline -> current: binary 8,356,288 -> 8,885,648 B (+6.3%); idle RSS 8,432 -> 8,480 KiB; `--version` 8.5 -> 7.8 ms. Long-history fixtures: JSONL +5-7%, replay 114 -> 129 ms (10k), 393 -> 446 ms (27k), single runs |
+| Live guard | Exact official free identity/API/endpoint/input/output/cache charges/terms, injected restricted factory, offline no-network rejects, redirect/fallback refusal | PASS offline: Python audit 5/5, Zen redirect tests, report without `--live` reads no credential; zero inference attempts |
+| Live coding | Synthetic read/edit/test actual files/exit oracle and deterministic counterpart | BLOCKED: no authorized credential; counterpart PASSED |
+| Live invocation | Headless Rust plus separate one-shot CLI, same engine and own completion, deterministic counterparts | BLOCKED: no authorized credential; counterparts PASSED |
+| Live recovery | Controlled interruption, passive reopen, explicit safe continuation, committed-state oracle, deterministic counterpart | BLOCKED: no authorized credential; counterpart PASSED |
+| Live compaction | Forced bounded synthetic history, executable critical-fact oracle, deterministic counterpart | BLOCKED: no authorized credential; counterpart and scripted adapter PASSED |
+| Live evolution | Synthetic Luau validate/activate/use/rollback with real source/state checks, deterministic counterpart | BLOCKED: no authorized credential; scripted adapter PASSED (adds capability-free session plugin; pinned `todo` is not editable) |
+| Live children | One/two isolated assignments, explicit reports/parent apply, deterministic counterpart | BLOCKED: no authorized credential; counterpart and scripted adapter PASSED |
 
 All verification inference (children, compaction, evaluations and retries too)
 must use one deliberately selected verified-free OpenCode Zen route. Prefer

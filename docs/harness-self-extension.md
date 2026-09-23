@@ -33,3 +33,12 @@ builtin's Luau source—for example, `read/handler.luau` formatting or schema—
 a new revision becomes visible only to a later epoch. Capability bindings remain
 host-owned immutable snapshot data: a changed `read` builtin cannot obtain
 workspace mutation or process authority simply by naming another capability.
+
+Candidate validation checks every session plugin's requested capabilities
+against the resolver's frozen capability ceiling, which is part of the
+persisted catalog identity. A host session that exposes `tea_harness` therefore
+freezes its ceiling to exactly the capabilities its seed grants the coding
+builtins (`authoring_capability_ceiling` in the terminal host); an `off`
+session keeps an empty ceiling. Operator-pinned global plugins such as `todo`,
+`goal`, and `web` are never editable by a candidate, while a new
+capability-free session plugin may be added through `registry_operations`.

@@ -309,7 +309,7 @@ impl JsonlSession {
         durability: DurabilityMode,
         clock: Arc<dyn SessionClock>,
     ) -> Result<Self, SessionError> {
-        if header.kind != "tea-session"
+        if header.kind != crate::SESSION_HEADER_KIND
             || header.format != SESSION_FORMAT_IDENTITY
             || header.version != SESSION_FORMAT_VERSION
         {
@@ -809,7 +809,7 @@ fn reject_unsupported_format(file: &mut File, path: &Path) -> Result<(), Session
         return Ok(());
     };
     let observed_version = fields.get("version").and_then(JsonValue::as_u64);
-    if kind != "tea-session"
+    if kind != crate::SESSION_HEADER_KIND
         || fields.get("format").and_then(JsonValue::as_str) != Some(SESSION_FORMAT_IDENTITY)
         || observed_version.is_some_and(|version| version != u64::from(SESSION_FORMAT_VERSION))
     {
@@ -1586,7 +1586,7 @@ fn io(path: &Path, error: std::io::Error) -> SessionError {
 
 fn encode_unsigned_header(header: &SessionHeader) -> JsonValue {
     JsonValue::object([
-        ("kind", JsonValue::String("tea-session".into())),
+        ("kind", JsonValue::String(crate::SESSION_HEADER_KIND.into())),
         ("format", JsonValue::String(SESSION_FORMAT_IDENTITY.into())),
         ("version", JsonValue::from(u64::from(header.version))),
         ("session_id", string_value(&header.session_id)),
@@ -1638,7 +1638,7 @@ fn decode_header(value: &JsonValue) -> Result<SessionHeader, String> {
         ],
         "header",
     )?;
-    if required_string(object, "kind")? != "tea-session" {
+    if required_string(object, "kind")? != crate::SESSION_HEADER_KIND {
         return Err("header kind must be `tea-session`".into());
     }
     if required_string(object, "format")? != SESSION_FORMAT_IDENTITY {
@@ -1652,7 +1652,7 @@ fn decode_header(value: &JsonValue) -> Result<SessionHeader, String> {
     }
     let digest = parse_digest(required_string(object, "digest")?)?;
     let header = SessionHeader {
-        kind: "tea-session".into(),
+        kind: crate::SESSION_HEADER_KIND.into(),
         format: SESSION_FORMAT_IDENTITY.into(),
         version: SESSION_FORMAT_VERSION,
         session_id: parse_id!(SessionId, required_string(object, "session_id")?),

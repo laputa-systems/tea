@@ -91,7 +91,7 @@ fn run() -> Result<i32, String> {
             detail: Some("pass --live after confirming catalog evidence and data-use terms".into()),
         })
         .collect::<Vec<_>>();
-    let mut blocker = None;
+    let blocker;
     let mut budget = JsonValue::Null;
     if !args.live {
         blocker = Some("pass --live only after reviewing the current official Zen catalog evidence".to_owned());
@@ -311,7 +311,8 @@ fn verification_cases() -> [VerificationCase; 6] {
 }
 
 fn run_counterparts(cases: &[VerificationCase]) -> Vec<CounterpartOutcome> {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = manifest_dir
         .parent()
         .and_then(Path::parent)
         .expect("tea-agent source has a workspace root");
@@ -789,7 +790,13 @@ fn live_prompt(case_id: &str) -> &'static str {
 }
 
 fn evolution_activation_prompt() -> &'static str {
-    "This is a disposable public immutable-harness verification. Use tea_harness to inspect the active revision and read plugins/todo/prompts.luau. Apply one minimal valid upsert of that same source that preserves the todo extension's behavior and state_version while adding the exact harmless comment `-- live verification evolution marker`. Supply the required bounded hypothesis and an empty registry_operations array. The apply call must be the only tool call in its assistant batch. Do not access paths outside the immutable harness source."
+    concat!(
+        "This is a disposable public immutable-harness verification. Use tea_harness status to find the active revision. ",
+        "Then apply one candidate on that base revision that adds a new capability-free session plugin with exactly two upserted files and a registry_operations entry {\"operation\":\"add\",\"plugin_id\":\"evolution_marker\"}. ",
+        "File plugins/evolution_marker/manifest.json must contain exactly {\"schema_version\":1,\"abi_version\":3,\"id\":\"evolution_marker\",\"entrypoint\":\"init.luau\",\"modules\":[\"init.luau\"],\"requested_capabilities\":[]}. ",
+        "File plugins/evolution_marker/init.luau must contain exactly return { prompt_sections = {{ id = \"evolution_marker\", content = \"live verification evolution marker\" }} }. ",
+        "Supply the required bounded hypothesis. The apply call must be the only tool call in its assistant batch. Do not access paths outside the immutable harness source."
+    )
 }
 
 fn evolution_use_prompt() -> &'static str {

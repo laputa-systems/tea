@@ -29,9 +29,17 @@ supervisor commits that compaction step, provider intent, and immutable exact
 request material together. Only a `Completed` settlement for that exact step
 may be linked to the `CompactionEntry` that stores the validated canonical
 replacement. A provider-summary strategy without this admission cannot commit
-a checkpoint. On passive reopen, `runtime::context` reconstructs future model
-context from the replacement while the original covered entries remain in the
-append-only session history.
+a checkpoint; the durable effect gate fails that operation closed. On passive
+reopen, `runtime::context` reconstructs future model context from the
+replacement while the original covered entries remain in the append-only
+session history.
+
+The gate also requires the proposed source to equal the effective durable
+context, so `encode_compaction_replacement` encodes a live message exactly as
+its durable reconstruction would. It therefore omits a tool result's host
+`failure` classification, which is neither model-visible nor stored in
+`ToolResultEntry`, and encodes a tool usage with no reported field as `null`.
+An ordinary failed tool call in the retained suffix does not block compaction.
 
 The durable harness adds those lifecycle records to the session and redacted
 trace. It never stores a prompt or checkpoint in the trace artifact itself.

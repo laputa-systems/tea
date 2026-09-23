@@ -173,6 +173,33 @@ impl PreviewEvent {
         }
     }
 
+    /// Reduce a queued preview superseded by its terminal semantic event.
+    ///
+    /// Tool activity is operation-scoped presentation that the terminal keeps
+    /// until the next attempt starts, and no semantic event repeats it. The
+    /// latest activity therefore survives as a content-free remnant queued
+    /// ahead of the fence; superseded content and assistant text do not.
+    fn retained_after_fence(self) -> Option<Self> {
+        match self {
+            Self::ToolProgress {
+                identity,
+                sequence,
+                tool_name,
+                activity: Some(activity),
+                truncated,
+                ..
+            } => Some(Self::ToolProgress {
+                identity,
+                sequence,
+                tool_name,
+                content: String::new(),
+                activity: Some(activity),
+                truncated,
+            }),
+            Self::ToolProgress { .. } | Self::AssistantText { .. } => None,
+        }
+    }
+
     fn coalesce(self, newer: Self) -> Self {
         match (self, newer) {
             (
@@ -1037,23 +1064,13 @@ impl SubscriberState {
 
     fn enqueue_semantic(&mut self, event: TeaEvent) -> bool {
         if let Some(run) = event.completed_observation_run() {
-            self.events.retain(|queued| {
-                !queued
-                    .preview()
-                    .is_some_and(|preview| &preview.identity().run == run)
-            });
+            self.reduce_fenced_previews(|identity| &identity.run == run);
             self.fenced_previews.retain(|identity| &identity.run != run);
             record_completed_run_fence(&mut self.completed_runs, run.clone());
         }
         let terminal_fences = event.terminal_preview_identities();
         if !terminal_fences.is_empty() {
-            self.events.retain(|queued| {
-                !queued.preview().is_some_and(|preview| {
-                    terminal_fences
-                        .iter()
-                        .any(|identity| identity == preview.identity())
-                })
-            });
+            self.reduce_fenced_previews(|identity| terminal_fences.contains(identity));
             for identity in terminal_fences {
                 record_terminal_preview_fence(&mut self.fenced_previews, identity);
             }
@@ -1067,6 +1084,21 @@ impl SubscriberState {
         }
         self.events.push_back(event);
         true
+    }
+
+    /// Replace each queued preview matched by a new fence with its bounded
+    /// post-fence remnant, preserving queue order and never growing it.
+    fn reduce_fenced_previews(&mut self, fenced: impl Fn(&PreviewIdentity) -> bool) {
+        let events = std::mem::take(&mut self.events);
+        self.events = events
+            .into_iter()
+            .filter_map(|queued| match queued {
+                TeaEvent::Preview(preview) if fenced(preview.identity()) => preview
+                    .retained_after_fence()
+                    .map(TeaEvent::Preview),
+                queued => Some(queued),
+            })
+            .collect();
     }
 }
 
@@ -1357,6 +1389,77 @@ mod observation_tests {
             })
         ));
         hub.publish(assistant_preview(3, "late"));
+        assert_eq!(subscription.try_recv(), Err(TeaEventTryRecvError::Empty));
+    }
+
+    #[test]
+    fn terminal_fences_keep_the_latest_queued_tool_activity_without_its_content() {
+        let hub = EventHub::default();
+        start_run(&hub);
+        let subscription = hub
+            .subscribe_with_snapshot(|| Ok(snapshot()))
+            .expect("subscription opens");
+        let tool_call_id = ToolCallId::new("activity-call").expect("valid fixture call ID");
+        let progress = |sequence: u64, content: &str, activity: Option<&str>| {
+            TeaEvent::Preview(PreviewEvent::ToolProgress {
+                identity: PreviewIdentity::tool(run(), tool_call_id.clone()),
+                sequence: EventSequence(sequence),
+                tool_name: "todo".into(),
+                content: content.into(),
+                activity: activity.map(Into::into),
+                truncated: false,
+            })
+        };
+        hub.publish(progress(1, "partial output", Some("TODO · 1 active")));
+        hub.publish(TeaEvent::Agent {
+            run: run(),
+            event: AgentEvent {
+                run_id: RunId(1),
+                sequence: EventSequence(2),
+                kind: AgentEventKind::ToolExecutionEnd {
+                    tool_call_id: tool_call_id.clone(),
+                    tool_name: "todo".into(),
+                    result: crate::tool::AgentToolResult {
+                        tool_call_id: tool_call_id.clone(),
+                        content: "done".into(),
+                        details: None,
+                        usage: None,
+                        added_tool_names: Vec::new(),
+                        terminate: false,
+                        is_error: false,
+                        failure: None,
+                    },
+                },
+            },
+        });
+        hub.publish(TeaEvent::Agent {
+            run: run(),
+            event: AgentEvent {
+                run_id: RunId(1),
+                sequence: EventSequence(3),
+                kind: AgentEventKind::AgentEnd { messages: Vec::new() },
+            },
+        });
+
+        assert_eq!(
+            subscription.try_recv(),
+            Ok(progress(1, "", Some("TODO · 1 active"))),
+            "operation-scoped activity survives the fence; superseded content does not"
+        );
+        assert!(matches!(
+            subscription.try_recv(),
+            Ok(TeaEvent::Agent {
+                event: AgentEvent { kind: AgentEventKind::ToolExecutionEnd { .. }, .. },
+                ..
+            })
+        ));
+        assert!(matches!(
+            subscription.try_recv(),
+            Ok(TeaEvent::Agent {
+                event: AgentEvent { kind: AgentEventKind::AgentEnd { .. }, .. },
+                ..
+            })
+        ));
         assert_eq!(subscription.try_recv(), Err(TeaEventTryRecvError::Empty));
     }
 

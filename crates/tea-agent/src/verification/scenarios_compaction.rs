@@ -89,6 +89,9 @@ pub fn run_live_compaction_scenario(
     let session_id = snapshot.header().session_id.to_string();
     let closed = smol::block_on(harness.close())
         .map_err(|error| LiveVerificationError::new(error.to_string()));
+    // Closing joins work; only dropping the last handle releases the single
+    // session writer that the passive reopen below must acquire.
+    drop(harness);
     verification?;
     closed?;
 

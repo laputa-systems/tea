@@ -188,13 +188,15 @@ fn provider_strategy_without_request_intent_cannot_commit_a_checkpoint() {
             compaction_fixture_runtime_with_compactor(Arc::new(UngatedProviderStrategyCompactor));
         let original_prompt = "ungated provider strategy source ".repeat(64);
 
-        let operation = runtime
+        // Every durable gate rejection is an integrity fault: it fails closed
+        // rather than silently recording a provider-free checkpoint.
+        let error = runtime
             .run_root_prompt(original_prompt.clone())
             .await
-            .expect("durable operation settles its rejected checkpoint");
+            .expect_err("the missing provider intent rejects the checkpoint");
         assert!(
-            !operation.is_completed(),
-            "the missing provider intent makes the operation fail rather than silently recording a provider-free checkpoint"
+            error.to_string().contains("no admitted request intent"),
+            "{error}"
         );
 
         let snapshot = runtime.snapshot().expect("settled snapshot reads");
