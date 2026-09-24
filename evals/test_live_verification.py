@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import date
 from pathlib import Path
 import unittest
 
@@ -19,16 +20,15 @@ class LiveVerificationEntrypointTests(unittest.TestCase):
         self.assertNotIn("coding", choices)
         self.assertNotIn("full", choices)
 
-    def test_catalog_record_is_exact_and_sanitized(self) -> None:
-        evidence = json.loads((ROOT / "evals" / "live" / "zen-free-catalog-evidence.json").read_text(encoding="utf-8"))
-        self.assertEqual(evidence["provider"], "opencode-zen")
-        self.assertEqual(evidence["model"], "muse-spark-1.3-contributor-free")
-        self.assertEqual(evidence["endpoint"], "https://opencode.ai/zen/v1/responses")
-        self.assertEqual(
-            evidence["pricing_per_million"],
-            {"cached_read": "Free", "cached_write": None, "input": "Free", "output": "Free"},
-        )
-        self.assertEqual(evidence["checked_on"], "2026-09-22")
+    def test_model_record_is_exact_and_sanitized(self) -> None:
+        evidence = json.loads((ROOT / "evals" / "live" / "codex-luna-model-evidence.json").read_text(encoding="utf-8"))
+        self.assertEqual(evidence["provider"], "codex")
+        self.assertEqual(evidence["model"], "gpt-5.6-luna")
+        self.assertEqual(evidence["endpoint"], "https://chatgpt.com/backend-api/codex/responses")
+        self.assertEqual(evidence["reasoning_effort"], "low")
+        self.assertEqual(evidence["model_source"], "https://learn.chatgpt.com/docs/models")
+        self.assertNotIn("credential", evidence)
+        self.assertEqual(date.fromisoformat(evidence["checked_on"]).isoformat(), evidence["checked_on"])
         self.assertTrue(evidence["synthetic_or_public_fixture_only"])
 
     def test_retired_shell_runner_cannot_start_cargo(self) -> None:

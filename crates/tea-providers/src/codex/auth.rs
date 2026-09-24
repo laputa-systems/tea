@@ -50,10 +50,10 @@ impl fmt::Debug for CodexAuthSnapshot {
     }
 }
 
-/// Safe terminal status projection of the current explicit credential record.
+/// Safe terminal status projection of the selected credential source.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CodexAuthStatus {
-    /// Whether an explicit Tea-owned credential record exists.
+    /// Whether the selected credential source has a record.
     pub logged_in: bool,
     /// Safely abbreviated account identity when logged in.
     pub account_id: Option<String>,
@@ -77,7 +77,7 @@ struct AuthInner {
     refresh_finished: Condvar,
 }
 
-/// Tea-owned source of fresh Codex request credentials.
+/// Host-selected source of fresh Codex request credentials.
 ///
 /// The manager never discovers a path itself; its caller supplies one explicit
 /// store. A provider receives this shared manager and cannot read environment
@@ -153,6 +153,9 @@ impl CodexAuthManager {
         grant: TokenGrant,
         cancellation: &CancellationToken,
     ) -> Result<CodexAuthSnapshot, AuthError> {
+        if !self.inner.store.can_refresh() {
+            return Err(AuthError::Credential(CredentialError::ReadOnly));
+        }
         if cancellation.is_cancelled() {
             return Err(AuthError::Cancelled);
         }
@@ -196,12 +199,14 @@ impl CodexAuthManager {
 
     /// Remove Tea-owned credentials even if remote revocation fails.
     pub fn logout(&self, cancellation: &CancellationToken) -> Result<(), AuthError> {
+        if !self.inner.store.can_refresh() {
+            return Err(AuthError::Credential(CredentialError::ReadOnly));
+        }
         let credential = self.inner.store.load().map_err(AuthError::Credential)?;
         if let Some(credential) = credential {
-            let _ = self
-                .inner
-                .oauth
-                .revoke(credential.refresh_token(), cancellation);
+            if let Some(refresh_token) = credential.refresh_token() {
+                let _ = self.inner.oauth.revoke(refresh_token, cancellation);
+            }
         }
         self.inner.store.remove().map_err(AuthError::Credential)?;
         let mut state = self.inner.refresh.lock().map_err(|_| AuthError::Internal)?;
@@ -233,6 +238,12 @@ impl CodexAuthManager {
             .map_err(AuthError::Credential)?
             .ok_or(AuthError::LoginRequired)?;
         let now = self.inner.clock.now_unix_ms()?;
+        if !self.inner.store.can_refresh() {
+            if !force && credential_is_fresh(&credential, now) {
+                return Ok(snapshot(&credential));
+            }
+            return Err(AuthError::ClientTokenExpired);
+        }
         if !force && credential_is_fresh(&credential, now) {
             return Ok(snapshot(&credential));
         }
@@ -318,7 +329,8 @@ impl CodexAuthManager {
             return Ok(snapshot(&current));
         }
 
-        let grant = self.refresh_with_transient_retry(current.refresh_token(), cancellation)?;
+        let refresh_token = current.refresh_token().ok_or(AuthError::MissingRefreshToken)?;
+        let grant = self.refresh_with_transient_retry(refresh_token, cancellation)?;
         let expires_at = expiry_from(now, grant.expires_in_seconds)?;
         let account_id = account_id_from_grant_or_existing(&grant, current.account_id())?;
         let replacement = current
@@ -447,8 +459,10 @@ fn wait_with_cancellation(
 /// Authentication-manager failure without credential values.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AuthError {
-    /// No Tea-owned current credential is available.
+    /// No current credential is available from the selected source.
     LoginRequired,
+    /// The external Codex client must renew its access token.
+    ClientTokenExpired,
     /// A refresh token was permanently invalidated, reused, expired, or revoked.
     PermanentRefresh,
     /// Interactive token exchange omitted the required rotating refresh token.
@@ -475,6 +489,9 @@ impl fmt::Display for AuthError {
             Self::LoginRequired | Self::PermanentRefresh => {
                 formatter.write_str("Codex login is required; run `tea auth login codex`")
             }
+            Self::ClientTokenExpired => formatter.write_str(
+                "installed Codex access token expired or was rejected; renew it with `codex login`",
+            ),
             Self::MissingRefreshToken => {
                 formatter.write_str("Codex OAuth response omitted a refresh token")
             }
@@ -624,7 +641,7 @@ mod tests {
             .expect("read committed replacement")
             .expect("replacement should exist");
         assert_eq!(persisted.access_token().expose(), "new-access");
-        assert_eq!(persisted.refresh_token().expose(), "old-refresh");
+        assert_eq!(persisted.refresh_token().expect("Tea refresh token").expose(), "old-refresh");
         assert_eq!(oauth.calls.load(Ordering::SeqCst), 1);
     }
 
@@ -664,6 +681,7 @@ mod tests {
                 .expect("read coordinated replacement")
                 .expect("replacement exists")
                 .refresh_token()
+                .expect("Tea refresh token")
                 .expose(),
             "new-refresh",
         );

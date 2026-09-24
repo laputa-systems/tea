@@ -23,11 +23,10 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m evals.quality fast --out /tmp/pi-quality-fa
 
 The former coding and full commands are retired: their Rust adapter no longer
 exists, and an arbitrary model identifier cannot satisfy the repository's
-free-only verification contract. The only proposed live boundary is the
-feature-gated Rust guard described in
-[`docs/verification.md`](../docs/verification.md). Its explicit public-fixture
-headless transport exercise remains semantically `BLOCKED` until dedicated
-drivers prove every live-case oracle.
+guarded Codex verification contract. The live boundary is the feature-gated
+Rust guard described in [`docs/verification.md`](../docs/verification.md).
+It runs six synthetic scenarios with durable oracles and records each live
+result separately from its offline counterpart.
 
 `controller.py` and `baselines.example.json` remain a generic, caller-supplied
 multi-baseline controller contract. The checked-in provider-specific manifests

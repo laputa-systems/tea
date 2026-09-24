@@ -1,15 +1,13 @@
-//! Guarded OpenCode Zen infrastructure for the repository's optional live verification suite.
+//! Guarded Codex subscription infrastructure for the optional live verification suite.
 //!
 //! This module is compiled only with `live-verification`. It does not update the provider
-//! catalog, select a model for ordinary Tea sessions, or provide a pricing abstraction. Its one
-//! purpose is to keep an explicitly authorized verification run on the exact checked Zen route
-//! while reserving the task-wide request budget before provider transport begins.
+//! catalog or select a model for ordinary Tea sessions. It pins the requested Codex model and
+//! reasoning effort while recording each request before provider transport.
 
 use std::collections::VecDeque;
 use std::fmt;
 use std::fs;
 use std::io::Write;
-use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -17,11 +15,14 @@ use tea_core::scheduler::{
     CancellationToken, ModelEventFuture, ModelEventStream, ModelFuture, ModelProvider,
     ModelRequest, ModelStreamEvent,
 };
-use tea_core::runtime::SessionSupervisor;
-use tea_core::state::ModelDescriptor;
+use tea_core::runtime::{DurableOperation, SessionSupervisor};
+use tea_core::state::{ModelDescriptor, ThinkingLevel};
 use tea_protocol::JsonValue;
 use tea_providers::{ConfiguredProvider, RetryPolicy};
-use tea_providers::opencode_zen::{OpencodeZenConfig, OpencodeZenProvider};
+use tea_providers::codex::{
+    CodexAuthManager, CodexClientCredentialStore, CodexConfig, CodexProvider, CredentialStore,
+    FileCredentialStore,
+};
 use tea_session::SessionEntry;
 
 pub(crate) mod scenarios_compaction;
@@ -38,89 +39,62 @@ pub use scenarios_evolution::{
 };
 
 /// The sole provider identifier accepted by live verification.
-pub const ZEN_PROVIDER_ID: &str = "opencode-zen";
-/// The current deliberately selected free Zen model identifier.
-pub const ZEN_FREE_MODEL_ID: &str = "muse-spark-1.3-contributor-free";
-/// The sole Zen endpoint accepted by the guarded factory.
-pub const ZEN_RESPONSES_ENDPOINT: &str = "https://opencode.ai/zen/v1/responses";
-/// The official catalog page that must be rechecked before a live invocation.
-pub const ZEN_CATALOG_SOURCE: &str = "https://opencode.ai/docs/zen";
+pub const CODEX_PROVIDER_ID: &str = "codex";
+/// The exact model selected for live verification.
+pub const CODEX_MODEL_ID: &str = "gpt-5.6-luna";
+/// The fixed ChatGPT subscription endpoint owned by the Codex adapter.
+pub const CODEX_RESPONSES_ENDPOINT: &str = "https://chatgpt.com/backend-api/codex/responses";
+/// Official Codex model documentation used for this selection.
+pub const CODEX_MODEL_SOURCE: &str = "https://learn.chatgpt.com/docs/models";
+/// The only reasoning effort admitted by the live suite.
+pub const CODEX_REASONING_EFFORT: ThinkingLevel = ThinkingLevel::Low;
 
-const EVIDENCE_SCHEMA: &str = "tea-free-zen-catalog-evidence/v1";
-const LEDGER_SCHEMA: &str = "tea-live-verification-ledger/v1";
-const MAX_ATTEMPTS: u64 = 40;
-const MAX_REQUESTED_OUTPUT_TOKENS: u64 = 100_000;
-const MAX_WALL_TIME: Duration = Duration::from_secs(30 * 60);
-const MAX_CONCURRENT_REQUESTS: u64 = 2;
+const EVIDENCE_SCHEMA: &str = "tea-codex-luna-model-evidence/v1";
+const LEDGER_SCHEMA: &str = "tea-codex-live-verification-ledger/v2";
 
-/// A checked official Zen catalog record accepted by the guarded factory.
-///
-/// The source document changes independently of this repository. Operators must refresh this
-/// record from the official page immediately before live verification; a model-name suffix or a
-/// free boolean does not satisfy this contract.
+/// A checked official model record accepted by the guarded factory.
+/// Availability for a specific Tea originator remains a live transport question.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct FreeZenCatalogEvidence {
+pub struct CodexModelEvidence {
     checked_on: String,
-    data_use_source: String,
-    data_use_summary: String,
 }
 
-impl FreeZenCatalogEvidence {
-    /// Read and strictly validate a sanitized official catalog record.
+impl CodexModelEvidence {
+    /// Read and strictly validate a sanitized official model record.
     pub fn read(path: &Path) -> Result<Self, LiveVerificationError> {
         let source = fs::read_to_string(path).map_err(|error| {
             LiveVerificationError::new(format!(
-                "cannot read live-verification catalog evidence {}: {error}",
+                "cannot read live-verification model evidence {}: {error}",
                 path.display()
             ))
         })?;
         let value = JsonValue::parse(&source).map_err(|error| {
             LiveVerificationError::new(format!(
-                "live-verification catalog evidence is not valid JSON: {error}"
+                "live-verification model evidence is not valid JSON: {error}"
             ))
         })?;
         Self::from_json(&value)
     }
 
-    /// Validate a parsed sanitized official catalog record.
+    /// Validate a parsed sanitized official model record.
     pub fn from_json(value: &JsonValue) -> Result<Self, LiveVerificationError> {
-        let record = object(value, "catalog evidence")?;
-        required_string(record, "schema_version", "catalog evidence")
+        let record = object(value, "model evidence")?;
+        required_string(record, "schema_version", "model evidence")
             .and_then(|schema| require_exact(schema, EVIDENCE_SCHEMA, "schema_version"))?;
-        required_string(record, "catalog_source", "catalog evidence")
-            .and_then(|source| require_exact(source, ZEN_CATALOG_SOURCE, "catalog_source"))?;
-        required_string(record, "provider", "catalog evidence")
-            .and_then(|provider| require_exact(provider, ZEN_PROVIDER_ID, "provider"))?;
-        required_string(record, "model", "catalog evidence")
-            .and_then(|model| require_exact(model, ZEN_FREE_MODEL_ID, "model"))?;
-        required_string(record, "endpoint", "catalog evidence")
-            .and_then(|endpoint| require_exact(endpoint, ZEN_RESPONSES_ENDPOINT, "endpoint"))?;
-        let pricing = object(
-            record
-                .get("pricing_per_million")
-                .ok_or_else(|| LiveVerificationError::new("catalog evidence omits pricing_per_million"))?,
-            "pricing_per_million",
-        )?;
-        for field in ["input", "output", "cached_read"] {
-            required_string(pricing, field, "pricing_per_million")
-                .and_then(|charge| require_exact(charge, "Free", field))?;
-        }
-        if !pricing.get("cached_write").is_some_and(JsonValue::is_null) {
-            return Err(LiveVerificationError::new(
-                "catalog evidence must record cached_write as unavailable for the selected model",
-            ));
-        }
-        let checked_on = required_string(record, "checked_on", "catalog evidence")?;
+        required_string(record, "model_source", "model evidence")
+            .and_then(|source| require_exact(source, CODEX_MODEL_SOURCE, "model_source"))?;
+        required_string(record, "provider", "model evidence")
+            .and_then(|provider| require_exact(provider, CODEX_PROVIDER_ID, "provider"))?;
+        required_string(record, "model", "model evidence")
+            .and_then(|model| require_exact(model, CODEX_MODEL_ID, "model"))?;
+        required_string(record, "endpoint", "model evidence")
+            .and_then(|endpoint| require_exact(endpoint, CODEX_RESPONSES_ENDPOINT, "endpoint"))?;
+        required_string(record, "reasoning_effort", "model evidence")
+            .and_then(|effort| require_exact(effort, "low", "reasoning_effort"))?;
+        let checked_on = required_string(record, "checked_on", "model evidence")?;
         if !is_iso_date(checked_on) {
             return Err(LiveVerificationError::new(
-                "catalog evidence checked_on must use YYYY-MM-DD",
-            ));
-        }
-        let data_use_source = required_string(record, "data_use_source", "catalog evidence")?;
-        let data_use_summary = required_string(record, "data_use_summary", "catalog evidence")?;
-        if data_use_source.trim().is_empty() || data_use_summary.trim().is_empty() {
-            return Err(LiveVerificationError::new(
-                "catalog evidence must record the selected route's data-use terms",
+                "model evidence checked_on must use YYYY-MM-DD",
             ));
         }
         if record
@@ -129,36 +103,24 @@ impl FreeZenCatalogEvidence {
             != Some(true)
         {
             return Err(LiveVerificationError::new(
-                "catalog evidence must acknowledge synthetic-or-public-fixture-only live input",
+                "model evidence must acknowledge synthetic-or-public-fixture-only live input",
             ));
         }
         Ok(Self {
             checked_on: checked_on.to_owned(),
-            data_use_source: data_use_source.to_owned(),
-            data_use_summary: data_use_summary.to_owned(),
         })
     }
 
-    /// Return the date on which the official catalog was checked.
+    /// Return the UTC date on which the official model record was checked.
     pub fn checked_on(&self) -> &str {
         &self.checked_on
-    }
-
-    /// Return the official source for the selected route's data-use terms.
-    pub fn data_use_source(&self) -> &str {
-        &self.data_use_source
-    }
-
-    /// Return the sanitized data-use limitation recorded for the selected route.
-    pub fn data_use_summary(&self) -> &str {
-        &self.data_use_summary
     }
 
     fn require_current_utc_date(&self) -> Result<(), LiveVerificationError> {
         let current = current_utc_date()?;
         if self.checked_on != current {
             return Err(LiveVerificationError::new(format!(
-                "live verification catalog evidence is stale (checked_on={}, current_utc_date={current}); refresh the official record before transport",
+                "live verification model evidence is stale (checked_on={}, current_utc_date={current}); refresh the official record before transport",
                 self.checked_on,
             )));
         }
@@ -200,32 +162,34 @@ pub struct LiveAttemptReservation {
     pub sequence: u64,
     /// The model consumer that requested this attempt.
     pub consumer: VerificationConsumer,
-    /// The output-token allowance reserved before transport.
-    pub requested_output_tokens: u64,
+    /// Exact model routed for this attempt, including attempts before an
+    /// explicitly authorized model change within the same aggregate ledger.
+    pub model: String,
 }
 
-/// A content-free aggregate view of the guarded live budget.
+/// A content-free aggregate view of the live request ledger.
+///
+/// The public type retains its original name for existing report callers; it
+/// records attempts and imposes no count, time, or concurrency ceiling.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LiveVerificationBudgetSnapshot {
     /// Attempts reserved by this aggregate live suite.
     pub attempted_requests: u64,
-    /// Requested output tokens reserved by this aggregate live suite.
-    pub requested_output_tokens: u64,
     /// Currently live provider streams.
     pub active_requests: u64,
-    /// Bounded per-attempt records, in reservation order.
+    /// Per-attempt records, in reservation order.
     pub attempts: Vec<LiveAttemptReservation>,
 }
 
-/// A model/provider pair admitted only by [`RestrictedZenFactory`].
+/// A model/provider pair admitted only by [`RestrictedCodexFactory`].
 #[derive(Clone)]
-pub struct RestrictedZenConsumer {
+pub struct RestrictedCodexConsumer {
     model: ModelDescriptor,
     provider: Arc<dyn ModelProvider>,
     role: VerificationConsumer,
 }
 
-impl RestrictedZenConsumer {
+impl RestrictedCodexConsumer {
     /// Borrow the exact provider-neutral model descriptor installed in this consumer.
     pub fn model(&self) -> &ModelDescriptor {
         &self.model
@@ -233,8 +197,8 @@ impl RestrictedZenConsumer {
 
     /// Clone the guarded provider handle.
     ///
-    /// This is a wrapper, not the concrete Zen adapter: every stream still validates the exact
-    /// descriptor and reserves its aggregate live budget before reaching transport.
+    /// This is a wrapper, not the concrete Codex adapter: every stream still validates the exact
+    /// descriptor and records its request in the aggregate ledger before transport.
     pub fn provider(&self) -> Arc<dyn ModelProvider> {
         Arc::clone(&self.provider)
     }
@@ -245,102 +209,101 @@ impl RestrictedZenConsumer {
     }
 }
 
-/// A single-model, single-endpoint provider factory for optional live verification.
+/// A single-model, fixed-effort provider factory for optional live verification.
 ///
 /// The raw configured provider is retained privately. Root, child, compaction, candidate, and
 /// comparison consumers receive only independently labelled wrappers that share this factory's
-/// descriptor, endpoint validation, and persisted budget ledger.
-pub struct RestrictedZenFactory {
+/// descriptor, reasoning guard, and persisted request ledger.
+pub struct RestrictedCodexFactory {
     model: ModelDescriptor,
     provider: Arc<dyn ModelProvider>,
-    budget: Arc<Mutex<LiveBudget>>,
-    evidence: FreeZenCatalogEvidence,
+    budget: Arc<Mutex<LiveRequestLedger>>,
+    evidence: CodexModelEvidence,
     ledger_path: PathBuf,
-    output_tokens_per_request: NonZeroU64,
 }
 
-impl RestrictedZenFactory {
-    /// Construct the restricted factory from an explicitly supplied Zen key and a caller-owned
-    /// ledger outside the source tree.
+impl RestrictedCodexFactory {
+    /// Construct the restricted factory from an explicit Codex credential path and
+    /// a caller-owned ledger outside the source tree.
     ///
-    /// The factory does not read environment variables or credential stores. A terminal/example
-    /// boundary may load an explicitly supplied key using its existing secret mechanism, then
-    /// pass the owned value here. No request is sent during construction.
+    /// The factory never discovers credentials or sends a request during construction.
+    /// Installed Codex client auth is read-only and reloaded at each request.
     pub fn new(
-        api_key: String,
-        evidence: FreeZenCatalogEvidence,
+        credential_path: PathBuf,
+        evidence: CodexModelEvidence,
         ledger_path: PathBuf,
-        output_tokens_per_request: NonZeroU64,
     ) -> Result<Self, LiveVerificationError> {
         evidence.require_current_utc_date()?;
-        if output_tokens_per_request.get() > MAX_REQUESTED_OUTPUT_TOKENS {
-            return Err(LiveVerificationError::new(format!(
-                "per-request output allowance exceeds the {MAX_REQUESTED_OUTPUT_TOKENS}-token live budget"
-            )));
-        }
-        let config = OpencodeZenConfig::try_new(api_key, ZEN_FREE_MODEL_ID)
-            .map_err(|error| LiveVerificationError::new(error.to_string()))?
-            .with_max_tokens(output_tokens_per_request.get())
-            .with_retry_policy(RetryPolicy::new(0, Duration::ZERO, Duration::ZERO));
-        if config.responses_url() != ZEN_RESPONSES_ENDPOINT {
+        let tea_owned = credential_path.file_name().is_some_and(|name| name == "codex.json")
+            && credential_path.parent().and_then(Path::file_name).is_some_and(|name| name == "auth");
+        let client_owned = credential_path.file_name().is_some_and(|name| name == "auth.json")
+            && credential_path.parent().and_then(Path::file_name).is_some_and(|name| name == ".codex");
+        if !credential_path.is_absolute() || !credential_path.is_file() || !(tea_owned || client_owned) {
             return Err(LiveVerificationError::new(
-                "live verification refused a non-canonical OpenCode Zen endpoint before transport",
+                "live verification requires an absolute Codex auth.json or Tea auth/codex.json credential path",
             ));
         }
+        let store: Arc<dyn CredentialStore> = if client_owned {
+            Arc::new(CodexClientCredentialStore::new(credential_path))
+        } else {
+            Arc::new(FileCredentialStore::new(credential_path))
+        };
+        let auth = Arc::new(CodexAuthManager::with_system_clock(store));
+        let config = CodexConfig::try_new(auth, CODEX_MODEL_ID)
+            .map_err(|error| LiveVerificationError::new(error.to_string()))?
+            .with_retry_policy(RetryPolicy::new(0, Duration::ZERO, Duration::ZERO));
         // The normal provider catalog intentionally remains a product-selection
         // surface and may lag this independently reviewed verification candidate.
         // This feature-only factory therefore constructs the exact descriptor
         // itself rather than falling back to a catalog neighbor.
         let model = ModelDescriptor {
-            provider: ZEN_PROVIDER_ID.into(),
-            model: ZEN_FREE_MODEL_ID.into(),
+            provider: CODEX_PROVIDER_ID.into(),
+            model: CODEX_MODEL_ID.into(),
             revision: None,
         };
-        if !is_exact_zen_descriptor(&model) {
+        if !is_exact_codex_descriptor(&model) {
             return Err(LiveVerificationError::new(
-                "live verification could not construct the exact selected Zen descriptor",
+                "live verification could not construct the exact selected Codex descriptor",
             ));
         }
         let configured = ConfiguredProvider {
             descriptor: model.clone(),
-            provider: Arc::new(OpencodeZenProvider::new(config)),
+            provider: Arc::new(CodexProvider::new(config)),
         };
         if configured.descriptor != model {
             return Err(LiveVerificationError::new(
                 "live verification configured a descriptor different from its exact route",
             ));
         }
-        let budget = LiveBudget::open(ledger_path.clone(), &evidence)?;
+        let budget = LiveRequestLedger::open(ledger_path.clone(), &evidence)?;
         Ok(Self {
             model,
             provider: configured.provider,
             budget: Arc::new(Mutex::new(budget)),
             evidence,
             ledger_path,
-            output_tokens_per_request,
         })
     }
 
     /// Create one guarded provider/model consumer for a required live-suite role.
-    pub fn consumer(&self, consumer: VerificationConsumer) -> RestrictedZenConsumer {
-        RestrictedZenConsumer {
+    pub fn consumer(&self, consumer: VerificationConsumer) -> RestrictedCodexConsumer {
+        RestrictedCodexConsumer {
             model: self.model.clone(),
-            provider: Arc::new(BudgetedZenProvider {
+            provider: Arc::new(LedgeredCodexProvider {
                 inner: Arc::clone(&self.provider),
                 expected_model: self.model.clone(),
                 consumer,
-                output_tokens_per_request: self.output_tokens_per_request,
                 budget: Arc::clone(&self.budget),
             }),
             role: consumer,
         }
     }
 
-    /// Return content-free aggregate request-budget evidence.
+    /// Return content-free aggregate request-ledger evidence.
     pub fn budget_snapshot(&self) -> Result<LiveVerificationBudgetSnapshot, LiveVerificationError> {
         self.budget
             .lock()
-            .map_err(|_| LiveVerificationError::new("live-verification budget lock is poisoned"))?
+            .map_err(|_| LiveVerificationError::new("live-verification ledger lock is poisoned"))?
             .snapshot()
     }
 
@@ -349,18 +312,18 @@ impl RestrictedZenFactory {
     /// A separate one-shot executable has its own guarded factory instance, so it persists its
     /// reservation in the same ledger before transport. The parent must reload only while it has
     /// no active stream; that prevents a stale in-memory snapshot from understating the suite
-    /// budget after the child exits.
+    /// request history after the child exits.
     pub fn reload_budget_snapshot(
         &self,
     ) -> Result<LiveVerificationBudgetSnapshot, LiveVerificationError> {
-        let refreshed = LiveBudget::open(self.ledger_path.clone(), &self.evidence)?;
+        let refreshed = LiveRequestLedger::open(self.ledger_path.clone(), &self.evidence)?;
         let mut budget = self
             .budget
             .lock()
-            .map_err(|_| LiveVerificationError::new("live-verification budget lock is poisoned"))?;
+            .map_err(|_| LiveVerificationError::new("live-verification ledger lock is poisoned"))?;
         if budget.active_requests != 0 {
             return Err(LiveVerificationError::new(
-                "live verification cannot reload its persisted budget while a provider stream is active",
+                "live verification cannot reload its persisted ledger while a provider stream is active",
             ));
         }
         *budget = refreshed;
@@ -372,7 +335,7 @@ impl RestrictedZenFactory {
 ///
 /// Both directories must already exist and be caller-owned temporary locations. The prompt must
 /// be disposable synthetic or deliberately public text; this type never accepts an ambient
-/// workspace, terminal configuration, or credential source.
+/// workspace, terminal configuration, or ambient credential source.
 pub struct HeadlessLiveCase<'a> {
     /// Existing caller-owned Tea home for this one case.
     pub tea_home: &'a Path,
@@ -381,9 +344,9 @@ pub struct HeadlessLiveCase<'a> {
     /// Fixed role expected to own the model request.
     pub role: VerificationConsumer,
     /// Restricted consumer constructed by the one suite factory.
-    pub consumer: &'a RestrictedZenConsumer,
+    pub consumer: &'a RestrictedCodexConsumer,
     /// Restricted compaction consumer, required only by the compaction case.
-    pub compactor: Option<&'a RestrictedZenConsumer>,
+    pub compactor: Option<&'a RestrictedCodexConsumer>,
     /// Drive through the terminal's distinct one-shot completion path.
     pub one_shot: bool,
     /// Close and passively reopen the resulting durable session before returning.
@@ -409,8 +372,8 @@ pub struct HeadlessLiveCaseOutcome {
 ///
 /// The terminal composition seam receives only the guarded consumer's descriptor and provider;
 /// it cannot select a fallback model or recover a credential. This is a real provider transport
-/// path when called, so callers must have completed catalog/terms review and must use disposable
-/// input. It retains no model output in the returned evidence.
+/// path when called, so callers must supply an explicit credential and disposable input.
+/// It retains no model output in the returned evidence.
 pub fn run_headless_live_case(
     case: HeadlessLiveCase<'_>,
 ) -> Result<HeadlessLiveCaseOutcome, LiveVerificationError> {
@@ -419,7 +382,7 @@ pub fn run_headless_live_case(
             "live verification headless case received a consumer for a different role",
         ));
     }
-    if !is_exact_zen_descriptor(case.consumer.model()) {
+    if !is_exact_codex_descriptor(case.consumer.model()) {
         return Err(LiveVerificationError::new(
             "live verification headless case refused a non-canonical model descriptor",
         ));
@@ -438,7 +401,7 @@ pub fn run_headless_live_case(
         None => None,
         Some(compactor) => {
             if compactor.role() != VerificationConsumer::Compaction
-                || !is_exact_zen_descriptor(compactor.model())
+                || !is_exact_codex_descriptor(compactor.model())
             {
                 return Err(LiveVerificationError::new(
                     "live verification headless case refused a non-canonical compaction consumer",
@@ -515,7 +478,7 @@ pub struct ControlledRecoveryLiveCase<'a> {
     /// Existing caller-owned disposable workspace for this one case.
     pub workspace: &'a Path,
     /// Restricted root consumer constructed by the one suite factory.
-    pub consumer: &'a RestrictedZenConsumer,
+    pub consumer: &'a RestrictedCodexConsumer,
     /// Synthetic request intentionally interrupted after durable provider admission.
     pub interrupted_prompt: &'a str,
     /// Fresh safe user request driven only after passive reopen.
@@ -548,7 +511,7 @@ pub fn run_controlled_recovery_live_case(
     case: ControlledRecoveryLiveCase<'_>,
 ) -> Result<ControlledRecoveryLiveCaseOutcome, LiveVerificationError> {
     if case.consumer.role() != VerificationConsumer::Root
-        || !is_exact_zen_descriptor(case.consumer.model())
+        || !is_exact_codex_descriptor(case.consumer.model())
     {
         return Err(LiveVerificationError::new(
             "live recovery requires the restricted canonical root consumer",
@@ -582,28 +545,23 @@ pub fn run_controlled_recovery_live_case(
     let drive_harness = Arc::clone(&harness);
     let interrupted_prompt = case.interrupted_prompt.to_owned();
     let drive = smol::spawn(async move { drive_harness.run_root_prompt(interrupted_prompt).await });
-    let first_operation = smol::block_on(async {
-        for _ in 0..4_096 {
-            if has_durable_provider_request(&harness)? {
-                if !harness
-                    .abort_root()
-                    .map_err(|error| LiveVerificationError::new(error.to_string()))?
-                {
-                    return Err(LiveVerificationError::new(
-                        "live recovery lost the active root operation before controlled cancellation",
-                    ));
-                }
-                return drive
-                    .await
-                    .map_err(|error| LiveVerificationError::new(error.to_string()));
+    let interruption_settled = smol::block_on(async {
+        if wait_for_provider_admission(|| has_durable_provider_request(&harness)).await? {
+            if !harness
+                .abort_root()
+                .map_err(|error| LiveVerificationError::new(error.to_string()))?
+            {
+                return Err(LiveVerificationError::new(
+                    "live recovery lost the active root operation before controlled cancellation",
+                ));
             }
-            smol::future::yield_now().await;
+            return interrupted_run_settled(drive.await);
         }
         Err(LiveVerificationError::new(
             "live recovery did not observe durable provider admission before cancellation",
         ))
     })?;
-    if first_operation.is_completed() {
+    if !interruption_settled {
         return Err(LiveVerificationError::new(
             "live recovery operation completed before controlled interruption",
         ));
@@ -618,6 +576,9 @@ pub fn run_controlled_recovery_live_case(
         .session_id
         .to_string();
     smol::block_on(harness.close()).map_err(|error| LiveVerificationError::new(error.to_string()))?;
+    // The passive reopen must acquire a fresh writer after the old supervisor
+    // has closed and released its last session handle.
+    drop(harness);
 
     let reopened = crate::app::reopen_live_verification_harness(
         case.tea_home,
@@ -664,6 +625,16 @@ pub fn run_controlled_recovery_live_case(
     })
 }
 
+fn interrupted_run_settled(
+    result: Result<DurableOperation, tea_core::harness::HarnessError>,
+) -> Result<bool, LiveVerificationError> {
+    match result {
+        Ok(operation) => Ok(!operation.is_completed()),
+        Err(tea_core::harness::HarnessError::Core(tea_core::error::CoreError::Cancelled)) => Ok(true),
+        Err(error) => Err(LiveVerificationError::new(error.to_string())),
+    }
+}
+
 fn has_durable_provider_request(
     harness: &SessionSupervisor<tea_session::JsonlSession>,
 ) -> Result<bool, LiveVerificationError> {
@@ -673,6 +644,21 @@ fn has_durable_provider_request(
         .records()
         .iter()
         .any(|record| matches!(record.record, tea_session::LaneRecord::ProviderRequestStarted(_))))
+}
+
+async fn wait_for_provider_admission(
+    mut observed: impl FnMut() -> Result<bool, LiveVerificationError>,
+) -> Result<bool, LiveVerificationError> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        if observed()? {
+            return Ok(true);
+        }
+        if std::time::Instant::now() >= deadline {
+            return Ok(false);
+        }
+        smol::Timer::after(Duration::from_millis(10)).await;
+    }
 }
 
 fn has_exact_assistant_response(
@@ -712,35 +698,31 @@ impl fmt::Display for LiveVerificationError {
 
 impl std::error::Error for LiveVerificationError {}
 
-struct BudgetedZenProvider {
+struct LedgeredCodexProvider {
     inner: Arc<dyn ModelProvider>,
     expected_model: ModelDescriptor,
     consumer: VerificationConsumer,
-    output_tokens_per_request: NonZeroU64,
-    budget: Arc<Mutex<LiveBudget>>,
+    budget: Arc<Mutex<LiveRequestLedger>>,
 }
 
-enum StreamAdmission {
-    Ready(Result<Box<dyn ModelEventStream>, tea_core::error::SchedulerError>),
-    TimedOut,
-}
-
-impl ModelProvider for BudgetedZenProvider {
+impl ModelProvider for LedgeredCodexProvider {
     fn stream<'a>(
         &'a self,
         request: ModelRequest,
         cancellation: CancellationToken,
     ) -> ModelFuture<'a> {
-        if request.model.as_ref() != Some(&self.expected_model) {
+        if request.model.as_ref() != Some(&self.expected_model)
+            || request.thinking_level != CODEX_REASONING_EFFORT
+        {
             return Box::pin(std::future::ready(Ok(Box::new(RejectedEventStream::new(
-                "live verification refused a paid, unknown, or mismatched provider route before transport",
+                "live verification refused a mismatched Codex model or reasoning effort before transport",
             )) as Box<dyn ModelEventStream>)));
         }
         match self
             .budget
             .lock()
-            .map_err(|_| LiveVerificationError::new("live-verification budget lock is poisoned"))
-            .and_then(|mut budget| budget.reserve(self.consumer, self.output_tokens_per_request))
+            .map_err(|_| LiveVerificationError::new("live-verification ledger lock is poisoned"))
+            .and_then(|mut budget| budget.reserve(self.consumer))
         {
             Ok(()) => {}
             Err(error) => {
@@ -753,94 +735,50 @@ impl ModelProvider for BudgetedZenProvider {
             budget: Some(Arc::clone(&self.budget)),
         };
         let inner = Arc::clone(&self.inner);
-        let budget = Arc::clone(&self.budget);
         Box::pin(async move {
-            let remaining = match budget
-                .lock()
-                .map_err(|_| LiveVerificationError::new("live-verification budget lock is poisoned"))
-                .and_then(|budget| budget.wall_time_remaining())
-            {
-                Ok(Some(remaining)) => remaining,
-                Ok(None) | Err(_) => {
-                    cancellation.cancel();
-                    return Ok(Box::new(BudgetedEventStream {
-                        inner: Box::new(RejectedEventStream::new(
-                            "live verification wall-time budget expired before provider transport",
-                        )),
-                        permit: Some(permit),
-                    }) as Box<dyn ModelEventStream>);
-                }
-            };
-            let timeout_cancellation = cancellation.clone();
-            let admission = smol::future::or(
-                async move { StreamAdmission::Ready(inner.stream(request, cancellation).await) },
-                async move {
-                    smol::Timer::after(remaining).await;
-                    timeout_cancellation.cancel();
-                    StreamAdmission::TimedOut
-                },
-            )
-            .await;
-            match admission {
-                StreamAdmission::Ready(Ok(stream)) => Ok(Box::new(BudgetedEventStream {
+            match inner.stream(request, cancellation).await {
+                Ok(stream) => Ok(Box::new(LedgeredEventStream {
                     inner: stream,
                     permit: Some(permit),
+                    finished: false,
                 }) as Box<dyn ModelEventStream>),
-                StreamAdmission::Ready(Err(error)) => Err(error),
-                StreamAdmission::TimedOut => Ok(Box::new(BudgetedEventStream {
-                    inner: Box::new(RejectedEventStream::new(
-                        "live verification wall-time budget expired during provider transport",
-                    )),
-                    permit: Some(permit),
-                }) as Box<dyn ModelEventStream>),
+                Err(error) => Err(error),
             }
         })
     }
 }
 
-struct BudgetedEventStream {
+struct LedgeredEventStream {
     inner: Box<dyn ModelEventStream>,
     permit: Option<LivePermit>,
+    finished: bool,
 }
 
-impl BudgetedEventStream {
+impl LedgeredEventStream {
     fn release(&mut self) {
         self.permit.take();
     }
 }
 
-impl ModelEventStream for BudgetedEventStream {
+impl ModelEventStream for LedgeredEventStream {
     fn next_event<'a>(&'a mut self, cancellation: CancellationToken) -> ModelEventFuture<'a> {
         Box::pin(async move {
-            let Some(remaining) = self.wall_time_remaining() else {
-                cancellation.cancel();
-                self.release();
-                return Ok(Some(ModelStreamEvent::Error {
-                    message: "live verification wall-time budget expired during provider stream".into(),
-                }));
-            };
-            let timeout_cancellation = cancellation.clone();
-            let event = smol::future::or(
-                self.inner.next_event(cancellation.clone()),
-                async move {
-                    smol::Timer::after(remaining).await;
-                    timeout_cancellation.cancel();
-                    Ok(Some(ModelStreamEvent::Error {
-                        message: "live verification wall-time budget expired during provider stream".into(),
-                    }))
-                },
-            )
-            .await;
+            if self.finished {
+                return Ok(None);
+            }
+            let event = self.inner.next_event(cancellation).await;
             if event.is_err()
                 || matches!(
                     &event,
                     Ok(None)
                         | Ok(Some(ModelStreamEvent::End(_)))
                         | Ok(Some(ModelStreamEvent::Error { .. }))
+                        | Ok(Some(ModelStreamEvent::ContextOverflow { .. }))
                         | Ok(Some(ModelStreamEvent::Aborted { .. }))
                 )
             {
                 self.release();
+                self.finished = true;
             }
             event
         })
@@ -868,28 +806,26 @@ impl ModelEventStream for RejectedEventStream {
     }
 }
 
-struct LiveBudget {
+struct LiveRequestLedger {
     ledger_path: PathBuf,
     checked_on: String,
     started_at_unix_seconds: u64,
     attempted_requests: u64,
-    requested_output_tokens: u64,
     active_requests: u64,
     attempts: Vec<LiveAttemptReservation>,
 }
 
-impl LiveBudget {
-    fn open(path: PathBuf, evidence: &FreeZenCatalogEvidence) -> Result<Self, LiveVerificationError> {
+impl LiveRequestLedger {
+    fn open(path: PathBuf, evidence: &CodexModelEvidence) -> Result<Self, LiveVerificationError> {
         let now = unix_seconds()?;
         match fs::read_to_string(&path) {
-            Ok(source) => Self::from_ledger_json(&path, evidence, &source, now),
+            Ok(source) => Self::from_ledger_json(&path, evidence, &source),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 let budget = Self {
                     ledger_path: path,
                     checked_on: evidence.checked_on.clone(),
                     started_at_unix_seconds: now,
                     attempted_requests: 0,
-                    requested_output_tokens: 0,
                     active_requests: 0,
                     attempts: Vec::new(),
                 };
@@ -897,7 +833,7 @@ impl LiveBudget {
                 Ok(budget)
             }
             Err(error) => Err(LiveVerificationError::new(format!(
-                "cannot read live-verification budget ledger {}: {error}",
+                "cannot read live-verification request ledger {}: {error}",
                 path.display()
             ))),
         }
@@ -905,9 +841,8 @@ impl LiveBudget {
 
     fn from_ledger_json(
         path: &Path,
-        evidence: &FreeZenCatalogEvidence,
+        evidence: &CodexModelEvidence,
         source: &str,
-        now: u64,
     ) -> Result<Self, LiveVerificationError> {
         let value = JsonValue::parse(source)
             .map_err(|error| LiveVerificationError::new(format!("invalid live-verification ledger: {error}")))?;
@@ -915,21 +850,17 @@ impl LiveBudget {
         required_string(record, "schema_version", "live-verification ledger")
             .and_then(|schema| require_exact(schema, LEDGER_SCHEMA, "schema_version"))?;
         required_string(record, "provider", "live-verification ledger")
-            .and_then(|provider| require_exact(provider, ZEN_PROVIDER_ID, "provider"))?;
+            .and_then(|provider| require_exact(provider, CODEX_PROVIDER_ID, "provider"))?;
         required_string(record, "model", "live-verification ledger")
-            .and_then(|model| require_exact(model, ZEN_FREE_MODEL_ID, "model"))?;
+            .and_then(|model| require_exact(model, CODEX_MODEL_ID, "model"))?;
         required_string(record, "endpoint", "live-verification ledger")
-            .and_then(|endpoint| require_exact(endpoint, ZEN_RESPONSES_ENDPOINT, "endpoint"))?;
+            .and_then(|endpoint| require_exact(endpoint, CODEX_RESPONSES_ENDPOINT, "endpoint"))?;
+        required_string(record, "reasoning_effort", "live-verification ledger")
+            .and_then(|effort| require_exact(effort, "low", "reasoning_effort"))?;
         required_string(record, "checked_on", "live-verification ledger")
             .and_then(|checked_on| require_exact(checked_on, evidence.checked_on(), "checked_on"))?;
         let started_at_unix_seconds = required_u64(record, "started_at_unix_seconds", "live-verification ledger")?;
-        if now.saturating_sub(started_at_unix_seconds) >= MAX_WALL_TIME.as_secs() {
-            return Err(LiveVerificationError::new(
-                "live verification wall-time budget is exhausted; start a new task with new evidence rather than resetting this ledger",
-            ));
-        }
         let attempted_requests = required_u64(record, "attempted_requests", "live-verification ledger")?;
-        let requested_output_tokens = required_u64(record, "requested_output_tokens", "live-verification ledger")?;
         let attempts = record
             .get("attempts")
             .and_then(JsonValue::as_array)
@@ -942,65 +873,48 @@ impl LiveBudget {
                 "live-verification ledger attempt count does not match attempt records",
             ));
         }
-        if attempted_requests > MAX_ATTEMPTS || requested_output_tokens > MAX_REQUESTED_OUTPUT_TOKENS {
+        if attempts.iter().enumerate().any(|(index, attempt)| {
+            attempt.sequence != index as u64 + 1
+                || (attempt.model != CODEX_MODEL_ID && attempt.model != "gpt-6-luna")
+        }) {
             return Err(LiveVerificationError::new(
-                "live-verification ledger already exceeds the aggregate task budget",
+                "live-verification ledger has an invalid sequence or unapproved model history",
             ));
+        }
+        let mut current_model_seen = false;
+        for attempt in &attempts {
+            if attempt.model == CODEX_MODEL_ID {
+                current_model_seen = true;
+            } else if current_model_seen {
+                return Err(LiveVerificationError::new(
+                    "live-verification ledger cannot return to the rejected model",
+                ));
+            }
         }
         Ok(Self {
             ledger_path: path.to_owned(),
             checked_on: evidence.checked_on.clone(),
             started_at_unix_seconds,
             attempted_requests,
-            requested_output_tokens,
             active_requests: 0,
             attempts,
         })
     }
 
-    fn reserve(
-        &mut self,
-        consumer: VerificationConsumer,
-        output_tokens: NonZeroU64,
-    ) -> Result<(), LiveVerificationError> {
-        if unix_seconds()?.saturating_sub(self.started_at_unix_seconds) >= MAX_WALL_TIME.as_secs() {
-            return Err(LiveVerificationError::new(
-                "live verification wall-time budget is exhausted before provider transport",
-            ));
-        }
+    fn reserve(&mut self, consumer: VerificationConsumer) -> Result<(), LiveVerificationError> {
         let next_attempt = self.attempted_requests.saturating_add(1);
-        let next_tokens = self
-            .requested_output_tokens
-            .checked_add(output_tokens.get())
-            .ok_or_else(|| LiveVerificationError::new("live-verification output budget overflow"))?;
-        if next_attempt > MAX_ATTEMPTS {
-            return Err(LiveVerificationError::new(
-                "live verification attempt budget is exhausted before provider transport",
-            ));
-        }
-        if next_tokens > MAX_REQUESTED_OUTPUT_TOKENS {
-            return Err(LiveVerificationError::new(
-                "live verification requested-output budget is exhausted before provider transport",
-            ));
-        }
-        if self.active_requests >= MAX_CONCURRENT_REQUESTS {
-            return Err(LiveVerificationError::new(
-                "live verification concurrent-request budget is exhausted before provider transport",
-            ));
+        if next_attempt == self.attempted_requests {
+            return Err(LiveVerificationError::new("live verification attempt counter overflow"));
         }
         self.attempted_requests = next_attempt;
-        self.requested_output_tokens = next_tokens;
         self.active_requests = self.active_requests.saturating_add(1);
         self.attempts.push(LiveAttemptReservation {
             sequence: next_attempt,
             consumer,
-            requested_output_tokens: output_tokens.get(),
+            model: CODEX_MODEL_ID.into(),
         });
         if let Err(error) = self.persist() {
             self.attempted_requests = self.attempted_requests.saturating_sub(1);
-            self.requested_output_tokens = self
-                .requested_output_tokens
-                .saturating_sub(output_tokens.get());
             self.active_requests = self.active_requests.saturating_sub(1);
             self.attempts.pop();
             return Err(error);
@@ -1008,16 +922,9 @@ impl LiveBudget {
         Ok(())
     }
 
-    fn wall_time_remaining(&self) -> Result<Option<Duration>, LiveVerificationError> {
-        let elapsed = unix_seconds()?.saturating_sub(self.started_at_unix_seconds);
-        Ok((elapsed < MAX_WALL_TIME.as_secs())
-            .then(|| Duration::from_secs(MAX_WALL_TIME.as_secs() - elapsed)))
-    }
-
     fn snapshot(&self) -> Result<LiveVerificationBudgetSnapshot, LiveVerificationError> {
         Ok(LiveVerificationBudgetSnapshot {
             attempted_requests: self.attempted_requests,
-            requested_output_tokens: self.requested_output_tokens,
             active_requests: self.active_requests,
             attempts: self.attempts.clone(),
         })
@@ -1062,13 +969,13 @@ impl LiveBudget {
         {
             let _ = fs::remove_file(&temporary);
             return Err(LiveVerificationError::new(format!(
-                "cannot persist live-verification budget before transport: {error}"
+                "cannot persist live-verification request ledger before transport: {error}"
             )));
         }
         fs::rename(&temporary, &self.ledger_path).map_err(|error| {
             let _ = fs::remove_file(&temporary);
             LiveVerificationError::new(format!(
-                "cannot publish live-verification budget before transport: {error}"
+                "cannot publish live-verification request ledger before transport: {error}"
             ))
         })
     }
@@ -1076,19 +983,16 @@ impl LiveBudget {
     fn ledger_json(&self) -> JsonValue {
         JsonValue::object([
             ("schema_version", JsonValue::from(LEDGER_SCHEMA)),
-            ("provider", JsonValue::from(ZEN_PROVIDER_ID)),
-            ("model", JsonValue::from(ZEN_FREE_MODEL_ID)),
-            ("endpoint", JsonValue::from(ZEN_RESPONSES_ENDPOINT)),
+            ("provider", JsonValue::from(CODEX_PROVIDER_ID)),
+            ("model", JsonValue::from(CODEX_MODEL_ID)),
+            ("endpoint", JsonValue::from(CODEX_RESPONSES_ENDPOINT)),
+            ("reasoning_effort", JsonValue::from("low")),
             ("checked_on", JsonValue::from(self.checked_on.clone())),
             (
                 "started_at_unix_seconds",
                 JsonValue::from(self.started_at_unix_seconds),
             ),
             ("attempted_requests", JsonValue::from(self.attempted_requests)),
-            (
-                "requested_output_tokens",
-                JsonValue::from(self.requested_output_tokens),
-            ),
             (
                 "attempts",
                 JsonValue::Array(
@@ -1098,10 +1002,7 @@ impl LiveBudget {
                             JsonValue::object([
                                 ("sequence", JsonValue::from(attempt.sequence)),
                                 ("consumer", JsonValue::from(attempt.consumer.as_str())),
-                                (
-                                    "requested_output_tokens",
-                                    JsonValue::from(attempt.requested_output_tokens),
-                                ),
+                                ("model", JsonValue::from(attempt.model.clone())),
                             ])
                         })
                         .collect(),
@@ -1112,7 +1013,7 @@ impl LiveBudget {
 }
 
 struct LivePermit {
-    budget: Option<Arc<Mutex<LiveBudget>>>,
+    budget: Option<Arc<Mutex<LiveRequestLedger>>>,
 }
 
 impl Drop for LivePermit {
@@ -1122,18 +1023,6 @@ impl Drop for LivePermit {
                 budget.active_requests = budget.active_requests.saturating_sub(1);
             }
         }
-    }
-}
-
-impl BudgetedEventStream {
-    fn wall_time_remaining(&self) -> Option<Duration> {
-        self.permit.as_ref().and_then(|permit| {
-            permit
-                .budget
-                .as_ref()
-                .and_then(|budget| budget.lock().ok())
-                .and_then(|budget| budget.wall_time_remaining().ok().flatten())
-        })
     }
 }
 
@@ -1150,16 +1039,12 @@ fn parse_attempt(value: &JsonValue) -> Result<LiveAttemptReservation, LiveVerifi
     Ok(LiveAttemptReservation {
         sequence: required_u64(record, "sequence", "live-verification attempt")?,
         consumer,
-        requested_output_tokens: required_u64(
-            record,
-            "requested_output_tokens",
-            "live-verification attempt",
-        )?,
+        model: required_string(record, "model", "live-verification attempt")?.to_owned(),
     })
 }
 
-fn is_exact_zen_descriptor(model: &ModelDescriptor) -> bool {
-    model.provider == ZEN_PROVIDER_ID && model.model == ZEN_FREE_MODEL_ID && model.revision.is_none()
+fn is_exact_codex_descriptor(model: &ModelDescriptor) -> bool {
+    model.provider == CODEX_PROVIDER_ID && model.model == CODEX_MODEL_ID && model.revision.is_none()
 }
 
 fn object<'a>(
@@ -1266,135 +1151,230 @@ mod tests {
         }
     }
 
-    fn evidence() -> FreeZenCatalogEvidence {
-        let checked_on = current_utc_date().expect("system UTC date is available");
-        FreeZenCatalogEvidence::from_json(&JsonValue::object([
+    fn evidence_record(checked_on: &str) -> JsonValue {
+        JsonValue::object([
             ("schema_version", JsonValue::from(EVIDENCE_SCHEMA)),
-            ("catalog_source", JsonValue::from(ZEN_CATALOG_SOURCE)),
-            ("provider", JsonValue::from(ZEN_PROVIDER_ID)),
-            ("model", JsonValue::from(ZEN_FREE_MODEL_ID)),
-            ("endpoint", JsonValue::from(ZEN_RESPONSES_ENDPOINT)),
-            (
-                "pricing_per_million",
-                JsonValue::object([
-                    ("input", JsonValue::from("Free")),
-                    ("output", JsonValue::from("Free")),
-                    ("cached_read", JsonValue::from("Free")),
-                    ("cached_write", JsonValue::Null),
-                ]),
-            ),
+            ("model_source", JsonValue::from(CODEX_MODEL_SOURCE)),
+            ("provider", JsonValue::from(CODEX_PROVIDER_ID)),
+            ("model", JsonValue::from(CODEX_MODEL_ID)),
+            ("endpoint", JsonValue::from(CODEX_RESPONSES_ENDPOINT)),
+            ("reasoning_effort", JsonValue::from("low")),
             ("checked_on", JsonValue::from(checked_on)),
-            ("data_use_source", JsonValue::from(ZEN_CATALOG_SOURCE)),
-            (
-                "data_use_summary",
-                JsonValue::from("Synthetic public fixture only; prompts and completions may train future Meta models."),
-            ),
             ("synthetic_or_public_fixture_only", JsonValue::Bool(true)),
-        ]))
-        .expect("fixture evidence is exact")
+        ])
+    }
+
+    fn evidence() -> CodexModelEvidence {
+        let checked_on = current_utc_date().expect("system UTC date is available");
+        CodexModelEvidence::from_json(&evidence_record(&checked_on))
+            .expect("fixture evidence is exact")
     }
 
     fn temporary_ledger(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
-            "tea-live-verification-{name}-{}-{}.json",
+            "tea-codex-live-verification-{name}-{}-{}.json",
             std::process::id(),
-            unix_seconds().expect("clock is available")
+            SystemTime::now().duration_since(UNIX_EPOCH).expect("clock is available").as_nanos()
         ))
+    }
+
+    fn temporary_credential(name: &str) -> PathBuf {
+        let directory = std::env::temp_dir().join(format!(
+            "tea-codex-live-auth-{name}-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).expect("clock is available").as_nanos()
+        ));
+        fs::create_dir_all(&directory).expect("temporary auth directory creates");
+        let auth_directory = directory.join("auth");
+        fs::create_dir(&auth_directory).expect("temporary auth subdirectory creates");
+        let path = auth_directory.join("codex.json");
+        fs::write(&path, "{}\n").expect("placeholder credential creates");
+        path
     }
 
     fn guarded_provider(inner: Arc<CountingProvider>) -> Arc<dyn ModelProvider> {
         let ledger = temporary_ledger("guard");
-        let budget = LiveBudget::open(ledger.clone(), &evidence()).expect("ledger opens");
-        let provider: Arc<dyn ModelProvider> = Arc::new(BudgetedZenProvider {
+        let budget = LiveRequestLedger::open(ledger.clone(), &evidence()).expect("ledger opens");
+        let provider: Arc<dyn ModelProvider> = Arc::new(LedgeredCodexProvider {
             inner,
             expected_model: ModelDescriptor {
-                provider: ZEN_PROVIDER_ID.into(),
-                model: ZEN_FREE_MODEL_ID.into(),
+                provider: CODEX_PROVIDER_ID.into(),
+                model: CODEX_MODEL_ID.into(),
                 revision: None,
             },
             consumer: VerificationConsumer::Root,
-            output_tokens_per_request: NonZeroU64::new(1).expect("nonzero"),
             budget: Arc::new(Mutex::new(budget)),
         });
         let _ = fs::remove_file(ledger);
         provider
     }
 
-    fn request(provider: &str, model: &str) -> ModelRequest {
+    fn request(provider: &str, model: &str, thinking_level: ThinkingLevel) -> ModelRequest {
         ModelRequest {
             model: Some(ModelDescriptor {
                 provider: provider.into(),
                 model: model.into(),
                 revision: None,
             }),
+            thinking_level,
             ..ModelRequest::default()
         }
     }
 
     #[test]
-    fn catalog_evidence_rejects_paid_or_incomplete_charges_before_provider_construction() {
-        let mut record = JsonValue::object([
-            ("schema_version", JsonValue::from(EVIDENCE_SCHEMA)),
-            ("catalog_source", JsonValue::from(ZEN_CATALOG_SOURCE)),
-            ("provider", JsonValue::from(ZEN_PROVIDER_ID)),
-            ("model", JsonValue::from(ZEN_FREE_MODEL_ID)),
-            ("endpoint", JsonValue::from(ZEN_RESPONSES_ENDPOINT)),
-            (
-                "pricing_per_million",
-                JsonValue::object([
-                    ("input", JsonValue::from("$0.01")),
-                    ("output", JsonValue::from("Free")),
-                    ("cached_read", JsonValue::from("Free")),
-                    ("cached_write", JsonValue::Null),
-                ]),
-            ),
-            ("checked_on", JsonValue::from("2026-09-21")),
-            ("data_use_source", JsonValue::from(ZEN_CATALOG_SOURCE)),
-            ("data_use_summary", JsonValue::from("synthetic only")),
-            ("synthetic_or_public_fixture_only", JsonValue::Bool(true)),
-        ]);
-        assert!(FreeZenCatalogEvidence::from_json(&record).is_err());
-        record
-            .as_object_mut()
-            .expect("object")
-            .insert("endpoint".into(), JsonValue::from("https://other.invalid/responses"));
-        assert!(FreeZenCatalogEvidence::from_json(&record).is_err());
+    fn model_evidence_rejects_wrong_model_effort_or_endpoint() {
+        let mut record = evidence_record("2026-09-21");
+        for (field, invalid) in [
+            ("model", "gpt-6-sol"),
+            ("reasoning_effort", "medium"),
+            ("endpoint", "https://other.invalid/responses"),
+        ] {
+            record.as_object_mut().expect("object").insert(field.into(), JsonValue::from(invalid));
+            assert!(CodexModelEvidence::from_json(&record).is_err(), "{field} must be exact");
+            record = evidence_record("2026-09-21");
+        }
     }
 
     #[test]
-    fn paid_unknown_and_mismatched_requests_do_not_reach_transport() {
+    fn mismatched_model_or_effort_never_reaches_transport() {
         let inner = Arc::new(CountingProvider::default());
         let provider = guarded_provider(Arc::clone(&inner));
-        for (provider_id, model) in [
-            (ZEN_PROVIDER_ID, "muse-spark-1.3"),
-            (ZEN_PROVIDER_ID, "unknown-free-looking-model"),
-            ("openrouter", ZEN_FREE_MODEL_ID),
+        for (provider_id, model, effort) in [
+            (CODEX_PROVIDER_ID, "gpt-6-sol", ThinkingLevel::Low),
+            ("openrouter", CODEX_MODEL_ID, ThinkingLevel::Low),
+            (CODEX_PROVIDER_ID, CODEX_MODEL_ID, ThinkingLevel::Off),
+            (CODEX_PROVIDER_ID, CODEX_MODEL_ID, ThinkingLevel::Medium),
         ] {
             let cancellation = CancellationToken::new();
-            let mut stream = smol::block_on(provider.stream(request(provider_id, model), cancellation.clone()))
+            let mut stream = smol::block_on(provider.stream(request(provider_id, model, effort), cancellation.clone()))
                 .expect("guard always yields a local rejection stream");
             assert!(matches!(
                 smol::block_on(stream.next_event(cancellation)),
                 Ok(Some(ModelStreamEvent::Error { .. }))
             ));
         }
-        assert_eq!(
-            inner.calls.load(Ordering::SeqCst),
-            0,
-            "rejected routes must not initiate provider transport"
-        );
+        assert_eq!(inner.calls.load(Ordering::SeqCst), 0);
     }
 
     #[test]
-    fn all_consumer_roles_share_one_exact_descriptor_and_budget() {
-        let ledger = temporary_ledger("factory");
-        let factory = RestrictedZenFactory::new(
-            "test-key".into(),
-            evidence(),
-            ledger.clone(),
-            NonZeroU64::new(1024).expect("nonzero"),
+    fn guarded_stream_closes_after_terminal_provider_error() {
+        let inner = Arc::new(CountingProvider::default());
+        let provider = guarded_provider(Arc::clone(&inner));
+        let cancellation = CancellationToken::new();
+        let mut stream = smol::block_on(provider.stream(
+            request(CODEX_PROVIDER_ID, CODEX_MODEL_ID, ThinkingLevel::Low),
+            cancellation.clone(),
+        ))
+        .expect("guarded stream opens");
+        assert!(matches!(
+            smol::block_on(stream.next_event(cancellation.clone())),
+            Ok(Some(ModelStreamEvent::Error { .. }))
+        ));
+        assert!(matches!(
+            smol::block_on(stream.next_event(cancellation)),
+            Ok(None)
+        ));
+        assert_eq!(inner.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn ledger_retains_rejected_model_attempts_across_authorized_model_change() {
+        let now = unix_seconds().expect("clock is available");
+        let attempts = ["gpt-6-luna", CODEX_MODEL_ID]
+            .into_iter()
+            .enumerate()
+            .map(|(index, model)| JsonValue::object([
+                ("sequence", JsonValue::from(index as u64 + 1)),
+                ("consumer", JsonValue::from("root")),
+                ("model", JsonValue::from(model)),
+            ]))
+            .collect();
+        let ledger = JsonValue::object([
+            ("schema_version", JsonValue::from(LEDGER_SCHEMA)),
+            ("provider", JsonValue::from(CODEX_PROVIDER_ID)),
+            ("model", JsonValue::from(CODEX_MODEL_ID)),
+            ("endpoint", JsonValue::from(CODEX_RESPONSES_ENDPOINT)),
+            ("reasoning_effort", JsonValue::from("low")),
+            ("checked_on", JsonValue::from(evidence().checked_on())),
+            ("started_at_unix_seconds", JsonValue::from(now)),
+            ("attempted_requests", JsonValue::from(2_u64)),
+            ("attempts", JsonValue::Array(attempts)),
+        ]);
+        let budget = LiveRequestLedger::from_ledger_json(
+            Path::new("/tmp/tea-codex-ledger-test.json"),
+            &evidence(),
+            &ledger.to_json_string().expect("ledger encodes"),
         )
-        .expect("factory configures without transport");
+        .expect("explicit model change retains earlier attempts");
+        assert_eq!(budget.attempted_requests, 2);
+        assert_eq!(budget.attempts[0].model, "gpt-6-luna");
+        assert_eq!(budget.attempts[1].model, CODEX_MODEL_ID);
+    }
+
+    #[test]
+    fn recorded_attempts_remain_usable_after_the_former_task_limits() {
+        let now = unix_seconds().expect("clock is available");
+        let attempts = (1..=41_u64)
+            .map(|sequence| JsonValue::object([
+                ("sequence", JsonValue::from(sequence)),
+                ("consumer", JsonValue::from("root")),
+                ("model", JsonValue::from(CODEX_MODEL_ID)),
+            ]))
+            .collect();
+        let ledger = JsonValue::object([
+            ("schema_version", JsonValue::from(LEDGER_SCHEMA)),
+            ("provider", JsonValue::from(CODEX_PROVIDER_ID)),
+            ("model", JsonValue::from(CODEX_MODEL_ID)),
+            ("endpoint", JsonValue::from(CODEX_RESPONSES_ENDPOINT)),
+            ("reasoning_effort", JsonValue::from("low")),
+            ("checked_on", JsonValue::from(evidence().checked_on())),
+            ("started_at_unix_seconds", JsonValue::from(now - 3_600)),
+            ("attempted_requests", JsonValue::from(41_u64)),
+            ("attempts", JsonValue::Array(attempts)),
+        ]);
+        let mut record = LiveRequestLedger::from_ledger_json(
+            Path::new("/tmp/tea-codex-recording-test.json"),
+            &evidence(),
+            &ledger.to_json_string().expect("ledger encodes"),
+        )
+        .expect("prior request count and elapsed time do not block the next run");
+        record.ledger_path = temporary_ledger("continued-recording");
+        record.reserve(VerificationConsumer::Root).expect("next attempt records");
+        assert_eq!(record.attempted_requests, 42);
+        let _ = fs::remove_file(record.ledger_path);
+    }
+
+    #[test]
+    fn recovery_wait_observes_delayed_durable_provider_admission() {
+        use std::sync::atomic::AtomicBool;
+        let admitted = Arc::new(AtomicBool::new(false));
+        let signal = Arc::clone(&admitted);
+        let producer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(250));
+            signal.store(true, Ordering::SeqCst);
+        });
+        let observed = smol::block_on(wait_for_provider_admission(|| {
+            Ok(admitted.load(Ordering::SeqCst))
+        }))
+        .expect("provider-admission wait succeeds");
+        producer.join().expect("delayed admission producer exits");
+        assert!(observed, "a real provider needs wall time to commit admission");
+    }
+
+    #[test]
+    fn controlled_cancellation_settles_the_interrupted_operation() {
+        let interrupted = interrupted_run_settled(Err(tea_core::harness::HarnessError::Core(
+            tea_core::error::CoreError::Cancelled,
+        )));
+        assert!(interrupted.expect("intentional cancellation is a settled interruption"));
+    }
+
+    #[test]
+    fn all_consumer_roles_share_exact_codex_descriptor_and_ledger() {
+        let ledger = temporary_ledger("factory");
+        let credential = temporary_credential("factory");
+        let factory = RestrictedCodexFactory::new(credential.clone(), evidence(), ledger.clone())
+            .expect("factory configures without transport");
         for consumer in [
             VerificationConsumer::Root,
             VerificationConsumer::Child,
@@ -1403,55 +1383,37 @@ mod tests {
             VerificationConsumer::Comparison,
         ] {
             let handle = factory.consumer(consumer);
-            assert_eq!(handle.model().provider, ZEN_PROVIDER_ID);
-            assert_eq!(handle.model().model, ZEN_FREE_MODEL_ID);
+            assert_eq!(handle.model().provider, CODEX_PROVIDER_ID);
+            assert_eq!(handle.model().model, CODEX_MODEL_ID);
             assert!(handle.model().revision.is_none());
         }
         assert_eq!(factory.budget_snapshot().expect("snapshot").attempted_requests, 0);
+        let persisted = JsonValue::parse(&fs::read_to_string(&ledger).expect("ledger reads"))
+            .expect("ledger is JSON");
+        assert_eq!(persisted.get("reasoning_effort").and_then(JsonValue::as_str), Some("low"));
+        assert!(persisted.get("requested_output_tokens").is_none());
         let _ = fs::remove_file(ledger);
+        let _ = fs::remove_dir_all(credential.parent().and_then(Path::parent).expect("credential has a Tea home"));
     }
 
     #[test]
-    fn stale_catalog_evidence_blocks_factory_before_transport() {
-        let record = JsonValue::object([
-            ("schema_version", JsonValue::from(EVIDENCE_SCHEMA)),
-            ("catalog_source", JsonValue::from(ZEN_CATALOG_SOURCE)),
-            ("provider", JsonValue::from(ZEN_PROVIDER_ID)),
-            ("model", JsonValue::from(ZEN_FREE_MODEL_ID)),
-            ("endpoint", JsonValue::from(ZEN_RESPONSES_ENDPOINT)),
-            (
-                "pricing_per_million",
-                JsonValue::object([
-                    ("input", JsonValue::from("Free")),
-                    ("output", JsonValue::from("Free")),
-                    ("cached_read", JsonValue::from("Free")),
-                    ("cached_write", JsonValue::Null),
-                ]),
-            ),
-            ("checked_on", JsonValue::from("2000-01-01")),
-            ("data_use_source", JsonValue::from(ZEN_CATALOG_SOURCE)),
-            ("data_use_summary", JsonValue::from("synthetic only")),
-            ("synthetic_or_public_fixture_only", JsonValue::Bool(true)),
-        ]);
-        let evidence = FreeZenCatalogEvidence::from_json(&record).expect("stale evidence is syntactically valid");
+    fn stale_model_evidence_blocks_factory_before_creating_a_ledger() {
+        let evidence = CodexModelEvidence::from_json(&evidence_record("2000-01-01"))
+            .expect("stale evidence is syntactically valid");
         let ledger = temporary_ledger("stale-evidence");
-        assert!(RestrictedZenFactory::new(
-            "test-key".into(),
-            evidence,
-            ledger.clone(),
-            NonZeroU64::new(1).expect("nonzero"),
-        )
-        .is_err());
-        assert!(!ledger.exists(), "stale evidence must fail before creating a budget ledger");
+        let credential = temporary_credential("stale-evidence");
+        assert!(RestrictedCodexFactory::new(credential.clone(), evidence, ledger.clone()).is_err());
+        assert!(!ledger.exists());
+        let _ = fs::remove_dir_all(credential.parent().and_then(Path::parent).expect("credential has a Tea home"));
     }
 
     #[test]
     fn invalid_headless_paths_are_rejected_before_provider_transport() {
         let inner = Arc::new(CountingProvider::default());
-        let consumer = RestrictedZenConsumer {
+        let consumer = RestrictedCodexConsumer {
             model: ModelDescriptor {
-                provider: ZEN_PROVIDER_ID.into(),
-                model: ZEN_FREE_MODEL_ID.into(),
+                provider: CODEX_PROVIDER_ID.into(),
+                model: CODEX_MODEL_ID.into(),
                 revision: None,
             },
             provider: guarded_provider(Arc::clone(&inner)),

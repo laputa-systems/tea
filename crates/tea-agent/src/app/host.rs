@@ -51,6 +51,33 @@ pub(super) fn host_configuration_for_provider(
 mod tests {
     use super::*;
 
+    #[cfg(feature = "provider-codex")]
+    #[test]
+    fn codex_host_context_uses_responses_items() {
+        use tea_core::hooks::ContextEnvelope;
+        use tea_core::state::{AgentMessage, MessageId};
+        use tea_protocol::JsonValue;
+
+        let configuration = host_configuration_for_provider("/public/workspace", Some("codex"))
+            .expect("Codex host configuration assembles");
+        let encoded = configuration
+            .hooks
+            .convert_to_llm(ContextEnvelope {
+                version: 1,
+                messages: vec![AgentMessage::User {
+                    id: MessageId(1),
+                    content: "public input".into(),
+                }],
+                host_messages: Vec::new(),
+            })
+            .expect("Codex context converts");
+        let input = JsonValue::parse(&encoded).expect("Responses input is JSON");
+        let item = input.as_array().and_then(|items| items.first()).expect("one user item");
+        assert_eq!(item.get("type").and_then(JsonValue::as_str), Some("message"));
+        let content = item.get("content").and_then(JsonValue::as_array).expect("content array");
+        assert_eq!(content[0].get("type").and_then(JsonValue::as_str), Some("input_text"));
+    }
+
     #[test]
     fn host_configuration_keeps_the_logical_workspace_outside_tool_authority() {
         let physical = std::env::temp_dir().join(format!(

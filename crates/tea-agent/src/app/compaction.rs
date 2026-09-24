@@ -75,6 +75,7 @@ pub(super) struct ProviderCompactor {
     model: ModelDescriptor,
     context_hook: Arc<dyn HookSet>,
     tool_free_requests: bool,
+    thinking_level: ThinkingLevel,
 }
 
 impl fmt::Debug for ProviderCompactor {
@@ -106,7 +107,15 @@ impl ProviderCompactor {
             tool_free_requests: model.provider == "codex",
             model,
             context_hook,
+            thinking_level: ThinkingLevel::Off,
         }
+    }
+
+    /// Pin a host-selected effort for every summary request in this compactor.
+    #[cfg(feature = "live-verification")]
+    pub(super) fn with_thinking_level(mut self, level: ThinkingLevel) -> Self {
+        self.thinking_level = level;
+        self
     }
 
     fn configured(
@@ -176,6 +185,7 @@ impl ProviderCompactor {
         let configured = self.configured(&context);
         let context_hook = Arc::clone(&self.context_hook);
         let tool_free_requests = self.tool_free_requests;
+        let thinking_level = self.thinking_level;
         Box::pin(async move {
             let (provider, model) = configured?;
             if context.messages.is_empty() {
@@ -188,6 +198,7 @@ impl ProviderCompactor {
                 context_hook.as_ref(),
                 tool_free_requests,
                 context.session_id.clone(),
+                thinking_level,
             )?;
             let layout = prepared.layout;
             let source_is_active_context_prefix = prepared.source_is_active_context_prefix;
@@ -216,6 +227,7 @@ impl ProviderCompactor {
         let configured = self.configured(&context);
         let context_hook = Arc::clone(&self.context_hook);
         let tool_free_requests = self.tool_free_requests;
+        let thinking_level = self.thinking_level;
         Box::pin(async move {
             let (provider, model) = configured?;
             let source_context = context
@@ -234,6 +246,7 @@ impl ProviderCompactor {
                 context_hook.as_ref(),
                 tool_free_requests,
                 context.session_id.clone(),
+                thinking_level,
             )?;
             let layout = prepared.layout;
             let source_is_active_context_prefix = prepared.source_is_active_context_prefix;
@@ -296,6 +309,7 @@ fn prepare_summary_request(
     context_hook: &dyn HookSet,
     tool_free_requests: bool,
     session_id: Option<String>,
+    thinking_level: ThinkingLevel,
 ) -> Result<PreparedSummaryRequest, CompactionError> {
     // The converted context is provider-owned. Codex uses Responses `input`
     // items rather than the older `{role, content: string}` shape, so the
@@ -335,7 +349,7 @@ fn prepare_summary_request(
             context,
             tools,
             model: Some(model),
-            thinking_level: ThinkingLevel::Off,
+            thinking_level,
             session_id,
         },
         layout,

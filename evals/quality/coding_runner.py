@@ -110,5 +110,5 @@ def run_coding_cases(
     del model, cache_root, workspace_root, out, validator, env_file, case_ids
     raise CodingRunError(
         "the historical coding runner is retired; use the restricted Rust live-verification "
-        "factory and its current BLOCKED evidence instead"
+        "factory and its case-specific report instead"
     )

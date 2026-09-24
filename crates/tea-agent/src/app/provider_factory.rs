@@ -465,9 +465,7 @@ impl ProviderFactory {
             "codex" => {
                 #[cfg(feature = "provider-codex")]
                 {
-                    let store = Arc::new(tea_providers::codex::FileCredentialStore::new(
-                        self.tea_home.join("auth").join("codex.json"),
-                    ));
+                    let store = super::auth::codex_credential_store(&self.tea_home);
                     let auth = Arc::new(tea_providers::codex::CodexAuthManager::with_system_clock(
                         store,
                     ));

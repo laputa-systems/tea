@@ -1,12 +1,12 @@
 //! Durable isolated-child verification driven through the injected live host.
 //!
 //! The public entry point never discovers a provider or credentials. It needs
-//! separately constructed root and child [`RestrictedZenConsumer`] values so
+//! separately constructed root and child [`RestrictedCodexConsumer`] values so
 //! the durable root and child requests retain their real verification roles
 //! even though the restricted factory intentionally pins both to one model.
 
 use super::{
-    is_exact_zen_descriptor, LiveVerificationError, RestrictedZenConsumer, VerificationConsumer,
+    is_exact_codex_descriptor, LiveVerificationError, RestrictedCodexConsumer, VerificationConsumer,
 };
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -30,9 +30,9 @@ pub struct LiveChildScenario<'a> {
     /// Existing clean public or synthetic Git workspace.
     pub workspace: &'a Path,
     /// Guarded root-role consumer from the one restricted factory.
-    pub root: &'a RestrictedZenConsumer,
+    pub root: &'a RestrictedCodexConsumer,
     /// Guarded child-role consumer from the one restricted factory.
-    pub child: &'a RestrictedZenConsumer,
+    pub child: &'a RestrictedCodexConsumer,
     /// Public or synthetic root prompt for the child lifecycle.
     pub prompt: &'a str,
 }
@@ -65,14 +65,14 @@ pub fn run_live_child_scenario(
     scenario: LiveChildScenario<'_>,
 ) -> Result<LiveChildScenarioOutcome, LiveVerificationError> {
     if scenario.root.role() != VerificationConsumer::Root
-        || !is_exact_zen_descriptor(scenario.root.model())
+        || !is_exact_codex_descriptor(scenario.root.model())
     {
         return Err(LiveVerificationError::new(
             "live child verification requires the restricted canonical root consumer",
         ));
     }
     if scenario.child.role() != VerificationConsumer::Child
-        || !is_exact_zen_descriptor(scenario.child.model())
+        || !is_exact_codex_descriptor(scenario.child.model())
     {
         return Err(LiveVerificationError::new(
             "live child verification requires the restricted canonical child consumer",
@@ -260,7 +260,7 @@ fn child_delta_precedes_parent_apply(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::verification::{ZEN_FREE_MODEL_ID, ZEN_PROVIDER_ID};
+    use crate::verification::{CODEX_MODEL_ID, CODEX_PROVIDER_ID};
     use std::fs;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -355,7 +355,7 @@ mod tests {
                                     .into(),
                             ),
                         ),
-                        ("model", JsonValue::String(ZEN_FREE_MODEL_ID.into())),
+                        ("model", JsonValue::String(CODEX_MODEL_ID.into())),
                         ("context", JsonValue::String("task".into())),
                     ]),
                 ),
@@ -485,16 +485,16 @@ mod tests {
         let root_provider = Arc::new(ScriptedRootProvider::default());
         let child_provider = Arc::new(ScriptedChildProvider::new());
         let descriptor = ModelDescriptor {
-            provider: ZEN_PROVIDER_ID.into(),
-            model: ZEN_FREE_MODEL_ID.into(),
+            provider: CODEX_PROVIDER_ID.into(),
+            model: CODEX_MODEL_ID.into(),
             revision: None,
         };
-        let root = RestrictedZenConsumer {
+        let root = RestrictedCodexConsumer {
             model: descriptor.clone(),
             provider: Arc::clone(&root_provider) as Arc<dyn ModelProvider>,
             role: VerificationConsumer::Root,
         };
-        let child = RestrictedZenConsumer {
+        let child = RestrictedCodexConsumer {
             model: descriptor,
             provider: Arc::clone(&child_provider) as Arc<dyn ModelProvider>,
             role: VerificationConsumer::Child,

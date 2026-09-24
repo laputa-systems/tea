@@ -8,6 +8,14 @@ tea_harness host tool accepts one guarded patch plus an explicit
 evidence/effect/risk hypothesis. It stages a closed Luau source tree, validates
 the resulting snapshot, and records a candidate. A candidate becomes active
 only at a safe epoch boundary through a durable HarnessRevisionChangedEntry.
+For `apply`, the model-facing `tea_harness` command takes `operation`, the
+active `base_revision`, a `hypothesis` with `failure_signature`,
+`expected_effect`, and `regression_risk`, plus `files` and
+`registry_operations`. `rollback` takes `operation`, `base_revision`,
+`target_revision`, and the same hypothesis. The exact accepted fields are in
+`harness_schema` and the command handlers in
+`crates/tea-core/src/runtime/harness_tool.rs`; nested schema fields are
+explicit so a provider can present the mutation contract to the model.
 
 The active epoch remains pinned to the revision selected at its start. A model
 cannot replace prompt sections, tools, hooks, or capability bindings midway

@@ -5,7 +5,7 @@
 //! root response, the summary response, nor the caller's marker is returned.
 
 use super::{
-    LiveVerificationError, RestrictedZenConsumer, VerificationConsumer, is_exact_zen_descriptor,
+    LiveVerificationError, RestrictedCodexConsumer, VerificationConsumer, is_exact_codex_descriptor,
 };
 use std::num::NonZeroU64;
 use std::path::Path;
@@ -31,9 +31,9 @@ pub struct LiveCompactionScenario<'a> {
     /// Existing caller-owned disposable workspace for the verification run.
     pub workspace: &'a Path,
     /// Restricted consumer that drives the root conversation.
-    pub root: &'a RestrictedZenConsumer,
+    pub root: &'a RestrictedCodexConsumer,
     /// Restricted consumer that produces the compaction checkpoint.
-    pub compactor: &'a RestrictedZenConsumer,
+    pub compactor: &'a RestrictedCodexConsumer,
     /// Synthetic marker that the compactor must retain in its checkpoint.
     pub critical_fact: &'a str,
 }
@@ -132,14 +132,14 @@ fn validate_scenario(scenario: &LiveCompactionScenario<'_>) -> Result<(), LiveVe
         ));
     }
     if scenario.root.role() != VerificationConsumer::Root
-        || !is_exact_zen_descriptor(scenario.root.model())
+        || !is_exact_codex_descriptor(scenario.root.model())
     {
         return Err(LiveVerificationError::new(
             "live compaction verification requires the restricted canonical root consumer",
         ));
     }
     if scenario.compactor.role() != VerificationConsumer::Compaction
-        || !is_exact_zen_descriptor(scenario.compactor.model())
+        || !is_exact_codex_descriptor(scenario.compactor.model())
     {
         return Err(LiveVerificationError::new(
             "live compaction verification requires the restricted canonical compaction consumer",
@@ -157,13 +157,16 @@ fn forced_compaction_policy() -> AutomaticCompactionPolicy {
     AutomaticCompactionPolicy {
         enabled: true,
         context_budget: ContextBudgetSource::ContextBudget(
-            NonZeroU64::new(512).expect("fixed live verification context budget is nonzero"),
+            // The synthetic history crosses this threshold before its first
+            // tool result. A completed checkpoint leaves enough room for the
+            // fixed coding-tool surface and a short follow-up tool call.
+            NonZeroU64::new(2_400).expect("fixed live verification context budget is nonzero"),
         ),
         reserved_tokens: 1,
         minimum_headroom_tokens: 1,
         recent_tokens: 0,
         overflow_recovery: OverflowRecovery::Disabled,
-        max_compactions_per_run: 1,
+        max_compactions_per_run: 3,
         max_overflow_retries_per_run: 0,
     }
 }
@@ -294,7 +297,7 @@ mod tests {
     use tea_core::scheduler::{
         CancellationToken, ModelFuture, ModelProvider, ModelRequest, ModelStream, ModelStreamEvent,
     };
-    use tea_core::state::{AgentToolCall, ModelDescriptor, SerializedJson, StopReason, ToolCallId};
+    use tea_core::state::{AgentToolCall, ModelDescriptor, SerializedJson, StopReason, ToolCallId, Usage};
 
     const CRITICAL_FACT: &str = "verification-critical-fact";
 
@@ -331,8 +334,8 @@ mod tests {
 
     fn model() -> ModelDescriptor {
         ModelDescriptor {
-            provider: super::super::ZEN_PROVIDER_ID.into(),
-            model: super::super::ZEN_FREE_MODEL_ID.into(),
+            provider: super::super::CODEX_PROVIDER_ID.into(),
+            model: super::super::CODEX_MODEL_ID.into(),
             revision: None,
         }
     }
@@ -340,8 +343,8 @@ mod tests {
     fn consumer(
         role: VerificationConsumer,
         provider: Arc<dyn ModelProvider>,
-    ) -> super::super::RestrictedZenConsumer {
-        super::super::RestrictedZenConsumer {
+    ) -> super::super::RestrictedCodexConsumer {
+        super::super::RestrictedCodexConsumer {
             model: model(),
             provider,
             role,
@@ -371,6 +374,27 @@ mod tests {
                         arguments: SerializedJson::new(
                             r#"{"path":"compaction-verification-missing.txt"}"#,
                         ),
+                    }),
+                    // Match the provider-confirmed input levels observed in
+                    // the synthetic live fixture before and after compaction.
+                    ModelStreamEvent::Usage(Usage {
+                        input_tokens: Some(2_764),
+                        ..Usage::default()
+                    }),
+                    ModelStreamEvent::End(StopReason::ToolUse),
+                ],
+            },
+            ModelStream {
+                events: vec![
+                    ModelStreamEvent::ToolCall(AgentToolCall {
+                        id: ToolCallId::new("compaction-verification-extra-tool")
+                            .expect("fixture tool ID"),
+                        name: "get_goal".into(),
+                        arguments: SerializedJson::new(r#"{}"#),
+                    }),
+                    ModelStreamEvent::Usage(Usage {
+                        input_tokens: Some(2_045),
+                        ..Usage::default()
                     }),
                     ModelStreamEvent::End(StopReason::ToolUse),
                 ],
@@ -411,7 +435,7 @@ mod tests {
                 durable_state_verified: true,
             }
         );
-        assert_eq!(root_provider.requests.load(Ordering::SeqCst), 2);
+        assert_eq!(root_provider.requests.load(Ordering::SeqCst), 3);
         assert_eq!(compactor_provider.requests.load(Ordering::SeqCst), 1);
         fs::remove_dir_all(tea_home).expect("temporary Tea home removes");
         fs::remove_dir_all(workspace).expect("temporary workspace removes");

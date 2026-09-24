@@ -17,7 +17,28 @@ use super::error::AppError;
 #[cfg(feature = "provider-codex")]
 use super::runtime::resolve_tea_home;
 
-/// Execute an explicit Tea-owned provider authorization operation.
+/// Prefer the installed Codex client's current access token when its auth file
+/// exists. The external store is read-only and reloads after client refreshes.
+#[cfg(feature = "provider-codex")]
+pub(super) fn codex_credential_store(
+    tea_home: &std::path::Path,
+) -> Arc<dyn tea_providers::codex::CredentialStore> {
+    use tea_providers::codex::{CodexClientCredentialStore, FileCredentialStore};
+    let client_home = std::env::var_os("CODEX_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".codex"))
+        });
+    if let Some(client_path) = client_home.map(|home| home.join("auth.json")) {
+        if client_path.exists() {
+            return Arc::new(CodexClientCredentialStore::new(client_path));
+        }
+    }
+    Arc::new(FileCredentialStore::new(tea_home.join("auth").join("codex.json")))
+}
+
+/// Execute a Codex authorization command. Status prefers installed client
+/// credentials; login and logout manage only Tea-owned credentials.
 pub(crate) fn run_auth_command(command: AuthCommand) -> Result<String, AppError> {
     #[cfg(feature = "provider-codex")]
     {
@@ -50,9 +71,13 @@ fn run_codex_command(command: AuthCommand) -> Result<String, AppError> {
     };
     require_codex_provider(provider)?;
     let home = resolve_tea_home(tea_home)?;
-    let store = Arc::new(FileCredentialStore::new(
-        home.join("auth").join("codex.json"),
-    ));
+    let store: Arc<dyn tea_providers::codex::CredentialStore> = if tea_home.is_none()
+        && matches!(command, AuthCommand::Status { .. })
+    {
+        codex_credential_store(&home)
+    } else {
+        Arc::new(FileCredentialStore::new(home.join("auth").join("codex.json")))
+    };
     let manager = CodexAuthManager::with_system_clock(store);
     let cancellation = CancellationToken::new();
 

@@ -19,11 +19,18 @@ prompt. Pending and blocked checks are never passes.
 - Baseline declarative fixtures: 29 passed, 1 failed. The stale
   `length-stop-no-tools` script expected settlement despite the core's tested
   continuation rule. Its script/golden now exercise the intended second turn.
-- No user sessions, credentials, home data, unrelated work, formatters, linters,
+- No user sessions, unrelated work, formatters, linters,
   hooks, commits, pushes, or uncontrolled inference may be touched.
+- The user explicitly supplied `~/.codex/auth.json` for this lane and clarified
+  that Tea's Codex provider must use the existing Codex login. Tea reads its
+  access token without copying or rotating the client refresh token. Live
+  reports, ledgers, and synthetic workspaces remain outside the repository.
 - Upstream Pi references are advisory; no upstream implementation imported or
-  relied upon. Official Zen source/date/free-route evidence is tracked in the
-  verification report; uncertain free status blocks live inference.
+  relied upon. The live lane now uses the user-selected native Codex provider,
+  `gpt-5.6-luna`, and low reasoning effort after the backend rejected the
+  original `gpt-6-luna` choice for this ChatGPT account. Its exact model record and request
+  ledger are tracked in verification evidence; account access is established
+  only by a real request.
 
 ## Responsibility graph
 
@@ -193,31 +200,35 @@ alternate screen, geometry, history/search/pickers/tool detail/status.
 | Workspace | `cargo test --workspace --locked` | PASS: 731 passed, 0 failed, 7 ignored |
 | PTY | `cargo test -p tea-agent --features pty-harness --test pty_streaming --locked` | PASS: 11/11 |
 | Fixtures | `./crates/tea-core/fixtures/run.sh` | PASS: 29/29 (`awaited-agent-end-observer` fixture deleted with its superseded API) |
-| Boundaries | `python3 scripts/check-crate-graph.py`, optional features including Zen, prohibited deps, `git diff --check` | PASS: crate graph; `cargo check --all-targets` for all feature sets, zero warnings; `tea-providers --all-features` 115; `live-verification` lib 197; entrypoint audit; toolchain pin; no new dependencies |
+| Boundaries | `python3 scripts/check-crate-graph.py`, optional features, prohibited deps, `git diff --check` | PASS: crate graph; prior all-target feature checks; focused `tea-core` lib 214/214, `tea-providers` Codex lib 67 passed/1 ignored, current `tea-agent` live-verification lib 205 passed/1 ignored, example 3/3, Python audit 5/5, entrypoint audit, diff check; no new dependencies. The child HTTP fixture deadline was widened from 5 to 15 seconds after it failed only under broad test load |
 | Platform/resources | Native macOS and Linux AArch64 Docker; identical binary/startup/idle/replay/large-history fixtures before/after | PASS: `make test-linux` exit 0 (workspace + PTY 11/11). Release baseline -> current: binary 8,356,288 -> 8,885,648 B (+6.3%); idle RSS 8,432 -> 8,480 KiB; `--version` 8.5 -> 7.8 ms. Long-history fixtures: JSONL +5-7%, replay 114 -> 129 ms (10k), 393 -> 446 ms (27k), single runs |
-| Live guard | Exact official free identity/API/endpoint/input/output/cache charges/terms, injected restricted factory, offline no-network rejects, redirect/fallback refusal | PASS offline: Python audit 5/5, Zen redirect tests, report without `--live` reads no credential; zero inference attempts |
-| Live coding | Synthetic read/edit/test actual files/exit oracle and deterministic counterpart | BLOCKED: no authorized credential; counterpart PASSED |
-| Live invocation | Headless Rust plus separate one-shot CLI, same engine and own completion, deterministic counterparts | BLOCKED: no authorized credential; counterparts PASSED |
-| Live recovery | Controlled interruption, passive reopen, explicit safe continuation, committed-state oracle, deterministic counterpart | BLOCKED: no authorized credential; counterpart PASSED |
-| Live compaction | Forced bounded synthetic history, executable critical-fact oracle, deterministic counterpart | BLOCKED: no authorized credential; counterpart and scripted adapter PASSED |
-| Live evolution | Synthetic Luau validate/activate/use/rollback with real source/state checks, deterministic counterpart | BLOCKED: no authorized credential; scripted adapter PASSED (adds capability-free session plugin; pinned `todo` is not editable) |
-| Live children | One/two isolated assignments, explicit reports/parent apply, deterministic counterpart | BLOCKED: no authorized credential; counterpart and scripted adapter PASSED |
+| Live guard | Exact `codex/gpt-5.6-luna` and low reasoning, explicit installed Codex or Tea-owned credential path, injected restricted factory, offline no-network rejects, request ledger | PASS: client access token loaded read-only; v2 ledger retained all 144 attempts, including ten rejected `gpt-6-luna` attempts. Final report: `/tmp/tea-codex-live.nLMg68/report-recheck.json`; ledger: `/tmp/tea-codex-live.nLMg68/ledger.json` |
+| Live coding | Synthetic read/edit/test actual files/exit oracle and deterministic counterpart | PASSED live and offline in final six-case run |
+| Live invocation | Headless Rust plus separate one-shot CLI, same engine and own completion, deterministic counterparts | PASSED live and offline in final six-case run |
+| Live recovery | Controlled interruption, passive reopen, explicit safe continuation, committed-state oracle, deterministic counterpart | PASSED live and offline in final six-case run. A typed cancellation is the expected interruption settlement; passive reopen and exact continuation passed |
+| Live compaction | Forced bounded synthetic history, executable critical-fact oracle and deterministic counterpart | PASSED live and offline in final six-case run. The threshold admits the synthetic history and leaves room after checkpoint for a follow-up tool turn |
+| Live evolution | Synthetic Luau validate/activate/use/rollback with real source/state checks and deterministic counterpart | PASSED live and offline in final six-case run. Exact nested `tea_harness` schema and explicit retry of a rejected todo row preserved source, state, rollback, and reopen oracles |
+| Live children | One/two isolated assignments, explicit reports/parent apply and deterministic counterpart | PASSED live and offline in final six-case run |
 
 All verification inference (children, compaction, evaluations and retries too)
-must use one deliberately selected verified-free OpenCode Zen route. Prefer
-verified `muse-spark-1.3-contributor-free`; uncertain pricing, unavailable route
-or missing explicitly supplied credentials is BLOCKED, never substitution.
-Use only injected host secrets and synthetic/public fixtures; raw reports stay
-outside the source tree. Aggregate budget: at most 40 attempts, 100,000 reserved
-output tokens, 30 minutes, two concurrent requests, starting serially. Reserve
-before sending; retain every failure. No reset, hidden auxiliary inference,
-private checkout upload, account change, or other-app credential inspection.
+must use the user-selected `codex/gpt-5.6-luna` route at low reasoning effort.
+Unavailable model access or a missing explicitly supplied Codex credential
+is BLOCKED, never a model fallback. Use only the explicit credential path and
+synthetic/public fixtures; raw reports stay outside the source tree. Aggregate
+ledger: reserve before sending and retain every attempt, including failures.
+The former 40-request, 30-minute, and two-stream task limits were removed by
+user direction; the existing ledger remained the aggregate audit record for
+continued runs. The Codex subscription wire has no reliable output-token
+request cap, so no such cap is claimed. The final 2026-09-24 live report is
+`PASSED`: all six live cases and all six deterministic counterparts passed
+using the user-selected model and installed Codex credentials. The aggregate
+ledger records 144 attempts across failed and successful runs, with no reset.
 
 ## Final deliverables
 
 Updated working code/callers/docs (architecture, semantics, recovery, extensions,
 subagents, TUI, quickstart, fixtures/evals, AGENTS routes); exact format/ABI
 identity; direct Rust/CLI examples; completed matrix with actual commands/results;
-platform/resource/dependency comparisons; sanitized free-route/budget/attempt
+platform/resource/dependency comparisons; sanitized model/budget/attempt
 evidence; precise remaining environmental blockers. Mandatory implementation
 cannot be relabelled future work. A live pass demonstrates integration only.

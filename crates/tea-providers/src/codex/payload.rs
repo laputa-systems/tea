@@ -164,6 +164,7 @@ mod tests {
     fn reasoning_levels_are_typed_and_clamped() {
         assert_eq!(reasoning_effort(ThinkingLevel::Off), None);
         assert_eq!(reasoning_effort(ThinkingLevel::Minimal), Some("minimal"));
+        assert_eq!(reasoning_effort(ThinkingLevel::Low), Some("low"));
         assert_eq!(reasoning_effort(ThinkingLevel::XHigh), Some("xhigh"));
         assert_eq!(reasoning_effort(ThinkingLevel::Max), Some("xhigh"));
     }

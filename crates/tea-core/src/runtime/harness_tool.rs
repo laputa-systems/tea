@@ -85,7 +85,7 @@ where
     }
 
     fn description(&self) -> &str {
-        "Inspect or atomically stage a session-local Tea harness candidate. Mutating apply and rollback calls must be issued alone; accepted changes activate automatically at the next epoch boundary."
+        "Inspect or atomically stage a session-local Tea harness candidate. Use operation=status to get the active base_revision. Apply requires base_revision, hypothesis (failure_signature, expected_effect, regression_risk), files, and registry_operations. Mutating apply and rollback calls must be issued alone; accepted changes activate automatically at the next epoch boundary."
     }
 
     fn schema(&self) -> &JsonValue {
@@ -1091,7 +1091,60 @@ fn harness_schema() -> &'static JsonValue {
     static SCHEMA: std::sync::OnceLock<JsonValue> = std::sync::OnceLock::new();
     SCHEMA.get_or_init(|| {
         JsonValue::parse(
-            r#"{"type":"object","required":["operation"],"properties":{"operation":{"type":"string","enum":["status","help","list","read","diff","apply","rollback"]},"kind":{"type":"string"},"maximum":{"type":"integer","minimum":1},"revision":{"type":"string"},"path":{"type":"string"},"offset":{"type":"integer","minimum":0},"maximum_bytes":{"type":"integer","minimum":1},"base_revision":{"type":"string"},"target_revision":{"type":"string"},"hypothesis":{"type":"object"},"files":{"type":"array"},"registry_operations":{"type":"array"}},"additionalProperties":false}"#,
+            r#"{
+                "type":"object",
+                "required":["operation"],
+                "properties":{
+                    "operation":{"type":"string","enum":["status","help","list","read","diff","apply","rollback"],"description":"Use this exact command field. Apply accepts only operation, base_revision, hypothesis, files, registry_operations; rollback accepts only operation, base_revision, target_revision, hypothesis."},
+                    "kind":{"type":"string"},
+                    "maximum":{"type":"integer","minimum":1},
+                    "revision":{"type":"string"},
+                    "path":{"type":"string"},
+                    "offset":{"type":"integer","minimum":0},
+                    "maximum_bytes":{"type":"integer","minimum":1},
+                    "base_revision":{"type":"string","description":"Active revision ID returned by status; required for apply and rollback."},
+                    "target_revision":{"type":"string","description":"Ancestor revision ID to restore; required for rollback."},
+                    "hypothesis":{
+                        "type":"object",
+                        "required":["failure_signature","expected_effect","regression_risk"],
+                        "properties":{
+                            "failure_signature":{"type":"string"},
+                            "expected_effect":{"type":"string"},
+                            "regression_risk":{"type":"string"}
+                        },
+                        "additionalProperties":false
+                    },
+                    "files":{
+                        "type":"array",
+                        "description":"Required for apply; each item is an upsert or delete patch.",
+                        "items":{
+                            "type":"object",
+                            "required":["operation","path"],
+                            "properties":{
+                                "operation":{"type":"string","enum":["upsert","delete"]},
+                                "path":{"type":"string"},
+                                "content":{"type":"string","description":"Required for upsert."},
+                                "expected_artifact_id":{"type":"string","description":"Required for delete."}
+                            },
+                            "additionalProperties":false
+                        }
+                    },
+                    "registry_operations":{
+                        "type":"array",
+                        "description":"Required for apply; add or remove a plugin ID.",
+                        "items":{
+                            "type":"object",
+                            "required":["operation","plugin_id"],
+                            "properties":{
+                                "operation":{"type":"string","enum":["add","remove"]},
+                                "plugin_id":{"type":"string"}
+                            },
+                            "additionalProperties":false
+                        }
+                    }
+                },
+                "additionalProperties":false
+            }"#,
         )
         .expect("stable tea_harness schema is valid")
     })
@@ -1104,6 +1157,25 @@ mod tests {
         HarnessRevisionId, MemorySession, ModelHarnessProfileId, OperationKind,
         OperationStartedRecord, ProvisionedEntry, SessionHeader, SessionId, SessionWriter,
     };
+
+    #[test]
+    fn harness_tool_schema_exposes_nested_apply_contract() {
+        let properties = harness_schema().get("properties").expect("tool properties");
+        let hypothesis = properties.get("hypothesis").expect("hypothesis schema");
+        let required = hypothesis
+            .get("required")
+            .and_then(JsonValue::as_array)
+            .expect("hypothesis fields must be explicit to the model");
+        for field in ["failure_signature", "expected_effect", "regression_risk"] {
+            assert!(required.iter().any(|value| value.as_str() == Some(field)));
+        }
+        let files = properties.get("files").and_then(|value| value.get("items"))
+            .expect("file-patch item schema");
+        assert_eq!(files.get("type").and_then(JsonValue::as_str), Some("object"));
+        let registry = properties.get("registry_operations").and_then(|value| value.get("items"))
+            .expect("registry-operation item schema");
+        assert_eq!(registry.get("type").and_then(JsonValue::as_str), Some("object"));
+    }
 
     #[test]
     fn authoring_authorization_is_a_host_recorded_user_entry_fact() {

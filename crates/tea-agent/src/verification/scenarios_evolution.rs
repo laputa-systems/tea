@@ -7,7 +7,7 @@
 //! state identities rather than retaining model or tool text.
 
 use super::{
-    LiveVerificationError, RestrictedZenConsumer, VerificationConsumer, is_exact_zen_descriptor,
+    LiveVerificationError, RestrictedCodexConsumer, VerificationConsumer, is_exact_codex_descriptor,
 };
 use std::path::Path;
 use tea_core::state::ModelDescriptor;
@@ -23,7 +23,7 @@ pub struct LiveEvolutionScenario<'a> {
     /// Existing caller-owned public or synthetic workspace.
     pub workspace: &'a Path,
     /// Guarded consumer that actually evaluates and authors the candidate.
-    pub candidate_evaluator: &'a RestrictedZenConsumer,
+    pub candidate_evaluator: &'a RestrictedCodexConsumer,
     /// Public request that instructs the model to inspect and apply one bounded
     /// candidate. Operator-pinned global plugins such as `todo` are not
     /// editable, so the checked-in prompt adds a capability-free session plugin.
@@ -77,7 +77,7 @@ fn validate_scenario(scenario: &LiveEvolutionScenario<'_>) -> Result<(), LiveVer
         ));
     }
     if scenario.candidate_evaluator.role() != VerificationConsumer::CandidateEvaluation
-        || !is_exact_zen_descriptor(scenario.candidate_evaluator.model())
+        || !is_exact_codex_descriptor(scenario.candidate_evaluator.model())
     {
         return Err(LiveVerificationError::new(
             "live evolution verification requires the restricted canonical candidate-evaluation consumer",
@@ -130,22 +130,31 @@ fn run_evolution_scenario(
         .map_err(|error| LiveVerificationError::new(error.to_string()))?;
     let activated_revision = activated_revision(&activated_snapshot, &initial_revision)?;
 
-    let use_operation = smol::block_on(harness.run_root_prompt(use_prompt))
-        .map_err(|error| LiveVerificationError::new(error.to_string()))?;
-    if !use_operation.is_completed() {
-        return Err(LiveVerificationError::new(
-            "live evolution source-use operation did not complete",
-        ));
+    let mut state_before_rollback = None;
+    let mut revised_source_used = false;
+    // A completed model turn may still contain a rejected todo call. Admit one
+    // fresh explicit request if the durable state oracle did not change.
+    for _ in 0..2 {
+        let use_operation = smol::block_on(harness.run_root_prompt(use_prompt))
+            .map_err(|error| LiveVerificationError::new(error.to_string()))?;
+        if !use_operation.is_completed() {
+            return Err(LiveVerificationError::new(
+                "live evolution source-use operation did not complete",
+            ));
+        }
+        let used_snapshot = harness
+            .snapshot()
+            .map_err(|error| LiveVerificationError::new(error.to_string()))?;
+        state_before_rollback = todo_state(&used_snapshot)?;
+        revised_source_used = operation_uses_revision(
+            &used_snapshot,
+            use_operation.id(),
+            &activated_revision,
+        ) && state_before_rollback.is_some();
+        if revised_source_used {
+            break;
+        }
     }
-    let used_snapshot = harness
-        .snapshot()
-        .map_err(|error| LiveVerificationError::new(error.to_string()))?;
-    let state_before_rollback = todo_state(&used_snapshot)?;
-    let revised_source_used = operation_uses_revision(
-        &used_snapshot,
-        use_operation.id(),
-        &activated_revision,
-    ) && state_before_rollback.is_some();
 
     let rollback = smol::block_on(harness.run_authoring_prompt(rollback_prompt))
         .map_err(|error| LiveVerificationError::new(error.to_string()))?;
@@ -431,8 +440,18 @@ mod tests {
                     )
                 }
                 2 => text("activated"),
-                // Use: one stateful todo call under the activated revision.
+                // First use attempt has a syntactically invalid todo row.
                 3 => tool_call(
+                    index,
+                    "todo",
+                    JsonValue::object([(
+                        "markdown",
+                        JsonValue::String("- public evolution state marker".into()),
+                    )]),
+                ),
+                4 => text("used"),
+                // A fresh explicit request repairs the rejected state update.
+                5 => tool_call(
                     index,
                     "todo",
                     JsonValue::object([(
@@ -440,10 +459,10 @@ mod tests {
                         JsonValue::String("- [ ] public evolution state marker".into()),
                     )]),
                 ),
-                4 => text("used"),
+                6 => text("used after repair"),
                 // Rollback: inspect, then roll back to the original revision.
-                5 => tool_call(index, "tea_harness", status()),
-                6 => {
+                7 => tool_call(index, "tea_harness", status()),
+                8 => {
                     let initial = self
                         .initial_revision
                         .lock()
@@ -461,7 +480,7 @@ mod tests {
                         ]),
                     )
                 }
-                7 => text("rolled back"),
+                9 => text("rolled back"),
                 other => panic!("evolution script received unexpected request {other}"),
             };
             Box::pin(std::future::ready(Ok(Box::new(stream) as _)))
@@ -482,10 +501,10 @@ mod tests {
     #[test]
     fn deterministic_evolution_fixture_uses_the_same_durable_oracles() {
         let provider = Arc::new(EvolutionScriptProvider::default());
-        let evaluator = super::super::RestrictedZenConsumer {
+        let evaluator = super::super::RestrictedCodexConsumer {
             model: ModelDescriptor {
-                provider: super::super::ZEN_PROVIDER_ID.into(),
-                model: super::super::ZEN_FREE_MODEL_ID.into(),
+                provider: super::super::CODEX_PROVIDER_ID.into(),
+                model: super::super::CODEX_MODEL_ID.into(),
                 revision: None,
             },
             provider: provider.clone(),
@@ -514,10 +533,10 @@ mod tests {
                 durable_state_verified: true,
             }
         );
-        assert_eq!(provider.requests.load(Ordering::SeqCst), 8);
+        assert_eq!(provider.requests.load(Ordering::SeqCst), 10);
         assert_eq!(
             *provider.marker_in_prompt.lock().expect("prompt observations"),
-            vec![false, false, true, true, true, true, true, false],
+            vec![false, false, true, true, true, true, true, true, true, false],
             "only epochs under the activated revision carry the authored section"
         );
         fs::remove_dir_all(tea_home).expect("temporary Tea home removes");

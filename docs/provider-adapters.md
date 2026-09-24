@@ -21,7 +21,7 @@ opaque caller providers or replay a stream after it has exposed events.
 | `provider-openrouter` | `tea_providers::openrouter` | OpenRouter Chat Completions SSE plus inline usage/accounting | Opt-in incremental rustls + Graviola HTTPS transport with packet-bound model validation and response-stall timeouts. |
 | `provider-local` | `tea_providers::local` | Caller-selected local OpenAI-compatible Chat Completions SSE endpoint | Opt-in incremental HTTP transport for caller-selected local servers; no credentials or endpoint discovery. |
 | `provider-opencode-zen` | `tea_providers::opencode_zen` | OpenCode Zen Responses API SSE (`https://opencode.ai/zen/v1/responses`) via `input` array | Opt-in incremental rustls + Graviola HTTPS transport for `opencode-zen`/`muse-spark-1.2-contributor-free` (free). Mirrors the real `opencode` TUI provider (`opencode` → `https://opencode.ai/zen/v1`, `OPENCODE_API_KEY`, `openai-compatible` for most models, `responses` for `muse-spark`). Uses `Authorization: Bearer` + `Accept: text/event-stream`, `User-Agent: tea/1.0 opencode-zen`, `x-opencode-client: tea`. |
-| `provider-codex` | `tea_providers::codex` | Direct ChatGPT-subscription Codex Responses SSE | Opt-in ChatGPT OAuth, Tea-owned rotating credentials, honest `originator: tea`, encrypted reasoning continuity, and no OpenAI Platform API key. See [Codex provider](codex-provider.md). |
+| `provider-codex` | `tea_providers::codex` | Direct ChatGPT-subscription Codex Responses SSE | Reads the installed Codex client's access token without sharing its refresh token, or uses optional Tea-owned OAuth. Keeps honest `originator: tea` and encrypted reasoning continuity. See [Codex provider](codex-provider.md). |
 
 All repository HTTP I/O goes through `tea-http`. Provider adapters share one
 pooled `tea_http::TransportClient` through their `transport_runtime` executor
@@ -130,10 +130,12 @@ paths, worktree paths, and lease suffixes should not cross provider boundaries.
 ## Codex subscription contract
 
 The optional `codex` adapter is deliberately distinct from API-key adapters.
-`FileCredentialStore` receives the terminal-owned explicit
-`auth/codex.json` path, while `CodexAuthManager` receives that store and
-`CodexProvider` receives the shared manager. None discovers a home directory,
-an environment variable, or another client credential. The terminal wires
+`CodexClientCredentialStore` receives the terminal-selected installed client
+`auth.json` path and reads its current access token without importing the
+refresh token. If that file is absent, `FileCredentialStore` receives the
+terminal-owned explicit `auth/codex.json` path. `CodexAuthManager` receives
+the selected store and `CodexProvider` receives the shared manager. The
+provider itself discovers neither home directories nor environment variables. The terminal wires
 `tea auth login|status|logout codex` and requires an explicit
 `codex/<model-id>` descriptor.
 

@@ -20,9 +20,9 @@ pty-harness = []
 # terminal builds do not link OAuth, PKCE, or credential-persistence code.
 provider-codex = ["tea-providers/provider-codex"]
 provider-codex-test-support = ["provider-codex", "tea-providers/provider-codex-test-support"]
-# Builds only the repository's explicit, free-Zen verification infrastructure. It has no normal
-# terminal entry point and never changes production provider selection or catalog pricing.
-live-verification = []
+# Builds only the repository's explicit Codex Luna verification infrastructure. It has no normal
+# terminal entry point and never changes ordinary provider selection.
+live-verification = ["provider-codex"]
 
 [dependencies]
 laputa-hi-lite = "0.1"
@@ -55,6 +55,6 @@ path = "tests/pty_streaming.rs"
 required-features = ["pty-harness"]
 
 [[example]]
-name = "zen-free-verification"
-path = "examples/zen_free_verification.rs"
+name = "codex-luna-verification"
+path = "examples/codex_luna_verification.rs"
 required-features = ["live-verification"]

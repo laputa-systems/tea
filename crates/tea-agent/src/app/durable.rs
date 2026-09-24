@@ -358,14 +358,14 @@ pub(crate) fn create_live_verification_harness(
         Some(&model.provider),
     )?;
     let compactor = compactor_provider
-        .map(|(model, provider)| Arc::new(ProviderCompactor::new(model, provider)));
+        .map(|(model, provider)| Arc::new(ProviderCompactor::new(model, provider).with_thinking_level(ThinkingLevel::Low)));
     create_live_verification_host_harness(HostHarnessConfig {
         tea_home,
         workspace,
         configuration,
         model,
         provider,
-        thinking_level: Some(ThinkingLevel::Off),
+        thinking_level: Some(ThinkingLevel::Low),
         compactor,
         automatic_compaction: AutomaticCompactionPolicy::disabled(),
         subagents: None,
@@ -401,7 +401,7 @@ pub(crate) fn create_live_verification_child_harness(
         configuration,
         model: root_model,
         provider: root_provider,
-        thinking_level: Some(ThinkingLevel::Off),
+        thinking_level: Some(ThinkingLevel::Low),
         compactor: None,
         automatic_compaction: AutomaticCompactionPolicy::disabled(),
         subagents: Some(HostSubagentConfig::live_verification(
@@ -432,7 +432,7 @@ pub(crate) fn create_live_verification_authoring_harness(
         configuration,
         model,
         provider,
-        thinking_level: Some(ThinkingLevel::Off),
+        thinking_level: Some(ThinkingLevel::Low),
         compactor: None,
         automatic_compaction: AutomaticCompactionPolicy::disabled(),
         subagents: None,
@@ -456,7 +456,7 @@ pub(crate) fn reopen_live_verification_harness(
         Some(&model.provider),
     )?;
     let compactor = compactor_provider
-        .map(|(model, provider)| Arc::new(ProviderCompactor::new(model, provider)));
+        .map(|(model, provider)| Arc::new(ProviderCompactor::new(model, provider).with_thinking_level(ThinkingLevel::Low)));
     reopen_live_verification_host_harness(HostHarnessReopen {
         tea_home,
         workspace,
@@ -519,14 +519,14 @@ pub(crate) fn create_live_verification_compaction_harness(
     let compactor = Arc::new(ProviderCompactor::new(
         compactor_provider.0,
         compactor_provider.1,
-    ));
+    ).with_thinking_level(ThinkingLevel::Low));
     create_live_verification_host_harness(HostHarnessConfig {
         tea_home,
         workspace,
         configuration,
         model: root_model,
         provider: root_provider,
-        thinking_level: Some(ThinkingLevel::Off),
+        thinking_level: Some(ThinkingLevel::Low),
         compactor: Some(compactor),
         automatic_compaction,
         subagents: None,
@@ -553,7 +553,7 @@ pub(crate) fn reopen_live_verification_compaction_harness(
     let compactor = Arc::new(ProviderCompactor::new(
         compactor_provider.0,
         compactor_provider.1,
-    ));
+    ).with_thinking_level(ThinkingLevel::Low));
     reopen_live_verification_host_harness(HostHarnessReopen {
         tea_home,
         workspace,
@@ -3853,7 +3853,9 @@ data: [DONE]
 
 "#;
             for body in [&edit, report] {
-                let deadline = Instant::now() + Duration::from_secs(5);
+                // Repository snapshot creation and child scheduling can exceed
+                // five seconds when the full feature suite runs concurrently.
+                let deadline = Instant::now() + Duration::from_secs(15);
                 let (mut socket, _) = loop {
                     match listener.accept() {
                         Ok(connection) => break connection,

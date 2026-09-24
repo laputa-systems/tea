@@ -314,7 +314,7 @@ impl CodexEventStream {
         });
         self.queue_last_error();
         self.pending.push_back(ModelStreamEvent::Error {
-            message: "Codex authentication failed; run `tea auth login codex` if login is required"
+            message: "Codex authentication failed; renew the selected Codex credential if login is required"
                 .into(),
         });
     }
@@ -915,7 +915,13 @@ fn response_indicates_context_overflow(body: &[u8]) -> bool {
 
 fn status_message(status: u16, body: &[u8], model: &str) -> String {
     match status {
-        401 => "Codex authorization was rejected after a fresh token attempt; run `tea auth login codex`".into(),
+        401 => "Codex authorization was rejected after a fresh token attempt; renew the selected Codex credential".into(),
+        400 if String::from_utf8_lossy(body)
+            .to_ascii_lowercase()
+            .contains("model is not supported when using codex with a chatgpt account") =>
+        {
+            format!("Codex backend does not support codex/{model} with this ChatGPT account")
+        }
         404 => format!(
             "Codex backend did not expose the selected model through Tea's honest originator (codex/{}, wire compatibility {}); availability can depend on account rollout",
             model, CODEX_WIRE_COMPAT_VERSION
@@ -1228,6 +1234,15 @@ mod tests {
             account_id: "acct_1234".into(),
         };
         assert!(request_headers(&snapshot, "session\u{0000}unsafe", "request").is_err());
+    }
+
+    #[test]
+    fn unsupported_chatgpt_model_response_names_the_selected_codex_model() {
+        let body = br#"{"detail":"The 'gpt-6-luna' model is not supported when using Codex with a ChatGPT account."}"#;
+        assert_eq!(
+            status_message(400, body, "gpt-6-luna"),
+            "Codex backend does not support codex/gpt-6-luna with this ChatGPT account",
+        );
     }
 
     #[test]
@@ -1684,8 +1699,8 @@ mod tests {
     }
 
     /// Deliberately excluded from ordinary tests: it reaches the fixed direct
-    /// ChatGPT backend only after the operator opts in and supplies a separate
-    /// Tea-owned credential record created by `tea auth login codex`.
+    /// ChatGPT backend only after the operator opts in and supplies an explicit
+    /// installed Codex client or Tea-owned credential path.
     #[test]
     #[ignore = "requires TEA_CODEX_LIVE_SMOKE=1, TEA_CODEX_CREDENTIAL_PATH, and TEA_CODEX_LIVE_MODEL"]
     fn live_chatgpt_subscription_smoke() {
@@ -1702,10 +1717,6 @@ mod tests {
                 .parent()
                 .and_then(std::path::Path::file_name)
                 == Some(std::ffi::OsStr::new("auth"));
-        assert!(
-            is_tea_owned_path,
-            "live Codex smoke requires an absolute Tea auth/codex.json credential path"
-        );
         let is_codex_client_path = credential_path.file_name()
             == Some(std::ffi::OsStr::new("auth.json"))
             && credential_path
@@ -1713,8 +1724,8 @@ mod tests {
                 .and_then(std::path::Path::file_name)
                 == Some(std::ffi::OsStr::new(".codex"));
         assert!(
-            !is_codex_client_path,
-            "live Codex smoke refuses the independent Codex client credential path"
+            credential_path.is_absolute() && (is_tea_owned_path || is_codex_client_path),
+            "live Codex smoke requires an absolute Codex auth.json or Tea auth/codex.json credential path"
         );
         let model = std::env::var("TEA_CODEX_LIVE_MODEL")
             .expect("live Codex smoke requires an explicit current model name");
@@ -1723,9 +1734,12 @@ mod tests {
             "live Codex model name must not be empty"
         );
 
-        let auth = Arc::new(CodexAuthManager::with_system_clock(Arc::new(
-            FileCredentialStore::new(credential_path),
-        )));
+        let store: Arc<dyn crate::codex::CredentialStore> = if is_codex_client_path {
+            Arc::new(crate::codex::CodexClientCredentialStore::new(credential_path))
+        } else {
+            Arc::new(FileCredentialStore::new(credential_path))
+        };
+        let auth = Arc::new(CodexAuthManager::with_system_clock(store));
         let provider = CodexProvider::new(
             CodexConfig::try_new(auth, model.clone())
                 .expect("explicit live Codex configuration should be valid"),

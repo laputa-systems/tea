@@ -1,28 +1,26 @@
-//! Fail-closed command surface for Tea's optional free-Zen live verification lane.
+//! Fail-closed command surface for Tea's optional Codex Luna live verification lane.
 //!
 //! This is intentionally an example target rather than a normal `tea` command. It never runs a
-//! provider by default and never exposes a generic provider/model option. Once the durable
-//! six-case driver is available, it must receive `RestrictedZenConsumer` handles from the single
-//! factory constructed below; it must not construct an adapter itself.
+//! provider by default and never exposes a generic provider/model option. The six-case driver
+//! receives `RestrictedCodexConsumer` handles from the single factory constructed below.
 
 use std::env;
 use std::fs;
-use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use tea_agent::verification::{
     LiveChildScenario, LiveCompactionScenario, LiveEvolutionScenario,
     run_controlled_recovery_live_case, run_headless_live_case, run_live_child_scenario,
     run_live_compaction_scenario, run_live_evolution_scenario, ControlledRecoveryLiveCase,
-    FreeZenCatalogEvidence, HeadlessLiveCase, RestrictedZenFactory, VerificationConsumer,
-    ZEN_FREE_MODEL_ID, ZEN_PROVIDER_ID, ZEN_RESPONSES_ENDPOINT,
+    CodexModelEvidence, HeadlessLiveCase, RestrictedCodexFactory, VerificationConsumer,
+    CODEX_MODEL_ID, CODEX_MODEL_SOURCE, CODEX_PROVIDER_ID, CODEX_RESPONSES_ENDPOINT,
 };
 use tea_protocol::JsonValue;
 
 const REPORT_SCHEMA: &str = "tea-live-verification-report/v1";
 
 struct Arguments {
-    catalog_evidence: PathBuf,
+    model_evidence: PathBuf,
     ledger: PathBuf,
     out: PathBuf,
     live: bool,
@@ -30,13 +28,15 @@ struct Arguments {
     run_counterparts: bool,
     tea_home: Option<PathBuf>,
     workspace: Option<PathBuf>,
+    credential_path: Option<PathBuf>,
 }
 
 struct OneShotChildArguments {
-    catalog_evidence: PathBuf,
+    model_evidence: PathBuf,
     ledger: PathBuf,
     tea_home: PathBuf,
     workspace: PathBuf,
+    credential_path: PathBuf,
 }
 
 #[derive(Clone, Copy)]
@@ -71,7 +71,7 @@ fn run() -> Result<i32, String> {
         return run_one_shot_child();
     }
     let args = parse_arguments()?;
-    let evidence = FreeZenCatalogEvidence::read(&args.catalog_evidence).map_err(|error| error.to_string())?;
+    let evidence = CodexModelEvidence::read(&args.model_evidence).map_err(|error| error.to_string())?;
     let cases = verification_cases();
     let counterpart_outcomes = if args.run_counterparts {
         run_counterparts(&cases)
@@ -88,38 +88,32 @@ fn run() -> Result<i32, String> {
         .iter()
         .map(|_| LiveOutcome {
             status: "BLOCKED",
-            detail: Some("pass --live after confirming catalog evidence and data-use terms".into()),
+            detail: Some("pass --live with an explicit Codex credential path".into()),
         })
         .collect::<Vec<_>>();
     let blocker;
     let mut budget = JsonValue::Null;
     if !args.live {
-        blocker = Some("pass --live only after reviewing the current official Zen catalog evidence".to_owned());
+        blocker = Some("pass --live to exercise the selected Codex Luna model".to_owned());
     } else if !args.synthetic_or_public_fixtures {
-        blocker = Some("pass --synthetic-or-public-fixtures to acknowledge the route's data-use terms".to_owned());
+        blocker = Some("pass --synthetic-or-public-fixtures to acknowledge disposable input".to_owned());
         live_outcomes.iter_mut().for_each(|outcome| {
             outcome.detail = Some(
                 "live execution requires --synthetic-or-public-fixtures acknowledgement".into(),
             )
         });
     } else {
-        match take_opencode_api_key() {
-            Err(_) => {
-                blocker = Some(
-                    "OPENCODE_API_KEY is unavailable at the explicit host secret boundary; no inference was sent"
-                        .to_owned(),
-                );
+        match args.credential_path.as_ref() {
+            None => {
+                blocker = Some("--credential-path must name an explicit Codex client auth.json or Tea auth/codex.json file".to_owned());
                 live_outcomes.iter_mut().for_each(|outcome| {
-                    outcome.detail = Some(
-                        "OPENCODE_API_KEY is unavailable at the explicit host secret boundary".into(),
-                    )
+                    outcome.detail = Some("Codex credential path is unavailable".into())
                 });
             }
-            Ok(api_key) => match RestrictedZenFactory::new(
-                api_key.clone(),
+            Some(credential_path) => match RestrictedCodexFactory::new(
+                credential_path.clone(),
                 evidence.clone(),
                 args.ledger.clone(),
-                NonZeroU64::new(2_048).expect("fixed output allowance is nonzero"),
             ) {
                 Err(error) => {
                     let detail = format!("restricted factory rejected live setup: {error}");
@@ -129,30 +123,35 @@ fn run() -> Result<i32, String> {
                     });
                 }
                 Ok(factory) => {
-                    live_outcomes = run_live_cases(&args, &factory, &cases, &api_key);
+                    live_outcomes = run_live_cases(&args, &factory, &cases);
                     budget = budget_json(
                         &factory
                             .reload_budget_snapshot()
                             .map_err(|error| error.to_string())?,
                     );
-                    blocker = Some(
-                        "headless transport cases executed only with explicit synthetic fixtures; inspect each semantic status before claiming a live pass".to_owned(),
-                    );
+                    blocker = None;
                 }
             },
         }
     }
+    let status = suite_status(&counterpart_outcomes, &live_outcomes);
+    let blocker = match status {
+        "PASSED" => JsonValue::Null,
+        "FAILED" => JsonValue::from("one or more verification cases failed; inspect case details"),
+        _ => JsonValue::from(blocker.unwrap_or_else(|| {
+            "one or more live or offline verification cases remain incomplete".to_owned()
+        })),
+    };
     let report = JsonValue::object([
         ("schema_version", JsonValue::from(REPORT_SCHEMA)),
-        ("status", JsonValue::from("BLOCKED")),
-        ("blocker", JsonValue::from(blocker.expect("all paths set a blocker"))),
-        ("catalog_source", JsonValue::from("https://opencode.ai/docs/zen")),
+        ("status", JsonValue::from(status)),
+        ("blocker", blocker),
+        ("model_source", JsonValue::from(CODEX_MODEL_SOURCE)),
         ("checked_on", JsonValue::from(evidence.checked_on())),
-        ("provider", JsonValue::from(ZEN_PROVIDER_ID)),
-        ("model", JsonValue::from(ZEN_FREE_MODEL_ID)),
-        ("endpoint", JsonValue::from(ZEN_RESPONSES_ENDPOINT)),
-        ("data_use_source", JsonValue::from(evidence.data_use_source())),
-        ("data_use_summary", JsonValue::from(evidence.data_use_summary())),
+        ("provider", JsonValue::from(CODEX_PROVIDER_ID)),
+        ("model", JsonValue::from(CODEX_MODEL_ID)),
+        ("endpoint", JsonValue::from(CODEX_RESPONSES_ENDPOINT)),
+        ("reasoning_effort", JsonValue::from("low")),
         ("budget", budget),
         (
             "cases",
@@ -164,7 +163,12 @@ fn run() -> Result<i32, String> {
                         JsonValue::object([
                             ("id", JsonValue::from(case.id)),
                             ("consumer", JsonValue::from(consumer_name(case.consumer))),
-                            ("status", JsonValue::from("BLOCKED")),
+                            ("status", JsonValue::from(case_status(
+                                outcome,
+                                live_outcomes
+                                    .get(case_index(&cases, case))
+                                    .expect("case and live outcome length match"),
+                            ))),
                             (
                                 "deterministic_counterpart",
                                 JsonValue::from(case.counterpart.join(" ")),
@@ -197,33 +201,49 @@ fn run() -> Result<i32, String> {
         ),
     ]);
     write_report(&args.out, &report)?;
-    println!("live verification BLOCKED; sanitized report: {}", args.out.display());
-    Ok(if counterpart_outcomes.iter().any(|outcome| outcome.status == "FAILED") {
-        1
-    } else {
-        2
+    println!("live verification {status}; sanitized report: {}", args.out.display());
+    Ok(match status {
+        "PASSED" => 0,
+        "FAILED" => 1,
+        _ => 2,
     })
 }
 
-fn take_opencode_api_key() -> Result<String, String> {
-    let api_key = env::var("OPENCODE_API_KEY").map_err(|_| {
-        "OPENCODE_API_KEY is unavailable at the explicit host secret boundary; no inference was sent"
-            .to_owned()
-    })?;
-    env::remove_var("OPENCODE_API_KEY");
-    Ok(api_key)
+// The suite passes only when every live scenario and its offline oracle pass.
+// An omitted oracle leaves the evidence incomplete; any failed oracle is a failure.
+fn case_status(offline: &CounterpartOutcome, live: &LiveOutcome) -> &'static str {
+    if offline.status == "FAILED" || live.status == "FAILED" {
+        "FAILED"
+    } else if offline.status == "PASSED" && live.status == "SEMANTIC_PASSED" {
+        "PASSED"
+    } else {
+        "BLOCKED"
+    }
+}
+
+fn suite_status(offline: &[CounterpartOutcome], live: &[LiveOutcome]) -> &'static str {
+    if offline.len() != verification_cases().len() || offline.len() != live.len() {
+        return "FAILED";
+    }
+    let mut blocked = false;
+    for (offline, live) in offline.iter().zip(live) {
+        match case_status(offline, live) {
+            "FAILED" => return "FAILED",
+            "BLOCKED" => blocked = true,
+            _ => {}
+        }
+    }
+    if blocked { "BLOCKED" } else { "PASSED" }
 }
 
 fn run_one_shot_child() -> Result<i32, String> {
     let arguments = parse_one_shot_child_arguments()?;
-    let api_key = take_opencode_api_key()?;
-    let evidence = FreeZenCatalogEvidence::read(&arguments.catalog_evidence)
+    let evidence = CodexModelEvidence::read(&arguments.model_evidence)
         .map_err(|error| error.to_string())?;
-    let factory = RestrictedZenFactory::new(
-        api_key,
+    let factory = RestrictedCodexFactory::new(
+        arguments.credential_path,
         evidence,
         arguments.ledger,
-        NonZeroU64::new(2_048).expect("fixed output allowance is nonzero"),
     )
     .map_err(|error| error.to_string())?;
     let consumer = factory.consumer(VerificationConsumer::Root);
@@ -413,9 +433,8 @@ fn run_fixture_oracle(mut command: Command, expected_path: &Path) -> Counterpart
 
 fn run_live_cases(
     arguments: &Arguments,
-    factory: &RestrictedZenFactory,
+    factory: &RestrictedCodexFactory,
     cases: &[VerificationCase],
-    api_key: &str,
 ) -> Vec<LiveOutcome> {
     let (Some(tea_home_root), Some(workspace_root)) =
         (arguments.tea_home.as_deref(), arguments.workspace.as_deref())
@@ -453,8 +472,9 @@ fn run_live_cases(
                     arguments,
                     &tea_home,
                     &workspace,
-                    api_key,
-                ) {
+                ).and_then(|()| {
+                    factory.reload_budget_snapshot().map(|_| ()).map_err(|error| error.to_string())
+                }) {
                     Ok(()) => LiveOutcome {
                         status: "SEMANTIC_PASSED",
                         detail: Some(
@@ -669,7 +689,6 @@ fn run_one_shot_child_process(
     arguments: &Arguments,
     tea_home: &Path,
     workspace: &Path,
-    api_key: &str,
 ) -> Result<(), String> {
     let executable = env::current_exe()
         .map_err(|error| format!("cannot locate the feature-only one-shot executable: {error}"))?;
@@ -678,16 +697,17 @@ fn run_one_shot_child_process(
             "--one-shot-child",
             "--live",
             "--synthetic-or-public-fixtures",
-            "--catalog-evidence",
+            "--model-evidence",
         ])
-        .arg(&arguments.catalog_evidence)
+        .arg(&arguments.model_evidence)
         .arg("--ledger")
         .arg(&arguments.ledger)
         .arg("--tea-home")
         .arg(tea_home)
         .arg("--workspace")
         .arg(workspace)
-        .env("OPENCODE_API_KEY", api_key)
+        .arg("--credential-path")
+        .arg(arguments.credential_path.as_ref().expect("live setup requires credential path"))
         .env_remove("OPENROUTER_API_KEY")
         .env_remove("CODEX_API_KEY")
         .env_remove("OPENAI_API_KEY")
@@ -783,7 +803,7 @@ fn live_prompt(case_id: &str) -> &'static str {
             evolution_activation_prompt()
         }
         "isolated-children" => {
-            "This is a disposable public child-lane verification. Delegate the one isolated task of replacing the only line in fixture.txt from before to after. Wait for its report, then explicitly apply its reported delta. Do not access paths outside this workspace."
+            "This is a disposable public child-lane verification. Delegate the one isolated task of replacing the only line in fixture.txt from before to after using model gpt-5.6-luna and thinking low. Wait for its report, then explicitly apply its reported delta. Do not access paths outside this workspace."
         }
         _ => "This is a disposable public Tea verification fixture. Do not use tools. Reply exactly READY.",
     }
@@ -800,7 +820,7 @@ fn evolution_activation_prompt() -> &'static str {
 }
 
 fn evolution_use_prompt() -> &'static str {
-    "This is a disposable public post-activation verification. Use the todo tool exactly once to create a one-item todo plan whose text is `public evolution state marker`. Do not invoke tea_harness or access paths outside this workspace."
+    "This is a disposable public post-activation verification. Call the todo tool with markdown exactly `- [ ] public evolution state marker`, including the checkbox syntax. If the tool rejects the row, correct it and retry until the one-item plan is committed. Do not invoke tea_harness or access paths outside this workspace."
 }
 
 fn evolution_rollback_prompt() -> &'static str {
@@ -827,20 +847,17 @@ fn consumer_name(consumer: VerificationConsumer) -> &'static str {
 fn budget_json(snapshot: &tea_agent::verification::LiveVerificationBudgetSnapshot) -> JsonValue {
     JsonValue::object([
         ("attempted_requests", JsonValue::from(snapshot.attempted_requests)),
-        (
-            "requested_output_tokens",
-            JsonValue::from(snapshot.requested_output_tokens),
-        ),
         ("active_requests", JsonValue::from(snapshot.active_requests)),
     ])
 }
 
 fn parse_one_shot_child_arguments() -> Result<OneShotChildArguments, String> {
     let mut values = env::args_os().skip(1);
-    let mut catalog_evidence = None;
+    let mut model_evidence = None;
     let mut ledger = None;
     let mut tea_home = None;
     let mut workspace = None;
+    let mut credential_path = None;
     let mut one_shot_child = false;
     let mut live = false;
     let mut synthetic_or_public_fixtures = false;
@@ -849,9 +866,9 @@ fn parse_one_shot_child_arguments() -> Result<OneShotChildArguments, String> {
             Some("--one-shot-child") => one_shot_child = true,
             Some("--live") => live = true,
             Some("--synthetic-or-public-fixtures") => synthetic_or_public_fixtures = true,
-            Some("--catalog-evidence") => {
-                catalog_evidence = Some(PathBuf::from(
-                    values.next().ok_or("--catalog-evidence requires a path")?,
+            Some("--model-evidence") => {
+                model_evidence = Some(PathBuf::from(
+                    values.next().ok_or("--model-evidence requires a path")?,
                 ));
             }
             Some("--ledger") => {
@@ -862,6 +879,9 @@ fn parse_one_shot_child_arguments() -> Result<OneShotChildArguments, String> {
             }
             Some("--workspace") => {
                 workspace = Some(PathBuf::from(values.next().ok_or("--workspace requires a path")?));
+            }
+            Some("--credential-path") => {
+                credential_path = Some(PathBuf::from(values.next().ok_or("--credential-path requires a path")?));
             }
             _ => {
                 return Err(format!(
@@ -878,16 +898,17 @@ fn parse_one_shot_child_arguments() -> Result<OneShotChildArguments, String> {
         );
     }
     Ok(OneShotChildArguments {
-        catalog_evidence: catalog_evidence.ok_or("--catalog-evidence is required")?,
+        model_evidence: model_evidence.ok_or("--model-evidence is required")?,
         ledger: ledger.ok_or("--ledger is required")?,
         tea_home: tea_home.ok_or("--tea-home is required")?,
         workspace: workspace.ok_or("--workspace is required")?,
+        credential_path: credential_path.ok_or("--credential-path is required")?,
     })
 }
 
 fn parse_arguments() -> Result<Arguments, String> {
     let mut values = env::args_os().skip(1);
-    let mut catalog_evidence = None;
+    let mut model_evidence = None;
     let mut ledger = None;
     let mut out = None;
     let mut live = false;
@@ -895,11 +916,12 @@ fn parse_arguments() -> Result<Arguments, String> {
     let mut run_counterparts = false;
     let mut tea_home = None;
     let mut workspace = None;
+    let mut credential_path = None;
     while let Some(argument) = values.next() {
         match argument.to_str() {
-            Some("--catalog-evidence") => {
-                catalog_evidence = Some(PathBuf::from(
-                    values.next().ok_or("--catalog-evidence requires a path")?,
+            Some("--model-evidence") => {
+                model_evidence = Some(PathBuf::from(
+                    values.next().ok_or("--model-evidence requires a path")?,
                 ));
             }
             Some("--ledger") => {
@@ -917,9 +939,12 @@ fn parse_arguments() -> Result<Arguments, String> {
             Some("--workspace") => {
                 workspace = Some(PathBuf::from(values.next().ok_or("--workspace requires a path")?));
             }
+            Some("--credential-path") => {
+                credential_path = Some(PathBuf::from(values.next().ok_or("--credential-path requires a path")?));
+            }
             Some("--help") | Some("-h") => {
                 println!(
-                    "usage: cargo run -p tea-agent --example zen-free-verification --features live-verification -- --catalog-evidence PATH --ledger PATH --out PATH [--run-counterparts] [--live --synthetic-or-public-fixtures --tea-home PATH --workspace PATH]"
+                    "usage: cargo run -p tea-agent --example codex-luna-verification --features live-verification -- --model-evidence PATH --ledger PATH --out PATH [--run-counterparts] [--live --synthetic-or-public-fixtures --credential-path PATH --tea-home PATH --workspace PATH]"
                 );
                 std::process::exit(0);
             }
@@ -927,7 +952,7 @@ fn parse_arguments() -> Result<Arguments, String> {
         }
     }
     Ok(Arguments {
-        catalog_evidence: catalog_evidence.ok_or("--catalog-evidence is required")?,
+        model_evidence: model_evidence.ok_or("--model-evidence is required")?,
         ledger: ledger.ok_or("--ledger is required")?,
         out: out.ok_or("--out is required")?,
         live,
@@ -935,6 +960,7 @@ fn parse_arguments() -> Result<Arguments, String> {
         run_counterparts,
         tea_home,
         workspace,
+        credential_path,
     })
 }
 
@@ -956,6 +982,45 @@ fn write_report(path: &std::path::Path, report: &JsonValue) -> Result<(), String
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn report_status_requires_all_six_live_and_offline_oracles() {
+        let offline = (0..6)
+            .map(|_| CounterpartOutcome { status: "PASSED", detail: None })
+            .collect::<Vec<_>>();
+        let live = (0..6)
+            .map(|_| LiveOutcome { status: "SEMANTIC_PASSED", detail: None })
+            .collect::<Vec<_>>();
+        assert_eq!(case_status(&offline[0], &live[0]), "PASSED");
+        assert_eq!(suite_status(&offline, &live), "PASSED");
+
+        let mut incomplete_live = live;
+        incomplete_live[1].status = "BLOCKED";
+        assert_eq!(case_status(&offline[1], &incomplete_live[1]), "BLOCKED");
+        assert_eq!(suite_status(&offline, &incomplete_live), "BLOCKED");
+
+        let mut incomplete_offline = offline;
+        incomplete_offline[2].status = "NOT_RUN";
+        assert_eq!(case_status(&incomplete_offline[2], &incomplete_live[2]), "BLOCKED");
+        assert_eq!(suite_status(&incomplete_offline, &incomplete_live), "BLOCKED");
+
+        incomplete_offline[2].status = "FAILED";
+        assert_eq!(case_status(&incomplete_offline[2], &incomplete_live[2]), "FAILED");
+        assert_eq!(suite_status(&incomplete_offline, &incomplete_live), "FAILED");
+    }
+
+    #[test]
+    fn report_status_preserves_live_failure_even_with_offline_passes() {
+        let offline = (0..6)
+            .map(|_| CounterpartOutcome { status: "PASSED", detail: None })
+            .collect::<Vec<_>>();
+        let mut live = (0..6)
+            .map(|_| LiveOutcome { status: "SEMANTIC_PASSED", detail: None })
+            .collect::<Vec<_>>();
+        live[0].status = "FAILED";
+        assert_eq!(case_status(&offline[0], &live[0]), "FAILED");
+        assert_eq!(suite_status(&offline, &live), "FAILED");
+    }
 
     #[test]
     fn mandatory_counterparts_are_exactly_six_and_provider_free() {

@@ -1,8 +1,7 @@
 //! Direct ChatGPT-subscription Codex Responses provider.
 //!
 //! This optional adapter implements Tea-owned OAuth and the direct Codex
-//! Responses SSE contract. It never shells out to Codex, reuses another
-//! Codex credential file, sends a subscription bearer token to an OpenAI
+//! Responses SSE contract. It never shells out to Codex, sends a subscription bearer token to an OpenAI
 //! Platform API origin, or impersonates a first-party client.
 
 mod auth;
@@ -25,7 +24,7 @@ pub use config::{CodexCapturedRequest, CodexRequestCapture};
 pub use config::{CodexConfig, CodexConfigError, CodexTextVerbosity};
 pub use context::CodexContextHook;
 pub use credentials::{
-    CodexCredential, CredentialError, CredentialStore, FileCredentialStore,
+    CodexClientCredentialStore, CodexCredential, CredentialError, CredentialStore, FileCredentialStore,
     InMemoryCredentialStore, SecretString, abbreviate_account_id,
 };
 pub use error::{CodexErrorReport, CodexErrorSource};

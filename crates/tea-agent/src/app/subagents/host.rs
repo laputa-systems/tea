@@ -28,7 +28,7 @@ use super::{
     WorkspaceLease as GitWorkspaceLease, WorkspaceLeaseRequest,
 };
 use crate::app::durable::CodingCapabilityRouter;
-use crate::app::host::host_configuration;
+use crate::app::host::host_configuration_for_provider;
 use crate::app::nonblocking_operations::NonblockingCodingOperations;
 use crate::app::picker::automatic_compaction_policy;
 use crate::app::provider_factory::ProviderFactory;
@@ -282,8 +282,11 @@ impl TuiSubagentHost {
         }
         // Tool authority is the lease worktree; model-facing host context is
         // the stable original workspace label retained by the lease.
-        let configuration =
-            host_configuration(lease.logical_workspace_label()).map_err(app_error)?;
+        let configuration = host_configuration_for_provider(
+            lease.logical_workspace_label(),
+            Some(&model.descriptor.provider),
+        )
+        .map_err(app_error)?;
         // The persisted model catalog carries the context capacity that
         // seeded this child's immutable runtime policy. Do not re-read a
         // changed current registry on reopen and accidentally mismatch that

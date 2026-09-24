@@ -2,6 +2,7 @@
 
 use crate::json::JsonValue;
 use crate::scheduler::CancellationToken;
+use base64::Engine as _;
 use rustix::fs::{CWD, FlockOperation, Mode, OFlags, flock, openat};
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
@@ -47,11 +48,12 @@ impl fmt::Debug for SecretString {
     }
 }
 
-/// One validated Tea-owned v1 Codex credential record.
+/// One validated Codex credential snapshot. Tea-owned v1 records include a
+/// refresh token; installed-client snapshots contain only an access token.
 #[derive(Clone, Eq, PartialEq)]
 pub struct CodexCredential {
     access_token: SecretString,
-    refresh_token: SecretString,
+    refresh_token: Option<SecretString>,
     expires_at_unix_ms: u64,
     account_id: String,
     obtained_at_unix_ms: u64,
@@ -77,7 +79,32 @@ impl CodexCredential {
         }
         Ok(Self {
             access_token,
-            refresh_token,
+            refresh_token: Some(refresh_token),
+            expires_at_unix_ms,
+            account_id,
+            obtained_at_unix_ms,
+        })
+    }
+
+    /// Represent a client-owned access token without importing its rotating refresh token.
+    pub fn from_client_access_token(
+        access_token: SecretString,
+        expires_at_unix_ms: u64,
+        account_id: impl Into<String>,
+        obtained_at_unix_ms: u64,
+    ) -> Result<Self, CredentialError> {
+        let account_id = account_id.into();
+        if account_id.trim().is_empty() || account_id.chars().any(char::is_control) {
+            return Err(CredentialError::InvalidAccountId);
+        }
+        if !(1..=MAX_TIMESTAMP_UNIX_MS).contains(&expires_at_unix_ms)
+            || !(1..=MAX_TIMESTAMP_UNIX_MS).contains(&obtained_at_unix_ms)
+        {
+            return Err(CredentialError::InvalidTimestamp);
+        }
+        Ok(Self {
+            access_token,
+            refresh_token: None,
             expires_at_unix_ms,
             account_id,
             obtained_at_unix_ms,
@@ -89,9 +116,9 @@ impl CodexCredential {
         &self.access_token
     }
 
-    /// Borrow the rotating refresh token at the immediate OAuth boundary.
-    pub(crate) fn refresh_token(&self) -> &SecretString {
-        &self.refresh_token
+    /// Borrow a Tea-owned rotating refresh token at the immediate OAuth boundary.
+    pub(crate) fn refresh_token(&self) -> Option<&SecretString> {
+        self.refresh_token.as_ref()
     }
 
     /// Absolute access-token expiry timestamp.
@@ -121,7 +148,9 @@ impl CodexCredential {
     ) -> Result<Self, CredentialError> {
         Self::new(
             access_token,
-            refresh_token.unwrap_or_else(|| self.refresh_token.clone()),
+            refresh_token
+                .or_else(|| self.refresh_token.clone())
+                .ok_or(CredentialError::MalformedRecord)?,
             expires_at_unix_ms,
             account_id,
             obtained_at_unix_ms,
@@ -129,6 +158,7 @@ impl CodexCredential {
     }
 
     fn encode(&self) -> Result<Vec<u8>, CredentialError> {
+        let refresh_token = self.refresh_token.as_ref().ok_or(CredentialError::MalformedRecord)?;
         JsonValue::object([
             ("version", JsonValue::from(CREDENTIAL_VERSION)),
             ("provider", JsonValue::String("codex".into())),
@@ -138,7 +168,7 @@ impl CodexCredential {
             ),
             (
                 "refresh_token",
-                JsonValue::String(self.refresh_token.expose().to_owned()),
+                JsonValue::String(refresh_token.expose().to_owned()),
             ),
             (
                 "expires_at_unix_ms",
@@ -237,6 +267,8 @@ pub enum CredentialError {
     LockTimeout,
     /// The refresh wait was cancelled.
     Cancelled,
+    /// The selected source is owned by another client and cannot be changed by Tea.
+    ReadOnly,
 }
 
 impl fmt::Display for CredentialError {
@@ -262,6 +294,9 @@ impl fmt::Display for CredentialError {
             Self::Io => formatter.write_str("Codex credential storage failed"),
             Self::LockTimeout => formatter.write_str("Codex credential refresh lock timed out"),
             Self::Cancelled => formatter.write_str("Codex credential operation was cancelled"),
+            Self::ReadOnly => {
+                formatter.write_str("installed Codex credentials are read-only to Tea")
+            }
         }
     }
 }
@@ -271,7 +306,7 @@ impl std::error::Error for CredentialError {}
 /// Held cross-process credential-refresh serialization token.
 pub trait CredentialRefreshLock: Send {}
 
-/// Explicit credential persistence and refresh-lock boundary owned by the host.
+/// Explicit credential source and optional persistence boundary owned by the host.
 pub trait CredentialStore: Send + Sync {
     /// Load the current record, if one exists.
     fn load(&self) -> Result<Option<CodexCredential>, CredentialError>;
@@ -286,6 +321,116 @@ pub trait CredentialStore: Send + Sync {
     ) -> Result<Box<dyn CredentialRefreshLock>, CredentialError>;
     /// Explicit path for status output, when persistence has one.
     fn path(&self) -> Option<&Path>;
+    /// Whether Tea owns the rotating refresh token and may update this store.
+    fn can_refresh(&self) -> bool {
+        true
+    }
+}
+
+/// Read-only view of an installed Codex client's auth file.
+///
+/// Each load opens the current file, so a refresh performed by Codex becomes
+/// visible to Tea. Tea never selects the client refresh token for use or
+/// writes this file.
+#[derive(Clone, Debug)]
+pub struct CodexClientCredentialStore {
+    path: PathBuf,
+}
+
+impl CodexClientCredentialStore {
+    /// Bind to one explicit installed Codex client auth path without reading it.
+    pub fn new(path: impl Into<PathBuf>) -> Self {
+        Self { path: path.into() }
+    }
+}
+
+impl CredentialStore for CodexClientCredentialStore {
+    fn load(&self) -> Result<Option<CodexCredential>, CredentialError> {
+        let metadata = match fs::symlink_metadata(&self.path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(_) => return Err(CredentialError::Io),
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(CredentialError::UnsafePath);
+        }
+        let file = openat(CWD, &self.path, OFlags::RDONLY | OFlags::NOFOLLOW, Mode::empty())
+            .map_err(|_| CredentialError::UnsafePath)?;
+        let mut bytes = Vec::new();
+        Read::by_ref(&mut File::from(file))
+            .take(MAX_CREDENTIAL_RECORD_BYTES.saturating_add(1))
+            .read_to_end(&mut bytes)
+            .map_err(|_| CredentialError::Io)?;
+        if bytes.len() as u64 > MAX_CREDENTIAL_RECORD_BYTES {
+            return Err(CredentialError::MalformedRecord);
+        }
+        let text = std::str::from_utf8(&bytes).map_err(|_| CredentialError::MalformedRecord)?;
+        let value = JsonValue::parse(text).map_err(|_| CredentialError::MalformedRecord)?;
+        if value.get("auth_mode").and_then(JsonValue::as_str) != Some("chatgpt") {
+            return Err(CredentialError::MalformedRecord);
+        }
+        let tokens = value.get("tokens").ok_or(CredentialError::MalformedRecord)?;
+        let access_token = tokens
+            .get("access_token")
+            .and_then(JsonValue::as_str)
+            .ok_or(CredentialError::MalformedRecord)?;
+        let account_id = tokens
+            .get("account_id")
+            .and_then(JsonValue::as_str)
+            .ok_or(CredentialError::MalformedRecord)?;
+        let payload = access_token
+            .split('.')
+            .nth(1)
+            .ok_or(CredentialError::MalformedRecord)?;
+        let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(payload)
+            .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(payload))
+            .map_err(|_| CredentialError::MalformedRecord)?;
+        let claims = JsonValue::parse(
+            std::str::from_utf8(&decoded).map_err(|_| CredentialError::MalformedRecord)?,
+        )
+        .map_err(|_| CredentialError::MalformedRecord)?;
+        let expires_at_unix_ms = claims
+            .get("exp")
+            .and_then(JsonValue::as_u64)
+            .and_then(|seconds| seconds.checked_mul(1_000))
+            .ok_or(CredentialError::InvalidTimestamp)?;
+        let obtained_at_unix_ms = claims
+            .get("iat")
+            .and_then(JsonValue::as_u64)
+            .and_then(|seconds| seconds.checked_mul(1_000))
+            .unwrap_or(expires_at_unix_ms);
+        CodexCredential::from_client_access_token(
+            SecretString::new(access_token.to_owned())?,
+            expires_at_unix_ms,
+            account_id.to_owned(),
+            obtained_at_unix_ms,
+        )
+        .map(Some)
+    }
+
+    fn save(&self, _: &CodexCredential) -> Result<(), CredentialError> {
+        Err(CredentialError::ReadOnly)
+    }
+
+    fn remove(&self) -> Result<(), CredentialError> {
+        Err(CredentialError::ReadOnly)
+    }
+
+    fn acquire_refresh_lock(
+        &self,
+        _: &CancellationToken,
+    ) -> Result<Box<dyn CredentialRefreshLock>, CredentialError> {
+        Err(CredentialError::ReadOnly)
+    }
+
+    fn path(&self) -> Option<&Path> {
+        Some(&self.path)
+    }
+
+    fn can_refresh(&self) -> bool {
+        false
+    }
 }
 
 /// File-backed Tea-owned credential store at an explicit host-selected path.
@@ -627,6 +772,48 @@ mod tests {
             ),
             Err(CredentialError::InvalidAccountId),
         );
+    }
+
+    #[test]
+    fn client_auth_reloads_access_token_without_importing_or_changing_refresh_token() {
+        let directory = TestDirectory::new();
+        let path = directory.path().join("auth.json");
+        let store = CodexClientCredentialStore::new(&path);
+        let write_client_auth = |access: &str| {
+            let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .encode(r#"{"exp":2000000000,"iat":1900000000}"#);
+            let token = format!("header.{payload}.{access}");
+            fs::write(
+                &path,
+                JsonValue::object([
+                    ("auth_mode", JsonValue::from("chatgpt")),
+                    ("tokens", JsonValue::object([
+                        ("access_token", JsonValue::from(token)),
+                        ("account_id", JsonValue::from("acct_12345678")),
+                        ("refresh_token", JsonValue::from("client-refresh-secret")),
+                    ])),
+                ]).to_json_string().expect("client auth fixture"),
+            ).expect("write client fixture");
+        };
+        write_client_auth("first");
+        let first = store.load().expect("load client auth").expect("credential");
+        assert_eq!(first.expires_at_unix_ms(), 2_000_000_000_000);
+        assert!(first.refresh_token().is_none());
+        write_client_auth("second");
+        let second = store.load().expect("reload client auth").expect("credential");
+        assert_ne!(first, second);
+        let manager = crate::codex::CodexAuthManager::with_system_clock(Arc::new(store.clone()));
+        assert_eq!(
+            manager.snapshot(&CancellationToken::new()).expect("fresh client token").account_id,
+            "acct_12345678",
+        );
+        assert_eq!(
+            manager.force_refresh(&CancellationToken::new()),
+            Err(crate::codex::AuthError::ClientTokenExpired),
+        );
+        assert_eq!(store.save(&second), Err(CredentialError::ReadOnly));
+        assert_eq!(store.remove(), Err(CredentialError::ReadOnly));
+        assert!(fs::read_to_string(&path).expect("client auth unchanged").contains("client-refresh-secret"));
     }
 
     #[test]

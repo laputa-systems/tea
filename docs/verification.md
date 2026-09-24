@@ -59,7 +59,7 @@ credential or live inference is part of these checks.
 Do not run formatters, linters, pre-commit hooks, or push as part of normal
 verification in this repository.
 
-## Guarded free-only live lane
+## Guarded Codex Luna live lane
 
 The normal Make targets and `python3 -m evals.quality` commands are
 provider-free. Confirm that boundary after changing an evaluation entry point:
@@ -73,64 +73,53 @@ The legacy `evals/run-rust-live.sh` command always exits before Cargo or
 transport. The generic `evals/controller.py` contract is not an approved live
 verification entry point; its checked-in test adapters are provider-free.
 
-The sole proposed live boundary is the feature-gated
-`tea_agent::verification::RestrictedZenFactory`. It accepts only
-`opencode-zen`, `muse-spark-1.3-contributor-free`, and
-`https://opencode.ai/zen/v1/responses`; it creates guarded root, child,
-compaction, candidate-evaluation, and comparison consumers from one factory.
-It refuses a model/provider mismatch before transport and reserves a
-content-free ledger entry before every allowed request. The aggregate limits
-are 40 attempts, 100,000 requested output tokens, 30 minutes, and two active
-streams. Evidence must be refreshed on the current UTC date before the
-factory can construct a provider; active streams also stop at the task wall
-deadline. The Zen adapter also rejects cross-origin redirects.
+The feature-gated `tea_agent::verification::RestrictedCodexFactory` accepts
+only `codex/gpt-5.6-luna` with low reasoning effort. It constructs the native
+Tea Codex subscription adapter from an explicit installed Codex client
+`auth.json` or Tea-owned `auth/codex.json`
+path and creates guarded root, child, compaction, candidate-evaluation, and
+comparison consumers. Every model request must match the exact model and
+effort before transport. The shared ledger records each request before
+transport and retains previous attempts across continued runs. It does not
+impose a request-count, wall-time, or concurrent-stream limit. The Codex
+subscription wire does not expose a reliable request output token cap, so this
+lane makes no reserved-output-token claim.
+The v2 ledger records the exact model for every attempt. The ten earlier
+`gpt-6-luna` attempts remain recorded after the user-approved switch to
+`gpt-5.6-luna`; the backend rejected the former with HTTP 400 for this
+ChatGPT account.
 
-The checked record at
-`evals/live/zen-free-catalog-evidence.json` was reviewed against the official
-[OpenCode Zen catalog](https://opencode.ai/docs/zen) on 2026-09-22. It records
-Free input, output, and cached-read charges per one million tokens;
-cached-write has no listed price. The catalog says the selected Contributor
-Free route permits prompts and completions to train future Meta models.
-Consequently, this lane may send only disposable synthetic or deliberately
-public fixtures. Refresh this record from the official page before any future
-live attempt; if the exact identity, endpoint, charge, or data-use term cannot
-be confirmed, record `BLOCKED` and do not substitute a model.
+The checked record at `evals/live/codex-luna-model-evidence.json` was reviewed
+against [official OpenAI Codex model documentation](https://learn.chatgpt.com/docs/models)
+on 2026-09-24 UTC. It pins the model and low effort. OpenAI says availability
+varies by account, rollout, and client; an actual Tea request must establish
+access. The direct subscription endpoint and credential boundary are
+defined in [Codex provider](codex-provider.md). Refresh the record on the UTC
+date of a live run. Keep fixture input disposable or deliberately public.
 
-Run the fail-closed report command with caller-owned paths outside the
-repository:
+Run the provider-free report with caller-owned paths outside the repository:
 
 ~~~sh
-cargo run -p tea-agent --example zen-free-verification --features live-verification -- \
-  --catalog-evidence evals/live/zen-free-catalog-evidence.json \
+cargo run -p tea-agent --example codex-luna-verification --features live-verification -- \
+  --model-evidence evals/live/codex-luna-model-evidence.json \
   --ledger /tmp/tea-live-ledger.json --out /tmp/tea-live-report.json \
   --run-counterparts
 ~~~
 
-`--run-counterparts` executes all six checked-in, provider-free oracles with
-credentials removed from their process environment. Without `--live`, the
-command creates a sanitized six-case `BLOCKED` report and reads no credential.
-A real headless exercise additionally requires
-`--live --synthetic-or-public-fixtures`, an explicit `OPENCODE_API_KEY`, and
-fresh caller-created `--tea-home` and `--workspace` directories. It injects
-the one restricted factory's providers into the feature-only terminal harness
-and sends only public synthetic prompts. It performs a workspace read/edit and
-host-side exit oracle, a distinct terminal one-shot completion with an exact
-synthetic response oracle, and controlled cancellation after durable provider
-admission followed by passive reopen and a fresh exact continuation. Forced
-compaction, Luau activation/rollback, and child orchestration each run through
-a dedicated scenario adapter in `tea_agent::verification`
-(`run_live_compaction_scenario`, `run_live_evolution_scenario`,
-`run_live_child_scenario`) with its own durable oracle; none substitutes a root
-transport prompt. Each adapter also has a feature-gated scripted-provider test
-under `--features live-verification`. A missing credential or any setup
-rejection remains `BLOCKED` and sends no inference. The required cases and executable
-provider-free counterparts are
-synthetic coding (`cargo test -p tea-core --test coding_capabilities --locked`),
-headless/one-shot and interrupted reopen (the `tea-fixtures` executable run
-against checked-in `single-turn-text` and `model-stream-cancellation-reuse`
-oracles), forced compaction (`cargo test -p tea-core --lib --locked
-compaction`), Luau activation/rollback (`cargo test -p tea-luau --locked`),
-and isolated children (`cargo test -p tea-core --lib --locked subagent`).
-The `--run-counterparts` report records the exact command for every case.
-Scripted providers only prove their deterministic counterparts and never
-constitute a live pass.
+`--run-counterparts` executes six checked-in, provider-free oracles with
+ambient API credentials removed from their process environment. Without
+`--live`, the command writes a sanitized six-case `BLOCKED` report and reads
+no Codex credential. Each case passes only when its live scenario and offline
+oracle pass; the suite passes only when all six cases pass. A failed case marks
+the report `FAILED`, and missing evidence leaves it `BLOCKED`.
+
+A live exercise additionally requires `--live --synthetic-or-public-fixtures`,
+an explicit `--credential-path` naming the installed Codex client's
+`auth.json` or Tea-owned `auth/codex.json`, and fresh caller-created
+`--tea-home` and `--workspace` directories. The client path is read-only;
+Tea reloads its access token but never imports its refresh token. The example injects the guarded provider
+into the feature-only terminal harness and runs synthetic coding, headless
+one-shot, interrupted reopen, forced compaction, Luau activation/rollback,
+and isolated child scenarios. Each scenario has a durable oracle and an
+offline counterpart; scripted providers never count as a live pass. A missing
+credential or setup rejection remains `BLOCKED` and sends no inference.

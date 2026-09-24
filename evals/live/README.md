@@ -1,42 +1,31 @@
 # Guarded live verification
 
-This directory records only sanitized, reviewable evidence for the optional
-real-model verification lane. It contains no credentials, prompts, model
-outputs, session logs, source checkouts, or workspaces. Raw reports and the
-mutable request-budget ledger belong in an explicit directory outside the
-repository.
+This directory holds sanitized model-selection evidence only. Raw reports,
+request ledgers, credentials, workspaces, prompts, and model outputs belong
+outside the repository.
 
-`zen-free-catalog-evidence.json` is a source-bound record, not a permanent
-price assertion. On September 22, 2026, OpenCode's official [Zen
-documentation](https://opencode.ai/docs/zen) listed `muse-spark-1.3-contributor-free`
-on `https://opencode.ai/zen/v1/responses`, with Free input, output, and cached
-read charges per 1M tokens and no cached-write price. The same page says the
-Contributor Free route permits using prompts and completions to train future
-Meta models. It may only receive disposable synthetic or deliberately public
-fixtures.
+`codex-luna-model-evidence.json` pins the deliberate `codex/gpt-5.6-luna` model,
+low reasoning effort, and the Tea Codex subscription endpoint. It was checked
+against [official OpenAI Codex model documentation](https://learn.chatgpt.com/docs/models)
+on 2026-09-24 UTC. Availability depends on the account, rollout, and client;
+the evidence record does not assert that the model is enabled for Tea's honest
+originator. Refresh the record on the UTC date of a live run.
 
-Refresh and review this record from the official document on the current UTC
-date before every live suite. If the identifier, endpoint, any charge,
-availability, or data-use term is uncertain, do not substitute another model:
-mark the live suite `BLOCKED`.
-The feature-gated `tea_agent::verification::RestrictedZenFactory` accepts only
-the exact fields above, limits an aggregate suite to 40 attempts, 100,000
-requested output tokens, 30 minutes, and two concurrent streams, and persists
-each reservation before it calls provider transport.
+`tea_agent::verification::RestrictedCodexFactory` accepts an explicit
+installed Codex client `auth.json` or Tea-owned `auth/codex.json` path. The
+client path is read-only and its access token is reloaded for each request;
+Tea-owned credentials may refresh. No ambient API key or model fallback is
+used. Every request must use the exact descriptor and low reasoning effort.
+The aggregate ledger records every request before transport and retains
+attempts across continued runs. It imposes no request-count, wall-time, or
+concurrent-stream limit. Codex subscription transport has no reliable
+output-token request cap, so the ledger does not claim one.
+The v2 ledger tags each attempt with its exact model and retains rejected
+`gpt-6-luna` attempts in the same aggregate ledger after the
+user-selected switch to `gpt-5.6-luna`.
 
-The Rust verification example can execute the six required offline counterparts
-with `--run-counterparts`; its headless fixtures execute the repository's real
-synthetic fixture runner and compare the result with checked-in oracles, while
-its coding case uses the real coding-capability tests. With an explicit
-`--live` acknowledgement, credential, temporary home, and temporary workspace,
-the example injects guarded consumers into a feature-only headless terminal
-harness. It executes a synthetic workspace edit plus host-side exit oracle, an
-exact one-shot completion oracle, and a controlled provider-admission
-cancellation followed by passive reopen and a fresh exact continuation. It
-records only booleans and bounded state, never model output.
-
-The suite is deliberately not a whole semantic live pass. Forced compaction,
-Luau activation/rollback, and isolated-child cases remain `BLOCKED` without
-transport until dedicated drivers exercise their real runtime boundaries. Do
-not claim a live pass from a scripted provider, a role-labelled root prompt, or
-a partial report.
+`codex-luna-verification` runs six synthetic live scenarios and six offline
+counterparts. Every live result is checked through a durable oracle. All six
+pairs must pass for the suite to pass; missing evidence remains `BLOCKED`, and
+failed evidence is `FAILED`. The offline command and credential setup are in
+[`docs/verification.md`](../../docs/verification.md).
