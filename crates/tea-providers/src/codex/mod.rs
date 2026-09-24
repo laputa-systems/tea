@@ -24,8 +24,8 @@ pub use config::{CodexCapturedRequest, CodexRequestCapture};
 pub use config::{CodexConfig, CodexConfigError, CodexTextVerbosity};
 pub use context::CodexContextHook;
 pub use credentials::{
-    CodexClientCredentialStore, CodexCredential, CredentialError, CredentialStore, FileCredentialStore,
-    InMemoryCredentialStore, SecretString, abbreviate_account_id,
+    CodexClientCredentialStore, CodexCredential, CredentialError, CredentialStore,
+    FileCredentialStore, InMemoryCredentialStore, SecretString, abbreviate_account_id,
 };
 pub use error::{CodexErrorReport, CodexErrorSource};
 pub use oauth::{

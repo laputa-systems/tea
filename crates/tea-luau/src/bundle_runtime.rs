@@ -365,8 +365,12 @@ mod tests {
 
     fn bundle(sources: impl IntoIterator<Item = (&'static str, &'static str)>) -> Bundle {
         Bundle::from_sources(
-            BundleManifest::new(BUNDLE_ABI_V3_VERSION, "main.luau", std::iter::empty::<&str>())
-                .unwrap(),
+            BundleManifest::new(
+                BUNDLE_ABI_V3_VERSION,
+                "main.luau",
+                std::iter::empty::<&str>(),
+            )
+            .unwrap(),
             sources,
         )
         .unwrap()
@@ -374,8 +378,12 @@ mod tests {
 
     fn owned_bundle(sources: impl IntoIterator<Item = (String, String)>) -> Bundle {
         Bundle::from_sources(
-            BundleManifest::new(BUNDLE_ABI_V3_VERSION, "main.luau", std::iter::empty::<&str>())
-                .unwrap(),
+            BundleManifest::new(
+                BUNDLE_ABI_V3_VERSION,
+                "main.luau",
+                std::iter::empty::<&str>(),
+            )
+            .unwrap(),
             sources,
         )
         .unwrap()

@@ -15,7 +15,7 @@ use tea_core::scheduler::{
     CancellationToken, ModelEventFuture, ModelEventStream, ModelFuture, ModelProvider,
     ModelRequest, ModelStreamEvent,
 };
-use tea_core::state::{AgentMessage, RunPhase, StopReason, MAX_PARTIAL_RESPONSE_BYTES};
+use tea_core::state::{AgentMessage, MAX_PARTIAL_RESPONSE_BYTES, RunPhase, StopReason};
 
 #[derive(Debug, Default)]
 struct Gate {
@@ -64,7 +64,9 @@ impl ModelEventStream for GatedStream {
     fn next_event<'a>(&'a mut self, _cancellation: CancellationToken) -> ModelEventFuture<'a> {
         if let Some(delta) = self.deltas.get(self.next_delta).cloned() {
             self.next_delta = self.next_delta.saturating_add(1);
-            return Box::pin(std::future::ready(Ok(Some(ModelStreamEvent::TextDelta(delta)))));
+            return Box::pin(std::future::ready(Ok(Some(ModelStreamEvent::TextDelta(
+                delta,
+            )))));
         }
         if !self.emitted_end {
             self.emitted_end = true;
@@ -162,7 +164,10 @@ fn delta_is_visible_while_the_provider_stream_is_still_open() {
 fn message_updates_are_deltas_while_final_assistant_content_remains_complete() {
     let gate = Arc::new(Gate::default());
     let deltas = ["one ".to_owned(), "two ".to_owned(), "three".to_owned()];
-    let provider = Arc::new(GatedProvider::with_deltas(Arc::clone(&gate), deltas.clone()));
+    let provider = Arc::new(GatedProvider::with_deltas(
+        Arc::clone(&gate),
+        deltas.clone(),
+    ));
     let agent = Agent::builder()
         .model_provider(provider as Arc<dyn ModelProvider>)
         .build();
@@ -175,7 +180,10 @@ fn message_updates_are_deltas_while_final_assistant_content_remains_complete() {
     let snapshot = agent.snapshot();
     let message_id = match snapshot.messages.last() {
         Some(AgentMessage::Assistant { id, content, .. }) => {
-            assert!(content.is_empty(), "live assistant content stays out of snapshots");
+            assert!(
+                content.is_empty(),
+                "live assistant content stays out of snapshots"
+            );
             *id
         }
         other => panic!("expected live assistant placeholder, got {other:?}"),
@@ -232,10 +240,12 @@ fn live_partial_response_is_bounded_without_truncating_the_final_message() {
         snapshot.partial_response.as_deref(),
         Some(&response[response.len() - MAX_PARTIAL_RESPONSE_BYTES..])
     );
-    assert!(snapshot
-        .partial_response
-        .as_ref()
-        .is_some_and(|partial| partial.len() <= MAX_PARTIAL_RESPONSE_BYTES));
+    assert!(
+        snapshot
+            .partial_response
+            .as_ref()
+            .is_some_and(|partial| partial.len() <= MAX_PARTIAL_RESPONSE_BYTES)
+    );
 
     gate.release();
     assert!(executor.try_tick());

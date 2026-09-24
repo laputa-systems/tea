@@ -45,12 +45,12 @@ use tea_session::{
     reduce_agent_graph, reduce_lane,
 };
 
-mod recovery_tests;
 mod child_outcome_recovery_tests;
-mod process_recovery_tests;
-mod input_queue_tests;
 mod compaction_tests;
+mod input_queue_tests;
 mod model_selection_tests;
+mod process_recovery_tests;
+mod recovery_tests;
 mod resume_claim_tests;
 mod trace_failure_tests;
 
@@ -308,12 +308,9 @@ fn fixture_prepared_subagent(
             logical_workspace: format!("fixture://{agent_id}"),
         },
         harness_identity,
-        runtime_services: RuntimeServices::new(
-            child_provider,
-            ToolRegistry::default(),
-        )
-        .model(descriptor)
-        .thinking_level(thinking),
+        runtime_services: RuntimeServices::new(child_provider, ToolRegistry::default())
+            .model(descriptor)
+            .thinking_level(thinking),
     }
 }
 
@@ -781,13 +778,12 @@ fn build_subagent_runtime_with_child_surface(
         streams: Mutex::new(root_streams.into()),
     });
     let child_provider = FixtureChildProvider::CompletionPerChild;
-    let (manager, root_identity, root_services, child_identity) =
-        fixture_subagent_manager(
-            root_provider,
-            child_provider.runtime_provider(),
-            store.clone(),
-            &policy,
-        );
+    let (manager, root_identity, root_services, child_identity) = fixture_subagent_manager(
+        root_provider,
+        child_provider.runtime_provider(),
+        store.clone(),
+        &policy,
+    );
     let requests = Arc::new(Mutex::new(Vec::new()));
     let reopen_count = Arc::new(Mutex::new(0));
     let host = Arc::new(FixtureSubagentHost {
@@ -1805,7 +1801,10 @@ fn subagent_spawn_intent_only_resume_requires_explicit_reconciliation() {
 
         let snapshot = runtime.snapshot().expect("recovered snapshot reads");
         let graph = reduce_agent_graph(&snapshot).expect("recovered child graph reduces");
-        assert!(graph.agents.is_empty(), "resume does not manufacture a child");
+        assert!(
+            graph.agents.is_empty(),
+            "resume does not manufacture a child"
+        );
         assert_eq!(
             requests.lock().expect("fixture request mutex").len(),
             0,
@@ -2490,23 +2489,33 @@ fn subagent_child_lanes_reject_public_resume_and_prompt_drives() {
             .expect("child reaches its retained terminal boundary");
 
         let child_lane = spawned.agent_id.lane_id();
-        let before = runtime.snapshot().expect("pre-drive snapshot reads").last_sequence();
+        let before = runtime
+            .snapshot()
+            .expect("pre-drive snapshot reads")
+            .last_sequence();
         let prompt_error = runtime
             .run_lane_prompt(child_lane.clone(), "resume the old child assignment")
             .await
             .expect_err("a public prompt must not create another child operation");
-        assert!(prompt_error
-            .to_string()
-            .contains("durable child lanes cannot be driven directly"));
+        assert!(
+            prompt_error
+                .to_string()
+                .contains("durable child lanes cannot be driven directly")
+        );
         let resume_error = runtime
             .resume_lane(child_lane)
             .await
             .expect_err("a public resume must not re-enter a retained child operation");
-        assert!(resume_error
-            .to_string()
-            .contains("durable child lanes cannot be driven directly"));
+        assert!(
+            resume_error
+                .to_string()
+                .contains("durable child lanes cannot be driven directly")
+        );
         assert_eq!(
-            runtime.snapshot().expect("post-drive snapshot reads").last_sequence(),
+            runtime
+                .snapshot()
+                .expect("post-drive snapshot reads")
+                .last_sequence(),
             before,
             "rejected public child drives perform no durable mutation"
         );
@@ -2559,9 +2568,18 @@ fn subagent_main_lane_resume_routes_through_retained_child_reconciliation() {
 
         let graph = reduce_agent_graph(&runtime.snapshot().expect("snapshot reads"))
             .expect("reconciled graph reduces");
-        let child = graph.agents.get(&spawned.agent_id).expect("child remains durable");
-        assert!(child.terminal.is_some(), "root continuation reports the retained child");
-        assert!(child.workspace_delta.is_some(), "root continuation preserves child evidence");
+        let child = graph
+            .agents
+            .get(&spawned.agent_id)
+            .expect("child remains durable");
+        assert!(
+            child.terminal.is_some(),
+            "root continuation reports the retained child"
+        );
+        assert!(
+            child.workspace_delta.is_some(),
+            "root continuation preserves child evidence"
+        );
         assert_eq!(
             *reopen_count.lock().expect("fixture reopen mutex"),
             1,
@@ -2573,7 +2591,10 @@ fn subagent_main_lane_resume_routes_through_retained_child_reconciliation() {
             "main-lane resume never creates a replacement child task"
         );
         assert!(
-            apply_requests.lock().expect("fixture apply request mutex").is_empty(),
+            apply_requests
+                .lock()
+                .expect("fixture apply request mutex")
+                .is_empty(),
             "main-lane recovery never auto-applies retained child changes"
         );
     });
@@ -2654,7 +2675,10 @@ fn subagent_reopen_is_passive_and_explicit_continuation_retains_an_interrupted_c
         );
         let graph = reduce_agent_graph(&reopened.snapshot().expect("reconciled snapshot reads"))
             .expect("reconciled graph reduces");
-        let child = graph.agents.get(&spawned.agent_id).expect("child remains durable");
+        let child = graph
+            .agents
+            .get(&spawned.agent_id)
+            .expect("child remains durable");
         assert!(matches!(
             child.state,
             AgentState::DeltaReady {
@@ -2662,14 +2686,23 @@ fn subagent_reopen_is_passive_and_explicit_continuation_retains_an_interrupted_c
                 ..
             }
         ));
-        assert!(matches!(
-            child.terminal.as_ref().map(|terminal| &terminal.report),
-            Some(PayloadRef::Inline(JsonValue::String(report))) if report.contains("interrupted")
-        ), "the retained terminal report tells the truth instead of presenting resumed output");
-        assert!(child.workspace_delta.is_some(), "salvageable workspace evidence is retained");
+        assert!(
+            matches!(
+                child.terminal.as_ref().map(|terminal| &terminal.report),
+                Some(PayloadRef::Inline(JsonValue::String(report))) if report.contains("interrupted")
+            ),
+            "the retained terminal report tells the truth instead of presenting resumed output"
+        );
+        assert!(
+            child.workspace_delta.is_some(),
+            "salvageable workspace evidence is retained"
+        );
         assert!(recovered_coordinator.is_exposable(&spawned.agent_id));
         assert!(
-            apply_requests.lock().expect("fixture apply request mutex").is_empty(),
+            apply_requests
+                .lock()
+                .expect("fixture apply request mutex")
+                .is_empty(),
             "recovery never applies a retained child delta"
         );
         reopened
@@ -2847,7 +2880,11 @@ fn subagent_interrupted_provider_attempt_is_settled_without_new_child_inference(
             1,
             "continuation reattaches workspace only to retain the interrupted child"
         );
-        assert_eq!(tasks.owned_task_count(), 0, "no replacement child task is started");
+        assert_eq!(
+            tasks.owned_task_count(),
+            0,
+            "no replacement child task is started"
+        );
         assert_eq!(
             reduce_agent_graph(&snapshot)
                 .expect("provider-interrupted graph reduces")
@@ -3631,12 +3668,8 @@ fn subagent_same_engine_drives_sixteen_children_and_rejects_the_seventeenth() {
                 )
             })
             .collect::<Vec<_>>();
-        let (runtime, tasks, provenance, calls) = build_active_spawn_fixture(
-            "runtime-subagent-sixteen",
-            policy,
-            child_provider,
-            calls,
-        );
+        let (runtime, tasks, provenance, calls) =
+            build_active_spawn_fixture("runtime-subagent-sixteen", policy, child_provider, calls);
         let coordinator = runtime
             .subagent_coordinator_for_test()
             .expect("fixture coordinator exists");
@@ -3664,9 +3697,11 @@ fn subagent_same_engine_drives_sixteen_children_and_rejects_the_seventeenth() {
             )
             .await
             .expect_err("the seventeenth live child exceeds the durable concurrency ceiling");
-        assert!(overflow
-            .to_string()
-            .contains("concurrent-operation limit is exhausted"));
+        assert!(
+            overflow
+                .to_string()
+                .contains("concurrent-operation limit is exhausted")
+        );
         assert_eq!(tasks.owned_task_count(), 16);
 
         tasks.hold_wait_timeouts();

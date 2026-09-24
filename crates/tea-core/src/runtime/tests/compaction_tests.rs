@@ -104,14 +104,20 @@ impl Compactor for UngatedProviderStrategyCompactor {
 
 fn compaction_fixture_runtime(
     requests: Arc<Mutex<Vec<ModelRequest>>>,
-) -> (Arc<SessionSupervisor<MemorySession>>, Arc<MemoryArtifactStore>) {
+) -> (
+    Arc<SessionSupervisor<MemorySession>>,
+    Arc<MemoryArtifactStore>,
+) {
     let compactor: Arc<dyn Compactor> = Arc::new(RequestMaterialCompactor { requests });
     compaction_fixture_runtime_with_compactor(compactor)
 }
 
 fn compaction_fixture_runtime_with_compactor(
     compactor: Arc<dyn Compactor>,
-) -> (Arc<SessionSupervisor<MemorySession>>, Arc<MemoryArtifactStore>) {
+) -> (
+    Arc<SessionSupervisor<MemorySession>>,
+    Arc<MemoryArtifactStore>,
+) {
     let provider: Arc<dyn ModelProvider> = Arc::new(QueuedProvider {
         streams: Mutex::new(VecDeque::from([
             ModelStream {
@@ -251,11 +257,7 @@ fn automatic_compaction_persists_exact_request_and_reopens_without_reinvocation(
             .records()
             .iter()
             .find_map(|record| match &record.record {
-                LaneRecord::StepAttempted(step)
-                    if step.kind == StepKind::Compaction =>
-                {
-                    Some(step)
-                }
+                LaneRecord::StepAttempted(step) if step.kind == StepKind::Compaction => Some(step),
                 _ => None,
             })
             .expect("compaction provider request has a durable step");
@@ -302,7 +304,9 @@ fn automatic_compaction_persists_exact_request_and_reopens_without_reinvocation(
             .expect("compaction provider request retains exact material");
         let artifact_id = match &material.request {
             PayloadRef::Artifact { artifact_id, .. } => *artifact_id,
-            PayloadRef::Inline(_) => panic!("compaction request material must use an immutable artifact"),
+            PayloadRef::Inline(_) => {
+                panic!("compaction request material must use an immutable artifact")
+            }
         };
         let material = JsonValue::parse(
             std::str::from_utf8(

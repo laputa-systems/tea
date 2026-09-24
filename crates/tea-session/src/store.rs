@@ -3,8 +3,8 @@ use crate::{
     Corruption, EntryHeader, EntryId, EpochId, LaneId, LaneMutation, LaneRecord, OperationId,
     OperationKind, ProviderRequestId, ProvisionedEntry, SESSION_FORMAT_VERSION, Sequence,
     SessionCommit, SessionCommitItem, SessionEntry, SessionFact, SessionHeader, SessionMutation,
-    SessionSnapshot, StepId, StepKind, StoredCommit, StoredEntry, StoredFact,
-    StoredLaneMutation, StoredMutation, StoredRecord,
+    SessionSnapshot, StepId, StepKind, StoredCommit, StoredEntry, StoredFact, StoredLaneMutation,
+    StoredMutation, StoredRecord,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -360,9 +360,7 @@ impl SessionAppendIndex {
             {
                 Ok(false)
             }
-            SessionMutation::Record(stored)
-                if matches!(&stored.record, LaneRecord::OperationStarted(record) if !record.input_ids.is_empty()) =>
-            {
+            SessionMutation::Record(stored) if matches!(&stored.record, LaneRecord::OperationStarted(record) if !record.input_ids.is_empty()) => {
                 Ok(false)
             }
             SessionMutation::Record(stored) => self.validate_lifecycle_record(&stored.record),
@@ -549,11 +547,13 @@ impl SessionAppendIndex {
                         record.request_id
                     )));
                 }
-                if !self.steps.get(&record.step_id).is_some_and(
-                    |(operation_id, epoch_id, _)| {
+                if !self
+                    .steps
+                    .get(&record.step_id)
+                    .is_some_and(|(operation_id, epoch_id, _)| {
                         operation_id == &record.operation_id && epoch_id == &record.epoch_id
-                    },
-                ) {
+                    })
+                {
                     return Err(Corruption::new(format!(
                         "provider request {} does not name its owning step {}",
                         record.request_id, record.step_id
@@ -745,7 +745,6 @@ impl MemorySession {
             None => Ok(()),
         }
     }
-
 }
 
 impl SessionReader for MemorySession {
@@ -788,7 +787,9 @@ pub(crate) fn prepare_commit(
     for item in commit.into_items() {
         let mutation = match item {
             SessionCommitItem::Entry { lane_id, entry } => {
-                if append_index.contains_entry(&entry.id) || !batch_entry_ids.insert(entry.id.clone()) {
+                if append_index.contains_entry(&entry.id)
+                    || !batch_entry_ids.insert(entry.id.clone())
+                {
                     return Err(SessionError::InvalidInput {
                         message: format!("entry ID {} already materialized", entry.id),
                     });
@@ -904,7 +905,9 @@ pub(crate) fn validate_prepared_commit(
     append_index: &SessionAppendIndex,
     appended: &StoredCommit,
 ) -> Result<(), Corruption> {
-    if appended.items.len() == 1 && append_index.is_locally_validated_mutation(&appended.items[0])? {
+    if appended.items.len() == 1
+        && append_index.is_locally_validated_mutation(&appended.items[0])?
+    {
         return Ok(());
     }
     validate_snapshot_commit(snapshot, appended)

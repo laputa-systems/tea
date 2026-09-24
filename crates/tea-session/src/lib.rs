@@ -32,8 +32,8 @@ pub use ids::{
     EntryId, EpochId, ExperimentId, FailureSignatureId, HarnessCandidateId, HarnessRevisionId,
     HarnessSnapshotId, HarnessTreeId, IdError, IdGenerator, LaneId, ModelHarnessProfileId,
     NormalizedPath, NormalizedPathError, OperationId, ProviderRequestId, RecordId, Sequence,
-    SessionId, StableHookId, StepId, ToolInvocationId, TurnCheckpointId, WorkspaceDeltaId, WorkspaceLeaseId,
-    derive_subagent_operation_id,
+    SessionId, StableHookId, StepId, ToolInvocationId, TurnCheckpointId, WorkspaceDeltaId,
+    WorkspaceLeaseId, derive_subagent_operation_id,
 };
 pub use jsonl::{
     DurabilityMode, JsonlSession, SessionExport, SessionExportError, SessionInspection,

@@ -298,7 +298,6 @@ fn idle_agent_can_replace_automatic_policy_without_rebuilding_history() {
     assert_eq!(agent.automatic_compaction(), configured);
 }
 
-
 /// Mirrors the terminal host's `ProviderCompactor`: when the core's split leaves
 /// nothing to summarize it returns the retained suffix unchanged. The core must
 /// never treat that no-op as an empty checkpoint and fail the run.

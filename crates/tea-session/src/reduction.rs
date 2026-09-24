@@ -1,10 +1,9 @@
 use crate::{
-    EffectiveLaneConfiguration, EntryId, EpochId, HarnessRevisionChangedEntry, LaneId, LaneRecord,
-    InputReduction, InputState, InputStatus, LaneState, LaneStatus, OperationId,
+    EffectiveLaneConfiguration, EntryId, EpochId, HarnessRevisionChangedEntry, InputReduction,
+    InputState, InputStatus, LaneId, LaneRecord, LaneState, LaneStatus, OperationId,
     PendingExtensionControl, PendingHarnessActivation, PendingWrite, ProvisionedEntry, Sequence,
-    SessionEntry, SessionFact, SessionMutationRef, SessionSnapshot, StepId, StepKind,
-    StoredCommit, StoredEntry, StoredMutation, StoredMutationRef, ToolReplayPolicy,
-    ToolStartedRecord, Usage,
+    SessionEntry, SessionFact, SessionMutationRef, SessionSnapshot, StepId, StepKind, StoredCommit,
+    StoredEntry, StoredMutation, StoredMutationRef, ToolReplayPolicy, ToolStartedRecord, Usage,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -210,7 +209,8 @@ fn reduce_lane_prefix<'a>(
     let mut input_order = Vec::<EntryId>::new();
     let mut extension_controls = BTreeMap::<String, PendingExtensionControl>::new();
     let mut applied_extension_controls = BTreeSet::<String>::new();
-    let mut extension_state = BTreeMap::<LaneId, BTreeMap<String, crate::ExtensionStateValue>>::new();
+    let mut extension_state =
+        BTreeMap::<LaneId, BTreeMap<String, crate::ExtensionStateValue>>::new();
     extension_state.insert(header.initial_lane.clone(), BTreeMap::new());
     let mut checkpoints = BTreeMap::<crate::TurnCheckpointId, crate::TurnCheckpointFact>::new();
     let mut forked_lanes = BTreeSet::<LaneId>::new();
@@ -228,7 +228,9 @@ fn reduce_lane_prefix<'a>(
         let item_index = observed_item_index;
         observed_item_index = observed_item_index.saturating_add(1);
         let sequence = mutation.sequence();
-        if sequence != observed_sequence && sequence != Sequence(observed_sequence.0.saturating_add(1)) {
+        if sequence != observed_sequence
+            && sequence != Sequence(observed_sequence.0.saturating_add(1))
+        {
             return Err(Corruption::new(format!(
                 "session commit sequence must be consecutive: expected {} or {}, found {}",
                 observed_sequence.0,
@@ -295,9 +297,8 @@ fn reduce_lane_prefix<'a>(
                 if let SessionEntry::Compaction(compaction) = &stored.body {
                     validate_compaction_replacement(compaction)?;
                     if let Some(request_id) = &compaction.provider_request_id {
-                        let is_completed_compaction_request = provider_starts
-                            .get(request_id)
-                            .is_some_and(|request| {
+                        let is_completed_compaction_request =
+                            provider_starts.get(request_id).is_some_and(|request| {
                                 steps.get(&request.step_id).is_some_and(
                                     |(operation_id, epoch_id, kind)| {
                                         operation_id == &request.operation_id
@@ -431,7 +432,9 @@ fn reduce_lane_prefix<'a>(
                         for (input_id, provisioned) in
                             record.input_ids.iter().zip(&record.original_input)
                         {
-                            if input_id != &provisioned.id || !seen_input_ids.insert(input_id.clone()) {
+                            if input_id != &provisioned.id
+                                || !seen_input_ids.insert(input_id.clone())
+                            {
                                 return Err(Corruption::new(format!(
                                     "operation {} has duplicate or mismatched input membership",
                                     record.id
@@ -597,11 +600,12 @@ fn reduce_lane_prefix<'a>(
                             record.request_id
                         )));
                     }
-                    if !steps.get(&record.step_id).is_some_and(
-                        |(operation_id, epoch_id, _)| {
+                    if !steps
+                        .get(&record.step_id)
+                        .is_some_and(|(operation_id, epoch_id, _)| {
                             operation_id == &record.operation_id && epoch_id == &record.epoch_id
-                        },
-                    ) {
+                        })
+                    {
                         return Err(Corruption::new(format!(
                             "provider request {} does not name its owning step {}",
                             record.request_id, record.step_id
@@ -768,7 +772,9 @@ fn reduce_lane_prefix<'a>(
                             record.control_id
                         )));
                     };
-                    if !operation.finished || !applied_extension_controls.insert(record.control_id.clone()) {
+                    if !operation.finished
+                        || !applied_extension_controls.insert(record.control_id.clone())
+                    {
                         return Err(Corruption::new(format!(
                             "extension control {} was applied before its operation settled",
                             record.control_id
@@ -867,11 +873,13 @@ fn reduce_lane_prefix<'a>(
                     }) || provider_starts.values().any(|request| {
                         request.operation_id == fact.operation_id
                             && !provider_settled.contains_key(&request.request_id)
-                    }) || extension_controls.values().any(|control| {
-                        control.control.operation_id == fact.operation_id
-                    }) || child_spawns.iter().any(|(agent_id, (operation_id, _))| {
-                        operation_id == &fact.operation_id && !child_terminal.contains(agent_id)
-                    }) {
+                    }) || extension_controls
+                        .values()
+                        .any(|control| control.control.operation_id == fact.operation_id)
+                        || child_spawns.iter().any(|(agent_id, (operation_id, _))| {
+                            operation_id == &fact.operation_id && !child_terminal.contains(agent_id)
+                        })
+                    {
                         return Err(Corruption::new(format!(
                             "turn checkpoint {} has unresolved work owned by operation {}",
                             fact.checkpoint_id, fact.operation_id
@@ -897,14 +905,17 @@ fn reduce_lane_prefix<'a>(
                         || !forked_lanes.insert(fact.lane_id.clone())
                         || lane_leaves.get(&fact.lane_id).cloned().flatten() != fact.base_leaf_id
                         || fact.base_leaf_id != checkpoint.leaf_id
-                        || operations.values().any(|operation| operation.lane_id == fact.lane_id)
+                        || operations
+                            .values()
+                            .any(|operation| operation.lane_id == fact.lane_id)
                     {
                         return Err(Corruption::new(format!(
                             "forked lane {} is not a fresh exact checkpoint branch",
                             fact.lane_id
                         )));
                     }
-                    extension_state.insert(fact.lane_id.clone(), checkpoint.extension_state.clone());
+                    extension_state
+                        .insert(fact.lane_id.clone(), checkpoint.extension_state.clone());
                 }
                 SessionFact::AgentSpawned(fact) => {
                     fresh_lanes.remove(&fact.lane_id);
@@ -1171,7 +1182,11 @@ fn validate_extension_state_value(
     let bytes = fact
         .value
         .to_json_string()
-        .map_err(|error| Corruption::new(format!("extension state cannot encode canonically: {error}")))?
+        .map_err(|error| {
+            Corruption::new(format!(
+                "extension state cannot encode canonically: {error}"
+            ))
+        })?
         .len();
     if bytes > 64 * 1024 {
         return Err(Corruption::new(format!(
@@ -1185,12 +1200,12 @@ fn validate_compaction_replacement(entry: &crate::CompactionEntry) -> Result<(),
     let digest = match &entry.replacement {
         crate::PayloadRef::Inline(value) => {
             if matches!(value, crate::JsonValue::Null) {
-                return Err(Corruption::new(
-                    "compaction replacement must not be null",
-                ));
+                return Err(Corruption::new("compaction replacement must not be null"));
             }
             let canonical = value.to_json_string().map_err(|error| {
-                Corruption::new(format!("compaction replacement cannot encode canonically: {error}"))
+                Corruption::new(format!(
+                    "compaction replacement cannot encode canonically: {error}"
+                ))
             })?;
             crate::Digest::from_bytes(canonical)
         }
@@ -1213,7 +1228,11 @@ fn validate_extension_control(
     let bytes = record
         .arguments
         .to_json_string()
-        .map_err(|error| Corruption::new(format!("extension control cannot encode canonically: {error}")))?
+        .map_err(|error| {
+            Corruption::new(format!(
+                "extension control cannot encode canonically: {error}"
+            ))
+        })?
         .len();
     if bytes > 64 * 1024 {
         return Err(Corruption::new(format!(
@@ -1366,7 +1385,9 @@ fn derive_recovery_plan(
     }
 
     for request in provider_starts.values() {
-        if &request.operation_id != operation_id || provider_settled.contains_key(&request.request_id) {
+        if &request.operation_id != operation_id
+            || provider_settled.contains_key(&request.request_id)
+        {
             continue;
         }
         if !provider_material.contains(&request.request_id) {

@@ -89,7 +89,9 @@ fn parse_canonical_declaration(declaration: &Table) -> Result<ParsedDeclaration,
                 Ok(state_version)
             } else {
                 Err(PolicyError::Contract {
-                    message: "v3 state_version must use a portable non-empty label of at most 120 bytes".into(),
+                    message:
+                        "v3 state_version must use a portable non-empty label of at most 120 bytes"
+                            .into(),
                 })
             }
         })
@@ -457,12 +459,14 @@ pub(super) fn parse_extension_result(value: Value) -> Result<ExtensionCommandRes
             let content_json: String = state.get("content_json").map_err(contract_error)?;
             if content_json.len() > 16 * 1024 {
                 return Err(PolicyError::Contract {
-                    message: "extension state replacement content_json must be at most 16384 bytes".into(),
+                    message: "extension state replacement content_json must be at most 16384 bytes"
+                        .into(),
                 });
             }
-            let content = JsonValue::parse(&content_json).map_err(|error| PolicyError::Contract {
-                message: format!("extension state content_json must be valid JSON: {error}"),
-            })?;
+            let content =
+                JsonValue::parse(&content_json).map_err(|error| PolicyError::Contract {
+                    message: format!("extension state content_json must be valid JSON: {error}"),
+                })?;
             Ok(ExtensionStateUpdate { value: content })
         })
         .transpose()?;

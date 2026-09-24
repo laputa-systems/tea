@@ -5,13 +5,11 @@
 //! root response, the summary response, nor the caller's marker is returned.
 
 use super::{
-    LiveVerificationError, RestrictedCodexConsumer, VerificationConsumer, is_exact_codex_descriptor,
+    is_exact_codex_descriptor, LiveVerificationError, RestrictedCodexConsumer, VerificationConsumer,
 };
 use std::num::NonZeroU64;
 use std::path::Path;
-use tea_core::compaction::{
-    AutomaticCompactionPolicy, ContextBudgetSource, OverflowRecovery,
-};
+use tea_core::compaction::{AutomaticCompactionPolicy, ContextBudgetSource, OverflowRecovery};
 use tea_session::{
     LaneRecord, PayloadRef, ProviderSettlementClassification, SessionEntry, SessionFact,
     SessionSnapshot, StepKind,
@@ -68,12 +66,16 @@ pub fn run_live_compaction_scenario(
         scenario.workspace,
         scenario.root.model().clone(),
         scenario.root.provider(),
-        (scenario.compactor.model().clone(), scenario.compactor.provider()),
+        (
+            scenario.compactor.model().clone(),
+            scenario.compactor.provider(),
+        ),
         policy.clone(),
     )
     .map_err(|error| LiveVerificationError::new(error.to_string()))?;
-    let operation = smol::block_on(harness.run_root_prompt(synthetic_prompt(scenario.critical_fact)))
-        .map_err(|error| LiveVerificationError::new(error.to_string()))?;
+    let operation =
+        smol::block_on(harness.run_root_prompt(synthetic_prompt(scenario.critical_fact)))
+            .map_err(|error| LiveVerificationError::new(error.to_string()))?;
     if !operation.is_completed() {
         return Err(LiveVerificationError::new(
             "live compaction verification root operation did not complete",
@@ -101,7 +103,10 @@ pub fn run_live_compaction_scenario(
         &session_id,
         scenario.root.model().clone(),
         scenario.root.provider(),
-        (scenario.compactor.model().clone(), scenario.compactor.provider()),
+        (
+            scenario.compactor.model().clone(),
+            scenario.compactor.provider(),
+        ),
         policy,
     )
     .map_err(|error| LiveVerificationError::new(error.to_string()))?;
@@ -112,7 +117,8 @@ pub fn run_live_compaction_scenario(
         .snapshot()
         .map_err(|error| LiveVerificationError::new(error.to_string()))?;
     let reopened_evidence = compaction_evidence(&reopened_snapshot, scenario.critical_fact);
-    smol::block_on(reopened.close()).map_err(|error| LiveVerificationError::new(error.to_string()))?;
+    smol::block_on(reopened.close())
+        .map_err(|error| LiveVerificationError::new(error.to_string()))?;
 
     Ok(LiveCompactionScenarioOutcome {
         compaction_request_observed: initial_evidence.compaction_request_observed
@@ -220,12 +226,16 @@ fn compaction_request_has_intent_and_material(
     snapshot: &SessionSnapshot,
     request_id: &tea_session::ProviderRequestId,
 ) -> bool {
-    let Some(started) = snapshot.records().iter().find_map(|record| match &record.record {
-        LaneRecord::ProviderRequestStarted(started) if &started.request_id == request_id => {
-            Some(started)
-        }
-        _ => None,
-    }) else {
+    let Some(started) = snapshot
+        .records()
+        .iter()
+        .find_map(|record| match &record.record {
+            LaneRecord::ProviderRequestStarted(started) if &started.request_id == request_id => {
+                Some(started)
+            }
+            _ => None,
+        })
+    else {
         return false;
     };
     let is_compaction_step = snapshot.records().iter().any(|candidate| {
@@ -297,7 +307,9 @@ mod tests {
     use tea_core::scheduler::{
         CancellationToken, ModelFuture, ModelProvider, ModelRequest, ModelStream, ModelStreamEvent,
     };
-    use tea_core::state::{AgentToolCall, ModelDescriptor, SerializedJson, StopReason, ToolCallId, Usage};
+    use tea_core::state::{
+        AgentToolCall, ModelDescriptor, SerializedJson, StopReason, ToolCallId, Usage,
+    };
 
     const CRITICAL_FACT: &str = "verification-critical-fact";
 

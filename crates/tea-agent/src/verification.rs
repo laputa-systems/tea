@@ -11,31 +11,31 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tea_core::runtime::{DurableOperation, SessionSupervisor};
 use tea_core::scheduler::{
     CancellationToken, ModelEventFuture, ModelEventStream, ModelFuture, ModelProvider,
     ModelRequest, ModelStreamEvent,
 };
-use tea_core::runtime::{DurableOperation, SessionSupervisor};
 use tea_core::state::{ModelDescriptor, ThinkingLevel};
 use tea_protocol::JsonValue;
-use tea_providers::{ConfiguredProvider, RetryPolicy};
 use tea_providers::codex::{
     CodexAuthManager, CodexClientCredentialStore, CodexConfig, CodexProvider, CredentialStore,
     FileCredentialStore,
 };
+use tea_providers::{ConfiguredProvider, RetryPolicy};
 use tea_session::SessionEntry;
 
-pub(crate) mod scenarios_compaction;
 pub(crate) mod scenarios_children;
+pub(crate) mod scenarios_compaction;
 pub(crate) mod scenarios_evolution;
-pub use scenarios_compaction::{
-    LiveCompactionScenario, LiveCompactionScenarioOutcome, run_live_compaction_scenario,
-};
 pub use scenarios_children::{
-    LiveChildScenario, LiveChildScenarioOutcome, run_live_child_scenario,
+    run_live_child_scenario, LiveChildScenario, LiveChildScenarioOutcome,
+};
+pub use scenarios_compaction::{
+    run_live_compaction_scenario, LiveCompactionScenario, LiveCompactionScenarioOutcome,
 };
 pub use scenarios_evolution::{
-    LiveEvolutionScenario, LiveEvolutionScenarioOutcome, run_live_evolution_scenario,
+    run_live_evolution_scenario, LiveEvolutionScenario, LiveEvolutionScenarioOutcome,
 };
 
 /// The sole provider identifier accepted by live verification.
@@ -234,11 +234,24 @@ impl RestrictedCodexFactory {
         ledger_path: PathBuf,
     ) -> Result<Self, LiveVerificationError> {
         evidence.require_current_utc_date()?;
-        let tea_owned = credential_path.file_name().is_some_and(|name| name == "codex.json")
-            && credential_path.parent().and_then(Path::file_name).is_some_and(|name| name == "auth");
-        let client_owned = credential_path.file_name().is_some_and(|name| name == "auth.json")
-            && credential_path.parent().and_then(Path::file_name).is_some_and(|name| name == ".codex");
-        if !credential_path.is_absolute() || !credential_path.is_file() || !(tea_owned || client_owned) {
+        let tea_owned = credential_path
+            .file_name()
+            .is_some_and(|name| name == "codex.json")
+            && credential_path
+                .parent()
+                .and_then(Path::file_name)
+                .is_some_and(|name| name == "auth");
+        let client_owned = credential_path
+            .file_name()
+            .is_some_and(|name| name == "auth.json")
+            && credential_path
+                .parent()
+                .and_then(Path::file_name)
+                .is_some_and(|name| name == ".codex");
+        if !credential_path.is_absolute()
+            || !credential_path.is_file()
+            || !(tea_owned || client_owned)
+        {
             return Err(LiveVerificationError::new(
                 "live verification requires an absolute Codex auth.json or Tea auth/codex.json credential path",
             ));
@@ -440,7 +453,8 @@ pub fn run_headless_live_case(
         .expected_response
         .is_none_or(|expected| has_exact_assistant_response(&snapshot, expected));
     let session_id = snapshot.header().session_id.to_string();
-    let closed = smol::block_on(harness.close()).map_err(|error| LiveVerificationError::new(error.to_string()));
+    let closed = smol::block_on(harness.close())
+        .map_err(|error| LiveVerificationError::new(error.to_string()));
     let operation_completed = operation_completed?;
     verification?;
     closed?;
@@ -525,7 +539,10 @@ pub fn run_controlled_recovery_live_case(
     for (label, value) in [
         ("interrupted prompt", case.interrupted_prompt),
         ("continuation prompt", case.continuation_prompt),
-        ("expected continuation response", case.expected_continuation_response),
+        (
+            "expected continuation response",
+            case.expected_continuation_response,
+        ),
     ] {
         if value.trim().is_empty() {
             return Err(LiveVerificationError::new(format!(
@@ -575,7 +592,8 @@ pub fn run_controlled_recovery_live_case(
         .header()
         .session_id
         .to_string();
-    smol::block_on(harness.close()).map_err(|error| LiveVerificationError::new(error.to_string()))?;
+    smol::block_on(harness.close())
+        .map_err(|error| LiveVerificationError::new(error.to_string()))?;
     // The passive reopen must acquire a fresh writer after the old supervisor
     // has closed and released its last session handle.
     drop(harness);
@@ -608,14 +626,13 @@ pub fn run_controlled_recovery_live_case(
     let snapshot = reopened
         .snapshot()
         .map_err(|error| LiveVerificationError::new(error.to_string()))?;
-    let continuation_response_verified = has_exact_assistant_response(
-        &snapshot,
-        case.expected_continuation_response,
-    );
+    let continuation_response_verified =
+        has_exact_assistant_response(&snapshot, case.expected_continuation_response);
     reopened
         .verify_durable_state()
         .map_err(|error| LiveVerificationError::new(error.to_string()))?;
-    smol::block_on(reopened.close()).map_err(|error| LiveVerificationError::new(error.to_string()))?;
+    smol::block_on(reopened.close())
+        .map_err(|error| LiveVerificationError::new(error.to_string()))?;
     Ok(ControlledRecoveryLiveCaseOutcome {
         provider_request_observed: true,
         interruption_settled: true,
@@ -630,7 +647,9 @@ fn interrupted_run_settled(
 ) -> Result<bool, LiveVerificationError> {
     match result {
         Ok(operation) => Ok(!operation.is_completed()),
-        Err(tea_core::harness::HarnessError::Core(tea_core::error::CoreError::Cancelled)) => Ok(true),
+        Err(tea_core::harness::HarnessError::Core(tea_core::error::CoreError::Cancelled)) => {
+            Ok(true)
+        }
         Err(error) => Err(LiveVerificationError::new(error.to_string())),
     }
 }
@@ -643,7 +662,12 @@ fn has_durable_provider_request(
         .map_err(|error| LiveVerificationError::new(error.to_string()))?
         .records()
         .iter()
-        .any(|record| matches!(record.record, tea_session::LaneRecord::ProviderRequestStarted(_))))
+        .any(|record| {
+            matches!(
+                record.record,
+                tea_session::LaneRecord::ProviderRequestStarted(_)
+            )
+        }))
 }
 
 async fn wait_for_provider_admission(
@@ -661,10 +685,7 @@ async fn wait_for_provider_admission(
     }
 }
 
-fn has_exact_assistant_response(
-    snapshot: &tea_session::SessionSnapshot,
-    expected: &str,
-) -> bool {
+fn has_exact_assistant_response(snapshot: &tea_session::SessionSnapshot, expected: &str) -> bool {
     snapshot
         .entries()
         .iter()
@@ -728,7 +749,8 @@ impl ModelProvider for LedgeredCodexProvider {
             Err(error) => {
                 return Box::pin(std::future::ready(Ok(Box::new(RejectedEventStream::new(
                     error.to_string(),
-                )) as Box<dyn ModelEventStream>)));
+                ))
+                    as Box<dyn ModelEventStream>)));
             }
         }
         let permit = LivePermit {
@@ -844,8 +866,9 @@ impl LiveRequestLedger {
         evidence: &CodexModelEvidence,
         source: &str,
     ) -> Result<Self, LiveVerificationError> {
-        let value = JsonValue::parse(source)
-            .map_err(|error| LiveVerificationError::new(format!("invalid live-verification ledger: {error}")))?;
+        let value = JsonValue::parse(source).map_err(|error| {
+            LiveVerificationError::new(format!("invalid live-verification ledger: {error}"))
+        })?;
         let record = object(&value, "live-verification ledger")?;
         required_string(record, "schema_version", "live-verification ledger")
             .and_then(|schema| require_exact(schema, LEDGER_SCHEMA, "schema_version"))?;
@@ -857,10 +880,16 @@ impl LiveRequestLedger {
             .and_then(|endpoint| require_exact(endpoint, CODEX_RESPONSES_ENDPOINT, "endpoint"))?;
         required_string(record, "reasoning_effort", "live-verification ledger")
             .and_then(|effort| require_exact(effort, "low", "reasoning_effort"))?;
-        required_string(record, "checked_on", "live-verification ledger")
-            .and_then(|checked_on| require_exact(checked_on, evidence.checked_on(), "checked_on"))?;
-        let started_at_unix_seconds = required_u64(record, "started_at_unix_seconds", "live-verification ledger")?;
-        let attempted_requests = required_u64(record, "attempted_requests", "live-verification ledger")?;
+        required_string(record, "checked_on", "live-verification ledger").and_then(
+            |checked_on| require_exact(checked_on, evidence.checked_on(), "checked_on"),
+        )?;
+        let started_at_unix_seconds = required_u64(
+            record,
+            "started_at_unix_seconds",
+            "live-verification ledger",
+        )?;
+        let attempted_requests =
+            required_u64(record, "attempted_requests", "live-verification ledger")?;
         let attempts = record
             .get("attempts")
             .and_then(JsonValue::as_array)
@@ -904,7 +933,9 @@ impl LiveRequestLedger {
     fn reserve(&mut self, consumer: VerificationConsumer) -> Result<(), LiveVerificationError> {
         let next_attempt = self.attempted_requests.saturating_add(1);
         if next_attempt == self.attempted_requests {
-            return Err(LiveVerificationError::new("live verification attempt counter overflow"));
+            return Err(LiveVerificationError::new(
+                "live verification attempt counter overflow",
+            ));
         }
         self.attempted_requests = next_attempt;
         self.active_requests = self.active_requests.saturating_add(1);
@@ -932,7 +963,9 @@ impl LiveRequestLedger {
 
     fn persist(&self) -> Result<(), LiveVerificationError> {
         let parent = self.ledger_path.parent().ok_or_else(|| {
-            LiveVerificationError::new("live-verification ledger must have an explicit parent directory")
+            LiveVerificationError::new(
+                "live-verification ledger must have an explicit parent directory",
+            )
         })?;
         if !parent.is_dir() {
             return Err(LiveVerificationError::new(format!(
@@ -945,7 +978,9 @@ impl LiveRequestLedger {
             self.ledger_path
                 .file_name()
                 .and_then(|name| name.to_str())
-                .ok_or_else(|| LiveVerificationError::new("live-verification ledger file name is invalid"))?,
+                .ok_or_else(|| LiveVerificationError::new(
+                    "live-verification ledger file name is invalid"
+                ))?,
             std::process::id(),
         ));
         let value = self.ledger_json();
@@ -992,7 +1027,10 @@ impl LiveRequestLedger {
                 "started_at_unix_seconds",
                 JsonValue::from(self.started_at_unix_seconds),
             ),
-            ("attempted_requests", JsonValue::from(self.attempted_requests)),
+            (
+                "attempted_requests",
+                JsonValue::from(self.attempted_requests),
+            ),
             (
                 "attempts",
                 JsonValue::Array(
@@ -1034,7 +1072,11 @@ fn parse_attempt(value: &JsonValue) -> Result<LiveAttemptReservation, LiveVerifi
         "compaction" => VerificationConsumer::Compaction,
         "candidate_evaluation" => VerificationConsumer::CandidateEvaluation,
         "comparison" => VerificationConsumer::Comparison,
-        _ => return Err(LiveVerificationError::new("live-verification ledger has an unknown consumer")),
+        _ => {
+            return Err(LiveVerificationError::new(
+                "live-verification ledger has an unknown consumer",
+            ))
+        }
     };
     Ok(LiveAttemptReservation {
         sequence: required_u64(record, "sequence", "live-verification attempt")?,
@@ -1075,7 +1117,9 @@ fn required_u64(
     object
         .get(field)
         .and_then(JsonValue::as_u64)
-        .ok_or_else(|| LiveVerificationError::new(format!("{label} must contain unsigned {field:?}")))
+        .ok_or_else(|| {
+            LiveVerificationError::new(format!("{label} must contain unsigned {field:?}"))
+        })
 }
 
 fn require_exact(value: &str, expected: &str, field: &str) -> Result<(), LiveVerificationError> {
@@ -1111,9 +1155,14 @@ fn current_utc_date() -> Result<String, LiveVerificationError> {
 // external `date` command at the security boundary.
 fn civil_date_from_unix_days(days: i64) -> (i64, u32, u32) {
     let shifted = days + 719_468;
-    let era = if shifted >= 0 { shifted } else { shifted - 146_096 } / 146_097;
+    let era = if shifted >= 0 {
+        shifted
+    } else {
+        shifted - 146_096
+    } / 146_097;
     let day_of_era = shifted - era * 146_097;
-    let year_of_era = (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
     let mut year = year_of_era + era * 400;
     let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
     let month_prime = (5 * day_of_year + 2) / 153;
@@ -1147,7 +1196,9 @@ mod tests {
             _cancellation: CancellationToken,
         ) -> ModelFuture<'a> {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            Box::pin(std::future::ready(Ok(Box::new(RejectedEventStream::new("fixture")) as _)))
+            Box::pin(std::future::ready(Ok(
+                Box::new(RejectedEventStream::new("fixture")) as _,
+            )))
         }
     }
 
@@ -1174,7 +1225,10 @@ mod tests {
         std::env::temp_dir().join(format!(
             "tea-codex-live-verification-{name}-{}-{}.json",
             std::process::id(),
-            SystemTime::now().duration_since(UNIX_EPOCH).expect("clock is available").as_nanos()
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock is available")
+                .as_nanos()
         ))
     }
 
@@ -1182,7 +1236,10 @@ mod tests {
         let directory = std::env::temp_dir().join(format!(
             "tea-codex-live-auth-{name}-{}-{}",
             std::process::id(),
-            SystemTime::now().duration_since(UNIX_EPOCH).expect("clock is available").as_nanos()
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock is available")
+                .as_nanos()
         ));
         fs::create_dir_all(&directory).expect("temporary auth directory creates");
         let auth_directory = directory.join("auth");
@@ -1229,8 +1286,14 @@ mod tests {
             ("reasoning_effort", "medium"),
             ("endpoint", "https://other.invalid/responses"),
         ] {
-            record.as_object_mut().expect("object").insert(field.into(), JsonValue::from(invalid));
-            assert!(CodexModelEvidence::from_json(&record).is_err(), "{field} must be exact");
+            record
+                .as_object_mut()
+                .expect("object")
+                .insert(field.into(), JsonValue::from(invalid));
+            assert!(
+                CodexModelEvidence::from_json(&record).is_err(),
+                "{field} must be exact"
+            );
             record = evidence_record("2026-09-21");
         }
     }
@@ -1246,8 +1309,10 @@ mod tests {
             (CODEX_PROVIDER_ID, CODEX_MODEL_ID, ThinkingLevel::Medium),
         ] {
             let cancellation = CancellationToken::new();
-            let mut stream = smol::block_on(provider.stream(request(provider_id, model, effort), cancellation.clone()))
-                .expect("guard always yields a local rejection stream");
+            let mut stream = smol::block_on(
+                provider.stream(request(provider_id, model, effort), cancellation.clone()),
+            )
+            .expect("guard always yields a local rejection stream");
             assert!(matches!(
                 smol::block_on(stream.next_event(cancellation)),
                 Ok(Some(ModelStreamEvent::Error { .. }))
@@ -1283,11 +1348,13 @@ mod tests {
         let attempts = ["gpt-6-luna", CODEX_MODEL_ID]
             .into_iter()
             .enumerate()
-            .map(|(index, model)| JsonValue::object([
-                ("sequence", JsonValue::from(index as u64 + 1)),
-                ("consumer", JsonValue::from("root")),
-                ("model", JsonValue::from(model)),
-            ]))
+            .map(|(index, model)| {
+                JsonValue::object([
+                    ("sequence", JsonValue::from(index as u64 + 1)),
+                    ("consumer", JsonValue::from("root")),
+                    ("model", JsonValue::from(model)),
+                ])
+            })
             .collect();
         let ledger = JsonValue::object([
             ("schema_version", JsonValue::from(LEDGER_SCHEMA)),
@@ -1315,11 +1382,13 @@ mod tests {
     fn recorded_attempts_remain_usable_after_the_former_task_limits() {
         let now = unix_seconds().expect("clock is available");
         let attempts = (1..=41_u64)
-            .map(|sequence| JsonValue::object([
-                ("sequence", JsonValue::from(sequence)),
-                ("consumer", JsonValue::from("root")),
-                ("model", JsonValue::from(CODEX_MODEL_ID)),
-            ]))
+            .map(|sequence| {
+                JsonValue::object([
+                    ("sequence", JsonValue::from(sequence)),
+                    ("consumer", JsonValue::from("root")),
+                    ("model", JsonValue::from(CODEX_MODEL_ID)),
+                ])
+            })
             .collect();
         let ledger = JsonValue::object([
             ("schema_version", JsonValue::from(LEDGER_SCHEMA)),
@@ -1339,7 +1408,9 @@ mod tests {
         )
         .expect("prior request count and elapsed time do not block the next run");
         record.ledger_path = temporary_ledger("continued-recording");
-        record.reserve(VerificationConsumer::Root).expect("next attempt records");
+        record
+            .reserve(VerificationConsumer::Root)
+            .expect("next attempt records");
         assert_eq!(record.attempted_requests, 42);
         let _ = fs::remove_file(record.ledger_path);
     }
@@ -1358,7 +1429,10 @@ mod tests {
         }))
         .expect("provider-admission wait succeeds");
         producer.join().expect("delayed admission producer exits");
-        assert!(observed, "a real provider needs wall time to commit admission");
+        assert!(
+            observed,
+            "a real provider needs wall time to commit admission"
+        );
     }
 
     #[test]
@@ -1387,13 +1461,29 @@ mod tests {
             assert_eq!(handle.model().model, CODEX_MODEL_ID);
             assert!(handle.model().revision.is_none());
         }
-        assert_eq!(factory.budget_snapshot().expect("snapshot").attempted_requests, 0);
+        assert_eq!(
+            factory
+                .budget_snapshot()
+                .expect("snapshot")
+                .attempted_requests,
+            0
+        );
         let persisted = JsonValue::parse(&fs::read_to_string(&ledger).expect("ledger reads"))
             .expect("ledger is JSON");
-        assert_eq!(persisted.get("reasoning_effort").and_then(JsonValue::as_str), Some("low"));
+        assert_eq!(
+            persisted
+                .get("reasoning_effort")
+                .and_then(JsonValue::as_str),
+            Some("low")
+        );
         assert!(persisted.get("requested_output_tokens").is_none());
         let _ = fs::remove_file(ledger);
-        let _ = fs::remove_dir_all(credential.parent().and_then(Path::parent).expect("credential has a Tea home"));
+        let _ = fs::remove_dir_all(
+            credential
+                .parent()
+                .and_then(Path::parent)
+                .expect("credential has a Tea home"),
+        );
     }
 
     #[test]
@@ -1404,7 +1494,12 @@ mod tests {
         let credential = temporary_credential("stale-evidence");
         assert!(RestrictedCodexFactory::new(credential.clone(), evidence, ledger.clone()).is_err());
         assert!(!ledger.exists());
-        let _ = fs::remove_dir_all(credential.parent().and_then(Path::parent).expect("credential has a Tea home"));
+        let _ = fs::remove_dir_all(
+            credential
+                .parent()
+                .and_then(Path::parent)
+                .expect("credential has a Tea home"),
+        );
     }
 
     #[test]

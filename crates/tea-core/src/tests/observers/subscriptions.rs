@@ -228,7 +228,12 @@ fn run_event_diagnostics_report_omission_after_the_bounded_suffix_overflows() {
             crate::run::RUN_EVENT_DIAGNOSTIC_LIMIT
         );
         assert_eq!(
-            diagnostics.events.first().expect("retained suffix").sequence.0,
+            diagnostics
+                .events
+                .first()
+                .expect("retained suffix")
+                .sequence
+                .0,
             diagnostics.omitted_events.saturating_add(1)
         );
 

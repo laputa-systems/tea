@@ -113,7 +113,9 @@ impl ModelProvider for PersistedCounterProvider {
                 ModelStreamEvent::End(StopReason::Stop),
             ],
         };
-        Box::pin(std::future::ready(Ok(Box::new(ModelStream { events }) as _)))
+        Box::pin(std::future::ready(
+            Ok(Box::new(ModelStream { events }) as _),
+        ))
     }
 }
 
@@ -209,13 +211,21 @@ fn sigkill_after_durable_unsafe_tool_intent_requires_reconciliation() {
     }));
 
     let reopened = reopen_runtime(&fixture, CrashPoint::UnsafeToolIntent);
-    assert_eq!(provider_calls(&fixture.counter_path), 1, "reopen must not infer");
+    assert_eq!(
+        provider_calls(&fixture.counter_path),
+        1,
+        "reopen must not infer"
+    );
     let before = reopened.snapshot().expect("reopened prefix snapshots");
     assert!(matches!(
         smol::block_on(reopened.resume()),
         Err(HarnessError::RecoveryRequired { .. })
     ));
-    assert_eq!(provider_calls(&fixture.counter_path), 1, "blocked continue must not infer");
+    assert_eq!(
+        provider_calls(&fixture.counter_path),
+        1,
+        "blocked continue must not infer"
+    );
     assert_eq!(
         reopened.snapshot().expect("blocked prefix snapshots"),
         before,
@@ -253,15 +263,24 @@ fn sigkill_after_committed_provider_final_settles_without_replay() {
                 if message.content == "durably committed final response" && message.stop_reason.as_deref() == Some("stop")
         )
     }));
-    assert!(snapshot.records().iter().all(|stored| {
-        !matches!(&stored.record, LaneRecord::OperationFinished(_))
-    }));
+    assert!(
+        snapshot
+            .records()
+            .iter()
+            .all(|stored| { !matches!(&stored.record, LaneRecord::OperationFinished(_)) })
+    );
 
     let reopened = reopen_runtime(&fixture, CrashPoint::ProviderFinal);
-    assert_eq!(provider_calls(&fixture.counter_path), 1, "reopen must not infer");
-    assert!(smol::block_on(reopened.resume())
-        .expect("committed final answer settles on explicit continuation")
-        .is_completed());
+    assert_eq!(
+        provider_calls(&fixture.counter_path),
+        1,
+        "reopen must not infer"
+    );
+    assert!(
+        smol::block_on(reopened.resume())
+            .expect("committed final answer settles on explicit continuation")
+            .is_completed()
+    );
     assert_eq!(
         provider_calls(&fixture.counter_path),
         1,
@@ -295,7 +314,10 @@ fn spawn_child(point: CrashPoint, fixture: &ProcessFixture) -> std::process::Chi
 }
 
 fn wait_for_ready(child: &mut std::process::Child, point: CrashPoint) {
-    let stdout = child.stdout.take().expect("crash fixture child pipes stdout");
+    let stdout = child
+        .stdout
+        .take()
+        .expect("crash fixture child pipes stdout");
     let mut output = BufReader::new(stdout);
     loop {
         let mut line = String::new();
@@ -312,7 +334,10 @@ fn wait_for_ready(child: &mut std::process::Child, point: CrashPoint) {
 fn kill_child(child: &mut std::process::Child) {
     child.kill().expect("SIGKILL reaches crash fixture child");
     let status = child.wait().expect("crash fixture child is reaped");
-    assert!(!status.success(), "crash fixture child must not exit cleanly");
+    assert!(
+        !status.success(),
+        "crash fixture child must not exit cleanly"
+    );
 }
 
 fn drive_child(point: CrashPoint) {
@@ -367,7 +392,8 @@ fn reopen_runtime(
             .artifact_store()
             .expect("reopened JSONL artifact store opens"),
     );
-    let repository = HarnessRepository::with_extension_engine(Arc::clone(&artifacts), Arc::new(NoExtensions));
+    let repository =
+        HarnessRepository::with_extension_engine(Arc::clone(&artifacts), Arc::new(NoExtensions));
     let resolver = Arc::new(HarnessResolver::new(repository, Default::default()));
     let root_services = process_services(point, &fixture.counter_path, false);
     SessionSupervisor::reopen(SessionSupervisorReopenInput {
@@ -388,7 +414,8 @@ fn child_harness(
     artifacts: Arc<dyn ArtifactStore>,
 ) -> (Arc<HarnessResolver>, HarnessIdentity) {
     let services = process_services(point, counter_path, true);
-    let mut repository = HarnessRepository::with_extension_engine(artifacts, Arc::new(NoExtensions));
+    let mut repository =
+        HarnessRepository::with_extension_engine(artifacts, Arc::new(NoExtensions));
     let snapshot = repository
         .stage_snapshot(snapshot_spec(services.runtime_policy_identities()))
         .expect("process fixture snapshot stages");
@@ -423,7 +450,8 @@ fn process_services(
         CrashPoint::UnsafeToolIntent => tools.insert(Arc::new(BlockingUnsafeTool)),
         CrashPoint::ProviderFinal => tools.insert(Arc::new(RecordingTool)),
     };
-    let services = match point {
+    
+    match point {
         CrashPoint::UnsafeToolIntent => RuntimeServices::new(provider, tools),
         CrashPoint::ProviderFinal => {
             let hooks: Arc<dyn HookSet> = if block_after_provider_final {
@@ -434,8 +462,7 @@ fn process_services(
             RuntimeServices::new(provider, tools)
                 .hooks_with_identity(hooks, Digest::from_bytes(FINAL_HOOK_IDENTITY))
         }
-    };
-    services
+    }
 }
 
 fn read_snapshot(directory: &Path) -> tea_session::SessionSnapshot {

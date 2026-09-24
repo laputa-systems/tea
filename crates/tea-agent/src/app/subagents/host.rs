@@ -296,13 +296,11 @@ impl TuiSubagentHost {
             .context_window
             .map(automatic_compaction_policy)
             .unwrap_or_else(AutomaticCompactionPolicy::disabled);
-        let mut runtime_services = RuntimeServices::from_agent_configuration(
-            provider,
-            configuration,
-        )
-        .model(model.descriptor.clone())
-        .thinking_level(thinking)
-        .automatic_compaction(automatic_compaction);
+        let mut runtime_services =
+            RuntimeServices::from_agent_configuration(provider, configuration)
+                .model(model.descriptor.clone())
+                .thinking_level(thinking)
+                .automatic_compaction(automatic_compaction);
         if let Some(compactor) = compactor {
             runtime_services = runtime_services.compactor(compactor);
         }
@@ -387,7 +385,9 @@ impl SubagentHost for TuiSubagentHost {
             let finalization = smol::unblock(move || {
                 // The gate guards no data, so a panicked holder cannot
                 // invalidate the next caller's idempotent finalization.
-                let _serialized = gate.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                let _serialized = gate
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 engine.finalize(&lease)
             })
             .await
@@ -538,7 +538,9 @@ impl SubagentHost for TuiSubagentHost {
             // session-owned deterministic lease path, never an ambient tree.
             let gate = self.lease_git_gate(&workspace_lease_id)?;
             smol::unblock(move || {
-                let _serialized = gate.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                let _serialized = gate
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 engine.cleanup_durable_lease(&workspace, &session_directory, &workspace_lease_id)
             })
             .await

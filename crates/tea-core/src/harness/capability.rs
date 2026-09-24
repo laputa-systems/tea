@@ -455,10 +455,7 @@ impl ExtensionCapability for ExtensionStateCapability {
                         }
                     })?;
                     state
-                        .replace(
-                            &extension_id,
-                            ExtensionStateUpdate { value },
-                        )
+                        .replace(&extension_id, ExtensionStateUpdate { value })
                         .map_err(|error| ExtensionCapabilityError::Execution {
                             message: error.to_string(),
                         })
@@ -621,8 +618,7 @@ mod tests {
     fn state_generation() -> ExtensionStateGeneration {
         ExtensionStateGeneration::new(
             LaneId::main(),
-            OperationId::new("extension-state-capability-operation")
-                .expect("fixture operation ID"),
+            OperationId::new("extension-state-capability-operation").expect("fixture operation ID"),
             EpochId::new("extension-state-capability-epoch").expect("fixture epoch ID"),
             HarnessRevisionId::new("extension-state-capability-revision")
                 .expect("fixture revision ID"),
@@ -636,27 +632,20 @@ mod tests {
         handle
             .attach(Arc::clone(&store) as Arc<dyn ExtensionStateStore>)
             .expect("state store attaches once");
-        let review = ExtensionStateCapability::new(
-            "review",
-            handle.for_generation(state_generation()),
-        )
-        .expect("portable extension ID");
-        let other = ExtensionStateCapability::new(
-            "other",
-            handle.for_generation(state_generation()),
-        )
-        .expect("portable extension ID");
+        let review =
+            ExtensionStateCapability::new("review", handle.for_generation(state_generation()))
+                .expect("portable extension ID");
+        let other =
+            ExtensionStateCapability::new("other", handle.for_generation(state_generation()))
+                .expect("portable extension ID");
 
-        let replaced = smol::block_on(
-            review.invoke(
-                request(
-                    "replace",
-                    JsonValue::parse(r#"{"value":{"phase":"open"}}"#)
-                        .expect("fixture state JSON"),
-                ),
-                CancellationToken::new(),
+        let replaced = smol::block_on(review.invoke(
+            request(
+                "replace",
+                JsonValue::parse(r#"{"value":{"phase":"open"}}"#).expect("fixture state JSON"),
             ),
-        )
+            CancellationToken::new(),
+        ))
         .expect("review can replace its state");
         assert_eq!(replaced.value, JsonValue::Bool(true));
 

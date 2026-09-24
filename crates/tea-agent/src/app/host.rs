@@ -72,10 +72,22 @@ mod tests {
             })
             .expect("Codex context converts");
         let input = JsonValue::parse(&encoded).expect("Responses input is JSON");
-        let item = input.as_array().and_then(|items| items.first()).expect("one user item");
-        assert_eq!(item.get("type").and_then(JsonValue::as_str), Some("message"));
-        let content = item.get("content").and_then(JsonValue::as_array).expect("content array");
-        assert_eq!(content[0].get("type").and_then(JsonValue::as_str), Some("input_text"));
+        let item = input
+            .as_array()
+            .and_then(|items| items.first())
+            .expect("one user item");
+        assert_eq!(
+            item.get("type").and_then(JsonValue::as_str),
+            Some("message")
+        );
+        let content = item
+            .get("content")
+            .and_then(JsonValue::as_array)
+            .expect("content array");
+        assert_eq!(
+            content[0].get("type").and_then(JsonValue::as_str),
+            Some("input_text")
+        );
     }
 
     #[test]

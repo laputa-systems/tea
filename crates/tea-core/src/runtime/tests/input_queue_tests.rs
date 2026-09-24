@@ -1,8 +1,4 @@
 use super::*;
-use crate::runtime::{
-    ExtensionCommandAdmission, IdleAuthorization, IdleDriveOutcome, InputDisposition,
-    InputOutcome, SessionEvent, SessionSupervisorReopenInput, TeaEvent,
-};
 use crate::harness::extension::{
     ExtensionCapabilityBindings, ExtensionCommandInput, ExtensionCommandResult,
     ExtensionDescriptor, ExtensionEngine, ExtensionError, ExtensionHostCommand,
@@ -15,6 +11,10 @@ use crate::harness::{
     HarnessSeedExtensionScope, ModelHarnessProfile,
 };
 use crate::hooks::HookSet;
+use crate::runtime::{
+    ExtensionCommandAdmission, IdleAuthorization, IdleDriveOutcome, InputDisposition, InputOutcome,
+    SessionEvent, SessionSupervisorReopenInput, TeaEvent,
+};
 use crate::scheduler::{
     CancellationToken, ModelFuture, ModelProvider, ModelRequest, ModelStream, ModelStreamEvent,
 };
@@ -23,9 +23,7 @@ use crate::tool::ToolRegistry;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::{Arc, Mutex};
-use tea_session::{
-    EntryId, LaneRecord, OperationOutcome, SessionFact, SessionHeader, SessionId,
-};
+use tea_session::{EntryId, LaneRecord, OperationOutcome, SessionFact, SessionHeader, SessionId};
 
 #[derive(Clone)]
 struct GateProvider {
@@ -40,7 +38,8 @@ impl ModelProvider for GateProvider {
         _request: ModelRequest,
         cancellation: CancellationToken,
     ) -> ModelFuture<'a> {
-        self.started.store(true, std::sync::atomic::Ordering::Release);
+        self.started
+            .store(true, std::sync::atomic::Ordering::Release);
         self.calls.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         let release = Arc::clone(&self.release);
         Box::pin(async move {
@@ -292,7 +291,10 @@ fn accepted_inputs_preserve_atomic_withdrawal_and_own_terminal_handles() {
             Some(InputDisposition::Withdrawn),
         );
         assert!(matches!(
-            input.completion().try_result().map(|result| result.outcome().clone()),
+            input
+                .completion()
+                .try_result()
+                .map(|result| result.outcome().clone()),
             Some(InputOutcome::Withdrawn),
         ));
     }
@@ -451,10 +453,12 @@ fn combined_input_dispatch_records_ordered_membership_and_survives_reopen() {
             outcome: OperationOutcome::Completed,
         }) if settled_operation == &operation_id,
     ));
-    assert!(reopened
-        .queued_inputs()
-        .expect("reopened queue projects")
-        .is_empty());
+    assert!(
+        reopened
+            .queued_inputs()
+            .expect("reopened queue projects")
+            .is_empty()
+    );
 }
 
 #[test]
@@ -475,10 +479,12 @@ fn direct_root_prompt_rejects_a_busy_claim_without_queuing_hidden_input() {
         before,
         "a convenience caller receives no invisible queued input when its root drive is rejected",
     );
-    assert!(runtime
-        .queued_inputs()
-        .expect("queue remains inspectable")
-        .is_empty());
+    assert!(
+        runtime
+            .queued_inputs()
+            .expect("queue remains inspectable")
+            .is_empty()
+    );
 }
 
 #[test]
@@ -503,7 +509,11 @@ fn close_preserves_accepted_queue_but_rejects_new_execution_authority() {
             .collect::<Vec<_>>(),
         vec![accepted.id().clone()],
     );
-    assert!(runtime.submit_input("must be rejected after close").is_err());
+    assert!(
+        runtime
+            .submit_input("must be rejected after close")
+            .is_err()
+    );
     assert!(smol::block_on(runtime.drive_next_input(IdleAuthorization::UserInputOnly)).is_err());
     assert!(accepted.completion().try_result().is_none());
 }
@@ -550,7 +560,10 @@ fn close_cancels_and_joins_its_owned_drive_without_settling_queued_input() {
         assert!(!runtime.is_active());
         assert!(runtime.is_closed());
         assert!(matches!(
-            active_input.completion().try_result().map(|result| result.outcome().clone()),
+            active_input
+                .completion()
+                .try_result()
+                .map(|result| result.outcome().clone()),
             Some(InputOutcome::Operation {
                 outcome: OperationOutcome::Aborted,
                 ..

@@ -33,9 +33,11 @@ fn busy_root_resume_cannot_reconcile_a_live_child_before_rejecting_the_claim() {
             .resume()
             .await
             .expect_err("a concurrent root resume must reject before child reconciliation");
-        assert!(error
-            .to_string()
-            .contains("durable harness already has an active drive"));
+        assert!(
+            error
+                .to_string()
+                .contains("durable harness already has an active drive")
+        );
         assert_eq!(
             runtime.snapshot().expect("rejected resume snapshot reads"),
             before,
@@ -49,7 +51,11 @@ fn busy_root_resume_cannot_reconcile_a_live_child_before_rejecting_the_claim() {
             AgentState::Running,
             "the rejected root continuation cannot abort or finalize its live child"
         );
-        assert_eq!(tasks.owned_task_count(), 1, "rejected resume cannot reap child work");
+        assert_eq!(
+            tasks.owned_task_count(),
+            1,
+            "rejected resume cannot reap child work"
+        );
         assert_eq!(
             *reopen_count.lock().expect("fixture reopen mutex"),
             0,

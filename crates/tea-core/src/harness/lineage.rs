@@ -631,13 +631,8 @@ impl HarnessRepository {
         let parent = self.require_revision(&draft.parent_revision_id)?.clone();
         let parent_snapshot = self.require_snapshot(&parent.snapshot_id)?.clone();
         let snapshot = self.require_snapshot(&draft.proposed_snapshot_id)?.clone();
-        let validation = validate_candidate(
-            &draft,
-            &parent,
-            &parent_snapshot,
-            &snapshot,
-            &self.trees,
-        )?;
+        let validation =
+            validate_candidate(&draft, &parent, &parent_snapshot, &snapshot, &self.trees)?;
         let candidate_id = candidate_id(&draft)?;
         let candidate = HarnessCandidateV1 {
             candidate_id: candidate_id.clone(),
@@ -1831,8 +1826,7 @@ mod tests {
                 self_extension_addendum: None,
                 ordered_global_plugins: vec![PluginBundleRef {
                     plugin_id: "todo".into(),
-                    tree_id: HarnessTreeId::new("fixture-todo-tree")
-                        .expect("fixture tree ID"),
+                    tree_id: HarnessTreeId::new("fixture-todo-tree").expect("fixture tree ID"),
                     requested_capabilities: BTreeSet::from(["extension.state".into()]),
                     state_version: Some(state_version.into()),
                 }],
@@ -1934,12 +1928,14 @@ mod tests {
         .expect("state contract validation completes");
 
         assert!(!validation.accepted);
-        assert!(validation
-            .diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.contains("todo")
-                && diagnostic.contains("state_version")
-                && diagnostic.contains("not supported")));
+        assert!(
+            validation
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.contains("todo")
+                    && diagnostic.contains("state_version")
+                    && diagnostic.contains("not supported"))
+        );
 
         let mut removed_snapshot = stateful_snapshot("fixture-removed-snapshot", "todo.v1");
         removed_snapshot.spec.ordered_global_plugins.clear();
@@ -1955,9 +1951,11 @@ mod tests {
         .expect("state removal validation completes");
 
         assert!(!removal.accepted);
-        assert!(removal
-            .diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.contains("removes stateful extension todo")));
+        assert!(
+            removal
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.contains("removes stateful extension todo"))
+        );
     }
 }

@@ -9,9 +9,8 @@ use std::sync::{Arc, Mutex};
 use tea_session::{
     ArtifactError, ArtifactId, ArtifactStore, EntryId, EpochId, EpochStartedRecord,
     HarnessRevisionChangedEntry, LaneId, LaneMutation, LaneRecord, MemoryArtifactStore,
-    MemorySession, ModelChangedEntry, OperationId, OperationKind, ProvisionedEntry,
-    SessionEntry, SessionError, SessionHeader, SessionId, SessionReader, SessionWriter,
-    StoredCommit,
+    MemorySession, ModelChangedEntry, OperationId, OperationKind, ProvisionedEntry, SessionEntry,
+    SessionError, SessionHeader, SessionId, SessionReader, SessionWriter, StoredCommit,
 };
 
 #[derive(Default)]
@@ -128,17 +127,29 @@ fn create_rejects_durable_model_selection_mismatch_before_side_effects() {
         (
             "provider",
             Some(selected.clone()),
-            Some(descriptor("other-provider", "durable-model", Some("durable-r1"))),
+            Some(descriptor(
+                "other-provider",
+                "durable-model",
+                Some("durable-r1"),
+            )),
         ),
         (
             "model",
             Some(selected.clone()),
-            Some(descriptor("fixture-provider", "other-model", Some("durable-r1"))),
+            Some(descriptor(
+                "fixture-provider",
+                "other-model",
+                Some("durable-r1"),
+            )),
         ),
         (
             "revision",
             Some(selected.clone()),
-            Some(descriptor("fixture-provider", "durable-model", Some("other-r1"))),
+            Some(descriptor(
+                "fixture-provider",
+                "durable-model",
+                Some("other-r1"),
+            )),
         ),
         ("missing", Some(selected.clone()), None),
         ("unexpected", None, Some(selected.clone())),
@@ -302,7 +313,11 @@ fn reopen_rejects_mismatched_model_before_restoring_the_catalog() {
         session,
         resolver,
         root_services: RuntimeServices::new(mismatched_provider.clone(), ToolRegistry::default())
-            .model(descriptor("fixture-provider", "other-model", Some("durable-r1"))),
+            .model(descriptor(
+                "fixture-provider",
+                "other-model",
+                Some("durable-r1"),
+            )),
         lane_services: BTreeMap::new(),
         artifacts: missing_catalog_store.clone(),
         rollover_budget: 1,
@@ -400,7 +415,11 @@ fn register_lane_rejects_mismatched_durable_model_before_installing_services() {
 #[test]
 fn resume_validates_model_selection_at_the_epoch_source_leaf() {
     smol::block_on(async {
-        let historical = descriptor("fixture-provider", "historical-model", Some("historical-r1"));
+        let historical = descriptor(
+            "fixture-provider",
+            "historical-model",
+            Some("historical-r1"),
+        );
         let current = descriptor("fixture-provider", "current-model", Some("current-r1"));
         let store = Arc::new(MemoryArtifactStore::default());
         let provider = Arc::new(ModelSelectionProvider::default());
@@ -418,22 +437,24 @@ fn resume_validates_model_selection_at_the_epoch_source_leaf() {
             "historical-epoch-model",
             &historical,
         );
-        let operation_id = OperationId::new("historical-epoch-operation")
-            .expect("fixture operation ID");
+        let operation_id =
+            OperationId::new("historical-epoch-operation").expect("fixture operation ID");
         let input = ProvisionedEntry::user(
             EntryId::new("historical-epoch-input").expect("fixture input entry ID"),
             "resume the historical epoch",
         );
         session
-            .append_record(LaneRecord::OperationStarted(tea_session::OperationStartedRecord::new(
-                operation_id.clone(),
-                LaneId::main(),
-                Some(EntryId::new("historical-epoch-model").expect("fixture model entry ID")),
-                OperationKind::Run,
-                vec![input.clone()],
-                identity.revision_id().clone(),
-                identity.profile_id().clone(),
-            )))
+            .append_record(LaneRecord::OperationStarted(
+                tea_session::OperationStartedRecord::new(
+                    operation_id.clone(),
+                    LaneId::main(),
+                    Some(EntryId::new("historical-epoch-model").expect("fixture model entry ID")),
+                    OperationKind::Run,
+                    vec![input.clone()],
+                    identity.revision_id().clone(),
+                    identity.profile_id().clone(),
+                ),
+            ))
             .expect("fixture operation accepts");
         session
             .append_entry(&LaneId::main(), input)

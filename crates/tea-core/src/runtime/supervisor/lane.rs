@@ -1,8 +1,8 @@
 //! Volatile state owned by one durable session lane.
 
+use super::ExtensionContinuation;
 use crate::agent::Agent;
 use crate::runtime::RuntimeServices;
-use super::ExtensionContinuation;
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::panic::{AssertUnwindSafe, catch_unwind};

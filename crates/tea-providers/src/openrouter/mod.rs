@@ -30,9 +30,9 @@ pub use config::{
 };
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
-use std::pin::Pin;
 #[cfg(test)]
 use std::io::Read;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -245,20 +245,22 @@ impl OpenRouterEventStream {
         self.response_headers.clear();
         self.response_headers_received = false;
         self.error_body.clear();
-        self.response = Some(http_client().stream(
-            Request::post(
-                self.provider.config.completion_url(),
-                self.payload.clone(),
-                self.provider.config.request_timeout,
-            )
-            .header(
-                "Authorization",
-                format!("Bearer {}", self.provider.config.api_key),
-            )
-            .header("Content-Type", "application/json")
-            .with_stall_timeout(self.provider.config.stall_timeout),
-            cancellation.clone(),
-        ));
+        self.response = Some(
+            http_client().stream(
+                Request::post(
+                    self.provider.config.completion_url(),
+                    self.payload.clone(),
+                    self.provider.config.request_timeout,
+                )
+                .header(
+                    "Authorization",
+                    format!("Bearer {}", self.provider.config.api_key),
+                )
+                .header("Content-Type", "application/json")
+                .with_stall_timeout(self.provider.config.stall_timeout),
+                cancellation.clone(),
+            ),
+        );
         self.decoder = Some(StreamingSseDecoder::new());
     }
 
@@ -345,9 +347,7 @@ impl OpenRouterEventStream {
     }
 
     fn handle_status_failure(&mut self) {
-        if openrouter_status_retryable(self.status_code)
-            && self.queue_retry(self.retry_after())
-        {
+        if openrouter_status_retryable(self.status_code) && self.queue_retry(self.retry_after()) {
             return;
         }
         self.response_failure(format!(
@@ -373,8 +373,7 @@ impl OpenRouterEventStream {
         self.status_code = self.status_code.or(failure.status_code);
         self.error_body.extend_from_slice(&failure.body);
         if !self.visible_stream_event {
-            if openrouter_status_retryable(self.status_code)
-                && self.queue_retry(self.retry_after())
+            if openrouter_status_retryable(self.status_code) && self.queue_retry(self.retry_after())
             {
                 return;
             }
@@ -1404,14 +1403,16 @@ data: [DONE]
     fn live_event_stream_retries_pre_output_status_with_cancellable_backoff() {
         use std::io::{Read, Write};
         use std::net::TcpListener;
-        use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
 
         fn drain_request(socket: &mut std::net::TcpStream) {
             let mut bytes = Vec::new();
             let mut chunk = [0_u8; 4096];
             let expected = loop {
-                let read = socket.read(&mut chunk).expect("request should remain readable");
+                let read = socket
+                    .read(&mut chunk)
+                    .expect("request should remain readable");
                 assert_ne!(read, 0, "request must not close before its body");
                 bytes.extend_from_slice(&chunk[..read]);
                 let Some(header_end) = bytes
@@ -1435,7 +1436,9 @@ data: [DONE]
                 break header_end + content_length;
             };
             while bytes.len() < expected {
-                let read = socket.read(&mut chunk).expect("request body should remain readable");
+                let read = socket
+                    .read(&mut chunk)
+                    .expect("request body should remain readable");
                 assert_ne!(read, 0, "request must not close before its body");
                 bytes.extend_from_slice(&chunk[..read]);
             }
@@ -1472,7 +1475,9 @@ data: [DONE]
                         .as_bytes(),
                     )
                     .expect("success response headers should write");
-                socket.write_all(body).expect("success response body should write");
+                socket
+                    .write_all(body)
+                    .expect("success response body should write");
             }
         });
 
@@ -1692,7 +1697,10 @@ data: [DONE]
         )
         .unwrap();
         let payload = JsonValue::parse(std::str::from_utf8(&payload).unwrap()).unwrap();
-        assert_eq!(payload.get("store").and_then(JsonValue::as_bool), Some(false));
+        assert_eq!(
+            payload.get("store").and_then(JsonValue::as_bool),
+            Some(false)
+        );
     }
 
     #[test]
@@ -1706,8 +1714,7 @@ data: [DONE]
             schema: JsonValue::object([("type", JsonValue::from("object"))]),
             execution_mode: ToolExecutionMode::Sequential,
             requires_exclusive_batch: false,
-            cancellation_settlement_mode:
-                crate::tool::CancellationSettlementMode::DropFuture,
+            cancellation_settlement_mode: crate::tool::CancellationSettlementMode::DropFuture,
         };
         let payload = build_payload(
             &config,
@@ -1938,7 +1945,10 @@ data: [DONE]
         });
         let started = std::time::Instant::now();
         let event = smol::block_on(stream.next_event(cancellation));
-        assert_eq!(event, Ok(Some(ModelStreamEvent::End(StopReason::Cancelled))));
+        assert_eq!(
+            event,
+            Ok(Some(ModelStreamEvent::End(StopReason::Cancelled)))
+        );
         assert!(started.elapsed() < Duration::from_millis(200));
     }
 

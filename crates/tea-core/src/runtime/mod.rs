@@ -25,11 +25,11 @@ pub use context::{
     derive_model_context, derive_model_context_with_patch,
 };
 pub use events::{
-    ArtifactEvent, DiagnosticCode, HarnessEvent, HarnessSnapshotView, LaneSnapshotView,
-    ObservationRun, PreviewEvent, PreviewIdentity, PreviewTarget, SessionEvent, TeaEvent,
-    TeaEventRecvError, TeaEventSubscription, TeaEventTryRecvError, TeaObservationSnapshot,
-    ValidationStage, LIVE_PREVIEW_LIMIT, MAX_PREVIEW_ACTIVITY_BYTES, MAX_PREVIEW_TEXT_BYTES,
-    MAX_PREVIEW_TOOL_NAME_BYTES, SUBSCRIBER_EVENT_BUFFER,
+    ArtifactEvent, DiagnosticCode, HarnessEvent, HarnessSnapshotView, LIVE_PREVIEW_LIMIT,
+    LaneSnapshotView, MAX_PREVIEW_ACTIVITY_BYTES, MAX_PREVIEW_TEXT_BYTES,
+    MAX_PREVIEW_TOOL_NAME_BYTES, ObservationRun, PreviewEvent, PreviewIdentity, PreviewTarget,
+    SUBSCRIBER_EVENT_BUFFER, SessionEvent, TeaEvent, TeaEventRecvError, TeaEventSubscription,
+    TeaEventTryRecvError, TeaObservationSnapshot, ValidationStage,
 };
 pub use hosted::{HostedEpoch, HostedEpochInput};
 pub use services::{RuntimePolicyIdentities, RuntimeServices};
@@ -46,9 +46,9 @@ pub use subagents::{
     root_subagent_tool_presentations, root_subagent_tool_surface_digest,
 };
 pub use supervisor::{
-    InterruptedEffect, LaneRecoveryReport, RecoveryReport, inspect_recovery,
     AcceptedInput, DurableOperation, ExtensionCommandAdmission, HarnessIdentity, IdleAuthorization,
-    IdleDriveOutcome, InputCompletion, InputCompletionFuture, InputCompletionHandle, InputOutcome,
-    InputDisposition, QueuedInput, SettledTurnFork, SessionSupervisor, SessionSupervisorInput, SessionSupervisorReopenInput,
-    WithdrawnInputs,
+    IdleDriveOutcome, InputCompletion, InputCompletionFuture, InputCompletionHandle,
+    InputDisposition, InputOutcome, InterruptedEffect, LaneRecoveryReport, QueuedInput,
+    RecoveryReport, SessionSupervisor, SessionSupervisorInput, SessionSupervisorReopenInput,
+    SettledTurnFork, WithdrawnInputs, inspect_recovery,
 };

@@ -1,9 +1,9 @@
 use super::*;
+use crate::harness::ResolvedHarness;
 use crate::harness::extension::{
     CollectedExtensionMemoryProposal, ExtensionMemoryProposal, ExtensionMemoryRetention,
     ExtensionMemoryVisibility,
 };
-use crate::harness::ResolvedHarness;
 use crate::hooks::NoHooks;
 use crate::state::{SerializedJson, ToolCallId};
 use tea_session::{

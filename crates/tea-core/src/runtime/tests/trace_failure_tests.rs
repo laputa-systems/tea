@@ -77,10 +77,12 @@ fn trace_artifact_failure_records_content_free_diagnostic_without_blocking_compl
                 }) if operation_id == operation.id()
             )
         }));
-        assert!(snapshot
-            .facts()
-            .iter()
-            .all(|stored| !matches!(stored.fact, SessionFact::TraceArtifact(_))));
+        assert!(
+            snapshot
+                .facts()
+                .iter()
+                .all(|stored| !matches!(stored.fact, SessionFact::TraceArtifact(_)))
+        );
 
         let diagnostic = snapshot
             .facts()
@@ -99,7 +101,13 @@ fn trace_artifact_failure_records_content_free_diagnostic_without_blocking_compl
             .expect("trace diagnostic is a JSON object");
         assert_eq!(
             fields.keys().map(String::as_str).collect::<Vec<_>>(),
-            vec!["core_run_id", "epoch_id", "operation_id", "reason", "schema_version"]
+            vec![
+                "core_run_id",
+                "epoch_id",
+                "operation_id",
+                "reason",
+                "schema_version"
+            ]
         );
         assert_eq!(
             fields.get("operation_id").and_then(JsonValue::as_str),
@@ -109,7 +117,10 @@ fn trace_artifact_failure_records_content_free_diagnostic_without_blocking_compl
             fields.get("reason").and_then(JsonValue::as_str),
             Some("artifact_store_unavailable")
         );
-        assert_eq!(fields.get("schema_version").and_then(JsonValue::as_u64), Some(1));
+        assert_eq!(
+            fields.get("schema_version").and_then(JsonValue::as_u64),
+            Some(1)
+        );
         let encoded = diagnostic
             .to_json_string()
             .expect("diagnostic canonically encodes");

@@ -83,10 +83,8 @@ impl OpenRouterRequestCapture {
             *self
                 .returned_route
                 .lock()
-                .expect("OpenRouter request capture mutex poisoned") = OpenRouterReturnedRoute {
-                model,
-                provider,
-            };
+                .expect("OpenRouter request capture mutex poisoned") =
+                OpenRouterReturnedRoute { model, provider };
         }
     }
 
@@ -123,9 +121,8 @@ impl fmt::Display for OpenRouterConfigError {
             Self::ZeroMaxTokens => {
                 formatter.write_str("OpenRouter max tokens must be greater than zero")
             }
-            Self::InvalidTemperature => {
-                formatter.write_str("OpenRouter temperature must be finite and between zero and two")
-            }
+            Self::InvalidTemperature => formatter
+                .write_str("OpenRouter temperature must be finite and between zero and two"),
             Self::ZeroRequestTimeout => {
                 formatter.write_str("OpenRouter request timeout must be greater than zero")
             }
@@ -295,12 +292,9 @@ impl OpenRouterConfig {
         if self.max_tokens == Some(0) {
             return Err(OpenRouterConfigError::ZeroMaxTokens);
         }
-        if self
-            .temperature
-            .is_some_and(|temperature| {
-                !temperature.is_finite() || !(0.0..=2.0).contains(&temperature)
-            })
-        {
+        if self.temperature.is_some_and(|temperature| {
+            !temperature.is_finite() || !(0.0..=2.0).contains(&temperature)
+        }) {
             return Err(OpenRouterConfigError::InvalidTemperature);
         }
         if self.request_timeout.is_zero() {

@@ -14,8 +14,8 @@ use std::sync::Arc;
 use tea_core::scheduler::ModelProvider;
 use tea_core::state::ModelDescriptor;
 use tea_session::{
-    LaneId, LaneRecord, OperationOutcome, SessionFact, SessionMutationRef,
-    SessionSnapshot, reduce_agent_graph,
+    reduce_agent_graph, LaneId, LaneRecord, OperationOutcome, SessionFact, SessionMutationRef,
+    SessionSnapshot,
 };
 
 /// Explicit disposable inputs for one live root/child orchestration exercise.
@@ -140,7 +140,8 @@ fn run_child_scenario(
         .verify_durable_state()
         .map_err(|error| LiveVerificationError::new(error.to_string()));
     let parent_clean_after = workspace_is_clean(workspace);
-    let closed = smol::block_on(harness.close()).map_err(|error| LiveVerificationError::new(error.to_string()));
+    let closed = smol::block_on(harness.close())
+        .map_err(|error| LiveVerificationError::new(error.to_string()));
 
     operation.map_err(|error| LiveVerificationError::new(error.to_string()))?;
     let snapshot = snapshot?;
@@ -162,9 +163,7 @@ fn run_child_scenario(
         })
     });
     let child = graph.agents.values().find(|child| {
-        child.workspace_delta.is_some()
-            || child.terminal.is_some()
-            || child.operation_id.is_some()
+        child.workspace_delta.is_some() || child.terminal.is_some() || child.operation_id.is_some()
     });
     let report_verified = child.is_some_and(|child| {
         child.terminal.as_ref().is_some_and(|terminal| {
@@ -251,7 +250,9 @@ fn child_delta_precedes_parent_apply(
                 }
                 _ => {}
             },
-            SessionMutationRef::Entry(_) | SessionMutationRef::Record(_) | SessionMutationRef::Lane(_) => {}
+            SessionMutationRef::Entry(_)
+            | SessionMutationRef::Record(_)
+            | SessionMutationRef::Lane(_) => {}
         }
     }
     false
@@ -262,11 +263,10 @@ mod tests {
     use super::*;
     use crate::verification::{CODEX_MODEL_ID, CODEX_PROVIDER_ID};
     use std::fs;
-    use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
     use tea_core::scheduler::{
-        CancellationToken, ModelFuture, ModelRequest, ModelStream,
-        ModelStreamEvent,
+        CancellationToken, ModelFuture, ModelRequest, ModelStream, ModelStreamEvent,
     };
     use tea_core::state::{AgentToolCall, SerializedJson, StopReason, ToolCallId};
     use tea_protocol::JsonValue;
@@ -295,8 +295,7 @@ mod tests {
                 &workspace,
                 &["config", "user.email", "verification@example.invalid"],
             );
-            fs::write(workspace.join("fixture.txt"), "before\n")
-                .expect("public fixture writes");
+            fs::write(workspace.join("fixture.txt"), "before\n").expect("public fixture writes");
             git(&workspace, &["add", "fixture.txt"]);
             git(&workspace, &["commit", "-m", "public fixture"]);
             Self {
@@ -390,7 +389,9 @@ mod tests {
                     message: "scripted root received an unexpected request".into(),
                 }],
             };
-            Box::pin(std::future::ready(Ok(Box::new(ModelStream { events }) as _)))
+            Box::pin(std::future::ready(
+                Ok(Box::new(ModelStream { events }) as _),
+            ))
         }
     }
 
@@ -439,7 +440,9 @@ mod tests {
                     message: "scripted child received an unexpected request".into(),
                 }],
             };
-            Box::pin(std::future::ready(Ok(Box::new(ModelStream { events }) as _)))
+            Box::pin(std::future::ready(
+                Ok(Box::new(ModelStream { events }) as _),
+            ))
         }
     }
 
@@ -449,7 +452,9 @@ mod tests {
                 id: ToolCallId::new(call_id).expect("fixture tool call ID"),
                 name: name.into(),
                 arguments: SerializedJson::new(
-                    arguments.to_json_string().expect("fixture arguments encode"),
+                    arguments
+                        .to_json_string()
+                        .expect("fixture arguments encode"),
                 ),
             }),
             ModelStreamEvent::End(StopReason::ToolUse),
@@ -520,7 +525,11 @@ mod tests {
             "the injected child-role provider drives the edit and terminal report",
         );
         assert_eq!(
-            root_provider.requests.lock().expect("root request mutex").len(),
+            root_provider
+                .requests
+                .lock()
+                .expect("root request mutex")
+                .len(),
             4,
             "the injected root-role provider owns spawn, wait, apply, and final turns",
         );

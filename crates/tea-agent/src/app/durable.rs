@@ -26,17 +26,16 @@ use tea_core::harness::extension::{
     ExtensionStateHandle, ExtensionToolLimits,
 };
 use tea_core::harness::{
-    CapabilityBindingRef, HarnessActor, HarnessRepository,
-    HarnessResolver, HarnessResourceLimits, HarnessSeedBuilder, HarnessSeedExtension,
-    HarnessSeedExtensionScope, ModelHarnessProfile, PluginCapabilityBinding,
-    PluginCapabilityCatalog, SelfExtensionMode, ToolPresentationDescriptor,
-    SELF_EXTENSION_MODE_METADATA_KEY, SELF_EXTENSION_V1_CONCISE,
+    CapabilityBindingRef, HarnessActor, HarnessRepository, HarnessResolver, HarnessResourceLimits,
+    HarnessSeedBuilder, HarnessSeedExtension, HarnessSeedExtensionScope, ModelHarnessProfile,
+    PluginCapabilityBinding, PluginCapabilityCatalog, SelfExtensionMode,
+    ToolPresentationDescriptor, SELF_EXTENSION_MODE_METADATA_KEY, SELF_EXTENSION_V1_CONCISE,
 };
 use tea_core::runtime::{
-    HarnessIdentity, RuntimeServices, SessionSupervisor, SessionSupervisorInput,
-    SessionSupervisorReopenInput, SubagentPolicy, SubagentServices, IdleAuthorization,
-    IdleDriveOutcome, InputCompletion, InputOutcome, PreviewEvent, TeaEvent,
-    TeaEventSubscription, TeaEventTryRecvError,
+    HarnessIdentity, IdleAuthorization, IdleDriveOutcome, InputCompletion, InputOutcome,
+    PreviewEvent, RuntimeServices, SessionSupervisor, SessionSupervisorInput,
+    SessionSupervisorReopenInput, SubagentPolicy, SubagentServices, TeaEvent, TeaEventSubscription,
+    TeaEventTryRecvError,
 };
 use tea_core::scheduler::ModelProvider;
 use tea_core::state::{
@@ -152,9 +151,7 @@ enum WebCapabilityCredentialSource {
 }
 
 impl WebCapabilityCredentialSource {
-    fn binding(
-        self,
-    ) -> Result<(PluginCapabilityBinding, CapabilityBindingRef), AppError> {
+    fn binding(self) -> Result<(PluginCapabilityBinding, CapabilityBindingRef), AppError> {
         match self {
             Self::TerminalEnvironment => web_capability_binding(),
             #[cfg(feature = "live-verification")]
@@ -202,12 +199,15 @@ impl HostSubagentConfig {
 
     fn resolve_policy(&self, root_model: &ModelDescriptor) -> Result<SubagentPolicy, AppError> {
         match self {
-            Self::Terminal { factory, config } => factory.resolve_subagent_policy(root_model, config),
+            Self::Terminal { factory, config } => {
+                factory.resolve_subagent_policy(root_model, config)
+            }
             #[cfg(feature = "live-verification")]
             Self::LiveVerification { child_model, .. } => {
                 if child_model != root_model {
                     return Err(AppError::Setup(
-                        "live verification child must use the exact injected root descriptor".into(),
+                        "live verification child must use the exact injected root descriptor"
+                            .into(),
                     ));
                 }
                 let policy = SubagentPolicy {
@@ -222,15 +222,18 @@ impl HostSubagentConfig {
                         .expect("fixed live-verification child total is nonzero"),
                     timeout: Duration::from_secs(120),
                 };
-                policy
-                    .validate()
-                    .map_err(|error| AppError::Setup(format!("invalid live verification child policy: {error}")))?;
+                policy.validate().map_err(|error| {
+                    AppError::Setup(format!("invalid live verification child policy: {error}"))
+                })?;
                 Ok(policy)
             }
         }
     }
 
-    fn child_seed_provider(&self, root_provider: &Arc<dyn ModelProvider>) -> Arc<dyn ModelProvider> {
+    fn child_seed_provider(
+        &self,
+        root_provider: &Arc<dyn ModelProvider>,
+    ) -> Arc<dyn ModelProvider> {
         match self {
             Self::Terminal { .. } => Arc::clone(root_provider),
             #[cfg(feature = "live-verification")]
@@ -257,7 +260,8 @@ impl HostSubagentConfig {
                 let expected = self.resolve_policy(root_model)?;
                 if persisted != expected {
                     return Err(AppError::Setup(
-                        "durable child policy differs from the injected live-verification policy".into(),
+                        "durable child policy differs from the injected live-verification policy"
+                            .into(),
                     ));
                 }
                 Ok(Some(persisted))
@@ -357,19 +361,23 @@ pub(crate) fn create_live_verification_harness(
         &workspace.to_string_lossy(),
         Some(&model.provider),
     )?;
-    let compactor = compactor_provider
-        .map(|(model, provider)| Arc::new(ProviderCompactor::new(model, provider).with_thinking_level(ThinkingLevel::Low)));
-    create_live_verification_host_harness(HostHarnessConfig {
-        tea_home,
-        workspace,
-        configuration,
-        model,
-        provider,
-        thinking_level: Some(ThinkingLevel::Low),
-        compactor,
-        automatic_compaction: AutomaticCompactionPolicy::disabled(),
-        subagents: None,
-    }, SelfExtensionMode::Off)
+    let compactor = compactor_provider.map(|(model, provider)| {
+        Arc::new(ProviderCompactor::new(model, provider).with_thinking_level(ThinkingLevel::Low))
+    });
+    create_live_verification_host_harness(
+        HostHarnessConfig {
+            tea_home,
+            workspace,
+            configuration,
+            model,
+            provider,
+            thinking_level: Some(ThinkingLevel::Low),
+            compactor,
+            automatic_compaction: AutomaticCompactionPolicy::disabled(),
+            subagents: None,
+        },
+        SelfExtensionMode::Off,
+    )
 }
 
 /// Feature-gated live-child composition seam. Root and child model consumers
@@ -395,20 +403,23 @@ pub(crate) fn create_live_verification_child_harness(
         &workspace.to_string_lossy(),
         Some(&root_model.provider),
     )?;
-    create_live_verification_host_harness(HostHarnessConfig {
-        tea_home,
-        workspace,
-        configuration,
-        model: root_model,
-        provider: root_provider,
-        thinking_level: Some(ThinkingLevel::Low),
-        compactor: None,
-        automatic_compaction: AutomaticCompactionPolicy::disabled(),
-        subagents: Some(HostSubagentConfig::live_verification(
-            child_model,
-            child_provider,
-        )),
-    }, SelfExtensionMode::Off)
+    create_live_verification_host_harness(
+        HostHarnessConfig {
+            tea_home,
+            workspace,
+            configuration,
+            model: root_model,
+            provider: root_provider,
+            thinking_level: Some(ThinkingLevel::Low),
+            compactor: None,
+            automatic_compaction: AutomaticCompactionPolicy::disabled(),
+            subagents: Some(HostSubagentConfig::live_verification(
+                child_model,
+                child_provider,
+            )),
+        },
+        SelfExtensionMode::Off,
+    )
 }
 
 /// Feature-gated authoring composition seam. The selected mode is frozen in
@@ -426,17 +437,20 @@ pub(crate) fn create_live_verification_authoring_harness(
         &workspace.to_string_lossy(),
         Some(&model.provider),
     )?;
-    create_live_verification_host_harness(HostHarnessConfig {
-        tea_home,
-        workspace,
-        configuration,
-        model,
-        provider,
-        thinking_level: Some(ThinkingLevel::Low),
-        compactor: None,
-        automatic_compaction: AutomaticCompactionPolicy::disabled(),
-        subagents: None,
-    }, SelfExtensionMode::Author)
+    create_live_verification_host_harness(
+        HostHarnessConfig {
+            tea_home,
+            workspace,
+            configuration,
+            model,
+            provider,
+            thinking_level: Some(ThinkingLevel::Low),
+            compactor: None,
+            automatic_compaction: AutomaticCompactionPolicy::disabled(),
+            subagents: None,
+        },
+        SelfExtensionMode::Author,
+    )
 }
 
 /// Reopen a verification-owned durable session without consulting terminal
@@ -455,8 +469,9 @@ pub(crate) fn reopen_live_verification_harness(
         &workspace.to_string_lossy(),
         Some(&model.provider),
     )?;
-    let compactor = compactor_provider
-        .map(|(model, provider)| Arc::new(ProviderCompactor::new(model, provider).with_thinking_level(ThinkingLevel::Low)));
+    let compactor = compactor_provider.map(|(model, provider)| {
+        Arc::new(ProviderCompactor::new(model, provider).with_thinking_level(ThinkingLevel::Low))
+    });
     reopen_live_verification_host_harness(HostHarnessReopen {
         tea_home,
         workspace,
@@ -516,21 +531,24 @@ pub(crate) fn create_live_verification_compaction_harness(
         &workspace.to_string_lossy(),
         Some(&root_model.provider),
     )?;
-    let compactor = Arc::new(ProviderCompactor::new(
-        compactor_provider.0,
-        compactor_provider.1,
-    ).with_thinking_level(ThinkingLevel::Low));
-    create_live_verification_host_harness(HostHarnessConfig {
-        tea_home,
-        workspace,
-        configuration,
-        model: root_model,
-        provider: root_provider,
-        thinking_level: Some(ThinkingLevel::Low),
-        compactor: Some(compactor),
-        automatic_compaction,
-        subagents: None,
-    }, SelfExtensionMode::Off)
+    let compactor = Arc::new(
+        ProviderCompactor::new(compactor_provider.0, compactor_provider.1)
+            .with_thinking_level(ThinkingLevel::Low),
+    );
+    create_live_verification_host_harness(
+        HostHarnessConfig {
+            tea_home,
+            workspace,
+            configuration,
+            model: root_model,
+            provider: root_provider,
+            thinking_level: Some(ThinkingLevel::Low),
+            compactor: Some(compactor),
+            automatic_compaction,
+            subagents: None,
+        },
+        SelfExtensionMode::Off,
+    )
 }
 
 /// Passive counterpart to [`create_live_verification_compaction_harness`].
@@ -550,10 +568,10 @@ pub(crate) fn reopen_live_verification_compaction_harness(
         &workspace.to_string_lossy(),
         Some(&root_model.provider),
     )?;
-    let compactor = Arc::new(ProviderCompactor::new(
-        compactor_provider.0,
-        compactor_provider.1,
-    ).with_thinking_level(ThinkingLevel::Low));
+    let compactor = Arc::new(
+        ProviderCompactor::new(compactor_provider.0, compactor_provider.1)
+            .with_thinking_level(ThinkingLevel::Low),
+    );
     reopen_live_verification_host_harness(HostHarnessReopen {
         tea_home,
         workspace,
@@ -852,10 +870,13 @@ fn create_host_harness_with_operations_and_mode(
             },
         )?;
         let manager = Arc::new(
-            HarnessResolver::new(repository, authoring_capability_ceiling(self_extension_mode))
-                .capability_catalog(capability_catalog)
-                .reserved_extension_command_names(super::commands::names())
-                .self_extension_mode(self_extension_mode),
+            HarnessResolver::new(
+                repository,
+                authoring_capability_ceiling(self_extension_mode),
+            )
+            .capability_catalog(capability_catalog)
+            .reserved_extension_command_names(super::commands::names())
+            .self_extension_mode(self_extension_mode),
         );
         let identity = HarnessIdentity::new(revision.revision_id, snapshot.id, profile.profile_id);
         let subagent_services = match (&subagents, &subagent_policy) {
@@ -1818,8 +1839,7 @@ async fn stream_host_prompt_to<W: Write>(
         .any(|lane| lane.lane_id == LaneId::main())
     {
         return Err(AppError::Setup(
-            "durable root recovery requires explicit continuation before accepting a prompt"
-                .into(),
+            "durable root recovery requires explicit continuation before accepting a prompt".into(),
         ));
     }
     let accepted = harness.submit_input(prompt)?;
@@ -1912,9 +1932,7 @@ async fn settle_prompt_after_output_failure(
     harness: &Arc<HostHarness>,
     drive: &mut std::pin::Pin<
         Box<
-            impl std::future::Future<
-                Output = Result<IdleDriveOutcome, tea_core::harness::HarnessError>,
-            >,
+            impl std::future::Future<Output = Result<IdleDriveOutcome, tea_core::harness::HarnessError>>,
         >,
     >,
 ) -> Result<(), tea_core::harness::HarnessError> {
@@ -1992,9 +2010,9 @@ fn drain_prompt_events_to<W: Write>(
                     AppError::Setup(format!("could not write response: {error}"))
                 })?;
             }
-            output.write_all(text.as_bytes()).map_err(|error| {
-                AppError::Setup(format!("could not write response: {error}"))
-            })?;
+            output
+                .write_all(text.as_bytes())
+                .map_err(|error| AppError::Setup(format!("could not write response: {error}")))?;
             wrote = true;
         }
     }
@@ -3504,10 +3522,9 @@ mod tests {
             .dispatch_extension_command("/todos", String::new())
             .expect("/todos dispatches")
         {
-            ExtensionCommandAdmission::Applied(dispatch) => dispatch
-                .result
-                .notice
-                .expect("/todos prints the list"),
+            ExtensionCommandAdmission::Applied(dispatch) => {
+                dispatch.result.notice.expect("/todos prints the list")
+            }
             ExtensionCommandAdmission::Queued { .. } => {
                 panic!("idle /todos command must apply immediately")
             }

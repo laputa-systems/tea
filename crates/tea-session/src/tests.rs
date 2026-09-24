@@ -40,11 +40,16 @@ fn semantic_commit_is_one_atomic_prefix_transition() {
         Metadata::new(),
     ))
     .expect("memory session creates");
-    let stored = memory.commit(commit.clone()).expect("memory commit succeeds");
+    let stored = memory
+        .commit(commit.clone())
+        .expect("memory commit succeeds");
     assert_eq!(stored.seq, Sequence(1));
     assert_eq!(stored.items.len(), 2);
     assert_eq!(
-        memory.snapshot().expect("snapshot succeeds").last_sequence(),
+        memory
+            .snapshot()
+            .expect("snapshot succeeds")
+            .last_sequence(),
         Sequence(1),
         "all semantic items share one durable commit sequence"
     );
@@ -75,7 +80,10 @@ fn semantic_commit_is_one_atomic_prefix_transition() {
         }),
     ])
     .expect("nonempty invalid semantic commit");
-    assert!(matches!(jsonl.commit(invalid), Err(SessionError::Corruption(_))));
+    assert!(matches!(
+        jsonl.commit(invalid),
+        Err(SessionError::Corruption(_))
+    ));
     assert_eq!(
         std::fs::read(directory.join("session.jsonl")).expect("prefix reads"),
         before,
@@ -94,8 +102,8 @@ fn semantic_commit_is_one_atomic_prefix_transition() {
         "header plus exactly one atomic commit envelope"
     );
     drop(jsonl);
-    let reopened = JsonlSession::open(&directory, DurabilityMode::Development)
-        .expect("atomic prefix reopens");
+    let reopened =
+        JsonlSession::open(&directory, DurabilityMode::Development).expect("atomic prefix reopens");
     assert_eq!(
         reopened
             .snapshot()
@@ -150,7 +158,8 @@ fn preview_session_commit_validates_a_new_lane_without_persisting_it() {
 #[test]
 fn settled_unadmitted_provider_request_does_not_reappear_in_recovery() {
     let lane = LaneId::main();
-    let operation_id = OperationId::new("unadmitted-provider-operation").expect("valid operation ID");
+    let operation_id =
+        OperationId::new("unadmitted-provider-operation").expect("valid operation ID");
     let epoch_id = EpochId::new("unadmitted-provider-epoch").expect("valid epoch ID");
     let step_id = StepId::new("unadmitted-provider-step").expect("valid step ID");
     let request_id =
@@ -187,8 +196,10 @@ fn settled_unadmitted_provider_request_does_not_reappear_in_recovery() {
                         .expect("valid revision ID"),
                     harness_snapshot_id: HarnessSnapshotId::new("unadmitted-provider-snapshot")
                         .expect("valid snapshot ID"),
-                    model_harness_profile: ModelHarnessProfileId::new("unadmitted-provider-profile")
-                        .expect("valid profile ID"),
+                    model_harness_profile: ModelHarnessProfileId::new(
+                        "unadmitted-provider-profile",
+                    )
+                    .expect("valid profile ID"),
                     core_run_id: CoreRunId::new("unadmitted-provider-core-run")
                         .expect("valid core run ID"),
                     epoch_resume_data: BTreeMap::new(),
@@ -333,7 +344,10 @@ fn compaction_rejects_reusing_a_provider_replacement() {
 }
 
 fn assert_rejected_provider_compaction(session: &mut MemorySession, invalid: SessionCommit) {
-    assert!(matches!(session.commit(invalid), Err(SessionError::Corruption(_))));
+    assert!(matches!(
+        session.commit(invalid),
+        Err(SessionError::Corruption(_))
+    ));
     assert_eq!(
         session
             .snapshot()
@@ -348,7 +362,8 @@ fn provider_linked_compaction_commit(
     classification: ProviderSettlementClassification,
 ) -> SessionCommit {
     let lane = LaneId::main();
-    let operation_id = OperationId::new("incomplete-compaction-operation").expect("valid operation ID");
+    let operation_id =
+        OperationId::new("incomplete-compaction-operation").expect("valid operation ID");
     let epoch_id = EpochId::new("incomplete-compaction-epoch").expect("valid epoch ID");
     let request_id =
         ProviderRequestId::new("incomplete-compaction-request").expect("valid request ID");
@@ -361,8 +376,7 @@ fn provider_linked_compaction_commit(
             OperationKind::Run,
             Vec::new(),
             HarnessRevisionId::new("incomplete-compaction-revision").expect("valid revision ID"),
-            ModelHarnessProfileId::new("incomplete-compaction-profile")
-                .expect("valid profile ID"),
+            ModelHarnessProfileId::new("incomplete-compaction-profile").expect("valid profile ID"),
         ))),
         SessionCommitItem::Record(LaneRecord::EpochStarted(EpochStartedRecord {
             id: epoch_id.clone(),
@@ -454,8 +468,7 @@ fn settled_input_control_checkpoint_and_fork_preserve_exact_lane_state() {
     );
     let operation_id = OperationId::new("checkpoint-operation").expect("valid operation ID");
     let revision = HarnessRevisionId::new("checkpoint-revision").expect("valid revision ID");
-    let profile =
-        ModelHarnessProfileId::new("checkpoint-profile").expect("valid profile ID");
+    let profile = ModelHarnessProfileId::new("checkpoint-profile").expect("valid profile ID");
     let control_id = "checkpoint-control".to_owned();
     let second_control_id = "another-checkpoint-control".to_owned();
     let extension_id = "checkpoint.extension".to_owned();
@@ -544,12 +557,10 @@ fn settled_input_control_checkpoint_and_fork_preserve_exact_lane_state() {
     session
         .commit(
             SessionCommit::new(vec![
-                SessionCommitItem::Record(LaneRecord::OperationFinished(
-                    OperationFinishedRecord {
-                        operation_id: operation_id.clone(),
-                        outcome: OperationOutcome::Completed,
-                    },
-                )),
+                SessionCommitItem::Record(LaneRecord::OperationFinished(OperationFinishedRecord {
+                    operation_id: operation_id.clone(),
+                    outcome: OperationOutcome::Completed,
+                })),
                 SessionCommitItem::Record(LaneRecord::InputSettled(InputSettledRecord {
                     operation_id: operation_id.clone(),
                     input_id: input.id.clone(),

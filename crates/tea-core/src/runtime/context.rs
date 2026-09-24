@@ -399,11 +399,8 @@ fn project_selected_entries(
         // lane that produced them. Do not copy a parent's encrypted reasoning
         // state into a child/provider boundary.
         let retain_opaque_context = entry.lane_id == *lane;
-        let entry_messages = message_for_entry(
-            entry,
-            messages.len() as u64 + 1,
-            retain_opaque_context,
-        )?;
+        let entry_messages =
+            message_for_entry(entry, messages.len() as u64 + 1, retain_opaque_context)?;
         if !entry_messages.is_empty() {
             messages.extend(entry_messages);
             included_entries.push(entry.header.id.clone());
@@ -708,9 +705,8 @@ fn source_ordered_selected_entries<'a>(
             }
             next += 1;
         }
-        result_entries.sort_by_key(|(source_index, append_index, _)| {
-            (*source_index, *append_index)
-        });
+        result_entries
+            .sort_by_key(|(source_index, append_index, _)| (*source_index, *append_index));
         ordered.extend(result_entries.into_iter().map(|(_, _, entry)| entry));
         cursor = next;
     }
@@ -830,7 +826,8 @@ fn validate_protected_context(
                     entry.header.id, call.id,
                 )));
             }
-            let paired = source_results_for_tool_call(branch, assistant_index, &call.id, &call.name);
+            let paired =
+                source_results_for_tool_call(branch, assistant_index, &call.id, &call.name);
             if paired.is_empty()
                 && pending_tool_calls
                     .get(&entry.header.id)
@@ -862,7 +859,8 @@ fn validate_protected_context(
         if !selected.contains(&entry.header.id) {
             continue;
         }
-        let Some((assistant_index, assistant)) = source_assistant_for_tool_result(branch, result_index)
+        let Some((assistant_index, assistant)) =
+            source_assistant_for_tool_result(branch, result_index)
         else {
             return Err(HarnessError::invalid_state(format!(
                 "selected tool result {} has no source-turn assistant",
@@ -1352,10 +1350,7 @@ fn compaction_replacement_usage(usage: &Usage) -> tea_protocol::JsonValue {
     object([
         ("cache_read_tokens", number(usage.cache_read_tokens)),
         ("cache_write_tokens", number(usage.cache_write_tokens)),
-        (
-            "cost",
-            optional_json_string(usage.cost.as_deref()),
-        ),
+        ("cost", optional_json_string(usage.cost.as_deref())),
         ("input_tokens", number(usage.input_tokens)),
         ("output_tokens", number(usage.output_tokens)),
         ("reasoning_tokens", number(usage.reasoning_tokens)),
@@ -1378,7 +1373,11 @@ pub(crate) fn decode_compaction_replacement(
     let object = replacement.as_object().ok_or_else(|| {
         HarnessError::invalid_state("compaction replacement payload must be an object")
     })?;
-    if object.get("version").and_then(tea_protocol::JsonValue::as_u64) != Some(1) {
+    if object
+        .get("version")
+        .and_then(tea_protocol::JsonValue::as_u64)
+        != Some(1)
+    {
         return Err(HarnessError::invalid_state(
             "compaction replacement payload has an unsupported version",
         ));
@@ -1966,10 +1965,9 @@ mod tests {
             is_error: true,
             failure,
         };
-        let live = encode_compaction_replacement(&[failed(Some(
-            crate::tool::ToolFailure::recoverable(),
-        ))])
-        .expect("a retained live tool failure can be compacted");
+        let live =
+            encode_compaction_replacement(&[failed(Some(crate::tool::ToolFailure::recoverable()))])
+                .expect("a retained live tool failure can be compacted");
         let durable = encode_compaction_replacement(&[failed(None)])
             .expect("the durable reconstruction encodes");
 
@@ -2133,7 +2131,11 @@ mod tests {
         let derived = derive_default_snapshot_context(&snapshot, LaneId::main())
             .expect("durable compaction derives");
 
-        assert_eq!(snapshot.entries().len(), 2, "raw history remains append-only");
+        assert_eq!(
+            snapshot.entries().len(),
+            2,
+            "raw history remains append-only"
+        );
         assert_eq!(derived.messages, replacement_messages);
         assert_eq!(derived.included_entries.len(), 1);
         assert_eq!(derived.omitted_entries, vec![source_id]);

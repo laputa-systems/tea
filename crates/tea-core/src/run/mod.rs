@@ -1389,10 +1389,8 @@ impl RunHandle {
         let source_history_revision = context.source_history_revision;
         let canonical_source_bytes = crate::compaction::messages_bytes(&context.messages);
         let canonical_source_messages = context.messages.clone();
-        let request_port = crate::compaction::CoreCompactionRequestPort::new(
-            self,
-            operation.clone(),
-        );
+        let request_port =
+            crate::compaction::CoreCompactionRequestPort::new(self, operation.clone());
         let compact_result = compactor
             .compact_automatic_with_requests(
                 context,
@@ -2501,9 +2499,7 @@ impl RunHandle {
             // released. An observer is advisory: its panic cannot rewrite an
             // already-recorded event or veto this run's committed outcome.
             let _ = catch_unwind(AssertUnwindSafe(|| {
-                registration
-                    .observer
-                    .observe(&event);
+                registration.observer.observe(&event);
             }));
         }
         // These subscriptions deliberately have a distinct contract from

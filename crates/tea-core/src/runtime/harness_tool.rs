@@ -1169,12 +1169,22 @@ mod tests {
         for field in ["failure_signature", "expected_effect", "regression_risk"] {
             assert!(required.iter().any(|value| value.as_str() == Some(field)));
         }
-        let files = properties.get("files").and_then(|value| value.get("items"))
+        let files = properties
+            .get("files")
+            .and_then(|value| value.get("items"))
             .expect("file-patch item schema");
-        assert_eq!(files.get("type").and_then(JsonValue::as_str), Some("object"));
-        let registry = properties.get("registry_operations").and_then(|value| value.get("items"))
+        assert_eq!(
+            files.get("type").and_then(JsonValue::as_str),
+            Some("object")
+        );
+        let registry = properties
+            .get("registry_operations")
+            .and_then(|value| value.get("items"))
             .expect("registry-operation item schema");
-        assert_eq!(registry.get("type").and_then(JsonValue::as_str), Some("object"));
+        assert_eq!(
+            registry.get("type").and_then(JsonValue::as_str),
+            Some("object")
+        );
     }
 
     #[test]

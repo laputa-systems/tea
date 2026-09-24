@@ -5,8 +5,8 @@
 
 #![allow(dead_code)]
 
-use super::{PROVIDER_ID, REASONING_DETAILS_CONTEXT_KIND};
 use super::accounting::{OpenRouterCostSource, OpenRouterCostTurn};
+use super::{PROVIDER_ID, REASONING_DETAILS_CONTEXT_KIND};
 use crate::json::{JsonValue, from_bytes};
 use crate::scheduler::ModelStreamEvent;
 use crate::state::{
@@ -381,7 +381,9 @@ fn parse_response_inner(bytes: &[u8], allow_partial_sse: bool) -> Result<ParsedR
     {
         events.push(ModelStreamEvent::TextDelta(content.to_owned()));
     }
-    if let Some(details) = message.get("reasoning_details").and_then(JsonValue::as_array)
+    if let Some(details) = message
+        .get("reasoning_details")
+        .and_then(JsonValue::as_array)
         && let Some(event) = reasoning_details_context_event(details)?
     {
         events.push(event);
@@ -487,7 +489,9 @@ fn parse_usage(usage: &JsonValue) -> Usage {
 /// core can durably associate it with the originating assistant turn. The
 /// regular transcript and tools never receive this provider-private field;
 /// `OpenAiContextHook` replays it only when building a later OpenRouter turn.
-fn reasoning_details_context_event(details: &[JsonValue]) -> Result<Option<ModelStreamEvent>, String> {
+fn reasoning_details_context_event(
+    details: &[JsonValue],
+) -> Result<Option<ModelStreamEvent>, String> {
     let mut retained = Vec::new();
     for detail in details {
         append_reasoning_detail(&mut retained, detail);
@@ -498,13 +502,11 @@ fn reasoning_details_context_event(details: &[JsonValue]) -> Result<Option<Model
     let payload = JsonValue::Array(retained)
         .to_json_string()
         .map_err(|_| "OpenRouter reasoning details could not be encoded".to_owned())?;
-    let item = OpaqueProviderContextItem::new(
-        PROVIDER_ID,
-        REASONING_DETAILS_CONTEXT_KIND,
-        None,
-        payload,
-    )
-    .map_err(|_| "OpenRouter reasoning details exceeded the durable continuation boundary".to_owned())?;
+    let item =
+        OpaqueProviderContextItem::new(PROVIDER_ID, REASONING_DETAILS_CONTEXT_KIND, None, payload)
+            .map_err(|_| {
+                "OpenRouter reasoning details exceeded the durable continuation boundary".to_owned()
+            })?;
     Ok(Some(ModelStreamEvent::OpaqueProviderContext(item)))
 }
 
@@ -555,11 +557,15 @@ fn optional_nullable_string(
 }
 
 fn optional_string(object: &std::collections::BTreeMap<String, JsonValue>, name: &str) -> bool {
-    object.get(name).is_none_or(|value| value.as_str().is_some())
+    object
+        .get(name)
+        .is_none_or(|value| value.as_str().is_some())
 }
 
 fn optional_number(object: &std::collections::BTreeMap<String, JsonValue>, name: &str) -> bool {
-    object.get(name).is_none_or(|value| value.as_f64().is_some())
+    object
+        .get(name)
+        .is_none_or(|value| value.as_f64().is_some())
 }
 
 fn merge_reasoning_detail(last: &mut JsonValue, detail: &JsonValue) -> bool {
@@ -580,11 +586,7 @@ fn merge_reasoning_detail(last: &mut JsonValue, detail: &JsonValue) -> bool {
     let Some(last_object) = last.as_object_mut() else {
         return false;
     };
-    if last_object
-        .get("type")
-        .and_then(JsonValue::as_str)
-        != Some(detail_type)
-    {
+    if last_object.get("type").and_then(JsonValue::as_str) != Some(detail_type) {
         return false;
     }
     let Some(JsonValue::String(current)) = last_object.get_mut(content_field) else {
@@ -592,7 +594,9 @@ fn merge_reasoning_detail(last: &mut JsonValue, detail: &JsonValue) -> bool {
     };
     current.push_str(suffix);
     for field in ["id", "index"] {
-        if last_object.get(field).is_none_or(|value| matches!(value, JsonValue::Null))
+        if last_object
+            .get(field)
+            .is_none_or(|value| matches!(value, JsonValue::Null))
             && let Some(value) = detail_object.get(field)
         {
             last_object.insert(field.to_owned(), value.clone());

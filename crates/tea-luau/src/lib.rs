@@ -162,8 +162,12 @@ mod tests {
     #[test]
     fn policy_bundle_resolves_only_its_closed_relative_module_graph() {
         let bundle = Bundle::from_sources(
-            BundleManifest::new(BUNDLE_ABI_V3_VERSION, "main.luau", std::iter::empty::<&str>())
-                .expect("manifest is valid"),
+            BundleManifest::new(
+                BUNDLE_ABI_V3_VERSION,
+                "main.luau",
+                std::iter::empty::<&str>(),
+            )
+            .expect("manifest is valid"),
             [
                 (
                     "main.luau",
@@ -191,8 +195,12 @@ mod tests {
     #[test]
     fn v3_bundle_exposes_named_prompt_sections() {
         let bundle = Bundle::from_sources(
-            BundleManifest::new(BUNDLE_ABI_V3_VERSION, "main.luau", std::iter::empty::<&str>())
-                .expect("v3 manifest is valid"),
+            BundleManifest::new(
+                BUNDLE_ABI_V3_VERSION,
+                "main.luau",
+                std::iter::empty::<&str>(),
+            )
+            .expect("v3 manifest is valid"),
             [(
                 "main.luau",
                 r#"
@@ -227,8 +235,12 @@ mod tests {
     #[test]
     fn v3_bundle_rejects_duplicate_named_prompt_sections() {
         let bundle = Bundle::from_sources(
-            BundleManifest::new(BUNDLE_ABI_V3_VERSION, "main.luau", std::iter::empty::<&str>())
-                .expect("v3 manifest is valid"),
+            BundleManifest::new(
+                BUNDLE_ABI_V3_VERSION,
+                "main.luau",
+                std::iter::empty::<&str>(),
+            )
+            .expect("v3 manifest is valid"),
             [(
                 "main.luau",
                 r#"
@@ -252,8 +264,12 @@ mod tests {
     #[test]
     fn v3_before_tool_can_normalize_arguments_without_bypassing_core_validation() {
         let bundle = Bundle::from_sources(
-            BundleManifest::new(BUNDLE_ABI_V3_VERSION, "main.luau", std::iter::empty::<&str>())
-                .expect("v3 manifest is valid"),
+            BundleManifest::new(
+                BUNDLE_ABI_V3_VERSION,
+                "main.luau",
+                std::iter::empty::<&str>(),
+            )
+            .expect("v3 manifest is valid"),
             [(
                 "main.luau",
                 r#"
@@ -286,8 +302,12 @@ mod tests {
     #[test]
     fn v3_after_tool_projects_only_model_visible_fields_and_annotations() {
         let bundle = Bundle::from_sources(
-            BundleManifest::new(BUNDLE_ABI_V3_VERSION, "main.luau", std::iter::empty::<&str>())
-                .expect("v3 manifest is valid"),
+            BundleManifest::new(
+                BUNDLE_ABI_V3_VERSION,
+                "main.luau",
+                std::iter::empty::<&str>(),
+            )
+            .expect("v3 manifest is valid"),
             [(
                 "main.luau",
                 r#"
@@ -346,8 +366,12 @@ mod tests {
     #[test]
     fn v3_after_tool_rejects_unknown_behavior_changing_fields() {
         let bundle = Bundle::from_sources(
-            BundleManifest::new(BUNDLE_ABI_V3_VERSION, "main.luau", std::iter::empty::<&str>())
-                .expect("v3 manifest is valid"),
+            BundleManifest::new(
+                BUNDLE_ABI_V3_VERSION,
+                "main.luau",
+                std::iter::empty::<&str>(),
+            )
+            .expect("v3 manifest is valid"),
             [(
                 "main.luau",
                 r#"
@@ -382,8 +406,12 @@ mod tests {
     #[test]
     fn v3_context_projection_receives_metadata_only_and_returns_a_bounded_patch() {
         let bundle = Bundle::from_sources(
-            BundleManifest::new(BUNDLE_ABI_V3_VERSION, "main.luau", std::iter::empty::<&str>())
-                .expect("v3 manifest is valid"),
+            BundleManifest::new(
+                BUNDLE_ABI_V3_VERSION,
+                "main.luau",
+                std::iter::empty::<&str>(),
+            )
+            .expect("v3 manifest is valid"),
             [(
                 "main.luau",
                 r#"
@@ -440,8 +468,12 @@ mod tests {
     #[test]
     fn v3_resume_hooks_persist_bounded_state_and_receive_only_their_own_values() {
         let bundle = Bundle::from_sources(
-            BundleManifest::new(BUNDLE_ABI_V3_VERSION, "main.luau", std::iter::empty::<&str>())
-                .expect("v3 manifest is valid"),
+            BundleManifest::new(
+                BUNDLE_ABI_V3_VERSION,
+                "main.luau",
+                std::iter::empty::<&str>(),
+            )
+            .expect("v3 manifest is valid"),
             [(
                 "main.luau",
                 r#"

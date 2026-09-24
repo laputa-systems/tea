@@ -570,9 +570,10 @@ fn merge_item_tool_fields(tool: &mut PendingTool, item: &JsonValue) {
         tool.name = Some(name.to_owned());
     }
     if let Some(arguments) = item.get("arguments").and_then(JsonValue::as_str)
-        && (!arguments.is_empty() || tool.arguments.is_empty()) {
-            tool.arguments = arguments.to_owned();
-        }
+        && (!arguments.is_empty() || tool.arguments.is_empty())
+    {
+        tool.arguments = arguments.to_owned();
+    }
 }
 
 fn merge_event_tool_fields(tool: &mut PendingTool, event: &JsonValue) {

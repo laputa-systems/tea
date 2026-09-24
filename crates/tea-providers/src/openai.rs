@@ -77,7 +77,9 @@ impl HookSet for OpenAiContextHook {
 fn openai_message_has_visible_content_or_tool_call(message: &AgentMessage) -> bool {
     match message {
         AgentMessage::Assistant {
-            content, tool_calls, ..
+            content,
+            tool_calls,
+            ..
         } => !content.trim().is_empty() || !tool_calls.is_empty(),
         _ => true,
     }
@@ -221,11 +223,15 @@ fn optional_nullable_string(
 }
 
 fn optional_string(object: &std::collections::BTreeMap<String, JsonValue>, name: &str) -> bool {
-    object.get(name).is_none_or(|value| value.as_str().is_some())
+    object
+        .get(name)
+        .is_none_or(|value| value.as_str().is_some())
 }
 
 fn optional_number(object: &std::collections::BTreeMap<String, JsonValue>, name: &str) -> bool {
-    object.get(name).is_none_or(|value| value.as_f64().is_some())
+    object
+        .get(name)
+        .is_none_or(|value| value.as_f64().is_some())
 }
 
 #[cfg(test)]
@@ -293,13 +299,8 @@ mod tests {
             stop_reason: Some(crate::state::StopReason::ToolUse),
             error_message: None,
             opaque_context: vec![
-                OpaqueProviderContextItem::new(
-                    "openrouter",
-                    "reasoning_details",
-                    None,
-                    details,
-                )
-                .expect("bounded OpenRouter reasoning details"),
+                OpaqueProviderContextItem::new("openrouter", "reasoning_details", None, details)
+                    .expect("bounded OpenRouter reasoning details"),
             ],
         };
 
@@ -325,20 +326,10 @@ mod tests {
             stop_reason: Some(crate::state::StopReason::ToolUse),
             error_message: None,
             opaque_context: vec![
-                OpaqueProviderContextItem::new(
-                    "openrouter",
-                    "reasoning_details",
-                    None,
-                    invalid,
-                )
-                .expect("bounded invalid fixture"),
-                OpaqueProviderContextItem::new(
-                    "openrouter",
-                    "reasoning_details",
-                    None,
-                    valid,
-                )
-                .expect("bounded valid fixture"),
+                OpaqueProviderContextItem::new("openrouter", "reasoning_details", None, invalid)
+                    .expect("bounded invalid fixture"),
+                OpaqueProviderContextItem::new("openrouter", "reasoning_details", None, valid)
+                    .expect("bounded valid fixture"),
             ],
         };
 
@@ -351,7 +342,8 @@ mod tests {
 
     #[test]
     fn context_omits_empty_assistant_messages_even_with_private_reasoning() {
-        let details = r#"[{"type":"reasoning.text","text":"aborted","format":"unknown","index":0}]"#;
+        let details =
+            r#"[{"type":"reasoning.text","text":"aborted","format":"unknown","index":0}]"#;
         let context = ContextEnvelope {
             version: 1,
             messages: vec![AgentMessage::Assistant {

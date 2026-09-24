@@ -375,7 +375,8 @@ impl AppState {
                             .get(&PreviewIdentity::assistant(run.clone(), *id))
                             .map(|line| line.transcript_index)
                     });
-                    let index = preview_index.or_else(|| run.is_none().then_some(self.streaming_line).flatten());
+                    let index = preview_index
+                        .or_else(|| run.is_none().then_some(self.streaming_line).flatten());
                     if let Some(index) = index {
                         if let Some(error) = error_message {
                             if let Some(entry) = self.transcript.get_mut(index) {
@@ -433,8 +434,10 @@ impl AppState {
                 );
                 self.active_tool_lines.insert(tool_call_id.clone(), index);
                 if let Some(run) = run {
-                    self.active_tool_previews
-                        .insert(PreviewIdentity::tool(run.clone(), tool_call_id.clone()), index);
+                    self.active_tool_previews.insert(
+                        PreviewIdentity::tool(run.clone(), tool_call_id.clone()),
+                        index,
+                    );
                 }
             }
             AgentEventKind::ToolExecutionUpdate {
@@ -632,10 +635,7 @@ impl AppState {
     /// Fence semantic-final preview subjects after applying their canonical
     /// terminal event. The fence lasts only for the owning core attempt and
     /// therefore cannot become durable state.
-    pub(super) fn fence_previews(
-        &mut self,
-        identities: impl IntoIterator<Item = PreviewIdentity>,
-    ) {
+    pub(super) fn fence_previews(&mut self, identities: impl IntoIterator<Item = PreviewIdentity>) {
         for identity in identities {
             self.active_assistant_previews.remove(&identity);
             self.active_tool_previews.remove(&identity);
@@ -1238,7 +1238,14 @@ impl AppState {
         result: Option<String>,
     ) {
         if let Some(index) = self.active_tool_lines.get(tool_call_id).copied() {
-            if self.update_tool_line_at(index, sequence, tool_name, state, progress.clone(), result.clone()) {
+            if self.update_tool_line_at(
+                index,
+                sequence,
+                tool_name,
+                state,
+                progress.clone(),
+                result.clone(),
+            ) {
                 return;
             }
         }
@@ -1703,13 +1710,7 @@ fn preview_text(text: &str, truncated: bool) -> String {
 /// scrollback prefix.
 fn durable_message_matches(entry: &TranscriptEntry, message: &AgentMessage) -> bool {
     match (entry, message) {
-        (
-            TranscriptEntry::User { text },
-            AgentMessage::User {
-                content,
-                ..
-            },
-        ) => text == content,
+        (TranscriptEntry::User { text }, AgentMessage::User { content, .. }) => text == content,
         (
             TranscriptEntry::Assistant {
                 text,

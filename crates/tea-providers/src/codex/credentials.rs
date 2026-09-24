@@ -158,7 +158,10 @@ impl CodexCredential {
     }
 
     fn encode(&self) -> Result<Vec<u8>, CredentialError> {
-        let refresh_token = self.refresh_token.as_ref().ok_or(CredentialError::MalformedRecord)?;
+        let refresh_token = self
+            .refresh_token
+            .as_ref()
+            .ok_or(CredentialError::MalformedRecord)?;
         JsonValue::object([
             ("version", JsonValue::from(CREDENTIAL_VERSION)),
             ("provider", JsonValue::String("codex".into())),
@@ -354,8 +357,13 @@ impl CredentialStore for CodexClientCredentialStore {
         if metadata.file_type().is_symlink() || !metadata.is_file() {
             return Err(CredentialError::UnsafePath);
         }
-        let file = openat(CWD, &self.path, OFlags::RDONLY | OFlags::NOFOLLOW, Mode::empty())
-            .map_err(|_| CredentialError::UnsafePath)?;
+        let file = openat(
+            CWD,
+            &self.path,
+            OFlags::RDONLY | OFlags::NOFOLLOW,
+            Mode::empty(),
+        )
+        .map_err(|_| CredentialError::UnsafePath)?;
         let mut bytes = Vec::new();
         Read::by_ref(&mut File::from(file))
             .take(MAX_CREDENTIAL_RECORD_BYTES.saturating_add(1))
@@ -369,7 +377,9 @@ impl CredentialStore for CodexClientCredentialStore {
         if value.get("auth_mode").and_then(JsonValue::as_str) != Some("chatgpt") {
             return Err(CredentialError::MalformedRecord);
         }
-        let tokens = value.get("tokens").ok_or(CredentialError::MalformedRecord)?;
+        let tokens = value
+            .get("tokens")
+            .ok_or(CredentialError::MalformedRecord)?;
         let access_token = tokens
             .get("access_token")
             .and_then(JsonValue::as_str)
@@ -787,24 +797,36 @@ mod tests {
                 &path,
                 JsonValue::object([
                     ("auth_mode", JsonValue::from("chatgpt")),
-                    ("tokens", JsonValue::object([
-                        ("access_token", JsonValue::from(token)),
-                        ("account_id", JsonValue::from("acct_12345678")),
-                        ("refresh_token", JsonValue::from("client-refresh-secret")),
-                    ])),
-                ]).to_json_string().expect("client auth fixture"),
-            ).expect("write client fixture");
+                    (
+                        "tokens",
+                        JsonValue::object([
+                            ("access_token", JsonValue::from(token)),
+                            ("account_id", JsonValue::from("acct_12345678")),
+                            ("refresh_token", JsonValue::from("client-refresh-secret")),
+                        ]),
+                    ),
+                ])
+                .to_json_string()
+                .expect("client auth fixture"),
+            )
+            .expect("write client fixture");
         };
         write_client_auth("first");
         let first = store.load().expect("load client auth").expect("credential");
         assert_eq!(first.expires_at_unix_ms(), 2_000_000_000_000);
         assert!(first.refresh_token().is_none());
         write_client_auth("second");
-        let second = store.load().expect("reload client auth").expect("credential");
+        let second = store
+            .load()
+            .expect("reload client auth")
+            .expect("credential");
         assert_ne!(first, second);
         let manager = crate::codex::CodexAuthManager::with_system_clock(Arc::new(store.clone()));
         assert_eq!(
-            manager.snapshot(&CancellationToken::new()).expect("fresh client token").account_id,
+            manager
+                .snapshot(&CancellationToken::new())
+                .expect("fresh client token")
+                .account_id,
             "acct_12345678",
         );
         assert_eq!(
@@ -813,7 +835,11 @@ mod tests {
         );
         assert_eq!(store.save(&second), Err(CredentialError::ReadOnly));
         assert_eq!(store.remove(), Err(CredentialError::ReadOnly));
-        assert!(fs::read_to_string(&path).expect("client auth unchanged").contains("client-refresh-secret"));
+        assert!(
+            fs::read_to_string(&path)
+                .expect("client auth unchanged")
+                .contains("client-refresh-secret")
+        );
     }
 
     #[test]

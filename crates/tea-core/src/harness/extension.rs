@@ -230,7 +230,8 @@ impl ExtensionStateGeneration {
             LaneId::new(lane_id.into()).map_err(|error| ExtensionError::new(error.to_string()))?,
             OperationId::new(operation_id.into())
                 .map_err(|error| ExtensionError::new(error.to_string()))?,
-            EpochId::new(epoch_id.into()).map_err(|error| ExtensionError::new(error.to_string()))?,
+            EpochId::new(epoch_id.into())
+                .map_err(|error| ExtensionError::new(error.to_string()))?,
             HarnessRevisionId::new(harness_revision_id.into())
                 .map_err(|error| ExtensionError::new(error.to_string()))?,
         ))

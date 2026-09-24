@@ -916,9 +916,9 @@ fn classify_token_status(status: u16, body: &[u8], refresh_grant: bool) -> OAuth
                     | "token_revoked"
             )
         }) || refresh_grant)
-        {
-            return OAuthError::PermanentRefresh;
-        }
+    {
+        return OAuthError::PermanentRefresh;
+    }
     OAuthError::HttpStatus(status)
 }
 

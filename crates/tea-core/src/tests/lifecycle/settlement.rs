@@ -57,10 +57,7 @@ fn caller_driven_text_run_emits_lifecycle_and_settles() {
             .position(|event| {
                 matches!(
                     event.kind,
-                    AgentEventKind::MessageUpdate {
-                        message_id: _,
-                        ..
-                    }
+                    AgentEventKind::MessageUpdate { .. }
                 )
             })
             .expect("assistant message updates");

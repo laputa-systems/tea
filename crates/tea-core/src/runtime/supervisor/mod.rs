@@ -16,22 +16,22 @@ use super::subagents::{
     WaitedSubagent, WorkspaceDelta, WorkspaceFinalization, root_subagent_runtime_tools,
 };
 use super::trace::{DurableTraceRedactor, TraceCaptureSink};
+mod child_recovery;
+mod compaction;
+mod extension_state;
+mod fork;
 mod lane;
 mod operation;
 mod recovery;
-mod extension_state;
-mod compaction;
-mod fork;
-mod child_recovery;
 #[cfg(test)]
 mod settlement_tests;
-pub use recovery::{InterruptedEffect, LaneRecoveryReport, RecoveryReport, inspect_recovery};
 pub use fork::SettledTurnFork;
+pub use recovery::{InterruptedEffect, LaneRecoveryReport, RecoveryReport, inspect_recovery};
 
 pub use operation::{
-    AcceptedInput, ExtensionCommandAdmission, IdleAuthorization, IdleDriveOutcome,
-    InputCompletion, InputCompletionFuture, InputCompletionHandle, InputOutcome, QueuedInput,
-    InputDisposition, WithdrawnInputs,
+    AcceptedInput, ExtensionCommandAdmission, IdleAuthorization, IdleDriveOutcome, InputCompletion,
+    InputCompletionFuture, InputCompletionHandle, InputDisposition, InputOutcome, QueuedInput,
+    WithdrawnInputs,
 };
 
 use crate::agent::Agent;
@@ -72,8 +72,8 @@ use tea_core::harness::extension::{
     ExtensionStateGeneration,
 };
 use tea_core::state::{
-    AgentMessage, AgentSnapshot, AgentToolCall, ModelDescriptor,
-    SerializedJson, StopReason, ThinkingLevel, ToolCallId,
+    AgentMessage, AgentSnapshot, AgentToolCall, ModelDescriptor, SerializedJson, StopReason,
+    ThinkingLevel, ToolCallId,
 };
 use tea_core::tool::{AgentTool, AgentToolResult, ToolCall, ToolFailureDisposition, ToolRegistry};
 use tea_core::trace::TraceObserver;
@@ -82,15 +82,14 @@ use tea_session::{
     AgentContextMode, AgentId, AgentSpawnedFact, AgentState, AgentTaskFinishedFact, ArtifactStore,
     CanonicalHashWriter, CoreRunId, Digest, EntryId, EpochFinishReason, EpochFinishedRecord,
     EpochId, EpochStartedRecord, ExtensionControlEnqueuedRecord, ExtensionStateValue,
-    HarnessRevisionChangedEntry,
-    HarnessRevisionId, HarnessSnapshotId, LaneId, LaneMutation, LaneRecord, MemoryRetention,
-    MemoryVisibility, ModelChangedEntry, ModelHarnessProfileId, OperationFinishedRecord,
-    OperationId, OperationKind, OperationOutcome, OperationStartedRecord, PayloadRef,
-    PluginMemoryEntry, ProviderRequestId,
-    ProviderRequestSettledRecord, ProviderRequestStartedRecord, ProviderSettlementClassification,
-    ProvisionedEntry, RecoveryPlan, SchemaFieldMismatch, SessionEntry, SessionFact,
-    SessionCommit, SessionCommitItem, SessionSnapshot, SessionWriter, StepAttemptedRecord, StepId,
-    StepKind, SubagentModelRecord, ThinkingChangedEntry, ToolReplayPolicy, ToolResultEntry, ToolSchemaDeviationFact,
+    HarnessRevisionChangedEntry, HarnessRevisionId, HarnessSnapshotId, LaneId, LaneMutation,
+    LaneRecord, MemoryRetention, MemoryVisibility, ModelChangedEntry, ModelHarnessProfileId,
+    OperationFinishedRecord, OperationId, OperationKind, OperationOutcome, OperationStartedRecord,
+    PayloadRef, PluginMemoryEntry, ProviderRequestId, ProviderRequestSettledRecord,
+    ProviderRequestStartedRecord, ProviderSettlementClassification, ProvisionedEntry, RecoveryPlan,
+    SchemaFieldMismatch, SessionCommit, SessionCommitItem, SessionEntry, SessionFact,
+    SessionSnapshot, SessionWriter, StepAttemptedRecord, StepId, StepKind, SubagentModelRecord,
+    ThinkingChangedEntry, ToolReplayPolicy, ToolResultEntry, ToolSchemaDeviationFact,
     ToolStartedRecord, TraceArtifactFact, Usage, WorkspaceDeltaAppliedFact, WorkspaceDeltaFact,
     WorkspaceDeltaId, WorkspaceLeaseId, derive_subagent_operation_id, reduce_agent_graph,
     reduce_lane,
@@ -606,7 +605,11 @@ where
                 Arc::downgrade(&supervisor),
                 services,
             ));
-            for node in agent_graph.agents.values().filter(|node| node.terminal.is_some()) {
+            for node in agent_graph
+                .agents
+                .values()
+                .filter(|node| node.terminal.is_some())
+            {
                 coordinator.restore_terminal_visibility(node.spawned.agent_id.clone());
             }
             *supervisor.coordinator.lock().map_err(|_| {
@@ -2006,19 +2009,23 @@ where
             (Some(existing), _) => Some(existing.delta_id.clone()),
             (None, Some(candidate)) => {
                 let delta_id = candidate.delta_id.clone();
-                items.push(SessionCommitItem::Fact(SessionFact::WorkspaceDelta(candidate)));
+                items.push(SessionCommitItem::Fact(SessionFact::WorkspaceDelta(
+                    candidate,
+                )));
                 Some(delta_id)
             }
             (None, None) => None,
         };
-        items.push(SessionCommitItem::Fact(SessionFact::AgentTaskFinished(AgentTaskFinishedFact {
-            agent_id: node.spawned.agent_id.clone(),
-            operation_id,
-            outcome,
-            final_entry_id,
-            report,
-            workspace_delta_id,
-        })));
+        items.push(SessionCommitItem::Fact(SessionFact::AgentTaskFinished(
+            AgentTaskFinishedFact {
+                agent_id: node.spawned.agent_id.clone(),
+                operation_id,
+                outcome,
+                final_entry_id,
+                report,
+                workspace_delta_id,
+            },
+        )));
         session.commit(SessionCommit::new(items)?)?;
         Ok(true)
     }
@@ -2508,7 +2515,9 @@ where
         items.push(SessionCommitItem::Fact(SessionFact::AgentSpawned(
             self.subagent_spawn_fact(intent, prepared),
         )));
-        items.push(SessionCommitItem::Record(LaneRecord::OperationStarted(operation)));
+        items.push(SessionCommitItem::Record(LaneRecord::OperationStarted(
+            operation,
+        )));
         items.push(SessionCommitItem::Entry {
             lane_id: intent.lane_id.clone(),
             entry: assignment,
@@ -2524,7 +2533,7 @@ where
         snapshot: &SessionSnapshot,
         intent: &SubagentSpawnIntent,
     ) -> Result<(), HarnessError> {
-        let graph = reduce_agent_graph(&snapshot)
+        let graph = reduce_agent_graph(snapshot)
             .map_err(|error| HarnessError::invalid_state(error.to_string()))?;
         if graph.agents.contains_key(&intent.agent_id) {
             return Err(HarnessError::invalid_state(
@@ -2764,9 +2773,12 @@ where
         let lanes = {
             let _gate = self.operation_gate_lock()?;
             self.closed.store(true, Ordering::Release);
-            self.lanes.lock()
+            self.lanes
+                .lock()
                 .map_err(|_| HarnessError::invalid_state("lane map mutex is poisoned"))?
-                .values().cloned().collect::<Vec<_>>()
+                .values()
+                .cloned()
+                .collect::<Vec<_>>()
         };
         for lane in &lanes {
             if lane.active.load(Ordering::Acquire) {
@@ -2776,9 +2788,12 @@ where
         }
         self.cancel_and_join().await?;
         if let Some(coordinator) = self.subagent_coordinator()? {
-            let owners = reduce_agent_graph(&self.snapshot()?)?.agents.values()
+            let owners = reduce_agent_graph(&self.snapshot()?)?
+                .agents
+                .values()
                 .filter(|node| coordinator.has_handle(&node.spawned.agent_id))
-                .map(|node| node.spawned.parent_operation_id.clone()).collect::<BTreeSet<_>>();
+                .map(|node| node.spawned.parent_operation_id.clone())
+                .collect::<BTreeSet<_>>();
             for owner in owners {
                 self.settle_root_children_before_finish(&owner).await?;
             }
@@ -2978,7 +2993,10 @@ where
                         "extension command changed state while its active operation was being queued; retry the command",
                     ));
                 }
-                if current_reduction.lane_state.active_harness_revision.as_ref()
+                if current_reduction
+                    .lane_state
+                    .active_harness_revision
+                    .as_ref()
                     != Some(configuration.identity.revision_id())
                 {
                     return Err(HarnessError::invalid_state(
@@ -3038,18 +3056,11 @@ where
             .extension_state
             .get(&selected.extension_id)
             .cloned();
-        ensure_retained_state_version(
-            &current_reduction,
-            &selected.extension_id,
-            &state_version,
-        )?;
+        ensure_retained_state_version(&current_reduction, &selected.extension_id, &state_version)?;
         let state = extension_state_view(&current, &lane.lane_id, &selected.extension_id)?;
         let result = selected
             .command
-            .invoke(&ExtensionCommandInput {
-                arguments,
-                state,
-            })
+            .invoke(&ExtensionCommandInput { arguments, state })
             .map_err(extension_error)?;
         let expected_state = result
             .state
@@ -3081,15 +3092,20 @@ where
         }
         self.replace_pending_extension_continuation(
             &lane,
-            result.internal_input.clone().map(|input| ExtensionContinuation {
-                extension_id: selected.extension_id.clone(),
-                input,
-            }),
+            result
+                .internal_input
+                .clone()
+                .map(|input| ExtensionContinuation {
+                    extension_id: selected.extension_id.clone(),
+                    input,
+                }),
         );
-        Ok(ExtensionCommandAdmission::Applied(ExtensionCommandDispatch {
-            extension_id: selected.extension_id,
-            result,
-        }))
+        Ok(ExtensionCommandAdmission::Applied(
+            ExtensionCommandDispatch {
+                extension_id: selected.extension_id,
+                result,
+            },
+        ))
     }
 
     /// Evaluate every resolved extension's optional idle policy after a
@@ -3134,11 +3150,11 @@ where
         if outcome != OperationOutcome::Completed {
             return Ok(None);
         }
-        let configuration = self.configuration_for_reduction(&lane, &reduction)?;
+        let configuration = self.configuration_for_reduction(lane, &reduction)?;
         if configuration.idle_hooks().is_empty() {
             return Ok(None);
         }
-        if !self.claim_idle_operation(&lane, &operation_id)? {
+        if !self.claim_idle_operation(lane, &operation_id)? {
             return Ok(None);
         }
         let usage = operation_usage(&snapshot, &operation_id);
@@ -3150,7 +3166,10 @@ where
         for idle in configuration.idle_hooks() {
             let callback_reduction = reduce_lane(callback_snapshot.clone(), lane.lane_id.clone())?;
             if callback_reduction.lane_state.active_operation.is_some()
-                || callback_reduction.lane_state.active_harness_revision.as_ref()
+                || callback_reduction
+                    .lane_state
+                    .active_harness_revision
+                    .as_ref()
                     != Some(configuration.identity.revision_id())
             {
                 return Err(HarnessError::invalid_state(
@@ -3163,20 +3182,13 @@ where
                     idle.extension_id,
                 ))
             })?;
-            ensure_retained_state_version(
-                &callback_reduction,
-                &idle.extension_id,
-                &state_version,
-            )?;
+            ensure_retained_state_version(&callback_reduction, &idle.extension_id, &state_version)?;
             let observed_state = callback_reduction
                 .extension_state
                 .get(&idle.extension_id)
                 .cloned();
-            let state = extension_state_view(
-                &callback_snapshot,
-                &lane.lane_id,
-                &idle.extension_id,
-            )?;
+            let state =
+                extension_state_view(&callback_snapshot, &lane.lane_id, &idle.extension_id)?;
             let result = idle
                 .hook
                 .on_idle(&ExtensionIdleInput {
@@ -3399,10 +3411,8 @@ where
         let lane = self.root_lane()?;
         let _claim = self.claim_lane_operation(Arc::clone(&lane))?;
         self.ensure_recovery_permitted(&lane.lane_id)?;
-        let accepted = self.submit_input_with_authoring_authorization(
-            input.into(),
-            authoring_authorized,
-        )?;
+        let accepted =
+            self.submit_input_with_authoring_authorization(input.into(), authoring_authorized)?;
         match self
             .drive_next_input_claimed(&lane, IdleAuthorization::UserInputOnly)
             .await?
@@ -3414,11 +3424,11 @@ where
             IdleDriveOutcome::Inputs { .. } => Err(HarnessError::invalid_state(
                 "root input drive settled an operation without its newly accepted input",
             )),
-            IdleDriveOutcome::Idle | IdleDriveOutcome::ExtensionContinuation { .. } => Err(
-                HarnessError::invalid_state(
+            IdleDriveOutcome::Idle | IdleDriveOutcome::ExtensionContinuation { .. } => {
+                Err(HarnessError::invalid_state(
                     "root input drive did not dispatch its newly accepted input",
-                ),
-            ),
+                ))
+            }
         }
     }
 
@@ -3535,7 +3545,9 @@ where
                 RecoveryPlan::ReplayToolIfStillSafe { tool } => {
                     if !self.replay_is_still_safe(&lane, &tool) {
                         return Err(HarnessError::RecoveryRequired {
-                            plan: RecoveryPlan::ReconcileToolEffect { result_entry_id: tool.result_entry_id },
+                            plan: RecoveryPlan::ReconcileToolEffect {
+                                result_entry_id: tool.result_entry_id,
+                            },
                         });
                     }
                     let epoch_id = open_epoch(&snapshot, &operation_id).ok_or_else(|| {
@@ -3544,16 +3556,25 @@ where
                         )
                     })?;
                     let tool_calls = recovery_tool_calls(&snapshot, &tool.assistant_entry_id)?;
-                    let replay_tool_starts = snapshot.records().iter().filter_map(|stored| match &stored.record {
-                        LaneRecord::ToolStarted(started)
-                            if started.operation_id == operation_id
-                                && started.assistant_entry_id == tool.assistant_entry_id
-                                && !snapshot.entries().iter().any(|entry| entry.header.id == started.result_entry_id) =>
-                        {
-                            Some(((started.assistant_entry_id.clone(), started.tool_index), started.clone()))
-                        }
-                        _ => None,
-                    }).collect();
+                    let replay_tool_starts = snapshot
+                        .records()
+                        .iter()
+                        .filter_map(|stored| match &stored.record {
+                            LaneRecord::ToolStarted(started)
+                                if started.operation_id == operation_id
+                                    && started.assistant_entry_id == tool.assistant_entry_id
+                                    && !snapshot.entries().iter().any(|entry| {
+                                        entry.header.id == started.result_entry_id
+                                    }) =>
+                            {
+                                Some((
+                                    (started.assistant_entry_id.clone(), started.tool_index),
+                                    started.clone(),
+                                ))
+                            }
+                            _ => None,
+                        })
+                        .collect();
                     return self
                         .drive_epoch(
                             &lane,
@@ -3604,9 +3625,12 @@ where
                             "ordinary operation recovery has no open durable epoch",
                         )
                     })?;
-                    if let Some(outcome) = recovery::committed_run_outcome(&snapshot, &lane.lane_id, &epoch_id)? {
+                    if let Some(outcome) =
+                        recovery::committed_run_outcome(&snapshot, &lane.lane_id, &epoch_id)?
+                    {
                         if lane.lane_id == self.root_lane_id {
-                            self.settle_root_children_before_finish(&operation_id).await?;
+                            self.settle_root_children_before_finish(&operation_id)
+                                .await?;
                         }
                         return self.finish_operation(&lane, &operation_id, &epoch_id, outcome);
                     }
@@ -4017,7 +4041,9 @@ where
             last_assistant_entry: recovery_assistant_entry,
             replay_tool_starts,
         })));
-        let gate: Arc<dyn EffectGate> = Arc::new(DurableEffectGate { runtime: Arc::clone(&runtime) });
+        let gate: Arc<dyn EffectGate> = Arc::new(DurableEffectGate {
+            runtime: Arc::clone(&runtime),
+        });
         let agent = runtime_services.build_agent_with_tools(
             &configuration,
             gate,
@@ -4080,7 +4106,8 @@ where
             // before agent installation requires.
             self.clear_lane_active_agent(&lane_runtime);
             if lane_runtime.lane_id == self.root_lane_id {
-                self.settle_root_children_before_finish(&operation_id).await?;
+                self.settle_root_children_before_finish(&operation_id)
+                    .await?;
             }
             self.finish_operation(
                 &lane_runtime,
@@ -4156,14 +4183,23 @@ where
                 }
             }
             Err(error @ CoreError::EffectGate(_)) => {
-                let interrupted_mutation = runtime.lock()
-                    .map_err(|_| HarnessError::invalid_state("durable effect state mutex is poisoned"))?
+                let interrupted_mutation = runtime
+                    .lock()
+                    .map_err(|_| {
+                        HarnessError::invalid_state("durable effect state mutex is poisoned")
+                    })?
                     .interrupted_mutation;
                 if interrupted_mutation {
                     if lane_runtime.lane_id == self.root_lane_id {
-                        self.settle_root_children_before_finish(&operation_id).await?;
+                        self.settle_root_children_before_finish(&operation_id)
+                            .await?;
                     }
-                    self.finish_operation(&lane_runtime, &operation_id, &epoch_id, OperationOutcome::Aborted)?;
+                    self.finish_operation(
+                        &lane_runtime,
+                        &operation_id,
+                        &epoch_id,
+                        OperationOutcome::Aborted,
+                    )?;
                     return Err(HarnessError::Core(CoreError::Cancelled));
                 }
                 Err(HarnessError::Core(error))
@@ -4258,8 +4294,11 @@ where
                 return Err(HarnessError::RecoveryRequired { plan: plan.clone() });
             }
             if reduction.lane_state.leaf_id != prepared.lane_state.leaf_id
-                || reduction.effective_configuration != prepared.effective_configuration {
-                return Err(HarnessError::invalid_state("epoch source changed during preparation"));
+                || reduction.effective_configuration != prepared.effective_configuration
+            {
+                return Err(HarnessError::invalid_state(
+                    "epoch source changed during preparation",
+                ));
             }
             let epoch_index = snapshot
                 .records()
@@ -4322,7 +4361,9 @@ where
                     operation_id: operation_id.clone(),
                     reason: match outcome {
                         OperationOutcome::Completed => EpochFinishReason::Settled,
-                        OperationOutcome::Aborted | OperationOutcome::Failed { .. } => EpochFinishReason::Interrupted,
+                        OperationOutcome::Aborted | OperationOutcome::Failed { .. } => {
+                            EpochFinishReason::Interrupted
+                        }
                     },
                 })),
                 SessionCommitItem::Record(LaneRecord::OperationFinished(OperationFinishedRecord {
@@ -4330,16 +4371,27 @@ where
                     outcome: outcome.clone(),
                 })),
             ];
-            items.extend(operation::input_settlement_records(operation_id, &input_ids, &outcome)
-                .into_iter().map(SessionCommitItem::Record));
+            items.extend(
+                operation::input_settlement_records(operation_id, &input_ids, &outcome)
+                    .into_iter()
+                    .map(SessionCommitItem::Record),
+            );
             if outcome == OperationOutcome::Completed {
                 let snapshot = session.snapshot()?;
-                let is_child = snapshot.facts().iter().any(|stored| matches!(&stored.fact,
-                    SessionFact::AgentSpawned(agent) if agent.lane_id == lane.lane_id));
+                let is_child = snapshot.facts().iter().any(|stored| {
+                    matches!(&stored.fact,
+                    SessionFact::AgentSpawned(agent) if agent.lane_id == lane.lane_id)
+                });
                 let has_controls = reduce_lane(snapshot.clone(), lane.lane_id.clone())?
-                    .pending_extension_controls.iter().any(|pending| &pending.control.operation_id == operation_id);
+                    .pending_extension_controls
+                    .iter()
+                    .any(|pending| &pending.control.operation_id == operation_id);
                 if !is_child && !has_controls {
-                    items.push(extension_state::turn_checkpoint_item(&snapshot, &lane.lane_id, operation_id)?);
+                    items.push(extension_state::turn_checkpoint_item(
+                        &snapshot,
+                        &lane.lane_id,
+                        operation_id,
+                    )?);
                 }
             }
             let stored = session.commit(SessionCommit::new(items)?)?;
@@ -4717,7 +4769,10 @@ where
         let fact = SessionFact::Custom {
             type_name: "tea.trace-unavailable.v1".into(),
             payload: JsonValue::object([
-                ("schema_version", JsonValue::Number(tea_protocol::JsonNumber::Unsigned(1))),
+                (
+                    "schema_version",
+                    JsonValue::Number(tea_protocol::JsonNumber::Unsigned(1)),
+                ),
                 ("operation_id", JsonValue::String(operation_id.to_string())),
                 ("epoch_id", JsonValue::String(epoch_id.to_string())),
                 ("core_run_id", JsonValue::String(core_run_id.to_string())),
@@ -4726,11 +4781,7 @@ where
         };
         let mut session = self.session_lock()?;
         let snapshot = session.snapshot()?;
-        if snapshot
-            .facts()
-            .iter()
-            .any(|stored| stored.fact == fact)
-        {
+        if snapshot.facts().iter().any(|stored| stored.fact == fact) {
             return Ok(());
         }
         session.append_fact(fact)?;
@@ -4976,10 +5027,7 @@ pub(super) fn validate_runtime_model_selection(
     services: &RuntimeServices,
     reduction: &tea_session::LaneReduction,
 ) -> Result<(), HarnessError> {
-    validate_runtime_model_descriptor(
-        services,
-        reduction.effective_configuration.model.as_ref(),
-    )
+    validate_runtime_model_descriptor(services, reduction.effective_configuration.model.as_ref())
 }
 
 fn validate_runtime_model_descriptor(
@@ -5146,9 +5194,15 @@ struct HarnessAgentEventObserver {
 
 impl EventObserver for HarnessAgentEventObserver {
     fn observe(&self, event: &AgentEvent) {
-        self.events.publish_agent(super::events::ObservationRun::new(
-            self.lane_id.clone(), self.operation_id.clone(), self.epoch_id.clone(), event.run_id,
-        ), event);
+        self.events.publish_agent(
+            super::events::ObservationRun::new(
+                self.lane_id.clone(),
+                self.operation_id.clone(),
+                self.epoch_id.clone(),
+                event.run_id,
+            ),
+            event,
+        );
     }
 }
 
@@ -5406,8 +5460,12 @@ where
         let profile_id = self.identity.profile_id.clone();
         let request_surface_digest = provider_request_digest(request);
         let material = request_material(request)?;
-        let bytes = material.to_json_string().map_err(|error| self.fault(error.to_string()))?;
-        let retained = self.artifacts.put(bytes.as_bytes(), "application/vnd.tea.model-request+json")
+        let bytes = material
+            .to_json_string()
+            .map_err(|error| self.fault(error.to_string()))?;
+        let retained = self
+            .artifacts
+            .put(bytes.as_bytes(), "application/vnd.tea.model-request+json")
             .map_err(|error| self.fault(error.to_string()))?;
         let request_material = PayloadRef::Artifact {
             artifact_id: retained.artifact_id,
@@ -5417,29 +5475,34 @@ where
         self.mutate(|session| {
             session.commit(SessionCommit::new(vec![
                 SessionCommitItem::Record(LaneRecord::StepAttempted(StepAttemptedRecord {
-                id: step_id.clone(),
-                operation_id: operation_id.clone(),
-                epoch_id: epoch_id.clone(),
-                kind: StepKind::Assistant,
-                attempt: assistant_attempt,
-                result_entry_id: result_entry_id.clone(),
-                reason: None,
-            })),
-                SessionCommitItem::Record(LaneRecord::ProviderRequestStarted(
-                ProviderRequestStartedRecord {
-                    request_id: request_id.clone(),
+                    id: step_id.clone(),
                     operation_id: operation_id.clone(),
                     epoch_id: epoch_id.clone(),
-                    step_id,
-                    physical_attempt: 1,
-                    model_harness_profile: profile_id,
-                    request_surface_digest,
-                    idempotency_key: None,
-                },
-            )),
-                SessionCommitItem::Fact(SessionFact::ProviderRequestMaterial(tea_session::ProviderRequestMaterialFact {
-                    operation_id, epoch_id, request_id: request_id.clone(), request: request_material,
+                    kind: StepKind::Assistant,
+                    attempt: assistant_attempt,
+                    result_entry_id: result_entry_id.clone(),
+                    reason: None,
                 })),
+                SessionCommitItem::Record(LaneRecord::ProviderRequestStarted(
+                    ProviderRequestStartedRecord {
+                        request_id: request_id.clone(),
+                        operation_id: operation_id.clone(),
+                        epoch_id: epoch_id.clone(),
+                        step_id,
+                        physical_attempt: 1,
+                        model_harness_profile: profile_id,
+                        request_surface_digest,
+                        idempotency_key: None,
+                    },
+                )),
+                SessionCommitItem::Fact(SessionFact::ProviderRequestMaterial(
+                    tea_session::ProviderRequestMaterialFact {
+                        operation_id,
+                        epoch_id,
+                        request_id: request_id.clone(),
+                        request: request_material,
+                    },
+                )),
             ])?)?;
             Ok(())
         })?;
@@ -5484,8 +5547,8 @@ where
                 let operation_id = self.operation_id.clone();
                 let lane = self.lane.clone();
                 self.mutate(|session| {
-                    let mut items = vec![SessionCommitItem::Record(LaneRecord::ProviderRequestSettled(
-                        ProviderRequestSettledRecord {
+                    let mut items = vec![SessionCommitItem::Record(
+                        LaneRecord::ProviderRequestSettled(ProviderRequestSettledRecord {
                             request_id: pending.request_id.clone(),
                             operation_id: operation_id.clone(),
                             outcome,
@@ -5493,14 +5556,16 @@ where
                             usage: response.usage.as_ref().map(core_usage),
                             response_artifact: None,
                             classification,
-                        },
-                    ))];
+                        }),
+                    )];
                     if let Some(usage) = response.usage.as_ref() {
-                        items.push(SessionCommitItem::Record(LaneRecord::Usage(tea_session::UsageRecord {
-                            operation_id: operation_id.clone(),
-                            request_id: Some(pending.request_id.clone()),
-                            usage: core_usage(usage),
-                        })));
+                        items.push(SessionCommitItem::Record(LaneRecord::Usage(
+                            tea_session::UsageRecord {
+                                operation_id: operation_id.clone(),
+                                request_id: Some(pending.request_id.clone()),
+                                usage: core_usage(usage),
+                            },
+                        )));
                     }
                     if let Some(assistant) = assistant {
                         items.push(SessionCommitItem::Entry {
@@ -5966,15 +6031,30 @@ where
         {
             return Err(self.fault("tool settlement does not match its durable effect intent"));
         }
-        if outcome.raw_result.failure.as_ref().is_some_and(|failure| failure.disposition() == ToolFailureDisposition::Cancelled) {
+        if outcome
+            .raw_result
+            .failure
+            .as_ref()
+            .is_some_and(|failure| failure.disposition() == ToolFailureDisposition::Cancelled)
+        {
             let snapshot = self.session_snapshot()?;
-            let intent = snapshot.records().iter().find_map(|stored| match &stored.record {
-                LaneRecord::ToolStarted(tool) if tool.result_entry_id == pending.result_entry_id => Some(tool),
-                _ => None,
-            }).ok_or_else(|| self.fault("cancelled tool has no durable intent"))?;
+            let intent = snapshot
+                .records()
+                .iter()
+                .find_map(|stored| match &stored.record {
+                    LaneRecord::ToolStarted(tool)
+                        if tool.result_entry_id == pending.result_entry_id =>
+                    {
+                        Some(tool)
+                    }
+                    _ => None,
+                })
+                .ok_or_else(|| self.fault("cancelled tool has no durable intent"))?;
             if intent.replay_policy_at_start == ToolReplayPolicy::Never {
                 self.interrupted_mutation = true;
-                return Err(self.fault("cancelled tool outcome is indeterminate and requires host reconciliation"));
+                return Err(self.fault(
+                    "cancelled tool outcome is indeterminate and requires host reconciliation",
+                ));
             }
         }
         self.persist_tool_result(call, &outcome.raw_result, &outcome.result)?;
@@ -6061,30 +6141,70 @@ fn session_time_ms() -> u64 {
         .unwrap_or(0)
 }
 
-fn request_material(request: &tea_core::scheduler::ModelRequest) -> Result<JsonValue, EffectGateError> {
-    let model = request.model.as_ref().map(|model| JsonValue::object([
-        ("provider", JsonValue::String(model.provider.clone())),
-        ("model", JsonValue::String(model.model.clone())),
-        ("revision", model.revision.clone().map(JsonValue::String).unwrap_or(JsonValue::Null)),
-    ])).unwrap_or(JsonValue::Null);
-    let tools = request.tools.iter().map(|tool| JsonValue::object([
-        ("name", JsonValue::String(tool.name.clone())),
-        ("description", JsonValue::String(tool.description.clone())),
-        ("schema", tool.schema.clone()),
-        ("execution_mode", JsonValue::String(match tool.execution_mode {
-            crate::tool::ToolExecutionMode::Sequential => "sequential",
-            crate::tool::ToolExecutionMode::Parallel => "parallel",
-        }.into())),
-    ])).collect::<Vec<_>>();
+fn request_material(
+    request: &tea_core::scheduler::ModelRequest,
+) -> Result<JsonValue, EffectGateError> {
+    let model = request
+        .model
+        .as_ref()
+        .map(|model| {
+            JsonValue::object([
+                ("provider", JsonValue::String(model.provider.clone())),
+                ("model", JsonValue::String(model.model.clone())),
+                (
+                    "revision",
+                    model
+                        .revision
+                        .clone()
+                        .map(JsonValue::String)
+                        .unwrap_or(JsonValue::Null),
+                ),
+            ])
+        })
+        .unwrap_or(JsonValue::Null);
+    let tools = request
+        .tools
+        .iter()
+        .map(|tool| {
+            JsonValue::object([
+                ("name", JsonValue::String(tool.name.clone())),
+                ("description", JsonValue::String(tool.description.clone())),
+                ("schema", tool.schema.clone()),
+                (
+                    "execution_mode",
+                    JsonValue::String(
+                        match tool.execution_mode {
+                            crate::tool::ToolExecutionMode::Sequential => "sequential",
+                            crate::tool::ToolExecutionMode::Parallel => "parallel",
+                        }
+                        .into(),
+                    ),
+                ),
+            ])
+        })
+        .collect::<Vec<_>>();
     Ok(JsonValue::object([
         ("format", JsonValue::String("tea-model-request".into())),
         ("version", JsonValue::from(1_u64)),
-        ("system_prompt", JsonValue::String(request.system_prompt.clone())),
+        (
+            "system_prompt",
+            JsonValue::String(request.system_prompt.clone()),
+        ),
         ("context", JsonValue::String(request.context.clone())),
         ("tools", JsonValue::Array(tools)),
         ("model", model),
-        ("thinking_level", JsonValue::String(thinking_level_name(request.thinking_level).into())),
-        ("session_id", request.session_id.clone().map(JsonValue::String).unwrap_or(JsonValue::Null)),
+        (
+            "thinking_level",
+            JsonValue::String(thinking_level_name(request.thinking_level).into()),
+        ),
+        (
+            "session_id",
+            request
+                .session_id
+                .clone()
+                .map(JsonValue::String)
+                .unwrap_or(JsonValue::Null),
+        ),
     ]))
 }
 
@@ -6843,7 +6963,12 @@ fn recovery_tool_calls(
     let trailing_results = snapshot.entries()[assistant_index.saturating_add(1)..]
         .iter()
         .filter(|entry| entry.lane_id == snapshot.entries()[assistant_index].lane_id)
-        .take_while(|entry| !matches!(&entry.body, SessionEntry::AssistantMessage(_) | SessionEntry::UserMessage(_)))
+        .take_while(|entry| {
+            !matches!(
+                &entry.body,
+                SessionEntry::AssistantMessage(_) | SessionEntry::UserMessage(_)
+            )
+        })
         .filter_map(|entry| match &entry.body {
             SessionEntry::ToolResult(result) => Some(result),
             _ => None,
@@ -6852,12 +6977,19 @@ fn recovery_tool_calls(
     let missing = assistant
         .tool_calls
         .iter()
-        .filter(|call| !trailing_results.iter().any(|result| result.tool_call_id == call.id && result.tool_name == call.name))
+        .filter(|call| {
+            !trailing_results
+                .iter()
+                .any(|result| result.tool_call_id == call.id && result.tool_name == call.name)
+        })
         .collect::<Vec<_>>();
     if missing.is_empty() {
-        return Err(HarnessError::invalid_state("recovery assistant has no unresolved tool calls"));
+        return Err(HarnessError::invalid_state(
+            "recovery assistant has no unresolved tool calls",
+        ));
     }
-    missing.into_iter()
+    missing
+        .into_iter()
         .map(|call| {
             Ok(AgentToolCall {
                 id: ToolCallId::new(call.id.clone()).map_err(|error| {

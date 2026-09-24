@@ -7,13 +7,13 @@
 //! state identities rather than retaining model or tool text.
 
 use super::{
-    LiveVerificationError, RestrictedCodexConsumer, VerificationConsumer, is_exact_codex_descriptor,
+    is_exact_codex_descriptor, LiveVerificationError, RestrictedCodexConsumer, VerificationConsumer,
 };
 use std::path::Path;
 use tea_core::state::ModelDescriptor;
 use tea_session::{
-    HarnessRevisionChangedEntry, HarnessRevisionId, LaneId, LaneRecord, SessionEntry,
-    SessionFact, SessionSnapshot, reduce_lane,
+    reduce_lane, HarnessRevisionChangedEntry, HarnessRevisionId, LaneId, LaneRecord, SessionEntry,
+    SessionFact, SessionSnapshot,
 };
 
 /// Explicit disposable inputs for a live immutable-harness evolution exercise.
@@ -146,11 +146,9 @@ fn run_evolution_scenario(
             .snapshot()
             .map_err(|error| LiveVerificationError::new(error.to_string()))?;
         state_before_rollback = todo_state(&used_snapshot)?;
-        revised_source_used = operation_uses_revision(
-            &used_snapshot,
-            use_operation.id(),
-            &activated_revision,
-        ) && state_before_rollback.is_some();
+        revised_source_used =
+            operation_uses_revision(&used_snapshot, use_operation.id(), &activated_revision)
+                && state_before_rollback.is_some();
         if revised_source_used {
             break;
         }
@@ -174,9 +172,11 @@ fn run_evolution_scenario(
         &initial_revision,
         &activated_revision,
     );
-    let state_retained_across_rollback = state_before_rollback == todo_state(&rolled_back_snapshot)?;
+    let state_retained_across_rollback =
+        state_before_rollback == todo_state(&rolled_back_snapshot)?;
     let session_id = rolled_back_snapshot.header().session_id.to_string();
-    smol::block_on(harness.close()).map_err(|error| LiveVerificationError::new(error.to_string()))?;
+    smol::block_on(harness.close())
+        .map_err(|error| LiveVerificationError::new(error.to_string()))?;
     // Closing joins work; only dropping the last handle releases the single
     // session writer that the passive reopen below must acquire.
     drop(harness);
@@ -196,23 +196,29 @@ fn run_evolution_scenario(
         .snapshot()
         .map_err(|error| LiveVerificationError::new(error.to_string()))?;
     let state_retained_across_reopen = state_before_rollback == todo_state(&reopened_snapshot)?;
-    smol::block_on(reopened.close()).map_err(|error| LiveVerificationError::new(error.to_string()))?;
+    smol::block_on(reopened.close())
+        .map_err(|error| LiveVerificationError::new(error.to_string()))?;
 
     Ok(LiveEvolutionScenarioOutcome {
         candidate_activated: true,
         revised_source_used,
-        state_retained_across_rollback: state_retained_across_rollback && state_retained_across_reopen,
+        state_retained_across_rollback: state_retained_across_rollback
+            && state_retained_across_reopen,
         rollback_activated,
         durable_state_verified: true,
     })
 }
 
-fn initial_revision(snapshot: &SessionSnapshot) -> Result<HarnessRevisionId, LiveVerificationError> {
+fn initial_revision(
+    snapshot: &SessionSnapshot,
+) -> Result<HarnessRevisionId, LiveVerificationError> {
     revision_entries(snapshot)
         .into_iter()
         .next()
         .map(|entry| entry.revision_id.clone())
-        .ok_or_else(|| LiveVerificationError::new("live evolution session has no initial harness revision"))
+        .ok_or_else(|| {
+            LiveVerificationError::new("live evolution session has no initial harness revision")
+        })
 }
 
 fn activated_revision(
@@ -268,7 +274,9 @@ fn operation_uses_revision(
     })
 }
 
-fn todo_state(snapshot: &SessionSnapshot) -> Result<Option<tea_protocol::JsonValue>, LiveVerificationError> {
+fn todo_state(
+    snapshot: &SessionSnapshot,
+) -> Result<Option<tea_protocol::JsonValue>, LiveVerificationError> {
     let reduction = reduce_lane(snapshot.clone(), LaneId::main())
         .map_err(|error| LiveVerificationError::new(error.to_string()))?;
     let Some(state) = reduction.extension_state.get("todo") else {
@@ -368,9 +376,18 @@ mod tests {
 
     fn hypothesis() -> JsonValue {
         JsonValue::object([
-            ("failure_signature", JsonValue::String("scripted evolution counterpart".into())),
-            ("expected_effect", JsonValue::String("behavior-preserving marker".into())),
-            ("regression_risk", JsonValue::String("none; comment only".into())),
+            (
+                "failure_signature",
+                JsonValue::String("scripted evolution counterpart".into()),
+            ),
+            (
+                "expected_effect",
+                JsonValue::String("behavior-preserving marker".into()),
+            ),
+            (
+                "regression_risk",
+                JsonValue::String("none; comment only".into()),
+            ),
         ])
     }
 
@@ -378,10 +395,13 @@ mod tests {
         ModelStream {
             events: vec![
                 ModelStreamEvent::ToolCall(AgentToolCall {
-                    id: ToolCallId::new(format!("evolution-call-{index}")).expect("fixture call ID"),
+                    id: ToolCallId::new(format!("evolution-call-{index}"))
+                        .expect("fixture call ID"),
                     name: name.into(),
                     arguments: SerializedJson::new(
-                        arguments.to_json_string().expect("fixture arguments encode"),
+                        arguments
+                            .to_json_string()
+                            .expect("fixture arguments encode"),
                     ),
                 }),
                 ModelStreamEvent::End(StopReason::ToolUse),
@@ -535,7 +555,10 @@ mod tests {
         );
         assert_eq!(provider.requests.load(Ordering::SeqCst), 10);
         assert_eq!(
-            *provider.marker_in_prompt.lock().expect("prompt observations"),
+            *provider
+                .marker_in_prompt
+                .lock()
+                .expect("prompt observations"),
             vec![false, false, true, true, true, true, true, true, true, false],
             "only epochs under the activated revision carry the authored section"
         );

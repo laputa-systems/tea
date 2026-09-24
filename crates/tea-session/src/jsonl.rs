@@ -733,11 +733,11 @@ impl JsonlSession {
         // never clones the retained prefix or exposes a partial group.
         validate_prepared_commit(&self.snapshot, &self.append_index, &stored)?;
         let refresh_head = stored.items.iter().any(selects_main_harness_revision);
-        let encoded = encode_commit(&stored)
-            .to_json_string()
-            .map_err(|error| SessionError::InvalidInput {
+        let encoded = encode_commit(&stored).to_json_string().map_err(|error| {
+            SessionError::InvalidInput {
                 message: format!("session commit cannot encode as JSON: {error}"),
-            })?;
+            }
+        })?;
         ensure_complete_line_size(&encoded)?;
         if let Err(error) = write_complete_line(
             &mut self.file,
@@ -1642,9 +1642,7 @@ fn decode_header(value: &JsonValue) -> Result<SessionHeader, String> {
         return Err("header kind must be `tea-session`".into());
     }
     if required_string(object, "format")? != SESSION_FORMAT_IDENTITY {
-        return Err(format!(
-            "header format must be `{SESSION_FORMAT_IDENTITY}`"
-        ));
+        return Err(format!("header format must be `{SESSION_FORMAT_IDENTITY}`"));
     }
     let version = required_u64(object, "version")?;
     if version != u64::from(SESSION_FORMAT_VERSION) {
@@ -2419,16 +2417,31 @@ fn encode_record(record: &LaneRecord) -> JsonValue {
             ("outcome", encode_operation_outcome(&record.outcome)),
         ]),
         LaneRecord::ExtensionControlEnqueued(record) => JsonValue::object([
-            ("type", JsonValue::String("extension_control_enqueued".into())),
+            (
+                "type",
+                JsonValue::String("extension_control_enqueued".into()),
+            ),
             ("operation_id", string_value(&record.operation_id)),
             ("control_id", JsonValue::String(record.control_id.clone())),
-            ("extension_id", JsonValue::String(record.extension_id.clone())),
-            ("harness_revision_id", string_value(&record.harness_revision_id)),
-            ("command_name", JsonValue::String(record.command_name.clone())),
+            (
+                "extension_id",
+                JsonValue::String(record.extension_id.clone()),
+            ),
+            (
+                "harness_revision_id",
+                string_value(&record.harness_revision_id),
+            ),
+            (
+                "command_name",
+                JsonValue::String(record.command_name.clone()),
+            ),
             ("arguments", record.arguments.clone()),
         ]),
         LaneRecord::ExtensionControlApplied(record) => JsonValue::object([
-            ("type", JsonValue::String("extension_control_applied".into())),
+            (
+                "type",
+                JsonValue::String("extension_control_applied".into()),
+            ),
             ("control_id", JsonValue::String(record.control_id.clone())),
         ]),
         LaneRecord::WriteDeferred(record) => JsonValue::object([
@@ -2891,17 +2904,26 @@ fn encode_fact(fact: &SessionFact) -> JsonValue {
             ("media_type", JsonValue::String(fact.media_type.clone())),
         ]),
         SessionFact::ProviderRequestMaterial(fact) => JsonValue::object([
-            ("type", JsonValue::String("provider_request_material".into())),
+            (
+                "type",
+                JsonValue::String("provider_request_material".into()),
+            ),
             ("operation_id", string_value(&fact.operation_id)),
             ("epoch_id", string_value(&fact.epoch_id)),
             ("request_id", string_value(&fact.request_id)),
             ("request", encode_payload_ref(&fact.request)),
         ]),
         SessionFact::ExtensionStateValueSet(fact) => JsonValue::object([
-            ("type", JsonValue::String("extension_state_value_set".into())),
+            (
+                "type",
+                JsonValue::String("extension_state_value_set".into()),
+            ),
             ("lane_id", string_value(&fact.lane_id)),
             ("extension_id", JsonValue::String(fact.extension_id.clone())),
-            ("state_version", JsonValue::String(fact.state_version.clone())),
+            (
+                "state_version",
+                JsonValue::String(fact.state_version.clone()),
+            ),
             ("value", fact.value.clone()),
         ]),
         SessionFact::TurnCheckpoint(fact) => JsonValue::object([
@@ -2910,7 +2932,10 @@ fn encode_fact(fact: &SessionFact) -> JsonValue {
             ("lane_id", string_value(&fact.lane_id)),
             ("operation_id", string_value(&fact.operation_id)),
             ("leaf_id", optional_id(fact.leaf_id.as_ref())),
-            ("extension_state", encode_extension_state(&fact.extension_state)),
+            (
+                "extension_state",
+                encode_extension_state(&fact.extension_state),
+            ),
         ]),
         SessionFact::ForkedLane(fact) => JsonValue::object([
             ("type", JsonValue::String("forked_lane".into())),
@@ -3109,7 +3134,10 @@ fn encode_extension_state(state: &BTreeMap<String, ExtensionStateValue>) -> Json
                 (
                     extension_id.clone(),
                     JsonValue::object([
-                        ("state_version", JsonValue::String(value.state_version.clone())),
+                        (
+                            "state_version",
+                            JsonValue::String(value.state_version.clone()),
+                        ),
                         ("value", value.value.clone()),
                     ]),
                 )

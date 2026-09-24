@@ -12,11 +12,11 @@ use crate::compaction::{
     CompactionId, CompactionImplementation, CompactionOperation, CompactionReplacement,
 };
 use crate::effect::{CompactionProviderEffectOutcome, EffectGateError};
+use crate::runtime::ProviderLimits;
 use crate::runtime::context::{
     compaction_replacement_digest, derive_default_snapshot_context,
     derive_snapshot_context_with_policies, encode_compaction_replacement,
 };
-use crate::runtime::ProviderLimits;
 use tea_protocol::JsonValue;
 use tea_session::{
     CompactionEntry, EntryId, LaneRecord, PayloadRef, ProviderRequestId,
@@ -51,9 +51,7 @@ where
         request: &crate::scheduler::ModelRequest,
     ) -> Result<(), EffectGateError> {
         if self.compaction_steps.contains_key(&operation.id) {
-            return Err(self.fault(
-                "a compaction operation may admit exactly one provider request",
-            ));
+            return Err(self.fault("a compaction operation may admit exactly one provider request"));
         }
 
         let snapshot = self.session_snapshot()?;
@@ -87,11 +85,9 @@ where
             [step_id.as_str(), "1"],
         ))
         .map_err(|error| self.fault(error.to_string()))?;
-        let result_entry_id = EntryId::new(durable_identifier(
-            "entry-compaction",
-            [step_id.as_str()],
-        ))
-        .map_err(|error| self.fault(error.to_string()))?;
+        let result_entry_id =
+            EntryId::new(durable_identifier("entry-compaction", [step_id.as_str()]))
+                .map_err(|error| self.fault(error.to_string()))?;
 
         let material = request_material(request)?;
         let bytes = material
@@ -214,8 +210,8 @@ where
             ),
         };
         self.mutate(|session| {
-            let mut items = vec![SessionCommitItem::Record(LaneRecord::ProviderRequestSettled(
-                ProviderRequestSettledRecord {
+            let mut items = vec![SessionCommitItem::Record(
+                LaneRecord::ProviderRequestSettled(ProviderRequestSettledRecord {
                     request_id: pending.request_id.clone(),
                     operation_id: operation_id.clone(),
                     outcome,
@@ -223,8 +219,8 @@ where
                     usage: usage.as_ref().map(core_usage),
                     response_artifact: None,
                     classification,
-                },
-            ))];
+                }),
+            )];
             if let Some(usage) = usage.as_ref() {
                 items.push(SessionCommitItem::Record(LaneRecord::Usage(
                     tea_session::UsageRecord {
@@ -269,9 +265,9 @@ where
         let proposed_source = encode_compaction_replacement(&replacement.source_messages)
             .map_err(|error| self.fault(error.to_string()))?;
         if persisted_source != proposed_source {
-            return Err(self.fault(
-                "compaction source no longer matches the effective durable context",
-            ));
+            return Err(
+                self.fault("compaction source no longer matches the effective durable context")
+            );
         }
 
         let operation_label = replacement.operation.id.to_string();
@@ -285,8 +281,9 @@ where
             ],
         ))
         .map_err(|error| self.fault(error.to_string()))?;
-        let generated_entry_id = EntryId::new(durable_identifier("entry-compaction", [step_id.as_str()]))
-            .map_err(|error| self.fault(error.to_string()))?;
+        let generated_entry_id =
+            EntryId::new(durable_identifier("entry-compaction", [step_id.as_str()]))
+                .map_err(|error| self.fault(error.to_string()))?;
         let (result_entry_id, provider_request_id) = match self.compaction_steps.get(&replacement.operation.id) {
             Some(step) => (
                 step.result_entry_id.clone(),
@@ -350,8 +347,9 @@ where
         let lane = self.lane.clone();
         match harness_snapshot {
             Some(harness) => {
-                let limits = ProviderLimits::new(harness.spec.resource_limits.provider_surface_bytes)
-                    .map_err(|error| self.fault(error.to_string()))?;
+                let limits =
+                    ProviderLimits::new(harness.spec.resource_limits.provider_surface_bytes)
+                        .map_err(|error| self.fault(error.to_string()))?;
                 derive_snapshot_context_with_policies(
                     snapshot,
                     lane,

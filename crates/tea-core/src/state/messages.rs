@@ -252,13 +252,15 @@ mod tests {
 
     #[test]
     fn opaque_context_allows_a_large_reasoning_record_but_keeps_a_finite_boundary() {
-        assert!(OpaqueProviderContextItem::new(
-            "openrouter",
-            "reasoning_details",
-            None,
-            "r".repeat(90_000),
-        )
-        .is_ok());
+        assert!(
+            OpaqueProviderContextItem::new(
+                "openrouter",
+                "reasoning_details",
+                None,
+                "r".repeat(90_000),
+            )
+            .is_ok()
+        );
         assert!(matches!(
             OpaqueProviderContextItem::new(
                 "openrouter",

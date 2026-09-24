@@ -9,15 +9,12 @@ use crate::harness::{HarnessError, ResolvedHarness};
 use std::collections::BTreeMap;
 use tea_core::harness::extension::{
     ExtensionError, ExtensionStateGeneration, ExtensionStateStore, ExtensionStateUpdate,
-    ExtensionStateView,
-    MAX_EXTENSION_STATE_VALUE_BYTES,
+    ExtensionStateView, MAX_EXTENSION_STATE_VALUE_BYTES,
 };
 use tea_session::{
-    EpochStartedRecord, ExtensionStateValue, ExtensionStateValueSetFact, HarnessRevisionId,
-    LaneId, OperationId, SessionCommit, SessionCommitItem, SessionFact, SessionSnapshot,
-    SessionWriter,
-    TurnCheckpointFact, TurnCheckpointId,
-    extension_state_for_lane, reduce_lane,
+    EpochStartedRecord, ExtensionStateValue, ExtensionStateValueSetFact, HarnessRevisionId, LaneId,
+    OperationId, SessionCommit, SessionCommitItem, SessionFact, SessionSnapshot, SessionWriter,
+    TurnCheckpointFact, TurnCheckpointId, extension_state_for_lane, reduce_lane,
 };
 
 /// Project the exact private state value owned by `extension_id` on `lane_id`.
@@ -65,14 +62,14 @@ pub(super) fn extension_state_commit_item(
     let value = tea_protocol::JsonValue::parse(&encoded).map_err(|_| {
         HarnessError::invalid_state("extension state value does not decode canonically")
     })?;
-    Ok(SessionCommitItem::Fact(SessionFact::ExtensionStateValueSet(
-        ExtensionStateValueSetFact {
+    Ok(SessionCommitItem::Fact(
+        SessionFact::ExtensionStateValueSet(ExtensionStateValueSetFact {
             lane_id,
             extension_id: extension_id.to_owned(),
             state_version: state_version.to_owned(),
             value,
-        },
-    )))
+        }),
+    ))
 }
 
 /// Build the exact settled-turn boundary fact that may later anchor a fork.
@@ -86,12 +83,7 @@ pub(super) fn turn_checkpoint_item(
     operation_id: &OperationId,
 ) -> Result<SessionCommitItem, HarnessError> {
     let reduction = reduce_lane(snapshot.clone(), lane_id.clone())?;
-    turn_checkpoint_item_with_state(
-        snapshot,
-        lane_id,
-        operation_id,
-        reduction.extension_state,
-    )
+    turn_checkpoint_item_with_state(snapshot, lane_id, operation_id, reduction.extension_state)
 }
 
 /// Build a settled-turn checkpoint after an atomically preceding state update.
@@ -219,12 +211,8 @@ where
         observed_state: Option<&ExtensionStateValue>,
         update: ExtensionStateUpdate,
     ) -> Result<(), HarnessError> {
-        let item = extension_state_commit_item(
-            lane.lane_id.clone(),
-            extension_id,
-            state_version,
-            update,
-        )?;
+        let item =
+            extension_state_commit_item(lane.lane_id.clone(), extension_id, state_version, update)?;
         let mut session = self.session_lock()?;
         let snapshot = session.snapshot()?;
         let reduction = reduce_lane(snapshot, lane.lane_id.clone())?;
@@ -261,12 +249,8 @@ where
         let started = validate_active_extension_state_generation(&snapshot, generation)?;
         let configuration = self.configuration_for_epoch_started(&lane, &snapshot, started)?;
         let state_version = required_state_version(&configuration, extension_id)?;
-        let item = extension_state_commit_item(
-            lane.lane_id.clone(),
-            extension_id,
-            state_version,
-            update,
-        )?;
+        let item =
+            extension_state_commit_item(lane.lane_id.clone(), extension_id, state_version, update)?;
 
         let mut session = self.session_lock()?;
         let snapshot = session.snapshot()?;
@@ -318,11 +302,13 @@ fn required_state_version<'a>(
     configuration: &'a ResolvedHarness,
     extension_id: &str,
 ) -> Result<&'a str, HarnessError> {
-    configuration.extension_state_version(extension_id).ok_or_else(|| {
-        HarnessError::invalid_state(format!(
-            "extension {extension_id} has no immutable state_version contract"
-        ))
-    })
+    configuration
+        .extension_state_version(extension_id)
+        .ok_or_else(|| {
+            HarnessError::invalid_state(format!(
+                "extension {extension_id} has no immutable state_version contract"
+            ))
+        })
 }
 
 /// Verify that a state capability still belongs to the one epoch that minted
@@ -350,7 +336,8 @@ fn validate_active_extension_state_generation<'a>(
             generation.lane_id(),
         )));
     }
-    if super::open_epoch(snapshot, generation.operation_id()).as_ref() != Some(generation.epoch_id())
+    if super::open_epoch(snapshot, generation.operation_id()).as_ref()
+        != Some(generation.epoch_id())
     {
         return Err(HarnessError::invalid_state(format!(
             "extension state generation epoch {} is no longer open for operation {}",
@@ -362,7 +349,9 @@ fn validate_active_extension_state_generation<'a>(
         .records()
         .iter()
         .find_map(|stored| match &stored.record {
-            tea_session::LaneRecord::EpochStarted(record) if record.id == *generation.epoch_id() => {
+            tea_session::LaneRecord::EpochStarted(record)
+                if record.id == *generation.epoch_id() =>
+            {
                 Some(record)
             }
             _ => None,
@@ -423,7 +412,10 @@ mod tests {
         assert_eq!(fact.lane_id, LaneId::main());
         assert_eq!(fact.extension_id, "todo");
         assert_eq!(fact.state_version, "todo.v1");
-        assert_eq!(fact.value, JsonValue::object([("open", JsonValue::from(2_u64))]));
+        assert_eq!(
+            fact.value,
+            JsonValue::object([("open", JsonValue::from(2_u64))])
+        );
     }
 
     #[test]
@@ -444,12 +436,21 @@ mod tests {
     #[test]
     fn state_commit_item_commits_the_value_reopen_will_decode() {
         let produced = JsonValue::object([
-            ("next_id", JsonValue::Number(tea_protocol::JsonNumber::Signed(2))),
-            ("offset", JsonValue::Number(tea_protocol::JsonNumber::Signed(-1))),
+            (
+                "next_id",
+                JsonValue::Number(tea_protocol::JsonNumber::Signed(2)),
+            ),
+            (
+                "offset",
+                JsonValue::Number(tea_protocol::JsonNumber::Signed(-1)),
+            ),
         ]);
         let reopened = JsonValue::parse(&produced.to_json_string().expect("value encodes"))
             .expect("encoded value decodes");
-        assert_ne!(produced, reopened, "the codec normalizes non-negative integers");
+        assert_ne!(
+            produced, reopened,
+            "the codec normalizes non-negative integers"
+        );
 
         let SessionCommitItem::Fact(SessionFact::ExtensionStateValueSet(fact)) =
             extension_state_commit_item(
@@ -469,20 +470,18 @@ mod tests {
     #[test]
     fn closed_epoch_generation_is_rejected_after_same_revision_starts_another_operation() {
         let lane = LaneId::main();
-        let revision = HarnessRevisionId::new("state-generation-revision")
-            .expect("fixture revision ID");
-        let snapshot_id = HarnessSnapshotId::new("state-generation-snapshot")
-            .expect("fixture snapshot ID");
-        let profile = ModelHarnessProfileId::new("state-generation-profile")
-            .expect("fixture profile ID");
-        let first_operation = OperationId::new("state-generation-first-operation")
-            .expect("fixture operation ID");
-        let first_epoch =
-            EpochId::new("state-generation-first-epoch").expect("fixture epoch ID");
-        let second_operation = OperationId::new("state-generation-second-operation")
-            .expect("fixture operation ID");
-        let second_epoch =
-            EpochId::new("state-generation-second-epoch").expect("fixture epoch ID");
+        let revision =
+            HarnessRevisionId::new("state-generation-revision").expect("fixture revision ID");
+        let snapshot_id =
+            HarnessSnapshotId::new("state-generation-snapshot").expect("fixture snapshot ID");
+        let profile =
+            ModelHarnessProfileId::new("state-generation-profile").expect("fixture profile ID");
+        let first_operation =
+            OperationId::new("state-generation-first-operation").expect("fixture operation ID");
+        let first_epoch = EpochId::new("state-generation-first-epoch").expect("fixture epoch ID");
+        let second_operation =
+            OperationId::new("state-generation-second-operation").expect("fixture operation ID");
+        let second_epoch = EpochId::new("state-generation-second-epoch").expect("fixture epoch ID");
         let first_generation = ExtensionStateGeneration::new(
             lane.clone(),
             first_operation.clone(),
@@ -495,8 +494,8 @@ mod tests {
             BTreeMap::new(),
         ))
         .expect("memory session creates");
-        let revision_entry = tea_session::EntryId::new("state-generation-revision-entry")
-            .expect("fixture entry ID");
+        let revision_entry =
+            tea_session::EntryId::new("state-generation-revision-entry").expect("fixture entry ID");
         session
             .append_entry(
                 &lane,

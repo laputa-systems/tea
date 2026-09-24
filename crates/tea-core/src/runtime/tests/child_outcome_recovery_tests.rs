@@ -7,10 +7,13 @@ fn committed_tool_result<'a>(
     snapshot: &'a tea_session::SessionSnapshot,
     tool_call_id: &str,
 ) -> Option<&'a ToolResultEntry> {
-    snapshot.entries().iter().find_map(|entry| match &entry.body {
-        SessionEntry::ToolResult(result) if result.tool_call_id == tool_call_id => Some(result),
-        _ => None,
-    })
+    snapshot
+        .entries()
+        .iter()
+        .find_map(|entry| match &entry.body {
+            SessionEntry::ToolResult(result) if result.tool_call_id == tool_call_id => Some(result),
+            _ => None,
+        })
 }
 
 fn inline_result_text(result: &ToolResultEntry) -> String {
@@ -76,7 +79,11 @@ fn resume_restores_an_accepted_spawn_result_without_new_child_work() {
             "restoring the result never prepares another child workspace"
         );
         let graph = reduce_agent_graph(&snapshot).expect("recovered graph reduces");
-        assert_eq!(graph.agents.len(), 1, "the old spawn identity is not duplicated");
+        assert_eq!(
+            graph.agents.len(),
+            1,
+            "the old spawn identity is not duplicated"
+        );
     });
 }
 

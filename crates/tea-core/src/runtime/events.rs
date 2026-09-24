@@ -159,17 +159,13 @@ impl PreviewEvent {
     /// Borrow the identity that coalesces this update.
     pub fn identity(&self) -> &PreviewIdentity {
         match self {
-            Self::AssistantText { identity, .. } | Self::ToolProgress { identity, .. } => {
-                identity
-            }
+            Self::AssistantText { identity, .. } | Self::ToolProgress { identity, .. } => identity,
         }
     }
 
     fn sequence(&self) -> EventSequence {
         match self {
-            Self::AssistantText { sequence, .. } | Self::ToolProgress { sequence, .. } => {
-                *sequence
-            }
+            Self::AssistantText { sequence, .. } | Self::ToolProgress { sequence, .. } => *sequence,
         }
     }
 
@@ -280,10 +276,7 @@ impl TeaEvent {
     fn session_sequence(&self) -> Option<Sequence> {
         match self {
             Self::Session(event) => Some(event.sequence()),
-            Self::Agent { .. }
-            | Self::Preview(_)
-            | Self::Harness(_)
-            | Self::Artifact(_) => None,
+            Self::Agent { .. } | Self::Preview(_) | Self::Harness(_) | Self::Artifact(_) => None,
         }
     }
 
@@ -656,7 +649,9 @@ pub enum TeaEventRecvError {
 impl fmt::Display for TeaEventRecvError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Lagged => formatter.write_str("tea event subscription lagged; resnapshot required"),
+            Self::Lagged => {
+                formatter.write_str("tea event subscription lagged; resnapshot required")
+            }
             Self::Disconnected => formatter.write_str("tea event subscription disconnected"),
         }
     }
@@ -713,16 +708,19 @@ impl TeaEventSubscription {
     }
 
     fn take_next(&self) -> Result<Option<TeaEvent>, TeaEventRecvError> {
-        let mut state = self.subscriber.state.lock().map_err(|_| {
-            TeaEventRecvError::Disconnected
-        })?;
+        let mut state = self
+            .subscriber
+            .state
+            .lock()
+            .map_err(|_| TeaEventRecvError::Disconnected)?;
         if state.lagged {
             return Err(TeaEventRecvError::Lagged);
         }
         while let Some(event) = state.events.pop_front() {
-            if event.session_sequence().is_none_or(|sequence| {
-                sequence > self.snapshot.view.sequence
-            }) {
+            if event
+                .session_sequence()
+                .is_none_or(|sequence| sequence > self.snapshot.view.sequence)
+            {
                 return Ok(Some(event));
             }
         }
@@ -777,8 +775,7 @@ impl EventHub {
                 message_id,
                 text_delta,
             } => {
-                let (text, truncated) =
-                    bounded_preview_text(text_delta, MAX_PREVIEW_TEXT_BYTES);
+                let (text, truncated) = bounded_preview_text(text_delta, MAX_PREVIEW_TEXT_BYTES);
                 TeaEvent::Preview(PreviewEvent::AssistantText {
                     identity: PreviewIdentity::assistant(run, *message_id),
                     sequence: event.sequence,
@@ -1037,12 +1034,15 @@ impl SubscriberState {
         {
             return false;
         }
-        let preview = if let Some(index) = self
-            .events
-            .iter()
-            .position(|event| event.preview().is_some_and(|current| current.identity() == preview.identity()))
-        {
-            let current = self.events.remove(index).expect("preview index is in bounds");
+        let preview = if let Some(index) = self.events.iter().position(|event| {
+            event
+                .preview()
+                .is_some_and(|current| current.identity() == preview.identity())
+        }) {
+            let current = self
+                .events
+                .remove(index)
+                .expect("preview index is in bounds");
             match current {
                 TeaEvent::Preview(current) => current.coalesce(preview),
                 TeaEvent::Agent { .. }
@@ -1093,9 +1093,9 @@ impl SubscriberState {
         self.events = events
             .into_iter()
             .filter_map(|queued| match queued {
-                TeaEvent::Preview(preview) if fenced(preview.identity()) => preview
-                    .retained_after_fence()
-                    .map(TeaEvent::Preview),
+                TeaEvent::Preview(preview) if fenced(preview.identity()) => {
+                    preview.retained_after_fence().map(TeaEvent::Preview)
+                }
                 queued => Some(queued),
             })
             .collect();
@@ -1178,7 +1178,10 @@ fn normalize_preview(preview: PreviewEvent) -> PreviewEvent {
                 tool_name,
                 content,
                 activity,
-                truncated: truncated || tool_name_truncated || content_truncated || activity_truncated,
+                truncated: truncated
+                    || tool_name_truncated
+                    || content_truncated
+                    || activity_truncated,
             }
         }
     }
@@ -1252,10 +1255,7 @@ mod observation_tests {
 
     fn assistant_preview(sequence: u64, text: &str) -> TeaEvent {
         TeaEvent::Preview(PreviewEvent::AssistantText {
-            identity: PreviewIdentity::assistant(
-                run(),
-                MessageId(1),
-            ),
+            identity: PreviewIdentity::assistant(run(), MessageId(1)),
             sequence: EventSequence(sequence),
             text: text.into(),
             truncated: false,
@@ -1339,7 +1339,12 @@ mod observation_tests {
 
         assert_eq!(
             subscription.snapshot.view.previews,
-            vec![assistant_preview(1, "still streaming").preview().cloned().expect("preview")]
+            vec![
+                assistant_preview(1, "still streaming")
+                    .preview()
+                    .cloned()
+                    .expect("preview")
+            ]
         );
         assert_eq!(subscription.try_recv(), Err(TeaEventTryRecvError::Empty));
     }
@@ -1437,7 +1442,9 @@ mod observation_tests {
             event: AgentEvent {
                 run_id: RunId(1),
                 sequence: EventSequence(3),
-                kind: AgentEventKind::AgentEnd { messages: Vec::new() },
+                kind: AgentEventKind::AgentEnd {
+                    messages: Vec::new(),
+                },
             },
         });
 
@@ -1449,14 +1456,20 @@ mod observation_tests {
         assert!(matches!(
             subscription.try_recv(),
             Ok(TeaEvent::Agent {
-                event: AgentEvent { kind: AgentEventKind::ToolExecutionEnd { .. }, .. },
+                event: AgentEvent {
+                    kind: AgentEventKind::ToolExecutionEnd { .. },
+                    ..
+                },
                 ..
             })
         ));
         assert!(matches!(
             subscription.try_recv(),
             Ok(TeaEvent::Agent {
-                event: AgentEvent { kind: AgentEventKind::AgentEnd { .. }, .. },
+                event: AgentEvent {
+                    kind: AgentEventKind::AgentEnd { .. },
+                    ..
+                },
                 ..
             })
         ));
@@ -1472,7 +1485,9 @@ mod observation_tests {
             event: AgentEvent {
                 run_id: RunId(1),
                 sequence: EventSequence(1),
-                kind: AgentEventKind::AgentEnd { messages: Vec::new() },
+                kind: AgentEventKind::AgentEnd {
+                    messages: Vec::new(),
+                },
             },
         });
         subscriber.enqueue(assistant_preview(2, "late after agent end"));
@@ -1566,9 +1581,10 @@ mod observation_tests {
                 assert!(truncated);
                 assert!(tool_name.len() <= MAX_PREVIEW_TOOL_NAME_BYTES);
                 assert!(content.len() <= MAX_PREVIEW_TEXT_BYTES);
-                assert!(activity.is_some_and(|activity| {
-                    activity.len() <= MAX_PREVIEW_ACTIVITY_BYTES
-                }));
+                assert!(
+                    activity
+                        .is_some_and(|activity| { activity.len() <= MAX_PREVIEW_ACTIVITY_BYTES })
+                );
             }
             other => panic!("expected bounded tool preview, got {other:?}"),
         }

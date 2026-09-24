@@ -603,10 +603,15 @@ fn recovery_keeps_a_later_committed_result_without_reexecuting_it() {
             }]
         );
         assert_eq!(provider.requests().len(), 1);
-        let ordered_results = agent.snapshot().messages.iter().filter_map(|message| match message {
-            AgentMessage::ToolResult { tool_call_id, .. } => Some(tool_call_id.clone()),
-            _ => None,
-        }).collect::<Vec<_>>();
+        let ordered_results = agent
+            .snapshot()
+            .messages
+            .iter()
+            .filter_map(|message| match message {
+                AgentMessage::ToolResult { tool_call_id, .. } => Some(tool_call_id.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
         assert_eq!(ordered_results, vec![first, second]);
         assert_eq!(
             agent

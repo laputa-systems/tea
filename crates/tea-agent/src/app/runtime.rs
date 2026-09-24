@@ -400,7 +400,9 @@ impl App {
                 Ok(event) => self.project_durable_event(event),
                 Err(TeaEventTryRecvError::Empty) => break,
                 Err(TeaEventTryRecvError::Lagged) => {
-                    self.resubscribe_durable_projection("live updates lagged; refreshed durable state");
+                    self.resubscribe_durable_projection(
+                        "live updates lagged; refreshed durable state",
+                    );
                     break;
                 }
                 Err(TeaEventTryRecvError::Disconnected) => {
@@ -491,8 +493,9 @@ impl App {
             Ok(()) => {
                 self.durable_subscription = Some(subscription);
                 if let Err(error) = self.refresh_runtime_input_projection() {
-                    self.state
-                        .notice(format!("{notice}; could not refresh queued inputs: {error}"));
+                    self.state.notice(format!(
+                        "{notice}; could not refresh queued inputs: {error}"
+                    ));
                     return;
                 }
                 self.state.notice(notice);
@@ -511,15 +514,15 @@ impl App {
         snapshot: &TeaObservationSnapshot,
     ) -> Result<(), AppError> {
         let messages = super::durable::project_host_messages(&snapshot.session)?;
-        let has_durable_projection = self
-            .state
-            .transcript()
-            .iter()
-            .enumerate()
-            .any(|(index, entry)| {
-                self.state.transcript_entry_id(index).is_some()
-                    || requires_durable_entry_id(entry)
-            });
+        let has_durable_projection =
+            self.state
+                .transcript()
+                .iter()
+                .enumerate()
+                .any(|(index, entry)| {
+                    self.state.transcript_entry_id(index).is_some()
+                        || requires_durable_entry_id(entry)
+                });
         let replaced = !messages.is_empty() || has_durable_projection;
         self.state.clear_previews();
         if replaced {
@@ -530,8 +533,9 @@ impl App {
                 self.state.apply_preview(preview);
             }
         }
-        let reduction = tea_session::reduce_lane(snapshot.session.clone(), tea_session::LaneId::main())
-            .map_err(|error| AppError::Setup(error.to_string()))?;
+        let reduction =
+            tea_session::reduce_lane(snapshot.session.clone(), tea_session::LaneId::main())
+                .map_err(|error| AppError::Setup(error.to_string()))?;
         self.state
             .set_session_id(Some(snapshot.session.header().session_id.to_string()));
         self.state
@@ -879,11 +883,13 @@ impl App {
     /// calls this path implicitly.
     pub(super) fn continue_recovery(&mut self) -> Result<(), AppError> {
         if self.agent_is_active() {
-            self.state.notice("continuation requires an idle durable harness");
+            self.state
+                .notice("continuation requires an idle durable harness");
             return Ok(());
         }
         let Some(harness) = self.durable_harness.as_ref().cloned() else {
-            self.state.notice("open a durable session before continuing recovery");
+            self.state
+                .notice("open a durable session before continuing recovery");
             return Ok(());
         };
         let report = harness.recovery_report()?;
@@ -892,7 +898,8 @@ impl App {
             .iter()
             .any(|lane| lane.lane_id == tea_session::LaneId::main())
         {
-            self.state.notice("the root session has no interrupted operation");
+            self.state
+                .notice("the root session has no interrupted operation");
             return Ok(());
         }
         if let Err(error) = self.ensure_execution_authority() {
@@ -909,7 +916,8 @@ impl App {
     /// harness boundary and installs fresh inert lane services atomically.
     pub(super) fn fork_settled_turn(&mut self, arguments: &str) -> Result<(), AppError> {
         if self.agent_is_active() {
-            self.state.notice("forking requires an idle durable harness");
+            self.state
+                .notice("forking requires an idle durable harness");
             return Ok(());
         }
         self.refresh_runtime_input_projection()?;
@@ -920,14 +928,12 @@ impl App {
         }
         let mut words = arguments.split_whitespace();
         let Some(checkpoint_text) = words.next() else {
-            self.state
-                .notice("usage: /fork <checkpoint-id> [lane-id]");
+            self.state.notice("usage: /fork <checkpoint-id> [lane-id]");
             return Ok(());
         };
         let lane_text = words.next();
         if words.next().is_some() {
-            self.state
-                .notice("usage: /fork <checkpoint-id> [lane-id]");
+            self.state.notice("usage: /fork <checkpoint-id> [lane-id]");
             return Ok(());
         }
         let checkpoint_id = match TurnCheckpointId::new(checkpoint_text.to_owned()) {

@@ -1073,13 +1073,20 @@ fn validate_recovery_tool_batch(
         else {
             return Err(recovery_transition("non-result-after-assistant", operation));
         };
-        if !tool_calls.iter().any(|call| &call.id == tool_call_id && &call.name == tool_name)
-            || !settled_ids.insert(tool_call_id.clone()) {
+        if !tool_calls
+            .iter()
+            .any(|call| &call.id == tool_call_id && &call.name == tool_name)
+            || !settled_ids.insert(tool_call_id.clone())
+        {
             return Err(recovery_transition("committed-result-mismatch", operation));
         }
         prior_all_terminate &= *terminate;
     }
-    let expected = tool_calls.iter().filter(|call| !settled_ids.contains(&call.id)).cloned().collect::<Vec<_>>();
+    let expected = tool_calls
+        .iter()
+        .filter(|call| !settled_ids.contains(&call.id))
+        .cloned()
+        .collect::<Vec<_>>();
     if expected != recovery_calls {
         return Err(recovery_transition("assistant-tool-mismatch", operation));
     }
@@ -1099,14 +1106,25 @@ fn validate_recovery_tool_batch(
 
 pub(crate) fn order_recovered_tool_results(agent: &AgentInner) {
     let mut state = agent.state.lock().expect("agent state mutex poisoned");
-    let Some(assistant_index) = state.messages.iter().rposition(|message| matches!(message, AgentMessage::Assistant { .. })) else {
+    let Some(assistant_index) = state
+        .messages
+        .iter()
+        .rposition(|message| matches!(message, AgentMessage::Assistant { .. }))
+    else {
         return;
     };
-    let AgentMessage::Assistant { tool_calls, .. } = &state.messages[assistant_index] else { unreachable!() };
-    let positions = tool_calls.iter().enumerate().map(|(index, call)| (call.id.clone(), index))
+    let AgentMessage::Assistant { tool_calls, .. } = &state.messages[assistant_index] else {
+        unreachable!()
+    };
+    let positions = tool_calls
+        .iter()
+        .enumerate()
+        .map(|(index, call)| (call.id.clone(), index))
         .collect::<std::collections::BTreeMap<_, _>>();
     state.messages[assistant_index.saturating_add(1)..].sort_by_key(|message| match message {
-        AgentMessage::ToolResult { tool_call_id, .. } => positions.get(tool_call_id).copied().unwrap_or(usize::MAX),
+        AgentMessage::ToolResult { tool_call_id, .. } => {
+            positions.get(tool_call_id).copied().unwrap_or(usize::MAX)
+        }
         _ => usize::MAX,
     });
     state.history_revision = state.history_revision.saturating_add(1);

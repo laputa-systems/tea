@@ -21,14 +21,13 @@ use crate::tool::AgentToolResult;
 use std::sync::Arc;
 use tea_protocol::JsonValue;
 use tea_session::{
-    AgentGraphNode, EpochFinishReason, EpochFinishedRecord, LaneRecord,
-    OperationFinishedRecord, OperationId, OperationOutcome, PayloadRef, ProvisionedEntry,
-    RecoveryPlan, SessionCommit, SessionCommitItem, SessionEntry, SessionSnapshot, SessionWriter,
-    ToolStartedRecord, reduce_agent_graph, reduce_lane,
+    AgentGraphNode, EpochFinishReason, EpochFinishedRecord, LaneRecord, OperationFinishedRecord,
+    OperationId, OperationOutcome, PayloadRef, ProvisionedEntry, RecoveryPlan, SessionCommit,
+    SessionCommitItem, SessionEntry, SessionSnapshot, SessionWriter, ToolStartedRecord,
+    reduce_agent_graph, reduce_lane,
 };
 
-const INTERRUPTED_CHILD_REPORT: &str =
-    "Child execution was interrupted before it reached a settled report. Tea did not resume the prior assignment.";
+const INTERRUPTED_CHILD_REPORT: &str = "Child execution was interrupted before it reached a settled report. Tea did not resume the prior assignment.";
 
 /// An ordinary tool result reconstructed from a stronger, already committed
 /// child fact. The host effect itself is never replayed here.
@@ -119,17 +118,15 @@ where
             };
             if !lane_operations.contains(&started.operation_id)
                 || snapshot
-                .entries()
-                .iter()
-                .any(|entry| entry.header.id == started.result_entry_id)
+                    .entries()
+                    .iter()
+                    .any(|entry| entry.header.id == started.result_entry_id)
             {
                 continue;
             }
             let value = match started.tool_name.as_str() {
                 "spawn_agent" => self.committed_spawn_result(snapshot, lane_id, started, &graph),
-                "apply_agent_changes" => {
-                    self.committed_apply_result(lane_id, started, &graph)
-                }
+                "apply_agent_changes" => self.committed_apply_result(lane_id, started, &graph),
                 _ => None,
             };
             let Some(value) = value else {
@@ -231,7 +228,8 @@ where
         self.ensure_owned_child_effects_reconciled(&snapshot, &nodes)?;
         self.interrupt_owned_child_provider_attempts(&snapshot, &nodes)?;
         for node in nodes {
-            self.reconcile_interrupted_subagent(coordinator, node).await?;
+            self.reconcile_interrupted_subagent(coordinator, node)
+                .await?;
         }
         Ok(())
     }
@@ -347,28 +345,32 @@ where
             .agents
             .get(&node.spawned.agent_id)
             .cloned()
-            .ok_or_else(|| HarnessError::invalid_state("interrupted child disappeared from graph"))?;
+            .ok_or_else(|| {
+                HarnessError::invalid_state("interrupted child disappeared from graph")
+            })?;
         if current.terminal.is_some() {
             coordinator.restore_terminal_visibility(current.spawned.agent_id);
             return Ok(());
         }
 
-        let (outcome, final_entry_id, report) = match child_operation_outcome(&snapshot, &operation_id)
-        {
-            Some(outcome) => {
-                let (final_entry_id, report) = self.subagent_report_payload(&snapshot, &current)?;
-                (outcome, final_entry_id, report)
-            }
-            None => {
-                let final_entry_id = self.append_interrupted_child_report(&current, &operation_id)?;
-                self.finish_recovered_child_operation(&current, &operation_id)?;
-                (
-                    OperationOutcome::Aborted,
-                    Some(final_entry_id),
-                    PayloadRef::Inline(JsonValue::String(INTERRUPTED_CHILD_REPORT.into())),
-                )
-            }
-        };
+        let (outcome, final_entry_id, report) =
+            match child_operation_outcome(&snapshot, &operation_id) {
+                Some(outcome) => {
+                    let (final_entry_id, report) =
+                        self.subagent_report_payload(&snapshot, &current)?;
+                    (outcome, final_entry_id, report)
+                }
+                None => {
+                    let final_entry_id =
+                        self.append_interrupted_child_report(&current, &operation_id)?;
+                    self.finish_recovered_child_operation(&current, &operation_id)?;
+                    (
+                        OperationOutcome::Aborted,
+                        Some(final_entry_id),
+                        PayloadRef::Inline(JsonValue::String(INTERRUPTED_CHILD_REPORT.into())),
+                    )
+                }
+            };
 
         let snapshot = self.snapshot()?;
         let graph = reduce_agent_graph(&snapshot)
@@ -377,7 +379,9 @@ where
             .agents
             .get(&node.spawned.agent_id)
             .cloned()
-            .ok_or_else(|| HarnessError::invalid_state("interrupted child disappeared from graph"))?;
+            .ok_or_else(|| {
+                HarnessError::invalid_state("interrupted child disappeared from graph")
+            })?;
         let delta = if current.workspace_delta.is_none() {
             match coordinator
                 .services()
@@ -396,12 +400,21 @@ where
                     )
                 })? {
                 WorkspaceFinalization::NoChanges => None,
-                WorkspaceFinalization::Delta(delta) => Some(self.workspace_delta_fact(&current, delta)?),
+                WorkspaceFinalization::Delta(delta) => {
+                    Some(self.workspace_delta_fact(&current, delta)?)
+                }
             }
         } else {
             None
         };
-        self.append_subagent_terminal(&current, operation_id, outcome, final_entry_id, report, delta)?;
+        self.append_subagent_terminal(
+            &current,
+            operation_id,
+            outcome,
+            final_entry_id,
+            report,
+            delta,
+        )?;
         coordinator
             .services()
             .host
@@ -425,11 +438,8 @@ where
         operation_id: &OperationId,
     ) -> Result<tea_session::EntryId, HarnessError> {
         let entry_id = subagent_entry_id(&node.spawned.agent_id, "interrupted-report")?;
-        let entry = ProvisionedEntry::assistant(
-            entry_id.clone(),
-            INTERRUPTED_CHILD_REPORT,
-            Vec::new(),
-        );
+        let entry =
+            ProvisionedEntry::assistant(entry_id.clone(), INTERRUPTED_CHILD_REPORT, Vec::new());
         let mut session = self.session_lock()?;
         let snapshot = session.snapshot()?;
         let reduction = reduce_lane(snapshot.clone(), node.spawned.lane_id.clone())?;
@@ -478,16 +488,20 @@ where
         }
         let mut items = Vec::new();
         if let Some(epoch_id) = open_epoch(&snapshot, operation_id) {
-            items.push(SessionCommitItem::Record(LaneRecord::EpochFinished(EpochFinishedRecord {
-                epoch_id,
-                operation_id: operation_id.clone(),
-                reason: EpochFinishReason::Interrupted,
-            })));
+            items.push(SessionCommitItem::Record(LaneRecord::EpochFinished(
+                EpochFinishedRecord {
+                    epoch_id,
+                    operation_id: operation_id.clone(),
+                    reason: EpochFinishReason::Interrupted,
+                },
+            )));
         }
-        items.push(SessionCommitItem::Record(LaneRecord::OperationFinished(OperationFinishedRecord {
-            operation_id: operation_id.clone(),
-            outcome: OperationOutcome::Aborted,
-        })));
+        items.push(SessionCommitItem::Record(LaneRecord::OperationFinished(
+            OperationFinishedRecord {
+                operation_id: operation_id.clone(),
+                outcome: OperationOutcome::Aborted,
+            },
+        )));
         session.commit(SessionCommit::new(items)?)?;
         Ok(())
     }

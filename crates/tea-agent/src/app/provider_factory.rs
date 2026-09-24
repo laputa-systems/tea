@@ -166,10 +166,7 @@ impl ProviderFactory {
 
     /// Validate a terminal-selected descriptor without consulting credentials
     /// or constructing an adapter.
-    pub(super) fn validate_descriptor(
-        &self,
-        descriptor: &ModelDescriptor,
-    ) -> Result<(), AppError> {
+    pub(super) fn validate_descriptor(&self, descriptor: &ModelDescriptor) -> Result<(), AppError> {
         if descriptor.provider == mock::PROVIDER_ID {
             if descriptor.model != mock::DEFAULT_MODEL_ID {
                 return Err(AppError::Setup(format!(
@@ -577,10 +574,7 @@ mod tests {
         };
 
         let policy = factory
-            .resolve_subagent_policy(
-                &root("local", "caller/local-model"),
-                &config,
-            )
+            .resolve_subagent_policy(&root("local", "caller/local-model"), &config)
             .expect("configured provider catalog resolves");
         assert_eq!(
             policy
@@ -732,7 +726,9 @@ mod tests {
         let credentials = Arc::new(RecordingCredentials {
             loads: AtomicUsize::new(0),
         });
-        let factory = Arc::new(factory(Arc::clone(&credentials) as Arc<dyn CredentialSource>));
+        let factory = Arc::new(factory(
+            Arc::clone(&credentials) as Arc<dyn CredentialSource>
+        ));
         let descriptor = root("openrouter", "openai/gpt-5.6-luna");
 
         let provider = factory

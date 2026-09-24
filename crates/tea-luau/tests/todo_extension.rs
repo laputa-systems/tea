@@ -11,8 +11,8 @@ use std::task::{Context, Poll, Waker};
 use tea_core::effect::RunProvenance;
 use tea_core::harness::extension::{
     ExtensionCapabilityBindings, ExtensionCommandInput, ExtensionEngine, ExtensionError,
-    ExtensionLimits, ExtensionMemoryCollector, ExtensionStateHandle, ExtensionStateStore,
-    ExtensionStateGeneration, ExtensionStateUpdate, ExtensionStateView, ResolvedExtension,
+    ExtensionLimits, ExtensionMemoryCollector, ExtensionStateGeneration, ExtensionStateHandle,
+    ExtensionStateStore, ExtensionStateUpdate, ExtensionStateView, ResolvedExtension,
 };
 use tea_core::harness::ExtensionStateCapability;
 use tea_core::hooks::NoHooks;

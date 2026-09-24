@@ -9,11 +9,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use tea_agent::verification::{
-    LiveChildScenario, LiveCompactionScenario, LiveEvolutionScenario,
     run_controlled_recovery_live_case, run_headless_live_case, run_live_child_scenario,
-    run_live_compaction_scenario, run_live_evolution_scenario, ControlledRecoveryLiveCase,
-    CodexModelEvidence, HeadlessLiveCase, RestrictedCodexFactory, VerificationConsumer,
-    CODEX_MODEL_ID, CODEX_MODEL_SOURCE, CODEX_PROVIDER_ID, CODEX_RESPONSES_ENDPOINT,
+    run_live_compaction_scenario, run_live_evolution_scenario, CodexModelEvidence,
+    ControlledRecoveryLiveCase, HeadlessLiveCase, LiveChildScenario, LiveCompactionScenario,
+    LiveEvolutionScenario, RestrictedCodexFactory, VerificationConsumer, CODEX_MODEL_ID,
+    CODEX_MODEL_SOURCE, CODEX_PROVIDER_ID, CODEX_RESPONSES_ENDPOINT,
 };
 use tea_protocol::JsonValue;
 
@@ -67,11 +67,15 @@ fn main() {
 }
 
 fn run() -> Result<i32, String> {
-    if env::args_os().skip(1).any(|argument| argument == "--one-shot-child") {
+    if env::args_os()
+        .skip(1)
+        .any(|argument| argument == "--one-shot-child")
+    {
         return run_one_shot_child();
     }
     let args = parse_arguments()?;
-    let evidence = CodexModelEvidence::read(&args.model_evidence).map_err(|error| error.to_string())?;
+    let evidence =
+        CodexModelEvidence::read(&args.model_evidence).map_err(|error| error.to_string())?;
     let cases = verification_cases();
     let counterpart_outcomes = if args.run_counterparts {
         run_counterparts(&cases)
@@ -96,7 +100,8 @@ fn run() -> Result<i32, String> {
     if !args.live {
         blocker = Some("pass --live to exercise the selected Codex Luna model".to_owned());
     } else if !args.synthetic_or_public_fixtures {
-        blocker = Some("pass --synthetic-or-public-fixtures to acknowledge disposable input".to_owned());
+        blocker =
+            Some("pass --synthetic-or-public-fixtures to acknowledge disposable input".to_owned());
         live_outcomes.iter_mut().for_each(|outcome| {
             outcome.detail = Some(
                 "live execution requires --synthetic-or-public-fixtures acknowledgement".into(),
@@ -163,12 +168,15 @@ fn run() -> Result<i32, String> {
                         JsonValue::object([
                             ("id", JsonValue::from(case.id)),
                             ("consumer", JsonValue::from(consumer_name(case.consumer))),
-                            ("status", JsonValue::from(case_status(
-                                outcome,
-                                live_outcomes
-                                    .get(case_index(&cases, case))
-                                    .expect("case and live outcome length match"),
-                            ))),
+                            (
+                                "status",
+                                JsonValue::from(case_status(
+                                    outcome,
+                                    live_outcomes
+                                        .get(case_index(&cases, case))
+                                        .expect("case and live outcome length match"),
+                                )),
+                            ),
                             (
                                 "deterministic_counterpart",
                                 JsonValue::from(case.counterpart.join(" ")),
@@ -176,15 +184,19 @@ fn run() -> Result<i32, String> {
                             ("offline_oracle_status", JsonValue::from(outcome.status)),
                             (
                                 "offline_oracle_detail",
-                                outcome
-                                    .detail
-                                    .as_ref()
-                                    .map_or(JsonValue::Null, |detail| JsonValue::from(detail.clone())),
+                                outcome.detail.as_ref().map_or(JsonValue::Null, |detail| {
+                                    JsonValue::from(detail.clone())
+                                }),
                             ),
-                            ("live_transport_status", JsonValue::from(live_outcomes
-                                .get(case_index(&cases, case))
-                                .expect("case and live outcome length match")
-                                .status)),
+                            (
+                                "live_transport_status",
+                                JsonValue::from(
+                                    live_outcomes
+                                        .get(case_index(&cases, case))
+                                        .expect("case and live outcome length match")
+                                        .status,
+                                ),
+                            ),
                             (
                                 "live_transport_detail",
                                 live_outcomes
@@ -192,7 +204,9 @@ fn run() -> Result<i32, String> {
                                     .expect("case and live outcome length match")
                                     .detail
                                     .as_ref()
-                                    .map_or(JsonValue::Null, |detail| JsonValue::from(detail.clone())),
+                                    .map_or(JsonValue::Null, |detail| {
+                                        JsonValue::from(detail.clone())
+                                    }),
                             ),
                         ])
                     })
@@ -201,7 +215,10 @@ fn run() -> Result<i32, String> {
         ),
     ]);
     write_report(&args.out, &report)?;
-    println!("live verification {status}; sanitized report: {}", args.out.display());
+    println!(
+        "live verification {status}; sanitized report: {}",
+        args.out.display()
+    );
     Ok(match status {
         "PASSED" => 0,
         "FAILED" => 1,
@@ -233,19 +250,20 @@ fn suite_status(offline: &[CounterpartOutcome], live: &[LiveOutcome]) -> &'stati
             _ => {}
         }
     }
-    if blocked { "BLOCKED" } else { "PASSED" }
+    if blocked {
+        "BLOCKED"
+    } else {
+        "PASSED"
+    }
 }
 
 fn run_one_shot_child() -> Result<i32, String> {
     let arguments = parse_one_shot_child_arguments()?;
-    let evidence = CodexModelEvidence::read(&arguments.model_evidence)
-        .map_err(|error| error.to_string())?;
-    let factory = RestrictedCodexFactory::new(
-        arguments.credential_path,
-        evidence,
-        arguments.ledger,
-    )
-    .map_err(|error| error.to_string())?;
+    let evidence =
+        CodexModelEvidence::read(&arguments.model_evidence).map_err(|error| error.to_string())?;
+    let factory =
+        RestrictedCodexFactory::new(arguments.credential_path, evidence, arguments.ledger)
+            .map_err(|error| error.to_string())?;
     let consumer = factory.consumer(VerificationConsumer::Root);
     let outcome = run_headless_live_case(HeadlessLiveCase {
         tea_home: &arguments.tea_home,
@@ -274,7 +292,15 @@ fn verification_cases() -> [VerificationCase; 6] {
         VerificationCase {
             consumer: VerificationConsumer::Root,
             id: "synthetic-coding",
-            counterpart: &["cargo", "test", "-p", "tea-core", "--test", "coding_capabilities", "--locked"],
+            counterpart: &[
+                "cargo",
+                "test",
+                "-p",
+                "tea-core",
+                "--test",
+                "coding_capabilities",
+                "--locked",
+            ],
         },
         VerificationCase {
             consumer: VerificationConsumer::Root,
@@ -315,7 +341,15 @@ fn verification_cases() -> [VerificationCase; 6] {
         VerificationCase {
             consumer: VerificationConsumer::Compaction,
             id: "forced-compaction",
-            counterpart: &["cargo", "test", "-p", "tea-core", "--lib", "--locked", "compaction"],
+            counterpart: &[
+                "cargo",
+                "test",
+                "-p",
+                "tea-core",
+                "--lib",
+                "--locked",
+                "compaction",
+            ],
         },
         VerificationCase {
             consumer: VerificationConsumer::CandidateEvaluation,
@@ -325,7 +359,9 @@ fn verification_cases() -> [VerificationCase; 6] {
         VerificationCase {
             consumer: VerificationConsumer::Child,
             id: "isolated-children",
-            counterpart: &["cargo", "test", "-p", "tea-core", "--lib", "--locked", "subagent"],
+            counterpart: &[
+                "cargo", "test", "-p", "tea-core", "--lib", "--locked", "subagent",
+            ],
         },
     ]
 }
@@ -353,7 +389,10 @@ fn run_counterparts(cases: &[VerificationCase]) -> Vec<CounterpartOutcome> {
                 },
                 Ok(status) => CounterpartOutcome {
                     status: "FAILED",
-                    detail: Some(format!("offline oracle exited with {}", status.code().unwrap_or(-1))),
+                    detail: Some(format!(
+                        "offline oracle exited with {}",
+                        status.code().unwrap_or(-1)
+                    )),
                 },
                 Err(error) => CounterpartOutcome {
                     status: "FAILED",
@@ -384,9 +423,7 @@ fn counterpart_command(case: &VerificationCase, root: &Path) -> Command {
 
 fn fixture_expected(case_id: &str) -> Option<&'static str> {
     match case_id {
-        "headless-and-one-shot" => {
-            Some("crates/tea-core/fixtures/expected/single-turn-text.json")
-        }
+        "headless-and-one-shot" => Some("crates/tea-core/fixtures/expected/single-turn-text.json"),
         "interrupted-reopen" => {
             Some("crates/tea-core/fixtures/expected/model-stream-cancellation-reuse.json")
         }
@@ -436,9 +473,10 @@ fn run_live_cases(
     factory: &RestrictedCodexFactory,
     cases: &[VerificationCase],
 ) -> Vec<LiveOutcome> {
-    let (Some(tea_home_root), Some(workspace_root)) =
-        (arguments.tea_home.as_deref(), arguments.workspace.as_deref())
-    else {
+    let (Some(tea_home_root), Some(workspace_root)) = (
+        arguments.tea_home.as_deref(),
+        arguments.workspace.as_deref(),
+    ) else {
         return blocked_live_cases(
             cases,
             "live execution requires explicit existing --tea-home and --workspace directories",
@@ -707,7 +745,12 @@ fn run_one_shot_child_process(
         .arg("--workspace")
         .arg(workspace)
         .arg("--credential-path")
-        .arg(arguments.credential_path.as_ref().expect("live setup requires credential path"))
+        .arg(
+            arguments
+                .credential_path
+                .as_ref()
+                .expect("live setup requires credential path"),
+        )
         .env_remove("OPENROUTER_API_KEY")
         .env_remove("CODEX_API_KEY")
         .env_remove("OPENAI_API_KEY")
@@ -720,7 +763,10 @@ fn run_one_shot_child_process(
     if status.success() {
         Ok(())
     } else {
-        Err(format!("separate one-shot executable exited with {}", status.code().unwrap_or(-1)))
+        Err(format!(
+            "separate one-shot executable exited with {}",
+            status.code().unwrap_or(-1)
+        ))
     }
 }
 
@@ -846,7 +892,10 @@ fn consumer_name(consumer: VerificationConsumer) -> &'static str {
 
 fn budget_json(snapshot: &tea_agent::verification::LiveVerificationBudgetSnapshot) -> JsonValue {
     JsonValue::object([
-        ("attempted_requests", JsonValue::from(snapshot.attempted_requests)),
+        (
+            "attempted_requests",
+            JsonValue::from(snapshot.attempted_requests),
+        ),
         ("active_requests", JsonValue::from(snapshot.active_requests)),
     ])
 }
@@ -872,16 +921,24 @@ fn parse_one_shot_child_arguments() -> Result<OneShotChildArguments, String> {
                 ));
             }
             Some("--ledger") => {
-                ledger = Some(PathBuf::from(values.next().ok_or("--ledger requires a path")?));
+                ledger = Some(PathBuf::from(
+                    values.next().ok_or("--ledger requires a path")?,
+                ));
             }
             Some("--tea-home") => {
-                tea_home = Some(PathBuf::from(values.next().ok_or("--tea-home requires a path")?));
+                tea_home = Some(PathBuf::from(
+                    values.next().ok_or("--tea-home requires a path")?,
+                ));
             }
             Some("--workspace") => {
-                workspace = Some(PathBuf::from(values.next().ok_or("--workspace requires a path")?));
+                workspace = Some(PathBuf::from(
+                    values.next().ok_or("--workspace requires a path")?,
+                ));
             }
             Some("--credential-path") => {
-                credential_path = Some(PathBuf::from(values.next().ok_or("--credential-path requires a path")?));
+                credential_path = Some(PathBuf::from(
+                    values.next().ok_or("--credential-path requires a path")?,
+                ));
             }
             _ => {
                 return Err(format!(
@@ -893,8 +950,7 @@ fn parse_one_shot_child_arguments() -> Result<OneShotChildArguments, String> {
     }
     if !one_shot_child || !live || !synthetic_or_public_fixtures {
         return Err(
-            "one-shot child requires --one-shot-child --live --synthetic-or-public-fixtures"
-                .into(),
+            "one-shot child requires --one-shot-child --live --synthetic-or-public-fixtures".into(),
         );
     }
     Ok(OneShotChildArguments {
@@ -925,7 +981,9 @@ fn parse_arguments() -> Result<Arguments, String> {
                 ));
             }
             Some("--ledger") => {
-                ledger = Some(PathBuf::from(values.next().ok_or("--ledger requires a path")?));
+                ledger = Some(PathBuf::from(
+                    values.next().ok_or("--ledger requires a path")?,
+                ));
             }
             Some("--out") => {
                 out = Some(PathBuf::from(values.next().ok_or("--out requires a path")?));
@@ -934,13 +992,19 @@ fn parse_arguments() -> Result<Arguments, String> {
             Some("--synthetic-or-public-fixtures") => synthetic_or_public_fixtures = true,
             Some("--run-counterparts") => run_counterparts = true,
             Some("--tea-home") => {
-                tea_home = Some(PathBuf::from(values.next().ok_or("--tea-home requires a path")?));
+                tea_home = Some(PathBuf::from(
+                    values.next().ok_or("--tea-home requires a path")?,
+                ));
             }
             Some("--workspace") => {
-                workspace = Some(PathBuf::from(values.next().ok_or("--workspace requires a path")?));
+                workspace = Some(PathBuf::from(
+                    values.next().ok_or("--workspace requires a path")?,
+                ));
             }
             Some("--credential-path") => {
-                credential_path = Some(PathBuf::from(values.next().ok_or("--credential-path requires a path")?));
+                credential_path = Some(PathBuf::from(
+                    values.next().ok_or("--credential-path requires a path")?,
+                ));
             }
             Some("--help") | Some("-h") => {
                 println!(
@@ -948,7 +1012,12 @@ fn parse_arguments() -> Result<Arguments, String> {
                 );
                 std::process::exit(0);
             }
-            _ => return Err(format!("unknown verification argument: {}", argument.to_string_lossy())),
+            _ => {
+                return Err(format!(
+                    "unknown verification argument: {}",
+                    argument.to_string_lossy()
+                ))
+            }
         }
     }
     Ok(Arguments {
@@ -966,11 +1035,19 @@ fn parse_arguments() -> Result<Arguments, String> {
 
 fn write_report(path: &std::path::Path, report: &JsonValue) -> Result<(), String> {
     if path.exists() {
-        return Err(format!("refusing to overwrite existing report {}", path.display()));
+        return Err(format!(
+            "refusing to overwrite existing report {}",
+            path.display()
+        ));
     }
-    let parent = path.parent().ok_or("--out must have an explicit parent directory")?;
+    let parent = path
+        .parent()
+        .ok_or("--out must have an explicit parent directory")?;
     if !parent.is_dir() {
-        return Err(format!("report parent is not a directory: {}", parent.display()));
+        return Err(format!(
+            "report parent is not a directory: {}",
+            parent.display()
+        ));
     }
     let content = report
         .to_json_string_pretty()
@@ -986,10 +1063,16 @@ mod tests {
     #[test]
     fn report_status_requires_all_six_live_and_offline_oracles() {
         let offline = (0..6)
-            .map(|_| CounterpartOutcome { status: "PASSED", detail: None })
+            .map(|_| CounterpartOutcome {
+                status: "PASSED",
+                detail: None,
+            })
             .collect::<Vec<_>>();
         let live = (0..6)
-            .map(|_| LiveOutcome { status: "SEMANTIC_PASSED", detail: None })
+            .map(|_| LiveOutcome {
+                status: "SEMANTIC_PASSED",
+                detail: None,
+            })
             .collect::<Vec<_>>();
         assert_eq!(case_status(&offline[0], &live[0]), "PASSED");
         assert_eq!(suite_status(&offline, &live), "PASSED");
@@ -1001,21 +1084,39 @@ mod tests {
 
         let mut incomplete_offline = offline;
         incomplete_offline[2].status = "NOT_RUN";
-        assert_eq!(case_status(&incomplete_offline[2], &incomplete_live[2]), "BLOCKED");
-        assert_eq!(suite_status(&incomplete_offline, &incomplete_live), "BLOCKED");
+        assert_eq!(
+            case_status(&incomplete_offline[2], &incomplete_live[2]),
+            "BLOCKED"
+        );
+        assert_eq!(
+            suite_status(&incomplete_offline, &incomplete_live),
+            "BLOCKED"
+        );
 
         incomplete_offline[2].status = "FAILED";
-        assert_eq!(case_status(&incomplete_offline[2], &incomplete_live[2]), "FAILED");
-        assert_eq!(suite_status(&incomplete_offline, &incomplete_live), "FAILED");
+        assert_eq!(
+            case_status(&incomplete_offline[2], &incomplete_live[2]),
+            "FAILED"
+        );
+        assert_eq!(
+            suite_status(&incomplete_offline, &incomplete_live),
+            "FAILED"
+        );
     }
 
     #[test]
     fn report_status_preserves_live_failure_even_with_offline_passes() {
         let offline = (0..6)
-            .map(|_| CounterpartOutcome { status: "PASSED", detail: None })
+            .map(|_| CounterpartOutcome {
+                status: "PASSED",
+                detail: None,
+            })
             .collect::<Vec<_>>();
         let mut live = (0..6)
-            .map(|_| LiveOutcome { status: "SEMANTIC_PASSED", detail: None })
+            .map(|_| LiveOutcome {
+                status: "SEMANTIC_PASSED",
+                detail: None,
+            })
             .collect::<Vec<_>>();
         live[0].status = "FAILED";
         assert_eq!(case_status(&offline[0], &live[0]), "FAILED");
@@ -1037,11 +1138,9 @@ mod tests {
                 "isolated-children",
             ]
         );
-        assert!(
-            cases
-                .iter()
-                .all(|case| case.counterpart.first() == Some(&"cargo"))
-        );
+        assert!(cases
+            .iter()
+            .all(|case| case.counterpart.first() == Some(&"cargo")));
         assert_eq!(cases[3].consumer, VerificationConsumer::Compaction);
         assert_eq!(cases[4].consumer, VerificationConsumer::CandidateEvaluation);
         assert_eq!(cases[5].consumer, VerificationConsumer::Child);

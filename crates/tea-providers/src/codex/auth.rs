@@ -203,11 +203,10 @@ impl CodexAuthManager {
             return Err(AuthError::Credential(CredentialError::ReadOnly));
         }
         let credential = self.inner.store.load().map_err(AuthError::Credential)?;
-        if let Some(credential) = credential {
-            if let Some(refresh_token) = credential.refresh_token() {
+        if let Some(credential) = credential
+            && let Some(refresh_token) = credential.refresh_token() {
                 let _ = self.inner.oauth.revoke(refresh_token, cancellation);
             }
-        }
         self.inner.store.remove().map_err(AuthError::Credential)?;
         let mut state = self.inner.refresh.lock().map_err(|_| AuthError::Internal)?;
         state.login_required = false;
@@ -329,7 +328,9 @@ impl CodexAuthManager {
             return Ok(snapshot(&current));
         }
 
-        let refresh_token = current.refresh_token().ok_or(AuthError::MissingRefreshToken)?;
+        let refresh_token = current
+            .refresh_token()
+            .ok_or(AuthError::MissingRefreshToken)?;
         let grant = self.refresh_with_transient_retry(refresh_token, cancellation)?;
         let expires_at = expiry_from(now, grant.expires_in_seconds)?;
         let account_id = account_id_from_grant_or_existing(&grant, current.account_id())?;
@@ -641,7 +642,13 @@ mod tests {
             .expect("read committed replacement")
             .expect("replacement should exist");
         assert_eq!(persisted.access_token().expose(), "new-access");
-        assert_eq!(persisted.refresh_token().expect("Tea refresh token").expose(), "old-refresh");
+        assert_eq!(
+            persisted
+                .refresh_token()
+                .expect("Tea refresh token")
+                .expose(),
+            "old-refresh"
+        );
         assert_eq!(oauth.calls.load(Ordering::SeqCst), 1);
     }
 

@@ -1213,8 +1213,7 @@ fn preview_projection_keeps_streaming_text_as_one_run_scoped_line() {
         LaneId::main(),
         tea_session::OperationId::new("preview-projection-operation")
             .expect("fixture operation ID is valid"),
-        tea_session::EpochId::new("preview-projection-epoch")
-            .expect("fixture epoch ID is valid"),
+        tea_session::EpochId::new("preview-projection-epoch").expect("fixture epoch ID is valid"),
         tea_core::state::RunId(1),
     );
     let identity = tea_core::runtime::PreviewIdentity::assistant(run, MessageId(2));
@@ -1840,12 +1839,12 @@ fn runtime_owned_withdrawal_restores_the_combined_slot_and_settles_each_input() 
     app.refresh_runtime_input_projection()
         .expect("terminal projection refreshes");
 
-    app.state.composer_mut().replace_from_editor("unfinished draft");
-    assert!(
-        !app
-            .withdraw_projected_inputs()
-            .expect("nonempty composer does not withdraw")
-    );
+    app.state
+        .composer_mut()
+        .replace_from_editor("unfinished draft");
+    assert!(!app
+        .withdraw_projected_inputs()
+        .expect("nonempty composer does not withdraw"));
     assert_eq!(
         harness
             .queued_inputs()
@@ -1856,10 +1855,9 @@ fn runtime_owned_withdrawal_restores_the_combined_slot_and_settles_each_input() 
     );
 
     app.state.composer_mut().clear();
-    assert!(
-        app.withdraw_projected_inputs()
-            .expect("empty composer withdraws the combined slot")
-    );
+    assert!(app
+        .withdraw_projected_inputs()
+        .expect("empty composer withdraws the combined slot"));
     assert_eq!(
         app.state().composer().text(),
         "first accepted input\n\nsecond accepted input"
@@ -1868,12 +1866,10 @@ fn runtime_owned_withdrawal_restores_the_combined_slot_and_settles_each_input() 
         app.state().queued_input_ids().is_empty(),
         "terminal clears its projection only after the runtime commits withdrawal"
     );
-    assert!(
-        harness
-            .queued_inputs()
-            .expect("durable queue reads after withdrawal")
-            .is_empty()
-    );
+    assert!(harness
+        .queued_inputs()
+        .expect("durable queue reads after withdrawal")
+        .is_empty());
     for accepted in [&first, &second] {
         assert!(matches!(
             accepted.completion().try_result(),
@@ -2333,11 +2329,8 @@ fn local_provider_is_selectable_without_a_credential() {
     let mut app = App::new(options);
     app.assemble_host().expect("host should assemble");
 
-    app.select_model(
-        "local".into(),
-        "caller/local-model".into(),
-    )
-    .expect("local provider should configure without a key");
+    app.select_model("local".into(), "caller/local-model".into())
+        .expect("local provider should configure without a key");
 
     assert_eq!(
         app.state()

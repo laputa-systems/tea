@@ -170,11 +170,10 @@ impl SessionEntry {
             | Self::ToolActivationChanged(_)
             | Self::HarnessRevisionChanged(_) => {}
         }
-        if let Self::Compaction(entry) = self {
-            if let Some(id) = entry.replacement.artifact_id() {
+        if let Self::Compaction(entry) = self
+            && let Some(id) = entry.replacement.artifact_id() {
                 references.push(id);
             }
-        }
         references
     }
 }
@@ -1353,9 +1352,7 @@ impl SessionFact {
             | Self::WorkspaceDeltaApplied(_)
             | Self::ExtensionStateValueSet(_)
             | Self::TurnCheckpoint(_)
-            | Self::ForkedLane(_) => {
-                Vec::new()
-            }
+            | Self::ForkedLane(_) => Vec::new(),
             Self::WorkspaceDelta(fact) => fact.patch.artifact_id().into_iter().collect(),
             Self::AgentTaskFinished(fact) => fact.report.artifact_id().into_iter().collect(),
             Self::HarnessCatalog(fact) => vec![fact.artifact_id],
@@ -1363,9 +1360,7 @@ impl SessionFact {
                 fact.raw_arguments.artifact_id().into_iter().collect()
             }
             Self::TraceArtifact(fact) => vec![fact.artifact_id],
-            Self::ProviderRequestMaterial(fact) => {
-                fact.request.artifact_id().into_iter().collect()
-            }
+            Self::ProviderRequestMaterial(fact) => fact.request.artifact_id().into_iter().collect(),
             Self::Custom { .. } => Vec::new(),
         }
     }

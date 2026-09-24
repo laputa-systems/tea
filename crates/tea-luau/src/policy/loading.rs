@@ -570,10 +570,7 @@ fn extension_idle_input_table(lua: &Lua, input: &ExtensionIdleInput) -> Result<T
     Ok(table)
 }
 
-fn extension_state_value(
-    lua: &Lua,
-    value: &Option<JsonValue>,
-) -> Result<Value, PolicyError> {
+fn extension_state_value(lua: &Lua, value: &Option<JsonValue>) -> Result<Value, PolicyError> {
     value
         .as_ref()
         .map(|value| json_to_lua(lua, value).map_err(runtime_error))

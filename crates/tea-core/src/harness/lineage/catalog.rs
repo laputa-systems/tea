@@ -210,15 +210,14 @@ impl HarnessRepository {
                         candidate.candidate_id, candidate.draft.proposed_snapshot_id
                     ))
                 })?;
-            let parent_snapshot = repository
-                .snapshots
-                .get(&parent.snapshot_id)
-                .ok_or_else(|| {
+            let parent_snapshot = repository.snapshots.get(&parent.snapshot_id).ok_or_else(
+                || {
                     invalid(format!(
                         "catalog candidate {} parent revision {} references missing snapshot {}",
                         candidate.candidate_id, parent.revision_id, parent.snapshot_id
                     ))
-                })?;
+                },
+            )?;
             let calculated_id = candidate_id(&candidate.draft)?;
             if calculated_id != candidate.candidate_id {
                 return Err(invalid(format!(
@@ -532,14 +531,22 @@ fn encode_bundle(bundle: &PluginBundleRef) -> JsonValue {
                     .collect(),
             ),
         ),
-        ("state_version", optional_string(bundle.state_version.as_deref())),
+        (
+            "state_version",
+            optional_string(bundle.state_version.as_deref()),
+        ),
     ])
 }
 
 fn decode_bundle(value: &JsonValue) -> Result<PluginBundleRef, HarnessLineageError> {
     let object = required_object(
         value,
-        &["plugin_id", "tree_id", "requested_capabilities", "state_version"],
+        &[
+            "plugin_id",
+            "tree_id",
+            "requested_capabilities",
+            "state_version",
+        ],
     )?;
     let mut requested_capabilities = BTreeSet::new();
     for value in required_array(object, "requested_capabilities")? {

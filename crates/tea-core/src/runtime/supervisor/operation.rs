@@ -8,20 +8,19 @@ use super::extension_state::{
 };
 use super::{ExtensionContinuation, LaneRuntime, SessionSupervisor, durable_identifier};
 use crate::harness::HarnessError;
-use tea_core::harness::extension::ExtensionCommandInput;
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, Mutex, Weak};
 use std::task::{Context, Poll, Waker};
+use tea_core::harness::extension::ExtensionCommandInput;
 use tea_session::{
     EntryId, ExtensionControlAppliedRecord, ExtensionStateValue, InputAcceptedRecord,
-    InputSettledRecord, InputStatus, InputWithdrawnRecord, LaneRecord, OperationId,
-    OperationKind, OperationOutcome, OperationStartedRecord, PendingExtensionControl,
-    ProvisionedEntry, SessionCommit, SessionCommitItem, SessionEntry, SessionFact, SessionWriter,
-    reduce_lane,
+    InputSettledRecord, InputStatus, InputWithdrawnRecord, LaneRecord, OperationId, OperationKind,
+    OperationOutcome, OperationStartedRecord, PendingExtensionControl, ProvisionedEntry,
+    SessionCommit, SessionCommitItem, SessionEntry, SessionFact, SessionWriter, reduce_lane,
 };
 
 /// The durable terminal result for one accepted user input.
@@ -416,7 +415,11 @@ where
             let sequence = snapshot.next_sequence().0.to_string();
             let input_id = EntryId::new(durable_identifier(
                 "accepted-input",
-                [snapshot.header().session_id.as_str(), sequence.as_str(), content.as_str()],
+                [
+                    snapshot.header().session_id.as_str(),
+                    sequence.as_str(),
+                    content.as_str(),
+                ],
             ))
             .map_err(|error| HarnessError::invalid_state(error.to_string()))?;
             let mut entry = ProvisionedEntry::user(input_id.clone(), content);
@@ -524,10 +527,7 @@ where
     /// duplicated, withdrawn, or already dispatched. This lets a terminal put
     /// a combined next-message slot back into local composition without
     /// erasing accepted history or racing a started operation.
-    pub fn withdraw_inputs(
-        &self,
-        input_ids: &[EntryId],
-    ) -> Result<WithdrawnInputs, HarnessError> {
+    pub fn withdraw_inputs(&self, input_ids: &[EntryId]) -> Result<WithdrawnInputs, HarnessError> {
         if input_ids.is_empty() {
             return Err(HarnessError::invalid_state(
                 "withdrawing inputs requires at least one accepted input ID",
@@ -687,12 +687,11 @@ where
         outcome: &OperationOutcome,
     ) -> Result<(), HarnessError> {
         for input_id in input_ids {
-            self.input_completions
-                .settle(InputCompletion::new(
-                    input_id.clone(),
-                    operation_id.clone(),
-                    outcome.clone(),
-                ));
+            self.input_completions.settle(InputCompletion::new(
+                input_id.clone(),
+                operation_id.clone(),
+                outcome.clone(),
+            ));
         }
         Ok(())
     }
@@ -791,11 +790,7 @@ where
                 pending.control.extension_id,
             ))
         })?;
-        ensure_retained_state_version(
-            &reduction,
-            &pending.control.extension_id,
-            &state_version,
-        )?;
+        ensure_retained_state_version(&reduction, &pending.control.extension_id, &state_version)?;
         let observed_state = reduction
             .extension_state
             .get(&pending.control.extension_id)
@@ -829,10 +824,13 @@ where
                 )
             })
             .transpose()?;
-        let continuation = result.internal_input.clone().map(|input| ExtensionContinuation {
-            extension_id: pending.control.extension_id.clone(),
-            input,
-        });
+        let continuation = result
+            .internal_input
+            .clone()
+            .map(|input| ExtensionContinuation {
+                extension_id: pending.control.extension_id.clone(),
+                input,
+            });
 
         {
             let mut session = self.session_lock()?;
@@ -843,7 +841,10 @@ where
                     "extension control became active before it could apply; retry the idle drive",
                 ));
             }
-            if current_reduction.lane_state.active_harness_revision.as_ref()
+            if current_reduction
+                .lane_state
+                .active_harness_revision
+                .as_ref()
                 != Some(&pending.control.harness_revision_id)
             {
                 return Err(HarnessError::invalid_state(format!(
@@ -879,19 +880,18 @@ where
             {
                 return Err(HarnessError::invalid_state(format!(
                     "extension state for {} changed while control {} was evaluating; retry the idle drive",
-                    pending.control.extension_id,
-                    pending.control.control_id,
+                    pending.control.extension_id, pending.control.control_id,
                 )));
             }
             let mut items = Vec::with_capacity(3);
             if let Some(state_item) = state_item {
                 items.push(state_item);
             }
-            items.push(SessionCommitItem::Record(LaneRecord::ExtensionControlApplied(
-                ExtensionControlAppliedRecord {
+            items.push(SessionCommitItem::Record(
+                LaneRecord::ExtensionControlApplied(ExtensionControlAppliedRecord {
                     control_id: pending.control.control_id.clone(),
-                },
-            )));
+                }),
+            ));
             if checkpoint_after_final_extension_control(
                 &current_snapshot,
                 lane,
@@ -1043,11 +1043,17 @@ where
                 ));
             }
             let mut items = Vec::with_capacity(original_input.len().saturating_add(1));
-            items.push(SessionCommitItem::Record(LaneRecord::OperationStarted(operation)));
-            items.extend(original_input.into_iter().map(|entry| SessionCommitItem::Entry {
-                lane_id: lane.lane_id.clone(),
-                entry,
-            }));
+            items.push(SessionCommitItem::Record(LaneRecord::OperationStarted(
+                operation,
+            )));
+            items.extend(
+                original_input
+                    .into_iter()
+                    .map(|entry| SessionCommitItem::Entry {
+                        lane_id: lane.lane_id.clone(),
+                        entry,
+                    }),
+            );
             let stored = session.commit(SessionCommit::new(items)?)?;
             stored.seq
         };
@@ -1065,10 +1071,7 @@ where
 fn queued_inputs_from_reduction(
     accepted: &[tea_session::AcceptedInput],
 ) -> Result<Vec<QueuedInput>, HarnessError> {
-    accepted
-        .iter()
-        .map(queued_input_from_accepted)
-        .collect()
+    accepted.iter().map(queued_input_from_accepted).collect()
 }
 
 fn queued_input_from_accepted(
@@ -1169,10 +1172,14 @@ fn checkpoint_after_final_extension_control(
     }) {
         return false;
     }
-    if reduction.pending_extension_controls.iter().any(|candidate| {
-        candidate.control.operation_id == pending.control.operation_id
-            && candidate.control.control_id != pending.control.control_id
-    }) {
+    if reduction
+        .pending_extension_controls
+        .iter()
+        .any(|candidate| {
+            candidate.control.operation_id == pending.control.operation_id
+                && candidate.control.control_id != pending.control.control_id
+        })
+    {
         return false;
     }
     matches!(
@@ -1225,8 +1232,8 @@ mod tests {
     use super::*;
     use std::future::Future;
     use std::pin::Pin;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::{Context, Poll, Wake, Waker};
 
     struct CountWake(AtomicUsize);
@@ -1264,12 +1271,11 @@ mod tests {
         let mut wait = Box::pin(handle.wait());
 
         assert!(matches!(poll_once(wait.as_mut(), &waker), Poll::Pending));
-        registry
-            .settle(InputCompletion::new(
-                input_id,
-                OperationId::new("operation-completion").expect("operation ID is valid"),
-                OperationOutcome::Completed,
-            ));
+        registry.settle(InputCompletion::new(
+            input_id,
+            OperationId::new("operation-completion").expect("operation ID is valid"),
+            OperationOutcome::Completed,
+        ));
 
         assert_eq!(wake.0.load(Ordering::Acquire), 1);
         let Poll::Ready(result) = poll_once(wait.as_mut(), &waker) else {
@@ -1296,10 +1302,8 @@ mod tests {
             OperationId::new("operation-first").expect("operation ID is valid"),
             OperationOutcome::Completed,
         );
-        registry
-            .settle(first.clone());
-        registry
-            .settle(first);
+        registry.settle(first.clone());
+        registry.settle(first);
         registry.settle(InputCompletion::new(
             input_id,
             OperationId::new("operation-second").expect("operation ID is valid"),
@@ -1332,10 +1336,12 @@ mod tests {
             OperationId::new("operation-panic-waker").expect("operation ID is valid"),
             OperationOutcome::Completed,
         );
-        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            registry.settle(completion.clone());
-        }))
-        .is_ok());
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                registry.settle(completion.clone());
+            }))
+            .is_ok()
+        );
         assert_eq!(handle.try_result(), Some(completion));
     }
 }

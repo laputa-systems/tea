@@ -402,11 +402,7 @@ fn reduce_agent_graph_prefix<'a>(
             SessionMutationRef::Entry(stored) => {
                 entries.insert(
                     stored.header.id.clone(),
-                    (
-                        stored.lane_id.clone(),
-                        stored.body.clone(),
-                        position,
-                    ),
+                    (stored.lane_id.clone(), stored.body.clone(), position),
                 );
             }
             SessionMutationRef::Record(stored) => match &stored.record {

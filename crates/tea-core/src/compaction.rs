@@ -832,10 +832,7 @@ impl CompactionRequestPort for CoreCompactionRequestPort<'_> {
         request: ModelRequest,
     ) -> CompactionRequestBeginFuture<'a> {
         Box::pin(async move {
-            if self
-                .provider_request_admitted
-                .swap(true, Ordering::AcqRel)
-            {
+            if self.provider_request_admitted.swap(true, Ordering::AcqRel) {
                 return Err(CompactionError::failed(
                     "a compaction operation may admit only one provider request",
                 ));
@@ -850,7 +847,8 @@ impl CompactionRequestPort for CoreCompactionRequestPort<'_> {
             {
                 Ok(effect) => effect,
                 Err(error) => {
-                    self.provider_request_admitted.store(false, Ordering::Release);
+                    self.provider_request_admitted
+                        .store(false, Ordering::Release);
                     return Err(compaction_effect_error(error));
                 }
             };
@@ -894,7 +892,9 @@ impl CompactionRequestPort for CoreCompactionRequestPort<'_> {
 }
 
 fn compaction_effect_error(error: CoreError) -> CompactionError {
-    CompactionError::failed(format!("compaction effect gate rejected the operation: {error}"))
+    CompactionError::failed(format!(
+        "compaction effect gate rejected the operation: {error}"
+    ))
 }
 
 /// A reserved, caller-driven manual compaction operation.
@@ -1049,7 +1049,11 @@ impl CompactionHandle {
             Err(error) => {
                 if let Err(port_error) = port_result {
                     let _ = self
-                        .emit_lifecycle_terminal(&agent, operation.id, CompactionTerminalOutcome::Failed)
+                        .emit_lifecycle_terminal(
+                            &agent,
+                            operation.id,
+                            CompactionTerminalOutcome::Failed,
+                        )
                         .await;
                     return self.settle_failure(&agent, port_error).await;
                 }
@@ -1389,12 +1393,7 @@ pub(crate) fn commit_replacement(
     replacement: Vec<AgentMessage>,
 ) -> Result<(), CoreError> {
     let mut state = agent.state.lock().expect("agent state mutex poisoned");
-    validate_replacement_precondition(
-        &state,
-        run_id,
-        cancellation,
-        expected_history_revision,
-    )?;
+    validate_replacement_precondition(&state, run_id, cancellation, expected_history_revision)?;
     state.replace_messages(replacement);
     Ok(())
 }

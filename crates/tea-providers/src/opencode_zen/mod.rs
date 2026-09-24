@@ -697,7 +697,10 @@ mod tests {
             RESPONSES_URL,
             Some("https://opencode.ai/another-path")
         ));
-        assert!(!cross_origin_redirect(RESPONSES_URL, Some("/zen/v1/responses")));
+        assert!(!cross_origin_redirect(
+            RESPONSES_URL,
+            Some("/zen/v1/responses")
+        ));
     }
 
     #[test]

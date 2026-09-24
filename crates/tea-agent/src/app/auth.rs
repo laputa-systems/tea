@@ -34,7 +34,9 @@ pub(super) fn codex_credential_store(
             return Arc::new(CodexClientCredentialStore::new(client_path));
         }
     }
-    Arc::new(FileCredentialStore::new(tea_home.join("auth").join("codex.json")))
+    Arc::new(FileCredentialStore::new(
+        tea_home.join("auth").join("codex.json"),
+    ))
 }
 
 /// Execute a Codex authorization command. Status prefers installed client
@@ -71,13 +73,14 @@ fn run_codex_command(command: AuthCommand) -> Result<String, AppError> {
     };
     require_codex_provider(provider)?;
     let home = resolve_tea_home(tea_home)?;
-    let store: Arc<dyn tea_providers::codex::CredentialStore> = if tea_home.is_none()
-        && matches!(command, AuthCommand::Status { .. })
-    {
-        codex_credential_store(&home)
-    } else {
-        Arc::new(FileCredentialStore::new(home.join("auth").join("codex.json")))
-    };
+    let store: Arc<dyn tea_providers::codex::CredentialStore> =
+        if tea_home.is_none() && matches!(command, AuthCommand::Status { .. }) {
+            codex_credential_store(&home)
+        } else {
+            Arc::new(FileCredentialStore::new(
+                home.join("auth").join("codex.json"),
+            ))
+        };
     let manager = CodexAuthManager::with_system_clock(store);
     let cancellation = CancellationToken::new();
 

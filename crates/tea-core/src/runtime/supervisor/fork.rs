@@ -13,8 +13,8 @@ use crate::runtime::RuntimeServices;
 use std::sync::Arc;
 use tea_session::{
     ForkedLaneFact, LaneId, LaneMutation, SessionCommit, SessionCommitItem, SessionFact,
-    SessionSnapshot, SessionWriter, TurnCheckpointFact, TurnCheckpointId,
-    preview_session_commit, reduce_lane,
+    SessionSnapshot, SessionWriter, TurnCheckpointFact, TurnCheckpointId, preview_session_commit,
+    reduce_lane,
 };
 
 /// A fresh user-facing lane created from one settled-turn checkpoint.
@@ -149,9 +149,7 @@ fn settled_root_checkpoint(
             _ => None,
         })
         .ok_or_else(|| {
-            HarnessError::invalid_state(format!(
-                "unknown settled-turn checkpoint {checkpoint_id}"
-            ))
+            HarnessError::invalid_state(format!("unknown settled-turn checkpoint {checkpoint_id}"))
         })?;
     if &checkpoint.lane_id != root_lane_id {
         return Err(HarnessError::invalid_state(format!(
@@ -214,7 +212,9 @@ fn services_for_fork_lane(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scheduler::{CancellationToken, ModelFuture, ModelProvider, ModelRequest, ModelStream};
+    use crate::scheduler::{
+        CancellationToken, ModelFuture, ModelProvider, ModelRequest, ModelStream,
+    };
     use crate::state::ModelDescriptor;
     use crate::tool::ToolRegistry;
     use std::collections::BTreeMap;
@@ -234,7 +234,9 @@ mod tests {
             _request: ModelRequest,
             _cancellation: CancellationToken,
         ) -> ModelFuture<'a> {
-            Box::pin(std::future::ready(Ok(Box::new(ModelStream::default()) as _)))
+            Box::pin(std::future::ready(
+                Ok(Box::new(ModelStream::default()) as _),
+            ))
         }
     }
 
@@ -257,10 +259,10 @@ mod tests {
             leaf_id: Some(input.id.clone()),
             extension_state: BTreeMap::from([("todo".into(), state.clone())]),
         };
-        let revision = tea_session::HarnessRevisionId::new("fork-revision")
-            .expect("valid revision ID");
-        let profile = tea_session::ModelHarnessProfileId::new("fork-profile")
-            .expect("valid profile ID");
+        let revision =
+            tea_session::HarnessRevisionId::new("fork-revision").expect("valid revision ID");
+        let profile =
+            tea_session::ModelHarnessProfileId::new("fork-profile").expect("valid profile ID");
         let mut session = tea_session::MemorySession::create(SessionHeader::new(
             SessionId::new("fork-session").expect("valid session ID"),
             "workspace-test",
@@ -268,12 +270,12 @@ mod tests {
         ))
         .expect("memory session creates");
         session
-            .commit(SessionCommit::one(SessionCommitItem::Record(LaneRecord::InputAccepted(
-                InputAcceptedRecord {
+            .commit(SessionCommit::one(SessionCommitItem::Record(
+                LaneRecord::InputAccepted(InputAcceptedRecord {
                     lane_id: lane.clone(),
                     entry: input.clone(),
-                },
-            ))))
+                }),
+            )))
             .expect("input accepts");
         session
             .commit(
@@ -372,8 +374,10 @@ mod tests {
             LaneId::new("fork-shape").expect("valid fork lane ID"),
         )
         .expect("fork commit builds");
-        let [SessionCommitItem::Lane(LaneMutation::Created { base_leaf_id, .. }),
-            SessionCommitItem::Fact(SessionFact::ForkedLane(fact))] = commit.items()
+        let [
+            SessionCommitItem::Lane(LaneMutation::Created { base_leaf_id, .. }),
+            SessionCommitItem::Fact(SessionFact::ForkedLane(fact)),
+        ] = commit.items()
         else {
             panic!("fork has exactly one topology mutation and one checkpoint binding");
         };

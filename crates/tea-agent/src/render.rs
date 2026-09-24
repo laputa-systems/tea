@@ -1546,13 +1546,11 @@ mod tests {
         let mut state = AppState::new();
         state.set_queued_inputs(vec![
             (
-                tea_session::EntryId::new("render-queued-one")
-                    .expect("fixture entry ID is valid"),
+                tea_session::EntryId::new("render-queued-one").expect("fixture entry ID is valid"),
                 "first instruction".into(),
             ),
             (
-                tea_session::EntryId::new("render-queued-two")
-                    .expect("fixture entry ID is valid"),
+                tea_session::EntryId::new("render-queued-two").expect("fixture entry ID is valid"),
                 "second instruction".into(),
             ),
         ]);

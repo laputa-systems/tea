@@ -7,8 +7,8 @@
 //! bytes before any `spawn_agent` call can occur.
 
 use super::{
-    ApplyAgentChangesResult, InterruptAgentResult, SpawnAgentRequest, SubagentCoordinator,
-    SpawnedAgentHandle, SubagentPolicy, SubagentPolicyError, SubagentStatus, WaitAgentsRequest,
+    ApplyAgentChangesResult, InterruptAgentResult, SpawnAgentRequest, SpawnedAgentHandle,
+    SubagentCoordinator, SubagentPolicy, SubagentPolicyError, SubagentStatus, WaitAgentsRequest,
     WaitAgentsResult, WaitReturnWhen, WaitedSubagent,
 };
 use crate::harness::ToolPresentationDescriptor;
