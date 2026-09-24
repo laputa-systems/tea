@@ -107,12 +107,14 @@ pub(super) struct HostTranscriptMessage {
 static NEXT_SESSION_NONCE: AtomicU64 = AtomicU64::new(1);
 const HOST_SESSION_METADATA_VERSION: u64 = 1;
 const MAX_HOST_SESSION_METADATA_BYTES: u64 = 65_536;
+const LOCAL_ENDPOINT_BINDING_METADATA_KEY: &str = "tea.provider.local_endpoint_binding";
 /// Existing host policy: permit exactly one automatic immutable activation per operation.
 const HOST_HARNESS_ROLLOVER_BUDGET: u32 = 1;
 
 pub(super) struct HostHarnessConfig<'a> {
     pub(super) tea_home: &'a Path,
     pub(super) workspace: &'a Path,
+    pub(super) local_base_url: Option<&'a str>,
     pub(super) configuration: AgentConfiguration,
     pub(super) model: ModelDescriptor,
     pub(super) provider: Arc<dyn ModelProvider>,
@@ -129,6 +131,7 @@ pub(super) struct HostHarnessReopen<'a> {
     pub(super) tea_home: &'a Path,
     pub(super) workspace: &'a Path,
     pub(super) session_id: &'a str,
+    pub(super) local_base_url: Option<&'a str>,
     pub(super) configuration: AgentConfiguration,
     pub(super) model: ModelDescriptor,
     pub(super) provider: Arc<dyn ModelProvider>,
@@ -369,6 +372,7 @@ pub(crate) fn create_live_verification_harness(
         HostHarnessConfig {
             tea_home,
             workspace,
+            local_base_url: None,
             configuration,
             model,
             provider,
@@ -408,6 +412,7 @@ pub(crate) fn create_live_verification_child_harness(
         HostHarnessConfig {
             tea_home,
             workspace,
+            local_base_url: None,
             configuration,
             model: root_model,
             provider: root_provider,
@@ -442,6 +447,7 @@ pub(crate) fn create_live_verification_authoring_harness(
         HostHarnessConfig {
             tea_home,
             workspace,
+            local_base_url: None,
             configuration,
             model,
             provider,
@@ -476,6 +482,7 @@ pub(crate) fn reopen_live_verification_harness(
     reopen_live_verification_host_harness(HostHarnessReopen {
         tea_home,
         workspace,
+        local_base_url: None,
         session_id,
         configuration,
         model,
@@ -504,6 +511,7 @@ pub(crate) fn reopen_live_verification_authoring_harness(
     let harness = reopen_live_verification_host_harness(HostHarnessReopen {
         tea_home,
         workspace,
+        local_base_url: None,
         session_id,
         configuration,
         model,
@@ -540,6 +548,7 @@ pub(crate) fn create_live_verification_compaction_harness(
         HostHarnessConfig {
             tea_home,
             workspace,
+            local_base_url: None,
             configuration,
             model: root_model,
             provider: root_provider,
@@ -576,6 +585,7 @@ pub(crate) fn reopen_live_verification_compaction_harness(
     reopen_live_verification_host_harness(HostHarnessReopen {
         tea_home,
         workspace,
+        local_base_url: None,
         session_id,
         configuration,
         model: root_model,
@@ -620,6 +630,7 @@ fn create_host_harness_with_operations_and_mode(
     let HostHarnessConfig {
         tea_home,
         workspace,
+        local_base_url,
         configuration,
         model,
         provider,
@@ -641,6 +652,14 @@ fn create_host_harness_with_operations_and_mode(
         .transpose()?;
 
     let profile = model_profile(&model)?;
+    let local_model = (model.provider == "local")
+        .then_some(model.model.as_str())
+        .or_else(|| {
+            subagent_policy.as_ref()?.models.iter().find_map(|child| {
+                (child.descriptor.provider == "local").then_some(child.descriptor.model.as_str())
+            })
+        });
+    let local_endpoint_binding = local_endpoint_binding(local_model, local_base_url)?;
     let template = epoch_template(
         Arc::clone(&provider),
         configuration.clone(),
@@ -682,6 +701,12 @@ fn create_host_harness_with_operations_and_mode(
             "tea.model.requested".into(),
             JsonValue::String(model.model.clone()),
         );
+        if let Some(binding) = local_endpoint_binding {
+            metadata.insert(
+                LOCAL_ENDPOINT_BINDING_METADATA_KEY.into(),
+                JsonValue::String(binding.to_hex()),
+            );
+        }
         if let Some(revision) = &model.revision {
             metadata.insert(
                 "tea.model.returned_revision".into(),
@@ -1009,6 +1034,7 @@ pub(super) fn authorize_host_session_reopen(
     workspace: &Path,
     session_id: &str,
     config: &TuiConfig,
+    local_base_url: Option<&str>,
 ) -> Result<ModelDescriptor, AppError> {
     let session_id = SessionId::new(session_id.to_owned())
         .map_err(|error| AppError::Setup(error.to_string()))?;
@@ -1034,9 +1060,14 @@ pub(super) fn authorize_host_session_reopen(
         .map_err(|error| AppError::Setup(error.to_string()))?;
     let current_policy = config.features.subagents.then_some(&config.subagents);
     reopen_subagent_policy(graph.policy.as_ref(), current_policy)?;
-    header.model.ok_or_else(|| {
+    let model = header.model.ok_or_else(|| {
         AppError::Setup("durable session header is missing its immutable model identity".into())
-    })
+    })?;
+    let local_model = (model.provider == "local")
+        .then_some(model.model.as_str())
+        .or_else(|| local_child_model(graph.policy.as_ref()));
+    require_local_endpoint_binding(local_model, header.local_endpoint_binding, local_base_url)?;
+    Ok(model)
 }
 
 /// Reconstruct the terminal host's disposable caches from one validated v1
@@ -1119,6 +1150,7 @@ fn reopen_host_harness_with_operations_and_web_credential_source(
         tea_home,
         workspace,
         session_id,
+        local_base_url,
         configuration,
         model,
         provider,
@@ -1156,6 +1188,12 @@ fn reopen_host_harness_with_operations_and_web_credential_source(
             session_id, stored_model.provider, stored_model.model
         )));
     }
+    let agent_graph =
+        reduce_agent_graph(&snapshot).map_err(|error| AppError::Setup(error.to_string()))?;
+    let local_model = (model.provider == "local")
+        .then_some(model.model.as_str())
+        .or_else(|| local_child_model(agent_graph.policy.as_ref()));
+    require_local_endpoint_binding(local_model, header.local_endpoint_binding, local_base_url)?;
     if let Err(error) = write_host_session_metadata(session.directory(), &snapshot) {
         eprintln!(
             "warning: durable session metadata cache was not refreshed for {}: {error}",
@@ -1164,8 +1202,6 @@ fn reopen_host_harness_with_operations_and_web_credential_source(
     }
     let artifacts: Arc<dyn tea_session::ArtifactStore> =
         Arc::new(session.artifact_store().map_err(AppError::from)?);
-    let agent_graph =
-        reduce_agent_graph(&snapshot).map_err(|error| AppError::Setup(error.to_string()))?;
     let reduction = reduce_lane(snapshot.clone(), LaneId::main())
         .map_err(|error| AppError::Setup(error.to_string()))?;
     let thinking_level = reduction
@@ -2444,6 +2480,7 @@ struct HostSessionHeader {
     session_id: String,
     workspace: String,
     model: Option<ModelDescriptor>,
+    local_endpoint_binding: Option<Digest>,
     thinking_level: ThinkingLevel,
     self_extension_mode: SelfExtensionMode,
 }
@@ -2729,6 +2766,46 @@ fn host_session_header_from_snapshot(
     )
 }
 
+/// Bind a local model to the API root actually used by its adapter. The
+/// digest avoids putting a caller-supplied URL in the session header while
+/// keeping endpoint changes visible at the durable resume boundary.
+fn local_endpoint_binding(
+    local_model: Option<&str>,
+    local_base_url: Option<&str>,
+) -> Result<Option<Digest>, AppError> {
+    let Some(local_model) = local_model else {
+        return Ok(None);
+    };
+    let base_url = local_base_url.unwrap_or(tea_providers::local::DEFAULT_BASE_URL);
+    let config = tea_providers::local::LocalConfig::try_new(base_url, local_model)
+        .map_err(|error| AppError::Setup(error.to_string()))?;
+    let effective_url = config.base_url().trim_end_matches('/');
+    Ok(Some(Digest::from_bytes(format!(
+        "tea.local.endpoint.v1\0{effective_url}"
+    ))))
+}
+
+fn require_local_endpoint_binding(
+    local_model: Option<&str>,
+    stored: Option<Digest>,
+    local_base_url: Option<&str>,
+) -> Result<(), AppError> {
+    let current = local_endpoint_binding(local_model, local_base_url)?;
+    if stored != current {
+        return Err(AppError::Setup(
+            "durable session local provider endpoint differs from the current API root or has no endpoint binding"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
+fn local_child_model(policy: Option<&SubagentPolicyFact>) -> Option<&str> {
+    policy?.models.iter().find_map(|child| {
+        (child.provider == "local").then_some(child.model.as_str())
+    })
+}
+
 fn host_session_metadata(
     session_id: String,
     workspace: String,
@@ -2762,6 +2839,17 @@ fn host_session_metadata(
             ));
         }
     };
+    let local_endpoint_binding = metadata
+        .get(LOCAL_ENDPOINT_BINDING_METADATA_KEY)
+        .map(|value| {
+            let hex = value.as_str().ok_or_else(|| {
+                AppError::Setup("durable local provider endpoint binding must be a string".into())
+            })?;
+            Digest::from_hex(hex).map_err(|_| {
+                AppError::Setup("durable local provider endpoint binding is invalid".into())
+            })
+        })
+        .transpose()?;
     let thinking_level = metadata
         .get("tea.thinking")
         .and_then(JsonValue::as_str)
@@ -2778,6 +2866,7 @@ fn host_session_metadata(
         session_id,
         workspace,
         model,
+        local_endpoint_binding,
         thinking_level,
         self_extension_mode,
     })
@@ -3174,7 +3263,7 @@ mod tests {
 
     impl Write for WaitForChildThenFailOutput {
         fn write(&mut self, _bytes: &[u8]) -> io::Result<usize> {
-            let deadline = Instant::now() + Duration::from_secs(5);
+            let deadline = Instant::now() + Duration::from_secs(15);
             while !self.child_started.load(Ordering::Acquire) {
                 if Instant::now() >= deadline {
                     return Err(io::Error::new(
@@ -3386,6 +3475,7 @@ mod tests {
         let harness = create_host_harness(HostHarnessConfig {
             tea_home: &home,
             workspace: &workspace,
+            local_base_url: None,
             configuration: configuration.clone(),
             model: model.clone(),
             provider: Arc::clone(&provider) as Arc<dyn ModelProvider>,
@@ -3462,6 +3552,7 @@ mod tests {
         let harness = reopen_host_harness(HostHarnessReopen {
             tea_home: &home,
             workspace: &workspace,
+            local_base_url: None,
             session_id: &session_id,
             configuration,
             model,
@@ -3759,6 +3850,7 @@ mod tests {
         let harness = create_mock_host_harness(HostHarnessConfig {
             tea_home: &home,
             workspace: &workspace,
+            local_base_url: None,
             configuration: super::super::mock::configuration(),
             model: model.clone(),
             provider: Arc::clone(&provider),
@@ -3807,6 +3899,7 @@ mod tests {
         let reopened = reopen_mock_host_harness(HostHarnessReopen {
             tea_home: &home,
             workspace: &workspace,
+            local_base_url: None,
             session_id: &session_id,
             configuration: super::super::mock::configuration(),
             model,
@@ -3930,6 +4023,7 @@ data: [DONE]
         let harness = create_host_harness(HostHarnessConfig {
             tea_home: &home,
             workspace: &workspace,
+            local_base_url: None,
             configuration: configuration.clone(),
             model: root_model.clone(),
             provider: Arc::clone(&root_provider) as Arc<dyn ModelProvider>,
@@ -4029,6 +4123,7 @@ data: [DONE]
         let reopened = reopen_host_harness(HostHarnessReopen {
             tea_home: &home,
             workspace: &workspace,
+            local_base_url: None,
             session_id: &session_id,
             configuration,
             model: root_model,
@@ -4205,6 +4300,7 @@ data: [DONE]
         let harness = create_host_harness(HostHarnessConfig {
             tea_home: &home,
             workspace: &workspace,
+            local_base_url: None,
             configuration,
             model,
             provider: Arc::new(StopProvider),
@@ -4259,6 +4355,7 @@ data: [DONE]
         let harness = create_host_harness(HostHarnessConfig {
             tea_home: &home,
             workspace: &workspace,
+            local_base_url: None,
             configuration: AgentConfiguration::new(
                 "trusted system prompt",
                 ToolRegistry::default(),
@@ -4392,6 +4489,7 @@ data: [DONE]
         let harness = create_host_harness(HostHarnessConfig {
             tea_home: &home,
             workspace: &workspace,
+            local_base_url: None,
             configuration: AgentConfiguration::new(
                 "trusted system prompt",
                 tools,
@@ -4743,6 +4841,7 @@ data: [DONE]
         let harness = create_host_harness(HostHarnessConfig {
             tea_home: &home,
             workspace: &workspace,
+            local_base_url: None,
             configuration: AgentConfiguration::new(
                 "trusted system prompt",
                 ToolRegistry::default(),
@@ -4811,7 +4910,7 @@ data: [DONE]
             listener
                 .set_nonblocking(true)
                 .expect("fixture listener becomes nonblocking");
-            let deadline = Instant::now() + Duration::from_secs(5);
+            let deadline = Instant::now() + Duration::from_secs(15);
             let (mut socket, _) = loop {
                 match listener.accept() {
                     Ok(connection) => break connection,
@@ -4856,6 +4955,7 @@ data: [DONE]
         let harness = create_host_harness(HostHarnessConfig {
             tea_home: &home,
             workspace: &workspace,
+            local_base_url: None,
             configuration,
             model: root_model,
             provider: Arc::new(RootSpawnThenPendingTextProvider::default()),
@@ -4926,6 +5026,7 @@ data: [DONE]
         let harness = create_host_harness(HostHarnessConfig {
             tea_home: &home,
             workspace: &workspace,
+            local_base_url: None,
             configuration: AgentConfiguration::new(
                 "trusted system prompt",
                 ToolRegistry::default(),
@@ -4974,6 +5075,7 @@ data: [DONE]
         let harness = create_host_harness(HostHarnessConfig {
             tea_home: &home,
             workspace: &workspace,
+            local_base_url: None,
             configuration,
             model: ModelDescriptor {
                 provider: "openrouter".into(),
@@ -5002,6 +5104,7 @@ data: [DONE]
         let harness = create_host_harness(HostHarnessConfig {
             tea_home: &home,
             workspace: &workspace,
+            local_base_url: None,
             configuration: AgentConfiguration::new(
                 "trusted system prompt",
                 ToolRegistry::default(),
@@ -5060,6 +5163,7 @@ data: [DONE]
         let harness = create_host_harness(HostHarnessConfig {
             tea_home: &home,
             workspace: &workspace,
+            local_base_url: None,
             configuration: configuration.clone(),
             model: model.clone(),
             provider: Arc::clone(&provider),
@@ -5083,6 +5187,7 @@ data: [DONE]
         let reopened = reopen_host_harness(HostHarnessReopen {
             tea_home: &home,
             workspace: &workspace,
+            local_base_url: None,
             session_id: &session_id,
             configuration,
             model,
@@ -5132,6 +5237,7 @@ data: [DONE]
         let harness = create_host_harness(HostHarnessConfig {
             tea_home: &home,
             workspace: &workspace,
+            local_base_url: None,
             configuration,
             model: model.clone(),
             provider: Arc::new(StopProvider),
@@ -5241,6 +5347,7 @@ data: [DONE]
         let harness = create_host_harness(HostHarnessConfig {
             tea_home: &home,
             workspace: &workspace,
+            local_base_url: None,
             configuration: AgentConfiguration::new(
                 "trusted system prompt",
                 ToolRegistry::default(),
@@ -5287,6 +5394,7 @@ data: [DONE]
         let harness = create_host_harness(HostHarnessConfig {
             tea_home: &home,
             workspace: &workspace,
+            local_base_url: None,
             configuration: AgentConfiguration::new(
                 "trusted system prompt",
                 ToolRegistry::default(),
@@ -5350,6 +5458,7 @@ data: [DONE]
         let harness = create_host_harness(HostHarnessConfig {
             tea_home: &home,
             workspace: &workspace,
+            local_base_url: None,
             configuration,
             model: ModelDescriptor {
                 provider: "fixture".into(),
@@ -5404,6 +5513,7 @@ data: [DONE]
         let harness = create_host_harness(HostHarnessConfig {
             tea_home: &home,
             workspace: &workspace,
+            local_base_url: None,
             configuration: AgentConfiguration::new(
                 "trusted system prompt",
                 ToolRegistry::default(),

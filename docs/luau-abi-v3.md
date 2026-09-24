@@ -95,3 +95,16 @@ Candidate validation rejects changing or removing an existing stateful
 extension rather than silently resetting, migrating, or reinterpreting private
 state. A closed generation cannot use mutable registry state to write a new
 namespace.
+
+## Public helper example
+
+[`crates/tea-luau/examples/run_counter`](../crates/tea-luau/examples/run_counter)
+is a closed, optional session plugin. Its manifest requests only
+`extension.state`. The `/run-count` command reads its lane's private count;
+its `on_idle` hook increments that count only after a completed operation and
+saturates at 1,000. It contributes no model-facing tools or ambient process,
+filesystem, network, or provider access. Stage its two files and registry entry
+through the immutable candidate flow described in
+[harness self-extension](harness-self-extension.md). The
+`run_counter_extension` integration test loads those exact public files and
+checks the manifest, command, hook, and bounded state behavior.

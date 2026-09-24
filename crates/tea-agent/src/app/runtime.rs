@@ -1050,10 +1050,16 @@ impl App {
             .clone();
         let automatic_compaction = self.automatic_compaction.clone();
         let subagents = self.subagent_host_config()?;
+        let local_base_url = self
+            .options
+            .local_base_url()
+            .map(|value| os_text(value, "--local-base-url"))
+            .transpose()?;
         let mock_coding_operations = model.provider == mock::PROVIDER_ID;
         let config = super::durable::HostHarnessConfig {
             tea_home: &home,
             workspace: &workspace,
+            local_base_url: local_base_url.as_deref(),
             configuration,
             model,
             provider,
@@ -1120,6 +1126,11 @@ impl App {
             .clone();
         let automatic_compaction = self.automatic_compaction.clone();
         let subagents = self.subagent_host_config()?;
+        let local_base_url = self
+            .options
+            .local_base_url()
+            .map(|value| os_text(value, "--local-base-url"))
+            .transpose()?;
 
         // Drop the prior idle writer before opening another session. This is
         // also what lets a user select the currently displayed session again
@@ -1131,6 +1142,7 @@ impl App {
             tea_home: &home,
             workspace: &workspace,
             session_id: id,
+            local_base_url: local_base_url.as_deref(),
             configuration,
             model,
             provider,

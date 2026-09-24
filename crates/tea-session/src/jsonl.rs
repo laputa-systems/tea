@@ -292,6 +292,38 @@ impl Drop for JsonlSession {
     }
 }
 
+/// An unfinished open or repair must release its lock before returning even
+/// if a fork briefly inherits a duplicate descriptor before exec closes it.
+struct ScopedWriterLock {
+    file: Option<File>,
+}
+
+impl ScopedWriterLock {
+    fn new(file: File) -> Self {
+        Self { file: Some(file) }
+    }
+
+    fn file(&self) -> &File {
+        self.file.as_ref().expect("writer lock owns a file")
+    }
+
+    fn file_mut(&mut self) -> &mut File {
+        self.file.as_mut().expect("writer lock owns a file")
+    }
+
+    fn into_file(mut self) -> File {
+        self.file.take().expect("writer lock transfers its file")
+    }
+}
+
+impl Drop for ScopedWriterLock {
+    fn drop(&mut self) {
+        if let Some(file) = &self.file {
+            let _ = flock(file, FlockOperation::Unlock);
+        }
+    }
+}
+
 impl JsonlSession {
     /// Create a new session directory and its initial v1 header atomically.
     pub fn create(
@@ -305,9 +337,36 @@ impl JsonlSession {
     /// Create a new session with an explicit commit clock.
     pub fn create_with_clock(
         directory: impl AsRef<Path>,
+        header: SessionHeader,
+        durability: DurabilityMode,
+        clock: Arc<dyn SessionClock>,
+    ) -> Result<Self, SessionError> {
+        Self::create_with_clock_and_locked_file(directory, header, durability, clock, |_| {})
+    }
+
+    #[cfg(test)]
+    pub(crate) fn create_with_inherited_descriptor_for_test(
+        directory: impl AsRef<Path>,
+        header: SessionHeader,
+        durability: DurabilityMode,
+    ) -> (Result<Self, SessionError>, File) {
+        let mut inherited = None;
+        let result = Self::create_with_clock_and_locked_file(
+            directory,
+            header,
+            durability,
+            Arc::new(SystemSessionClock),
+            |file| inherited = Some(file.try_clone().expect("test duplicates create descriptor")),
+        );
+        (result, inherited.expect("create lock was acquired"))
+    }
+
+    fn create_with_clock_and_locked_file(
+        directory: impl AsRef<Path>,
         mut header: SessionHeader,
         durability: DurabilityMode,
         clock: Arc<dyn SessionClock>,
+        on_locked: impl FnOnce(&File),
     ) -> Result<Self, SessionError> {
         if header.kind != crate::SESSION_HEADER_KIND
             || header.format != SESSION_FORMAT_IDENTITY
@@ -367,11 +426,13 @@ impl JsonlSession {
                 use std::os::unix::fs::OpenOptionsExt as _;
                 options.mode(0o600);
             }
-            let mut file = options
+            let file = options
                 .open(&temporary_session_path)
                 .map_err(|error| io(&temporary_session_path, error))?;
             acquire_writer_lock(&file, &temporary_session_path)?;
-            write_complete_line(&mut file, &encoded, durability, &temporary_session_path)?;
+            let mut lock = ScopedWriterLock::new(file);
+            on_locked(lock.file());
+            write_complete_line(lock.file_mut(), &encoded, durability, &temporary_session_path)?;
             #[cfg(test)]
             interrupt_creation_at(TestCreationFailpoint::AfterHeaderWrite, &temporary)?;
             let snapshot = SessionSnapshot::empty(header);
@@ -407,7 +468,7 @@ impl JsonlSession {
             Ok(Self {
                 directory: directory.clone(),
                 session_path: directory.join("session.jsonl"),
-                file,
+                file: lock.into_file(),
                 snapshot,
                 append_index,
                 durability,
@@ -439,20 +500,46 @@ impl JsonlSession {
         durability: DurabilityMode,
         clock: Arc<dyn SessionClock>,
     ) -> Result<Self, SessionError> {
+        Self::open_with_clock_and_locked_file(directory, durability, clock, |_| {})
+    }
+
+    #[cfg(test)]
+    pub(crate) fn open_with_inherited_descriptor_for_test(
+        directory: impl AsRef<Path>,
+        durability: DurabilityMode,
+    ) -> (Result<Self, SessionError>, File) {
+        let mut inherited = None;
+        let result = Self::open_with_clock_and_locked_file(
+            directory,
+            durability,
+            Arc::new(SystemSessionClock),
+            |file| inherited = Some(file.try_clone().expect("test duplicates open descriptor")),
+        );
+        (result, inherited.expect("open lock was acquired"))
+    }
+
+    fn open_with_clock_and_locked_file(
+        directory: impl AsRef<Path>,
+        durability: DurabilityMode,
+        clock: Arc<dyn SessionClock>,
+        on_locked: impl FnOnce(&File),
+    ) -> Result<Self, SessionError> {
         let directory = directory.as_ref().to_path_buf();
         ensure_real_directory(&directory)?;
         ensure_layout(&directory)?;
         let session_path = directory.join("session.jsonl");
         ensure_regular_file(&session_path)?;
-        let mut file = OpenOptions::new()
+        let file = OpenOptions::new()
             .read(true)
             .append(true)
             .open(&session_path)
             .map_err(|error| io(&session_path, error))?;
         acquire_writer_lock(&file, &session_path)?;
-        reject_unsupported_format(&mut file, &session_path)?;
+        let mut lock = ScopedWriterLock::new(file);
+        on_locked(lock.file());
+        reject_unsupported_format(lock.file_mut(), &session_path)?;
         let (snapshot, append_index, incomplete_tail_offset) =
-            decode_snapshot_stream(&mut file, &session_path)?;
+            decode_snapshot_stream(lock.file_mut(), &session_path)?;
         if let Some(offset) = incomplete_tail_offset {
             return Err(SessionError::RecoveryRequired {
                 path: session_path.display().to_string(),
@@ -470,7 +557,7 @@ impl JsonlSession {
         Ok(Self {
             directory,
             session_path,
-            file,
+            file: lock.into_file(),
             snapshot,
             append_index,
             durability,
@@ -508,25 +595,51 @@ impl JsonlSession {
         directory: impl AsRef<Path>,
         durability: DurabilityMode,
     ) -> Result<SessionRepair, SessionError> {
+        Self::repair_torn_tail_with_locked_file(directory, durability, |_| {})
+    }
+
+    #[cfg(test)]
+    pub(crate) fn repair_torn_tail_with_inherited_descriptor_for_test(
+        directory: impl AsRef<Path>,
+        durability: DurabilityMode,
+    ) -> Result<(SessionRepair, File), SessionError> {
+        let mut inherited = None;
+        let repair = Self::repair_torn_tail_with_locked_file(directory, durability, |file| {
+            inherited = Some(file.try_clone().expect("test duplicates repair descriptor"));
+        })?;
+        Ok((repair, inherited.expect("repair lock was acquired")))
+    }
+
+    fn repair_torn_tail_with_locked_file(
+        directory: impl AsRef<Path>,
+        durability: DurabilityMode,
+        on_locked: impl FnOnce(&File),
+    ) -> Result<SessionRepair, SessionError> {
         let directory = directory.as_ref().to_path_buf();
         ensure_real_directory(&directory)?;
         ensure_layout(&directory)?;
         let session_path = directory.join("session.jsonl");
         ensure_regular_file(&session_path)?;
-        let mut file = OpenOptions::new()
+        let file = OpenOptions::new()
             .read(true)
             .append(true)
             .open(&session_path)
             .map_err(|error| io(&session_path, error))?;
         acquire_writer_lock(&file, &session_path)?;
-        reject_unsupported_format(&mut file, &session_path)?;
-        let (snapshot, _, torn_tail_offset) = decode_snapshot_stream(&mut file, &session_path)?;
+        let mut lock = ScopedWriterLock::new(file);
+        on_locked(lock.file());
+        reject_unsupported_format(lock.file_mut(), &session_path)?;
+        let (snapshot, _, torn_tail_offset) =
+            decode_snapshot_stream(lock.file_mut(), &session_path)?;
         validate_snapshot(&snapshot)?;
         if let Some(offset) = torn_tail_offset {
-            file.set_len(offset)
+            lock.file()
+                .set_len(offset)
                 .map_err(|error| io(&session_path, error))?;
             if durability == DurabilityMode::Strict {
-                file.sync_data().map_err(|error| io(&session_path, error))?;
+                lock.file()
+                    .sync_data()
+                    .map_err(|error| io(&session_path, error))?;
             }
         }
         let cache_warning = write_head_cache(&directory, &snapshot, durability)

@@ -16,6 +16,8 @@ cargo test -p tea-agent --lib --locked
 cargo test -p tea-agent --features pty-harness --test pty_streaming --locked
 cargo test -p tea-agent --features live-verification --lib --locked
 cargo test -p tea-providers --all-features --locked
+cargo test -p tea-luau --test run_counter_extension --locked
+cargo check --workspace --all-targets --all-features --locked
 ./crates/tea-core/fixtures/run.sh
 python3 scripts/check-crate-graph.py
 scripts/check-toolchain-pin.sh
@@ -123,3 +125,58 @@ one-shot, interrupted reopen, forced compaction, Luau activation/rollback,
 and isolated child scenarios. Each scenario has a durable oracle and an
 offline counterpart; scripted providers never count as a live pass. A missing
 credential or setup rejection remains `BLOCKED` and sends no inference.
+
+## Recorded runtime redesign acceptance
+
+The durable contract is in [architecture](architecture.md),
+[semantics](semantics.md), [session format](session-format-v1.md),
+[recovery](harness-recovery.md), [Luau ABI v3](luau-abi-v3.md),
+[subagents](subagents.md), and [terminal host](tui.md). These checks are
+evidence for that contract, not a source of execution authority.
+
+| Check | Recorded result |
+| --- | --- |
+| `cargo test --workspace --locked` | 736 passed, 0 failed, 7 ignored on macOS and Linux AArch64 after the public helper and writer-lock regressions were added. |
+| `cargo test -p tea-luau --test run_counter_extension --locked` | 1 passed: the public ABI-v3 helper's manifest, private state, command, and idle hook. |
+| `cargo check --workspace --all-targets --all-features --locked` | Passed, including the feature-only live-verification and terminal targets. |
+| `cargo test -p tea-agent --features live-verification --lib --locked` | 205 provider-free feature tests passed, 1 ignored. |
+| `cargo test -p tea-agent --features pty-harness --test pty_streaming --locked` | 11 passed, 0 failed on macOS AArch64. |
+| `./crates/tea-core/fixtures/run.sh` | 29 passed, 0 failed. |
+| `python3 scripts/check-crate-graph.py` and `scripts/check-toolchain-pin.sh` | Both passed; nine workspace crates and no new dependency. |
+| `PYTHONDONTWRITEBYTECODE=1 python3 scripts/check-verification-entrypoints.py` and `PYTHONDONTWRITEBYTECODE=1 python3 -m unittest evals.test_live_verification` | Provider-free entry points passed; 5 Python tests passed. |
+| `git diff --check` | Passed after removing a trailing blank line in `.gitignore`. |
+
+The focused regression tests for atomic batches, corrupt/missing artifacts,
+poisoned writers, interrupted reopen, unsafe effect reconciliation, input
+membership, checkpoint forks, extension state, bounded observation, child
+worktrees, and TUI projection are part of the workspace and PTY commands above.
+The five ignored `tea-session` generated resource fixtures are run explicitly
+when collecting measurements; they are not silently counted as passes in the
+workspace command. The acceptance runner also checks the six live scenarios
+against six separate provider-free counterparts.
+
+The guarded Codex run on 2026-09-24 UTC reported six live passes and six
+offline counterpart passes using `codex/gpt-5.6-luna` at low reasoning effort.
+Its sanitized report was written to
+`/tmp/tea-codex-live.nLMg68/report-recheck.json`, and its aggregate v2
+request ledger to `/tmp/tea-codex-live.nLMg68/ledger.json`. The ledger recorded
+144 attempts: 134 with `gpt-5.6-luna` and ten earlier backend-rejected
+`gpt-6-luna` attempts retained after the user-selected model change. The
+final report had zero active requests and no remaining blocker. These are
+local run artifacts, not reproducible source-tree fixtures; the guarded runner
+above is the way to repeat the check with explicit credentials and disposable
+workspaces. A live pass demonstrates integration, while the deterministic
+checks establish the offline contract.
+
+The Linux AArch64 Docker run of `make test-linux` passed the workspace and all
+11 PTY tests after one broad-run storage-test failure exposed a missing
+explicit unlock in short-lived recovery operations. The focused inherited-
+descriptor regressions for creation, open, and repair first failed, then
+passed after the lock fix. On the
+same macOS host, the redesign comparison recorded
+release binary size 8,356,288 to 8,885,648 bytes (+6.3%), idle RSS 8,432 to
+8,480 KiB, and `tea --version` startup 8.5 to 7.8 ms. The generated 10,000-
+and 27,000-mutation long-history fixtures grew JSONL size by 5–7%; single-run
+reopen times changed from 114 to 129 ms and 393 to 446 ms respectively. These
+figures are local comparisons, not performance limits; the fixture shapes and
+commands are in [persistence measurements](persistence-benchmarks.md).

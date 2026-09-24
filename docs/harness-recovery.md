@@ -12,7 +12,9 @@ separate explicit execution action.
 authority. `JsonlSession::open` requires a complete valid prefix and the one
 writer lock. An unterminated final envelope requires explicit
 `JsonlSession::repair_torn_tail`; corruption in a complete record is not a
-torn tail and is never silently erased.
+torn tail and is never silently erased. A failed creation, rejected writable
+open, and completed or failed repair release their locks before returning,
+even when a child process briefly inherited a duplicate file descriptor.
 
 `SessionSupervisor::reopen` restores immutable catalog/revision/configuration.
 `inspect_recovery(&snapshot)` and `recovery_report()` expose interrupted

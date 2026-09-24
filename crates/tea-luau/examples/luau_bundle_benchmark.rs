@@ -4,7 +4,7 @@
 //! resolves it for plain `cargo`):
 //!
 //! ```text
-//! cargo run -p tea-luau --example v1_luau_benchmark --release
+//! cargo run -p tea-luau --example luau_bundle_benchmark --release
 //! ```
 //!
 //! The output is observational evidence, not a pass/fail performance gate. Wall-clock
@@ -27,6 +27,7 @@ use std::time::{Duration, Instant};
 use tea_core::hooks::BeforeToolCall;
 use tea_core::state::{SerializedJson, ToolCallId};
 use tea_core::tool::ToolCall;
+use tea_luau::bundle::{Bundle, BundleManifest, BUNDLE_ABI_V3_VERSION};
 use tea_luau::LuaPolicy;
 
 const STARTUP_SAMPLES: usize = 32;
@@ -40,6 +41,18 @@ const SIMPLE_POLICY: &str = r#"
         before_tool = function(_) return "allow" end,
     }
 "#;
+
+fn load_policy(source: &str) -> Result<LuaPolicy, String> {
+    let manifest = BundleManifest::new(
+        BUNDLE_ABI_V3_VERSION,
+        "main.luau",
+        std::iter::empty::<&str>(),
+    )
+    .map_err(|error| error.to_string())?;
+    let bundle = Bundle::from_sources(manifest, [("main.luau", source)])
+        .map_err(|error| error.to_string())?;
+    LuaPolicy::load_bundle(bundle).map_err(|error| error.to_string())
+}
 
 #[derive(Debug)]
 struct DurationStats {
@@ -106,13 +119,13 @@ fn startup_and_teardown() -> Result<(), String> {
 
     for _ in 0..STARTUP_SAMPLES {
         let started = Instant::now();
-        let policy = LuaPolicy::load(SIMPLE_POLICY).map_err(|error| error.to_string())?;
+        let policy = load_policy(SIMPLE_POLICY)?;
         black_box(policy.prompt_sections());
         startup.push(started.elapsed());
         drop(policy);
 
         let started = Instant::now();
-        let policy = LuaPolicy::load(SIMPLE_POLICY).map_err(|error| error.to_string())?;
+        let policy = load_policy(SIMPLE_POLICY)?;
         black_box(policy.prompt_sections());
         drop(policy);
         lifecycle.push(started.elapsed());
@@ -125,7 +138,7 @@ fn startup_and_teardown() -> Result<(), String> {
 }
 
 fn hook_invocation() -> Result<(), String> {
-    let policy = LuaPolicy::load(SIMPLE_POLICY).map_err(|error| error.to_string())?;
+    let policy = load_policy(SIMPLE_POLICY)?;
     let call = benchmark_call();
     let mut samples = Vec::with_capacity(HOOK_SAMPLES);
 
@@ -149,7 +162,7 @@ fn isolated_policies() -> Result<(), String> {
         let source = format!(
             "return {{ prompt_sections = {{ {{ id = \"isolated-{index}\", content = \"isolated-policy-{index}\" }} }}, before_tool = function(_) return \"allow\" end }}"
         );
-        policies.push(LuaPolicy::load(&source).map_err(|error| error.to_string())?);
+        policies.push(load_policy(&source)?);
     }
     let load_elapsed = started.elapsed();
 

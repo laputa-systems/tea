@@ -2373,6 +2373,117 @@ fn local_provider_accepts_an_explicit_api_root() {
 }
 
 #[test]
+fn local_session_resume_rejects_a_changed_api_root_before_model_selection() {
+    let tea_home = test_tea_home("local-api-root-reopen");
+    let workspace = tea_home.join("workspace");
+    fs::create_dir(&workspace).expect("workspace should be created");
+    let workspace = fs::canonicalize(workspace).expect("workspace should canonicalize");
+    let options = |base_url: &str| {
+        CliOptions::parse(
+            [
+                "tea",
+                "--tea-home",
+                tea_home.to_str().expect("UTF-8 test path"),
+                "--cwd",
+                workspace.to_str().expect("UTF-8 workspace path"),
+                "--local-base-url",
+                base_url,
+            ]
+            .map(OsString::from),
+        )
+        .expect("local endpoint options parse")
+    };
+    let mut first = App::new(options("http://127.0.0.1:12345/v1"));
+    first.assemble_host().expect("first host should assemble");
+    first
+        .select_model("local".into(), "caller/local-model".into())
+        .expect("local model should select");
+    let harness = first
+        .ensure_durable_harness()
+        .expect("local session should create");
+    let session_id = harness
+        .snapshot()
+        .expect("created session snapshot")
+        .header()
+        .session_id
+        .to_string();
+    drop(harness);
+    drop(first);
+
+    let mut changed = App::new(options("http://127.0.0.1:54321/v1"));
+    changed.assemble_host().expect("changed host should assemble");
+    let error = changed
+        .resume_session(&session_id)
+        .expect_err("a different local endpoint must not inherit this session");
+    assert!(error.to_string().contains("local provider endpoint"));
+    assert!(changed.durable_harness.is_none());
+    assert!(changed.state().selected_model.is_none());
+
+    let mut same = App::new(options("http://127.0.0.1:12345/v1/"));
+    same.assemble_host().expect("matching host should assemble");
+    same.resume_session(&session_id)
+        .expect("matching local endpoint should reopen");
+    let _ = fs::remove_dir_all(tea_home);
+}
+
+#[test]
+fn session_with_local_child_models_rejects_a_changed_api_root() {
+    let tea_home = test_tea_home("local-child-api-root-reopen");
+    fs::write(
+        tea_home.join("config.toml"),
+        "[features]\nsubagents = true\n[subagents]\nprovider = \"local\"\nmodels = [\"child-local\"]\n",
+    )
+    .expect("local child policy writes");
+    let workspace = tea_home.join("workspace");
+    fs::create_dir(&workspace).expect("workspace should be created");
+    let workspace = fs::canonicalize(workspace).expect("workspace should canonicalize");
+    let options = |base_url: &str| {
+        CliOptions::parse(
+            [
+                "tea",
+                "--tea-home",
+                tea_home.to_str().expect("UTF-8 test path"),
+                "--cwd",
+                workspace.to_str().expect("UTF-8 workspace path"),
+                "--provider",
+                mock::PROVIDER_ID,
+                "--local-base-url",
+                base_url,
+            ]
+            .map(OsString::from),
+        )
+        .expect("subagent endpoint options parse")
+    };
+    let mut first = App::new(options("http://127.0.0.1:12345/v1"));
+    first.assemble_host().expect("first host should assemble");
+    let harness = first
+        .ensure_durable_harness()
+        .expect("local child session should create");
+    let session_id = harness
+        .snapshot()
+        .expect("created session snapshot")
+        .header()
+        .session_id
+        .to_string();
+    drop(harness);
+    drop(first);
+
+    let mut changed = App::new(options("http://127.0.0.1:54321/v1"));
+    changed.assemble_host().expect("changed host should assemble");
+    let error = changed
+        .resume_session(&session_id)
+        .expect_err("a different local child endpoint must not inherit this session");
+    assert!(error.to_string().contains("local provider endpoint"));
+    assert!(changed
+        .state()
+        .selected_model
+        .as_ref()
+        .is_some_and(|model| model.provider == "mock"));
+    assert!(changed.durable_harness.is_none());
+    let _ = fs::remove_dir_all(tea_home);
+}
+
+#[test]
 fn prompt_history_returns_to_the_live_draft_after_navigation() {
     let mut state = AppState::new();
     state.record_history("first prompt");

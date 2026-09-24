@@ -160,6 +160,5 @@ reflows only mutable content. Untrusted content cannot issue terminal controls.
 
 Contract tests are in `tea-session`, `tea-core`, `tea-luau`, `tea-agent` and
 the declarative fixture runner. PTY tests preserve the terminal oracle.
-[Verification](verification.md) and [the acceptance ledger](../plan.md) record
-executed checks and distinguish offline behavior from blocked live/platform
-evidence.
+[Verification](verification.md) records the acceptance commands and evidence,
+including the distinct offline, live, and platform checks.

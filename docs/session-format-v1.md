@@ -52,6 +52,10 @@ renamed during inspection or reopen.
 Host-created headers also retain `tea.build.version` and `tea.build.git_sha`.
 Read-only session reports expose those values as `tea_version` and `tea_git_sha`,
 or `null` for sessions created before build identity was recorded.
+For host sessions whose root or allowed child model uses the local adapter,
+`tea.provider.local_endpoint_binding` retains a content digest of the effective
+API root. The terminal checks it before reopening for execution; it does not
+store the caller-supplied URL in the header.
 
 ## Wire, integrity, and commit contract
 
@@ -132,6 +136,9 @@ and reopening can validate.
 Writable opens hold an operating-system exclusive lock on `session.jsonl`.
 Another writer fails while the owner is live; the lock is released by normal
 close and by child-process termination, without a PID-file recovery path.
+Failed creations, rejected writable opens, and explicit repairs release their
+locks before returning, including when a duplicated descriptor briefly outlives
+the operation.
 
 `JsonlSession::inspect` is the read-only replay path. If it reports an
 unterminated final tail, `JsonlSession::repair_torn_tail` is the only repair

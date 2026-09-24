@@ -1062,6 +1062,30 @@ fn injected_creation_failures_publish_nothing_or_one_reopenable_v1_directory() {
 }
 
 #[test]
+fn failed_published_creation_unlocks_before_an_inherited_descriptor_can_delay_reopen() {
+    use crate::jsonl::{TestCreationFailpoint, install_test_creation_failpoint};
+
+    let directory = temporary_session_directory("create-inherited-descriptor");
+    let failpoint = install_test_creation_failpoint(TestCreationFailpoint::AfterPublication);
+    let (creation, inherited) = JsonlSession::create_with_inherited_descriptor_for_test(
+        &directory,
+        SessionHeader::new(
+            SessionId::new("create-inherited-descriptor").expect("valid session ID"),
+            "workspace-test",
+            Metadata::new(),
+        ),
+        DurabilityMode::Development,
+    );
+    drop(failpoint);
+    assert!(matches!(creation, Err(SessionError::Io { .. })));
+    let reopened = JsonlSession::open(&directory, DurabilityMode::Development)
+        .expect("failed publication releases its lock before reopen");
+    drop(reopened);
+    drop(inherited);
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+#[test]
 fn jsonl_commit_appends_only_one_new_canonical_line_without_replacing_the_log() {
     let directory = temporary_session_directory("append-only-file");
     let mut session = JsonlSession::create(
@@ -3460,8 +3484,11 @@ fn injected_write_failures_poison_only_indeterminate_writers_without_hybrid_reco
                     .expect("only the uncommitted tail is repairable");
                 assert_eq!(repaired.truncated_tail_offset, Some(header_len));
             }
-            let reopened = JsonlSession::open(&directory, durability)
-                .expect("prior complete prefix reopens after repair or empty interruption");
+            let reopened = JsonlSession::open(&directory, durability).unwrap_or_else(|error| {
+                panic!(
+                    "case {case_index} ({failpoint:?}) must reopen its prior complete prefix after repair or empty interruption: {error}"
+                )
+            });
             assert_eq!(
                 reopened
                     .snapshot()
@@ -4455,6 +4482,76 @@ fn jsonl_drop_unlocks_before_an_inherited_descriptor_can_delay_close() {
     let reopened = JsonlSession::open(&directory, DurabilityMode::Strict)
         .expect("dropping the owner explicitly unlocks before inherited descriptors close");
     drop(reopened);
+    drop(inherited);
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+#[test]
+fn repair_torn_tail_unlocks_before_an_inherited_descriptor_can_delay_close() {
+    let directory = temporary_session_directory("repair-inherited-descriptor");
+    let session = JsonlSession::create(
+        &directory,
+        SessionHeader::new(
+            SessionId::new("repair-inherited-descriptor").expect("valid session ID"),
+            "workspace-test",
+            Metadata::new(),
+        ),
+        DurabilityMode::Development,
+    )
+    .expect("session creates");
+    drop(session);
+
+    let path = directory.join("session.jsonl");
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .expect("torn-tail fixture opens");
+    std::io::Write::write_all(&mut file, b"{").expect("torn-tail fixture writes");
+    drop(file);
+
+    let (repair, inherited) = JsonlSession::repair_torn_tail_with_inherited_descriptor_for_test(
+        &directory,
+        DurabilityMode::Development,
+    )
+    .expect("torn tail repairs");
+    assert!(repair.truncated_tail_offset.is_some());
+    let reopened = JsonlSession::open(&directory, DurabilityMode::Development)
+        .expect("repair releases its lock even when a duplicate descriptor remains open");
+    drop(reopened);
+    drop(inherited);
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+#[test]
+fn rejected_open_unlocks_before_an_inherited_descriptor_can_delay_repair() {
+    let directory = temporary_session_directory("open-inherited-descriptor");
+    let session = JsonlSession::create(
+        &directory,
+        SessionHeader::new(
+            SessionId::new("open-inherited-descriptor").expect("valid session ID"),
+            "workspace-test",
+            Metadata::new(),
+        ),
+        DurabilityMode::Development,
+    )
+    .expect("session creates");
+    drop(session);
+
+    let path = directory.join("session.jsonl");
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .expect("torn-tail fixture opens");
+    std::io::Write::write_all(&mut file, b"{").expect("torn-tail fixture writes");
+    drop(file);
+
+    let (opened, inherited) = JsonlSession::open_with_inherited_descriptor_for_test(
+        &directory,
+        DurabilityMode::Development,
+    );
+    assert!(matches!(opened, Err(SessionError::RecoveryRequired { .. })));
+    JsonlSession::repair_torn_tail(&directory, DurabilityMode::Development)
+        .expect("a rejected open releases its lock before explicit repair");
     drop(inherited);
     let _ = std::fs::remove_dir_all(&directory);
 }

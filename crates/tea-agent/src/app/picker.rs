@@ -99,7 +99,18 @@ impl App {
         // This is a durable authorization check, not provider selection. It
         // must complete before selection can lazily construct an adapter or
         // clear the currently attached idle harness.
-        let model = super::durable::authorize_host_session_reopen(home, workspace, id, config)?;
+        let local_base_url = self
+            .options
+            .local_base_url()
+            .map(|value| super::runtime::os_text(value, "--local-base-url"))
+            .transpose()?;
+        let model = super::durable::authorize_host_session_reopen(
+            home,
+            workspace,
+            id,
+            config,
+            local_base_url.as_deref(),
+        )?;
         self.select_model_descriptor(model)?;
         self.reopen_durable_session(id)
     }

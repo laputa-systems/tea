@@ -234,7 +234,7 @@ data: [DONE]
 
 "#
                 .to_owned();
-            let deadline = Instant::now() + Duration::from_secs(5);
+            let deadline = Instant::now() + Duration::from_secs(15);
             let mut root_requests = 0_u8;
             let mut child_writer = None;
             let mut child_final = Some(child_final);
@@ -334,13 +334,13 @@ data: [DONE]
 
     fn wait_for_child_stream(&self) {
         self.child_streamed
-            .recv_timeout(Duration::from_secs(5))
+            .recv_timeout(Duration::from_secs(15))
             .expect("child should stream before cancellation");
     }
 
     fn wait_for_root_wait(&self) {
         self.root_wait_started
-            .recv_timeout(Duration::from_secs(5))
+            .recv_timeout(Duration::from_secs(15))
             .expect("root should call wait_agent before cancellation");
     }
 

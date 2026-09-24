@@ -110,6 +110,14 @@ working credential. The terminal checks execution authority immediately before
 admitting text or explicit recovery work; a failure leaves the local draft
 untouched.
 
+Sessions that use the `local` provider as the root or for an allowed child
+model also seal a digest of the effective local API root in the header metadata
+(`tea.provider.local_endpoint_binding`). `/resume` checks this binding before
+selecting a provider or replacing the current session. A changed API root, or
+an older local session without a binding, cannot be reopened for execution;
+its history remains available through session inspection and export. A
+trailing slash on the same API root does not change the binding.
+
 The `/resume` picker omits the durable session currently attached to the host;
 it only offers other saved sessions. Selecting a model through `/models` is a
 two-step flow: choose the provider/model, then choose its reasoning effort.
