@@ -35,6 +35,7 @@ const MAXIMUM_LIST_ITEMS: usize = 100;
 const MAXIMUM_SOURCE_PAGE_BYTES: usize = 8 * 1024;
 
 /// Add the fixed harness-control capability to a host-owned registry.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn stable_harness_tools<S>(
     session: Arc<Mutex<S>>,
     artifacts: Arc<dyn tea_session::ArtifactStore>,

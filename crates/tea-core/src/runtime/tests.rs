@@ -54,6 +54,32 @@ mod recovery_tests;
 mod resume_claim_tests;
 mod trace_failure_tests;
 
+type FixtureTaskMap = BTreeMap<u64, Pin<Box<dyn Future<Output = ()> + Send + 'static>>>;
+type SubagentRuntimeFixture = (
+    Arc<SessionSupervisor<MemorySession>>,
+    Arc<Mutex<Vec<PrepareSubagentRequest>>>,
+    Arc<FixtureTaskRuntime>,
+);
+type ActiveSpawnReplayFixture = (
+    Arc<SessionSupervisor<MemorySession>>,
+    Arc<FixtureTaskRuntime>,
+    Arc<Mutex<Vec<PrepareSubagentRequest>>>,
+    Arc<Mutex<u32>>,
+    Arc<Mutex<bool>>,
+    Arc<Mutex<VecDeque<FixtureFinalization>>>,
+    Arc<Mutex<VecDeque<Result<WorkspaceApplyOutcome, SubagentHostError>>>>,
+    Arc<Mutex<Vec<ApplyWorkspaceDeltaRequest>>>,
+    ToolCall,
+    RunProvenance,
+    SpawnAgentRequest,
+);
+type ActiveSpawnFixture = (
+    Arc<SessionSupervisor<MemorySession>>,
+    Arc<FixtureTaskRuntime>,
+    RunProvenance,
+    Vec<(ToolCall, SpawnAgentRequest)>,
+);
+
 #[derive(Debug)]
 struct QueuedProvider {
     streams: Mutex<VecDeque<ModelStream>>,
@@ -316,8 +342,7 @@ fn fixture_prepared_subagent(
 
 struct FixtureTaskHandle {
     task_id: u64,
-    tasks:
-        std::sync::Weak<Mutex<BTreeMap<u64, Pin<Box<dyn Future<Output = ()> + Send + 'static>>>>>,
+    tasks: std::sync::Weak<Mutex<FixtureTaskMap>>,
 }
 
 impl TaskHandle for FixtureTaskHandle {
@@ -336,7 +361,7 @@ impl TaskHandle for FixtureTaskHandle {
 }
 
 struct FixtureTaskRuntime {
-    tasks: Arc<Mutex<BTreeMap<u64, Pin<Box<dyn Future<Output = ()> + Send + 'static>>>>>,
+    tasks: Arc<Mutex<FixtureTaskMap>>,
     accepted: Mutex<u32>,
     reject_next: Mutex<bool>,
     next_task_id: Mutex<u64>,
@@ -739,11 +764,7 @@ fn append_subagent_policy<S: SessionWriter>(session: &mut S, policy: &SubagentPo
 fn build_subagent_runtime(
     session_id: &str,
     root_streams: Vec<ModelStream>,
-) -> (
-    Arc<SessionSupervisor<MemorySession>>,
-    Arc<Mutex<Vec<PrepareSubagentRequest>>>,
-    Arc<FixtureTaskRuntime>,
-) {
+) -> SubagentRuntimeFixture {
     build_subagent_runtime_with_policy(session_id, root_streams, fixture_subagent_policy())
 }
 
@@ -751,11 +772,7 @@ fn build_subagent_runtime_with_policy(
     session_id: &str,
     root_streams: Vec<ModelStream>,
     policy: SubagentPolicy,
-) -> (
-    Arc<SessionSupervisor<MemorySession>>,
-    Arc<Mutex<Vec<PrepareSubagentRequest>>>,
-    Arc<FixtureTaskRuntime>,
-) {
+) -> SubagentRuntimeFixture {
     build_subagent_runtime_with_child_surface(session_id, root_streams, policy, false)
 }
 
@@ -764,11 +781,7 @@ fn build_subagent_runtime_with_child_surface(
     root_streams: Vec<ModelStream>,
     policy: SubagentPolicy,
     use_root_surface_for_child: bool,
-) -> (
-    Arc<SessionSupervisor<MemorySession>>,
-    Arc<Mutex<Vec<PrepareSubagentRequest>>>,
-    Arc<FixtureTaskRuntime>,
-) {
+) -> SubagentRuntimeFixture {
     let store = Arc::new(MemoryArtifactStore::default());
     let delta_patch_artifact = store
         .put(b"fixture child patch", "application/x-git-diff")
@@ -893,37 +906,13 @@ fn fixture_subagent_manager(
     )
 }
 
-fn build_active_spawn_replay_fixture() -> (
-    Arc<SessionSupervisor<MemorySession>>,
-    Arc<FixtureTaskRuntime>,
-    Arc<Mutex<Vec<PrepareSubagentRequest>>>,
-    Arc<Mutex<u32>>,
-    Arc<Mutex<bool>>,
-    Arc<Mutex<VecDeque<FixtureFinalization>>>,
-    Arc<Mutex<VecDeque<Result<WorkspaceApplyOutcome, SubagentHostError>>>>,
-    Arc<Mutex<Vec<ApplyWorkspaceDeltaRequest>>>,
-    ToolCall,
-    RunProvenance,
-    SpawnAgentRequest,
-) {
+fn build_active_spawn_replay_fixture() -> ActiveSpawnReplayFixture {
     build_active_spawn_replay_fixture_with_options(false, false, true, None)
 }
 
 fn build_active_spawn_replay_fixture_with_foreign_reused_task(
     include_foreign: bool,
-) -> (
-    Arc<SessionSupervisor<MemorySession>>,
-    Arc<FixtureTaskRuntime>,
-    Arc<Mutex<Vec<PrepareSubagentRequest>>>,
-    Arc<Mutex<u32>>,
-    Arc<Mutex<bool>>,
-    Arc<Mutex<VecDeque<FixtureFinalization>>>,
-    Arc<Mutex<VecDeque<Result<WorkspaceApplyOutcome, SubagentHostError>>>>,
-    Arc<Mutex<Vec<ApplyWorkspaceDeltaRequest>>>,
-    ToolCall,
-    RunProvenance,
-    SpawnAgentRequest,
-) {
+) -> ActiveSpawnReplayFixture {
     build_active_spawn_replay_fixture_with_options(include_foreign, false, true, None)
 }
 
@@ -932,19 +921,7 @@ fn build_active_spawn_replay_fixture_with_options(
     settle_spawn_intent: bool,
     include_apply_intent: bool,
     parent_thinking: Option<crate::state::ThinkingLevel>,
-) -> (
-    Arc<SessionSupervisor<MemorySession>>,
-    Arc<FixtureTaskRuntime>,
-    Arc<Mutex<Vec<PrepareSubagentRequest>>>,
-    Arc<Mutex<u32>>,
-    Arc<Mutex<bool>>,
-    Arc<Mutex<VecDeque<FixtureFinalization>>>,
-    Arc<Mutex<VecDeque<Result<WorkspaceApplyOutcome, SubagentHostError>>>>,
-    Arc<Mutex<Vec<ApplyWorkspaceDeltaRequest>>>,
-    ToolCall,
-    RunProvenance,
-    SpawnAgentRequest,
-) {
+) -> ActiveSpawnReplayFixture {
     let store = Arc::new(MemoryArtifactStore::default());
     let delta_patch_artifact = store
         .put(b"fixture child patch", "application/x-git-diff")
@@ -1423,12 +1400,7 @@ fn build_active_spawn_fixture(
     policy: SubagentPolicy,
     child_provider: FixtureChildProvider,
     calls: Vec<(ToolCall, SpawnAgentRequest)>,
-) -> (
-    Arc<SessionSupervisor<MemorySession>>,
-    Arc<FixtureTaskRuntime>,
-    RunProvenance,
-    Vec<(ToolCall, SpawnAgentRequest)>,
-) {
+) -> ActiveSpawnFixture {
     let store = Arc::new(MemoryArtifactStore::default());
     let delta_patch_artifact = store
         .put(b"fixture child patch", "application/x-git-diff")
@@ -1567,12 +1539,7 @@ fn build_active_spawn_fixture(
     (runtime, tasks, provenance, calls)
 }
 
-fn build_active_two_spawn_fixture() -> (
-    Arc<SessionSupervisor<MemorySession>>,
-    Arc<FixtureTaskRuntime>,
-    RunProvenance,
-    Vec<(ToolCall, SpawnAgentRequest)>,
-) {
+fn build_active_two_spawn_fixture() -> ActiveSpawnFixture {
     build_active_spawn_fixture(
         "runtime-subagent-multi",
         fixture_subagent_policy(),

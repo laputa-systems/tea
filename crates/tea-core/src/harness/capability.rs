@@ -258,6 +258,7 @@ impl PluginCapabilityCatalog {
     /// Resolve a persisted reference into a capability set for one immutable
     /// snapshot. This is crate-private because only harness resolution may
     /// bind a script to an epoch configuration.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn bind(
         &self,
         plugin_id: &str,

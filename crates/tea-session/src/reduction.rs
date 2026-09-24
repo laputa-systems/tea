@@ -1339,6 +1339,7 @@ fn unresolved_activation(
     Ok(pending)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn derive_recovery_plan(
     entries: &BTreeMap<EntryId, StoredEntry>,
     operations: &BTreeMap<OperationId, OperationState>,

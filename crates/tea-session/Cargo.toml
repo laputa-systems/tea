@@ -12,3 +12,6 @@ path = "src/lib.rs"
 blake3 = "=1.8.6"
 rustix = { version = "=1.1.4", default-features = false, features = ["fs", "std"] }
 tea-protocol = { path = "../tea-protocol" }
+
+[lints]
+workspace = true

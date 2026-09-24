@@ -177,6 +177,7 @@ pub enum EffectSubject {
 /// durable host interprets this request in its own session format and must
 /// commit it before the core message becomes observable.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[allow(clippy::large_enum_variant)]
 pub enum DurableWriteRequest {
     /// One post-policy tool result about to join the canonical transcript.
     ToolResult {
@@ -310,6 +311,7 @@ pub struct ProviderResponse {
 
 /// Provider effect settlement seen by a gate.
 #[derive(Clone, Debug, PartialEq)]
+#[allow(clippy::large_enum_variant)]
 pub enum ProviderEffectOutcome {
     /// The response reached a terminal stream event.
     Settled(ProviderResponse),
@@ -327,6 +329,7 @@ pub enum ProviderEffectOutcome {
 /// replacement may later enter canonical context through
 /// [`DurableWriteRequest::CompactionReplacement`].
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[allow(clippy::large_enum_variant)]
 pub enum CompactionProviderEffectOutcome {
     /// The summary provider reached a terminal successful response.
     Succeeded {

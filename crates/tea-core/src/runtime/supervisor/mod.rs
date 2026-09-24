@@ -96,6 +96,15 @@ use tea_session::{
 };
 use tea_trace::{JsonLinesSink, RedactingSink, TraceEvent, TraceSink};
 
+/// Reopened supervisor parts shared with deterministic test fixtures.
+#[cfg(test)]
+pub(crate) type ReopenedTestParts = (
+    Arc<HarnessResolver>,
+    RuntimeServices,
+    Arc<dyn ArtifactStore>,
+    Option<super::subagents::SubagentServices>,
+);
+
 /// Exact immutable identity selected for an operation's core epochs.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HarnessIdentity {
@@ -767,17 +776,7 @@ where
     }
 
     #[cfg(test)]
-    pub(crate) fn reopen_parts_for_test(
-        &self,
-    ) -> Result<
-        (
-            Arc<HarnessResolver>,
-            RuntimeServices,
-            Arc<dyn ArtifactStore>,
-            Option<super::subagents::SubagentServices>,
-        ),
-        HarnessError,
-    > {
+    pub(crate) fn reopen_parts_for_test(&self) -> Result<ReopenedTestParts, HarnessError> {
         Ok((
             Arc::clone(&self.manager),
             self.root_lane()?.runtime_services.clone(),

@@ -37,6 +37,7 @@ pub(super) enum RootTaskOutcome {
     Recovery,
 }
 
+#[allow(clippy::large_enum_variant)]
 enum RootTaskCompletion {
     Settled(Result<RootTaskOutcome, HarnessError>),
     Disconnected,
@@ -391,11 +392,12 @@ impl App {
     }
 
     pub(super) fn drain_events(&mut self) {
-        loop {
-            let event = match self.durable_subscription.as_ref() {
-                Some(subscription) => subscription.try_recv(),
-                None => break,
-            };
+        while self.durable_subscription.is_some() {
+            let event = self
+                .durable_subscription
+                .as_ref()
+                .expect("durable subscription presence checked")
+                .try_recv();
             match event {
                 Ok(event) => self.project_durable_event(event),
                 Err(TeaEventTryRecvError::Empty) => break,

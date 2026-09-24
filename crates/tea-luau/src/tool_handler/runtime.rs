@@ -634,6 +634,7 @@ fn provenance_to_lua(lua: &Lua, provenance: &RunProvenance) -> mlua::Result<Tabl
 }
 
 /// What a suspended handler asked the host to do before it resumes.
+#[allow(clippy::large_enum_variant)]
 enum HandlerYield {
     /// Invoke the one capability explicitly bound to this tool.
     Capability(CapabilityRequest),

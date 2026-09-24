@@ -269,6 +269,7 @@ impl HostSubagentConfig {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn build_host(
         &self,
         workspace: PathBuf,
@@ -2227,6 +2228,7 @@ fn reopen_subagent_policy(
 /// resolver catalog. Building it independently gives reopen a deterministic
 /// catalog derivation for every permitted model, including models never
 /// previously spawned in this process.
+#[allow(clippy::too_many_arguments)]
 fn child_harness_seeds(
     artifacts: Arc<dyn tea_session::ArtifactStore>,
     provider: Arc<dyn ModelProvider>,
@@ -2314,6 +2316,7 @@ fn child_harness_seeds(
 /// Stage every permitted child profile in the same immutable resolver catalog
 /// as the root. The resulting identities are the host lookup table used for
 /// an exact descriptor at child preparation time.
+#[allow(clippy::too_many_arguments)]
 fn seed_child_harnesses(
     repository: &mut HarnessRepository,
     artifacts: Arc<dyn tea_session::ArtifactStore>,
@@ -2362,6 +2365,7 @@ fn seed_child_harnesses(
 /// Recompute the immutable child catalog identities during session reopen.
 /// `AgentSpawned` facts are intentionally not consulted: the policy's closed
 /// ordered model catalog is enough to recover models never used before exit.
+#[allow(clippy::too_many_arguments)]
 fn derive_child_harnesses(
     artifacts: Arc<dyn tea_session::ArtifactStore>,
     provider: Arc<dyn ModelProvider>,

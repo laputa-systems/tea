@@ -254,6 +254,7 @@ impl PreviewEvent {
 
 /// One application-level event envelope.
 #[derive(Clone, Debug, PartialEq)]
+#[allow(clippy::large_enum_variant)]
 pub enum TeaEvent {
     /// A core-owned run event for a local application consumer.
     Agent {

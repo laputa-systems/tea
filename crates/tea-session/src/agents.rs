@@ -948,6 +948,7 @@ fn reduce_agent_graph_prefix<'a>(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn validate_spawn(
     spawn: &AgentSpawnedFact,
     position: TimelinePosition,

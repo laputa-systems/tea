@@ -58,3 +58,6 @@ required-features = ["pty-harness"]
 name = "codex-luna-verification"
 path = "examples/codex_luna_verification.rs"
 required-features = ["live-verification"]
+
+[lints]
+workspace = true

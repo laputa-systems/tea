@@ -19,3 +19,6 @@ tea-protocol = { path = "../tea-protocol" }
 
 [dev-dependencies]
 smol.workspace = true
+
+[lints]
+workspace = true

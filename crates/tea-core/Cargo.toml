@@ -33,3 +33,6 @@ required-features = ["fixture-runner"]
 [[bench]]
 name = "quality_memory"
 harness = false
+
+[lints]
+workspace = true

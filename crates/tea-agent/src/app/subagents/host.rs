@@ -106,6 +106,7 @@ impl From<&ModelDescriptor> for ChildHarnessKey {
 impl TuiSubagentHost {
     /// Bind terminal-local authority to child harness identities already staged
     /// in the session's immutable resolver catalog.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         workspace: PathBuf,
         session_directory: PathBuf,
@@ -132,6 +133,7 @@ impl TuiSubagentHost {
     /// provider supplied by the verification factory. This has no terminal
     /// configuration or provider-factory fallback.
     #[cfg(feature = "live-verification")]
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new_live_verification(
         workspace: PathBuf,
         session_directory: PathBuf,
@@ -158,6 +160,7 @@ impl TuiSubagentHost {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn with_provider_source(
         workspace: PathBuf,
         session_directory: PathBuf,

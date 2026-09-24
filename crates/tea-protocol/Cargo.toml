@@ -13,3 +13,6 @@ default = []
 
 [dependencies]
 miniserde = { workspace = true }
+
+[lints]
+workspace = true

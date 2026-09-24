@@ -241,51 +241,70 @@ fn parse_cache(o: &Obj) -> Result<Option<CacheEvidence>, JsonTraceDecodeError> {
             "field cache_evidence has wrong type",
         ));
     };
-    let mut c = CacheEvidence::default();
-    c.continuity = take_opt_str(p, "continuity")?;
-    c.cache_domain_fingerprint = take_opt_u64(p, "cache_domain_fingerprint")?;
-    c.changed_cache_domain_components = take_strings(p, "changed_cache_domain_components")?;
-    c.context_bytes = take_opt_u64(p, "context_bytes")?;
-    c.common_context_prefix_bytes = take_opt_u64(p, "common_context_prefix_bytes")?;
-    c.common_context_prefix_ratio_millionths =
+    let continuity = take_opt_str(p, "continuity")?;
+    let cache_domain_fingerprint = take_opt_u64(p, "cache_domain_fingerprint")?;
+    let changed_cache_domain_components = take_strings(p, "changed_cache_domain_components")?;
+    let context_bytes = take_opt_u64(p, "context_bytes")?;
+    let common_context_prefix_bytes = take_opt_u64(p, "common_context_prefix_bytes")?;
+    let common_context_prefix_ratio_millionths =
         take_opt_u64(p, "common_context_prefix_ratio_millionths")?
             .map(u32::try_from)
             .transpose()
             .map_err(|_| JsonTraceDecodeError::new("ratio out of range"))?;
-    c.context_projection_changed = take_opt_bool(p, "context_projection_changed")?;
-    c.context_fingerprint = take_opt_u64(p, "context_fingerprint")?;
-    c.system_prompt_fingerprint = take_opt_u64(p, "system_prompt_fingerprint")?;
-    c.tool_definition_fingerprint = take_opt_u64(p, "tool_definition_fingerprint")?;
-    c.tool_order_fingerprint = take_opt_u64(p, "tool_order_fingerprint")?;
-    c.model_fingerprint = take_opt_u64(p, "model_fingerprint")?;
-    c.thinking_fingerprint = take_opt_u64(p, "thinking_fingerprint")?;
-    c.deterministic_common_prefix_bytes = take_opt_u64(p, "deterministic_common_prefix_bytes")?;
-    c.deterministic_common_prefix_tokens_estimate =
+    let context_projection_changed = take_opt_bool(p, "context_projection_changed")?;
+    let context_fingerprint = take_opt_u64(p, "context_fingerprint")?;
+    let system_prompt_fingerprint = take_opt_u64(p, "system_prompt_fingerprint")?;
+    let tool_definition_fingerprint = take_opt_u64(p, "tool_definition_fingerprint")?;
+    let tool_order_fingerprint = take_opt_u64(p, "tool_order_fingerprint")?;
+    let model_fingerprint = take_opt_u64(p, "model_fingerprint")?;
+    let thinking_fingerprint = take_opt_u64(p, "thinking_fingerprint")?;
+    let deterministic_common_prefix_bytes = take_opt_u64(p, "deterministic_common_prefix_bytes")?;
+    let deterministic_common_prefix_tokens_estimate =
         take_opt_u64(p, "deterministic_common_prefix_tokens_estimate")?;
-    c.provider_cache_read_tokens = take_opt_u64(p, "provider_cache_read_tokens")?;
-    c.provider_cache_write_tokens = take_opt_u64(p, "provider_cache_write_tokens")?;
-    c.serialized_request_bytes = take_opt_u64(p, "serialized_request_bytes")?;
-    c.adapter_cache_domain_fingerprint = take_opt_u64(p, "adapter_cache_domain_fingerprint")?;
-    c.provider_surface_digest = take_opt_str(p, "provider_surface_digest")?;
-    match take(p, "adapter_cache_domain_components")? {
-        miniserde::json::Value::Object(m) => {
-            c.adapter_cache_domain_components = m
-                .iter()
-                .map(|(k, v)| match v {
-                    miniserde::json::Value::Number(miniserde::json::Number::U64(n)) => {
-                        Ok((k.clone(), *n))
-                    }
-                    _ => Err(JsonTraceDecodeError::new("map value has wrong type")),
-                })
-                .collect::<Result<_, _>>()?
-        }
+    let provider_cache_read_tokens = take_opt_u64(p, "provider_cache_read_tokens")?;
+    let provider_cache_write_tokens = take_opt_u64(p, "provider_cache_write_tokens")?;
+    let serialized_request_bytes = take_opt_u64(p, "serialized_request_bytes")?;
+    let adapter_cache_domain_fingerprint = take_opt_u64(p, "adapter_cache_domain_fingerprint")?;
+    let provider_surface_digest = take_opt_str(p, "provider_surface_digest")?;
+    let adapter_cache_domain_components = match take(p, "adapter_cache_domain_components")? {
+        miniserde::json::Value::Object(m) => m
+            .iter()
+            .map(|(k, v)| match v {
+                miniserde::json::Value::Number(miniserde::json::Number::U64(n)) => {
+                    Ok((k.clone(), *n))
+                }
+                _ => Err(JsonTraceDecodeError::new("map value has wrong type")),
+            })
+            .collect::<Result<_, _>>()?,
         _ => {
             return Err(JsonTraceDecodeError::new(
                 "field adapter_cache_domain_components has wrong type",
             ));
         }
-    }
-    Ok(Some(c))
+    };
+    Ok(Some(CacheEvidence {
+        continuity,
+        cache_domain_fingerprint,
+        changed_cache_domain_components,
+        context_bytes,
+        common_context_prefix_bytes,
+        common_context_prefix_ratio_millionths,
+        context_projection_changed,
+        context_fingerprint,
+        system_prompt_fingerprint,
+        tool_definition_fingerprint,
+        tool_order_fingerprint,
+        model_fingerprint,
+        thinking_fingerprint,
+        deterministic_common_prefix_bytes,
+        deterministic_common_prefix_tokens_estimate,
+        provider_cache_read_tokens,
+        provider_cache_write_tokens,
+        serialized_request_bytes,
+        adapter_cache_domain_fingerprint,
+        adapter_cache_domain_components,
+        provider_surface_digest,
+    }))
 }
 fn parse_compaction(o: &Obj) -> Result<TraceEvent, JsonTraceDecodeError> {
     let stage = match take_str(o, "stage")?.as_str() {

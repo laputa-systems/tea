@@ -481,7 +481,6 @@ fn parse_usage(usage: &JsonValue) -> Usage {
             .get("cost")
             .and_then(JsonValue::as_str)
             .map(|s| s.to_owned()),
-        ..Usage::default()
     }
 }
 

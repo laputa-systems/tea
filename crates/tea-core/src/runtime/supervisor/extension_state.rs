@@ -570,6 +570,7 @@ mod tests {
         assert!(error.to_string().contains("no longer active"));
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn start_generation_operation(
         session: &mut MemorySession,
         lane: &LaneId,
