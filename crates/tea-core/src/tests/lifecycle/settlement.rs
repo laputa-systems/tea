@@ -54,12 +54,7 @@ fn caller_driven_text_run_emits_lifecycle_and_settles() {
             .expect("assistant message starts");
         let assistant_update = events
             .iter()
-            .position(|event| {
-                matches!(
-                    event.kind,
-                    AgentEventKind::MessageUpdate { .. }
-                )
-            })
+            .position(|event| matches!(event.kind, AgentEventKind::MessageUpdate { .. }))
             .expect("assistant message updates");
         let assistant_end = events
             .iter()

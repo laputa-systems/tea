@@ -171,9 +171,10 @@ impl SessionEntry {
             | Self::HarnessRevisionChanged(_) => {}
         }
         if let Self::Compaction(entry) = self
-            && let Some(id) = entry.replacement.artifact_id() {
-                references.push(id);
-            }
+            && let Some(id) = entry.replacement.artifact_id()
+        {
+            references.push(id);
+        }
         references
     }
 }

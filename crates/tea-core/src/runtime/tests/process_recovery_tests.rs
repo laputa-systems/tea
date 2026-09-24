@@ -450,7 +450,7 @@ fn process_services(
         CrashPoint::UnsafeToolIntent => tools.insert(Arc::new(BlockingUnsafeTool)),
         CrashPoint::ProviderFinal => tools.insert(Arc::new(RecordingTool)),
     };
-    
+
     match point {
         CrashPoint::UnsafeToolIntent => RuntimeServices::new(provider, tools),
         CrashPoint::ProviderFinal => {

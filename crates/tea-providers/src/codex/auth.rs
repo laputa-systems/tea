@@ -204,9 +204,10 @@ impl CodexAuthManager {
         }
         let credential = self.inner.store.load().map_err(AuthError::Credential)?;
         if let Some(credential) = credential
-            && let Some(refresh_token) = credential.refresh_token() {
-                let _ = self.inner.oauth.revoke(refresh_token, cancellation);
-            }
+            && let Some(refresh_token) = credential.refresh_token()
+        {
+            let _ = self.inner.oauth.revoke(refresh_token, cancellation);
+        }
         self.inner.store.remove().map_err(AuthError::Credential)?;
         let mut state = self.inner.refresh.lock().map_err(|_| AuthError::Internal)?;
         state.login_required = false;
