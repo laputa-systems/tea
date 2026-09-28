@@ -1,7 +1,9 @@
 # Runtime architecture
 
-Tea is an in-process extensible agent runtime. The session is authoritative;
-model context and terminal presentation are projections of it.
+Tea is a single-session extensible agent runtime. The core executes in-process;
+each host owns or attaches to at most one live root session at a time. The
+session is authoritative; model context and terminal presentation are
+projections of it.
 
 ```text
 Rust embedding / one-shot CLI / TUI
@@ -44,6 +46,40 @@ workspace/process/filesystem/network authority, clocks and execution.
 `EffectGate`; it creates no durable session and rejects session-dependent
 policies that have no explicit host implementation. Memory-backed sessions are
 useful embeddings/tests, not crash-durable storage.
+
+## Single-session invariant
+
+Tea is intentionally a session harness, not a session manager. One host has
+zero or one attached root `SessionSupervisor`; there is never a host-owned
+collection of live root supervisors. `/new` and `/resume` are replacement
+operations: the host leaves its current root session before attaching another.
+Stored session directories remain inert until explicitly opened. Read-only
+listing, inspection, export and verification do not create runtime ownership or
+advance work.
+
+Fork lanes, goal continuations and optional subagents are internal execution
+inside the one root session. They share its durable authority and do not create
+independently schedulable top-level sessions. Independent tea invocations may
+each own one session, but no tea component may multiplex or supervise those
+invocations as a fleet.
+
+The one permitted process split is crash isolation between presentation and the
+one session it is presenting. A session-owned runtime process may outlive a
+failed TUI so already-admitted work and durable settlement are not coupled to
+terminal health. Any such boundary must remain one-to-one and session-scoped:
+
+- the runtime endpoint is bound to exactly one durable session;
+- the endpoint cannot create, discover, select, switch or route other root
+  sessions;
+- reattachment names the exact session directly, using only session-owned
+  metadata or IPC;
+- a minimal private session-local transport is allowed, but not a reusable
+  daemon API or repository-wide control plane; and
+- the runtime process is never repurposed for another session after its owning
+  session ends.
+
+This exception permits a disposable TUI without turning tea into a resident
+service.
 
 ## Persistence
 
@@ -114,6 +150,9 @@ integration stays in `tea-agent`. Stable entry identities and a local frontier
 emit settled rows once to native scrollback; the bounded live tail remains
 mutable and only modals borrow the alternate screen.
 
-There is no daemon, RPC/control protocol, arbitrary durable-task registry,
-workflow language, replicated document store, service hot reload, or hidden
-second engine.
+There is no multi-session manager, live-root registry, session broker, global
+daemon, resident supervisor, arbitrary durable-task registry, workflow
+language, replicated document store, service hot reload, or hidden second
+engine. There is no repository-wide RPC/control plane. Minimal session-local
+IPC is allowed only for the one-to-one TUI crash-isolation boundary defined
+above.

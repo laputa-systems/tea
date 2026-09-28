@@ -2,6 +2,9 @@
 
 minimal extensible agent harness
 
+Tea is deliberately single-session. A running host attaches to at most one live
+root session; it never becomes a multi-session manager or resident service.
+
 Start with [docs/overview.md](docs/overview.md). The main routes are:
 
 - [Quickstart](docs/quickstart.md) for an application integration.
@@ -23,6 +26,29 @@ Start with [docs/overview.md](docs/overview.md). The main routes are:
   for fixture-based contract work.
 - [Luau ABI v3](docs/luau-abi-v3.md) for the optional capability-scoped
   policy plane.
+
+## Architectural invariants
+
+- A tea host owns or attaches to at most one live root session at a time.
+  Switching with `/new` or `/resume` replaces that attachment; it never
+  multiplexes root sessions.
+- Saved session directories are inert durable state until explicitly opened.
+  Listing, inspecting, exporting, verifying, or presenting them must not keep
+  them alive or advance work.
+- Do not add a live-session registry, session tabs/workspaces, a background
+  session scheduler, a daemon, broker, resident server, global control socket,
+  or any service whose job is to supervise or route among root sessions.
+- Fork lanes and optional subagents belong to the one attached root session.
+  They must not become independently managed top-level sessions.
+- Presentation may be crash-isolated from execution only through a one-to-one,
+  session-owned boundary. A session-scoped runtime process may outlive a failed
+  TUI and use minimal session-local IPC, but it may serve only that session,
+  cannot discover/create/switch other root sessions, and cannot become a
+  reusable global service. Reattachment must identify the exact session
+  directly rather than asking a broker to enumerate live sessions.
+- Independent tea invocations may each own one session. The prohibition is on
+  multiplexing or supervising multiple root sessions inside one harness or
+  shared resident service, not on a machine-global singleton.
 
 ## Working contract
 

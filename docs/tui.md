@@ -1,8 +1,31 @@
 # Terminal host
 
-The tea terminal is a presentation layer over one managed `SessionSupervisor`. It
-does not own a transcript format, an extension registry, or a second agent
+The tea terminal is a presentation layer over one managed `SessionSupervisor`.
+It does not own a transcript format, an extension registry, or a second agent
 loop.
+
+## Single-session host contract
+
+The terminal attaches to exactly one live root session at a time. It has no
+session tabs, root-session workspace collection, background root-session
+scheduler, or registry of live sessions. `/new` and `/resume` replace the
+single attachment; they never leave the previous root running under the same
+host. Saved sessions shown by a picker are inert durable directories, not
+managed background sessions. Independent tea invocations may each own one
+session, but tea provides no resident process that supervises or routes among
+them.
+
+The TUI itself is disposable. A future crash-isolation implementation may put
+the attached `SessionSupervisor` behind a session-owned process boundary so a
+TUI crash does not cancel already-admitted work. That is explicitly not a
+daemon architecture: the runtime process must be bound to one exact session,
+use only minimal session-local IPC, accept no request to enumerate/create/open
+or switch other sessions, and never become a reusable broker. Reattachment
+must name the exact session directly.
+
+This is a permitted lifetime boundary, not a requirement that the current
+terminal already runs out-of-process. Orderly terminal shutdown may continue to
+cancel and join work according to the documented shutdown contract.
 
 ## Scrollback-native presentation
 
@@ -93,6 +116,8 @@ cache-friendly compaction requests.
 
 Sessions live below the explicit Tea home, scoped by a normalized workspace
 identity. Each is a v1 session directory with its colocated object store.
+Persisted directories are cold state until opened; the picker is navigation
+over that storage, not a control surface for multiple live sessions.
 
 - /resume opens the durable session picker and reopens a selected durable session.
 - /new creates a new durable session.

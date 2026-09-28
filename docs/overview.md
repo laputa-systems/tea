@@ -1,8 +1,9 @@
 # tea
 
-tea is a minimal, extensible, durable agent harness. The core execution engine
-remains provider- and executor-agnostic; the repository-owned terminal enters
-through the durable harness for every prompt.
+tea is a minimal, extensible, durable, single-session agent harness. The core
+execution engine remains provider- and executor-agnostic; the repository-owned
+terminal enters through the durable harness for every prompt. Tea intentionally
+does not multiplex live root sessions or rely on a resident daemon.
 
 ## Start here
 

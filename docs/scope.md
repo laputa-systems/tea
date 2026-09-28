@@ -1,7 +1,8 @@
 # Scope
 
 Tea v1 is a provider- and executor-agnostic Rust agent core with an optional
-durable harness and a repository-owned terminal host.
+durable harness and a repository-owned terminal host. It is deliberately a
+single-session harness, not a multi-session manager.
 
 The core owns typed agent state, one active run, provider request construction,
 tool scheduling, queues, hooks, cancellation, compaction transactions, event
@@ -15,6 +16,19 @@ process, provider, artifact-store, or promotion authority.
 
 The terminal uses that durable layer for all prompts. It is not a second
 execution engine.
+
+A host may own or attach to at most one live root session. Saved sessions are
+inert until explicitly opened; switching sessions replaces the host's
+attachment rather than multiplexing roots. Fork lanes, goal continuation and
+optional subagents remain subordinate to that one session. Tea does not own a
+live-session registry, background session scheduler, daemon, broker, resident
+server, or global control plane.
+
+Presentation/execution crash isolation is the only process-separation exception.
+A session-owned runtime process may survive a TUI failure and expose minimal
+session-local IPC for direct reattachment to that exact session. It may not
+discover, create, select, route, or supervise other root sessions, and it may
+not be reused as a global service.
 
 Luau remains optional and capability-scoped. Its closed v3 bundles can
 contribute bounded policy but cannot redefine core state transitions, session
