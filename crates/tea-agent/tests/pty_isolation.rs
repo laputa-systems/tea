@@ -605,3 +605,173 @@ fn switching_sessions_moves_the_attachment_instead_of_accumulating_runtimes() {
     assert!(runtime_record(&second).is_none());
     let _ = fs::remove_dir_all(home);
 }
+
+/// A local provider that answers the first request with a `bash` tool call
+/// and the second with text, counting requests.
+struct ToolProvider {
+    url: String,
+    requests: Arc<AtomicUsize>,
+    shutdown: Arc<std::sync::atomic::AtomicBool>,
+    server: Option<thread::JoinHandle<()>>,
+}
+
+impl ToolProvider {
+    fn start(command: &str) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("fixture binds");
+        listener.set_nonblocking(true).expect("nonblocking");
+        let url = format!("http://{}/v1", listener.local_addr().expect("address"));
+        let requests = Arc::new(AtomicUsize::new(0));
+        let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let counted = Arc::clone(&requests);
+        let stop = Arc::clone(&shutdown);
+        let arguments = tea_protocol::JsonValue::String(
+            tea_protocol::JsonValue::object([("command", tea_protocol::JsonValue::from(command))])
+                .to_json_string()
+                .expect("arguments"),
+        )
+        .to_json_string()
+        .expect("encoded arguments");
+        let server = thread::spawn(move || {
+            while !stop.load(Ordering::SeqCst) {
+                let (mut socket, _) = match listener.accept() {
+                    Ok(connection) => connection,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(5));
+                        continue;
+                    }
+                    Err(_) => return,
+                };
+                socket.set_nonblocking(false).expect("blocking socket");
+                let mut request = [0_u8; 65_536];
+                let _ = socket.read(&mut request);
+                let body = if counted.fetch_add(1, Ordering::SeqCst) == 0 {
+                    format!(
+                        "data: {{\"choices\":[{{\"delta\":{{\"tool_calls\":[{{\"index\":0,\"id\":\"call-bash\",\"function\":{{\"name\":\"bash\",\"arguments\":{arguments}}}}}]}},\"finish_reason\":\"tool_calls\"}}]}}\n\ndata: [DONE]\n\n"
+                    )
+                } else {
+                    "data: {\"choices\":[{\"delta\":{\"content\":\"bash finished\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n".to_owned()
+                };
+                let _ = socket.write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                );
+                let _ = socket.flush();
+            }
+        });
+        Self {
+            url,
+            requests,
+            shutdown,
+            server: Some(server),
+        }
+    }
+}
+
+impl Drop for ToolProvider {
+    fn drop(&mut self) {
+        self.shutdown.store(true, Ordering::SeqCst);
+        if let Some(server) = self.server.take() {
+            let _ = server.join();
+        }
+    }
+}
+
+#[test]
+fn losing_the_terminal_during_a_bash_tool_wait_lets_the_runtime_finish_the_turn() {
+    let _lock = lock();
+    let home = tea_home("bash");
+    let workspace = home.join("workspace");
+    fs::create_dir_all(&workspace).expect("workspace");
+    let gate = workspace.join("go");
+    let marker = workspace.join("done.txt");
+    // The command waits for the test, so the terminal is lost mid-tool.
+    let command = format!(
+        "while [ ! -e {} ]; do sleep 0.05; done; echo finished > {}",
+        gate.display(),
+        marker.display()
+    );
+    let provider = ToolProvider::start(&command);
+    let scenario = Scenario::new("isolation bash")
+        .expect("valid label")
+        .command(CommandSpec::new(env!("CARGO_BIN_EXE_tea")).args([
+            "--tea-home",
+            home.to_str().expect("UTF-8"),
+            "--cwd",
+            workspace.to_str().expect("UTF-8"),
+            "--provider",
+            "local",
+            "--model",
+            MODEL,
+            "--local-base-url",
+            provider.url.as_str(),
+        ]))
+        .size(Size::new(100, 24).expect("size"))
+        .environment(TestEnv::hermetic().expect("hermetic environment"))
+        .protocol_profile(ProtocolProfile::xterm_minimal_v1());
+    let mut terminal = PtyTest::spawn(scenario).expect("tea starts");
+    submit(&mut terminal, "run the slow command");
+    wait_for("bash request", Duration::from_secs(10), || {
+        (provider.requests.load(Ordering::SeqCst) >= 1).then_some(())
+    });
+    terminal
+        .wait_for_screen(
+            terminal.deadline(Duration::from_secs(10)),
+            "bash running",
+            |screen| screen.contains("bash"),
+        )
+        .expect("the tool row renders");
+    let directory = wait_for("session directory", Duration::from_secs(5), || {
+        session_directory(&home)
+    });
+    let (runtime, session) = wait_for("runtime record", Duration::from_secs(5), || {
+        runtime_record(&directory)
+    });
+    terminal.signal(9).expect("kill the relay");
+    let _ = terminal.wait_for_exit(terminal.deadline(Duration::from_secs(5)));
+    let _ = terminal.finish(terminal.deadline(Duration::from_secs(3)));
+    assert!(alive(runtime));
+
+    // The runtime-owned command keeps running and completes; the runtime
+    // then asks the model for the next step and settles the turn.
+    fs::write(&gate, "").expect("release the command");
+    wait_for("command completion", Duration::from_secs(15), || {
+        marker.exists().then_some(())
+    });
+    wait_for("detached runtime exit", Duration::from_secs(20), || {
+        (!alive(runtime)).then_some(())
+    });
+    assert_eq!(provider.requests.load(Ordering::SeqCst), 2);
+    assert_eq!(entry_counts(&directory), (1, 2));
+
+    let scenario = Scenario::new("isolation bash reattach")
+        .expect("valid label")
+        .command(CommandSpec::new(env!("CARGO_BIN_EXE_tea")).args([
+            "--tea-home",
+            home.to_str().expect("UTF-8"),
+            "--cwd",
+            workspace.to_str().expect("UTF-8"),
+            "--provider",
+            "local",
+            "--local-base-url",
+            provider.url.as_str(),
+            "--attach",
+            session.as_str(),
+        ]))
+        .size(Size::new(100, 24).expect("size"))
+        .environment(TestEnv::hermetic().expect("hermetic environment"))
+        .protocol_profile(ProtocolProfile::xterm_minimal_v1());
+    let mut reopened = PtyTest::spawn(scenario).expect("tea reattaches");
+    reopened
+        .wait_for_screen(
+            reopened.deadline(Duration::from_secs(10)),
+            "settled turn",
+            |screen| screen.contains("bash finished"),
+        )
+        .expect("the settled tool turn is visible");
+    quit(reopened);
+    assert_eq!(provider.requests.load(Ordering::SeqCst), 2);
+    let _ = fs::remove_dir_all(home);
+}
