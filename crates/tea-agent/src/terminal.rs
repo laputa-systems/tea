@@ -78,6 +78,9 @@ pub enum TerminalEvent {
     FocusGained,
     FocusLost,
     Mouse,
+    /// A new terminal attached to a session runtime; the whole view must be
+    /// presented again from state.
+    Reattached,
 }
 
 /// Errors from terminal setup, input, output, or restoration.
@@ -127,12 +130,45 @@ impl From<Errno> for TerminalError {
 /// Normal conversation stays on the main screen. The contained portable
 /// renderer enters the alternate screen only for explicit temporary surfaces.
 pub struct TerminalGuard {
-    input: Stdin,
-    renderer: InlineTerminal<Stdout>,
+    input: TerminalInput,
+    renderer: InlineTerminal<TerminalOutput>,
     original_termios: Option<Termios>,
     active: bool,
     last_size: Option<(u16, u16)>,
     decoder: InputDecoder,
+    remote_generation: u64,
+}
+
+/// Where terminal input comes from: the controlling terminal, or a relay
+/// attached to this session runtime.
+enum TerminalInput {
+    Local(Stdin),
+    Remote(std::sync::Arc<crate::detach::RemoteLink>),
+}
+
+/// Where rendered output goes.
+#[derive(Debug)]
+pub enum TerminalOutput {
+    /// The controlling terminal.
+    Local(Stdout),
+    /// The attached relay; discarded while detached.
+    Remote(crate::detach::RemoteOutput),
+}
+
+impl Write for TerminalOutput {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        match self {
+            Self::Local(stdout) => stdout.write(bytes),
+            Self::Remote(remote) => remote.write(bytes),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        match self {
+            Self::Local(stdout) => stdout.flush(),
+            Self::Remote(remote) => remote.flush(),
+        }
+    }
 }
 
 impl fmt::Debug for TerminalGuard {
@@ -148,8 +184,29 @@ impl TerminalGuard {
     /// Enter the terminal modes owned by the application.
     pub fn enter() -> Result<Self, TerminalError> {
         let mut guard = Self {
-            input: stdin(),
-            renderer: InlineTerminal::new(stdout()),
+            input: TerminalInput::Local(stdin()),
+            renderer: InlineTerminal::new(TerminalOutput::Local(stdout())),
+            original_termios: None,
+            active: false,
+            last_size: None,
+            decoder: InputDecoder::default(),
+            remote_generation: 0,
+        };
+        guard.activate()?;
+        Ok(guard)
+    }
+
+    /// Present through a relay attached to this session runtime instead of
+    /// a controlling terminal. The relay owns raw mode on the real terminal.
+    pub fn enter_remote(
+        link: std::sync::Arc<crate::detach::RemoteLink>,
+    ) -> Result<Self, TerminalError> {
+        let mut guard = Self {
+            renderer: InlineTerminal::new(TerminalOutput::Remote(
+                crate::detach::RemoteOutput::new(std::sync::Arc::clone(&link)),
+            )),
+            remote_generation: link.generation(),
+            input: TerminalInput::Remote(link),
             original_termios: None,
             active: false,
             last_size: None,
@@ -159,17 +216,34 @@ impl TerminalGuard {
         Ok(guard)
     }
 
+    /// Whether this runtime currently has no terminal attached.
+    pub fn is_detached(&self) -> bool {
+        match &self.input {
+            TerminalInput::Local(_) => false,
+            TerminalInput::Remote(link) => link.is_detached(),
+        }
+    }
+
     fn activate(&mut self) -> Result<(), TerminalError> {
-        let original = tcgetattr(&self.input)?;
+        let TerminalInput::Local(input) = &self.input else {
+            self.write_mode_sequences(true)
+                .and_then(|()| self.flush_io())
+                .map_err(TerminalError::Io)?;
+            self.active = true;
+            self.last_size = Some(self.size()?);
+            self.decoder = InputDecoder::default();
+            return Ok(());
+        };
+        let original = tcgetattr(input)?;
         let mut raw = original.clone();
         raw.make_raw();
-        tcsetattr(&self.input, OptionalActions::Now, &raw)?;
+        tcsetattr(input, OptionalActions::Now, &raw)?;
 
         if let Err(error) = self
             .write_mode_sequences(true)
             .and_then(|()| self.flush_io())
         {
-            let _ = tcsetattr(&self.input, OptionalActions::Now, &original);
+            self.restore_termios(&original);
             return Err(TerminalError::Io(error));
         }
 
@@ -179,7 +253,7 @@ impl TerminalGuard {
                 let _ = self
                     .write_mode_sequences(false)
                     .and_then(|()| self.flush_io());
-                let _ = tcsetattr(&self.input, OptionalActions::Now, &original);
+                self.restore_termios(&original);
                 return Err(error);
             }
         };
@@ -199,11 +273,12 @@ impl TerminalGuard {
         let command_result = self
             .write_mode_sequences(false)
             .and_then(|()| self.flush_io());
-        let raw_result = self
-            .original_termios
-            .take()
-            .map(|termios| tcsetattr(&self.input, OptionalActions::Now, &termios))
-            .unwrap_or(Ok(()));
+        let raw_result = match (&self.input, self.original_termios.take()) {
+            (TerminalInput::Local(input), Some(termios)) => {
+                tcsetattr(input, OptionalActions::Now, &termios)
+            }
+            _ => Ok(()),
+        };
         self.active = false;
         self.last_size = None;
         presentation_result.map_err(TerminalError::Io)?;
@@ -247,6 +322,40 @@ impl TerminalGuard {
             .decoder
             .timeout_until_escape(now)
             .map_or(timeout, |remaining| remaining.min(timeout));
+        if let TerminalInput::Remote(link) = &self.input {
+            let link = std::sync::Arc::clone(link);
+            if link.generation() != self.remote_generation {
+                // A different terminal: start presentation from scratch.
+                self.remote_generation = link.generation();
+                self.renderer = InlineTerminal::new(TerminalOutput::Remote(
+                    crate::detach::RemoteOutput::new(std::sync::Arc::clone(&link)),
+                ));
+                self.decoder = InputDecoder::default();
+                self.last_size = Some(link.size());
+                self.write_mode_sequences(true)
+                    .and_then(|()| self.flush_io())
+                    .map_err(TerminalError::Io)?;
+                return Ok(Some(TerminalEvent::Reattached));
+            }
+            let seen = (
+                self.remote_generation,
+                self.last_size.unwrap_or_else(|| link.size()),
+            );
+            let bytes = link.wait_input(wait, seen);
+            self.decoder.push(&bytes);
+            if let Some(event) = self.decoder.next_event(Instant::now()) {
+                return Ok(Some(event));
+            }
+            let size = link.size();
+            if self.last_size != Some(size) {
+                self.last_size = Some(size);
+                return Ok(Some(TerminalEvent::Resize(size.0, size.1)));
+            }
+            return Ok(None);
+        }
+        let TerminalInput::Local(input) = &mut self.input else {
+            unreachable!("remote input returned above");
+        };
         let timespec = duration_to_timespec(wait);
         // Child-workspace cleanup reaps short-lived `git` processes.  On
         // platforms which surface that SIGCHLD to the foreground thread, an
@@ -254,13 +363,13 @@ impl TerminalGuard {
         // change terminal ownership or input state, so retry the syscall
         // rather than tear down an interactive session mid-cancellation.
         let ready = retry_on_intr(|| {
-            let mut fds = [PollFd::new(&self.input, PollFlags::IN)];
+            let mut fds = [PollFd::new(&*input, PollFlags::IN)];
             poll(&mut fds, Some(&timespec))
         })?;
         if ready != 0 {
             let mut bytes = [0_u8; 4096];
             let count = loop {
-                match self.input.read(&mut bytes) {
+                match input.read(&mut bytes) {
                     Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
                     result => break result?,
                 }
@@ -281,12 +390,25 @@ impl TerminalGuard {
 
     /// Return the currently available terminal dimensions.
     pub fn size(&self) -> Result<(u16, u16), TerminalError> {
-        let size = retry_on_intr(|| tcgetwinsize(&self.input))?;
-        Ok((size.ws_col, size.ws_row))
+        match &self.input {
+            TerminalInput::Local(input) => {
+                let size = retry_on_intr(|| tcgetwinsize(input))?;
+                Ok((size.ws_col, size.ws_row))
+            }
+            TerminalInput::Remote(link) => Ok(link.size()),
+        }
+    }
+
+    fn restore_termios(&self, original: &Termios) {
+        if let TerminalInput::Local(input) = &self.input {
+            let _ = tcsetattr(input, OptionalActions::Now, original);
+        }
     }
 
     /// Borrow the portable renderer that owns mutable-tail bookkeeping.
-    pub fn renderer_mut(&mut self) -> Result<&mut InlineTerminal<Stdout>, TerminalError> {
+    pub fn renderer_mut(
+        &mut self,
+    ) -> Result<&mut InlineTerminal<TerminalOutput>, TerminalError> {
         if !self.active {
             return Err(TerminalError::Inactive);
         }

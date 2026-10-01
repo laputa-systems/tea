@@ -41,6 +41,11 @@ pub use state::{
 };
 pub use support::format_usage;
 
+/// Resolve the Tea home directory an invocation uses.
+pub fn tea_home_for(options: &CliOptions) -> Result<std::path::PathBuf, AppError> {
+    runtime::resolve_tea_home(options.tea_home())
+}
+
 #[cfg(feature = "live-verification")]
 pub(crate) use durable::{
     create_live_verification_authoring_harness, create_live_verification_child_harness,

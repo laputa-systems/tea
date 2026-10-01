@@ -150,7 +150,7 @@ impl McpManager {
     }
 
     /// Process ids of running servers, for lifecycle tests.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "mcp-fixture"))]
     pub(crate) fn pids(&self) -> Vec<u32> {
         self.servers
             .iter()

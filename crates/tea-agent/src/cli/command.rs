@@ -17,6 +17,8 @@ pub enum OptionKey {
     Prompt,
     Cwd,
     TeaHome,
+    Resume,
+    Attach,
     Root,
     Apply,
     Device,
@@ -172,6 +174,34 @@ pub static PROMPT: OptionSpec = OptionSpec {
     error_name: "-p/--prompt",
 };
 
+pub static RESUME: OptionSpec = OptionSpec {
+    key: OptionKey::Resume,
+    short: None,
+    aliases: &[],
+    long: "resume",
+    value_name: Some("session-id"),
+    required: false,
+    repeatable: false,
+    default: None,
+    env: None,
+    help: "Open the saved session session-id at startup.",
+    error_name: "--resume",
+};
+
+pub static ATTACH: OptionSpec = OptionSpec {
+    key: OptionKey::Attach,
+    short: None,
+    aliases: &[],
+    long: "attach",
+    value_name: Some("session-id"),
+    required: false,
+    repeatable: false,
+    default: None,
+    env: None,
+    help: "Reattach a terminal to the runtime still serving session-id, or reopen the session if no runtime remains.",
+    error_name: "--attach",
+};
+
 pub static CWD: OptionSpec = OptionSpec {
     key: OptionKey::Cwd,
     short: None,
@@ -267,6 +297,8 @@ pub static ROOT_OPTIONS: &[OptionSpec] = &[
     PROMPT,
     CWD,
     TEA_HOME,
+    RESUME,
+    ATTACH,
 ];
 
 pub static SESSION_OPTIONS: &[OptionSpec] = &[HELP, VERSION];

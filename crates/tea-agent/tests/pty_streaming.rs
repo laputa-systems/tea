@@ -115,6 +115,31 @@ fn capture_mock_idle_startup(label: &str, config: Option<&str>) -> (String, Vec<
     (screen, output)
 }
 
+/// Submit `/new` once the settled operation has released the agent. The
+/// screen can show a settled answer slightly before durable settlement
+/// finishes; the application then answers "requires an idle agent", so retry.
+fn start_new_session(terminal: &mut PtyTest) {
+    for _ in 0..20 {
+        terminal
+            .send_text(terminal.deadline(Duration::from_secs(3)), "/new")
+            .expect("type /new");
+        terminal
+            .send_key(terminal.deadline(Duration::from_secs(3)), Key::Enter)
+            .expect("submit /new");
+        let outcome = terminal.wait_for_screen(
+            terminal.deadline(Duration::from_secs(3)),
+            "new session or busy notice",
+            |screen| screen.contains("new session"),
+        );
+        outcome.expect("a /new outcome renders");
+        if !terminal.screen().contains("requires an idle agent") {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    panic!("the agent never became idle for /new");
+}
+
 struct StreamingFixture {
     first_delta: Receiver<()>,
     release_response: Sender<()>,
@@ -908,19 +933,7 @@ fn real_binary_renders_streamed_text_before_the_fixture_settles() {
             },
         )
         .expect("application should become idle");
-    terminal
-        .send_text(terminal.deadline(Duration::from_secs(3)), "/new")
-        .expect("open a fresh linear session");
-    terminal
-        .send_key(terminal.deadline(Duration::from_secs(3)), Key::Enter)
-        .expect("submit new-session command");
-    terminal
-        .wait_for_screen(
-            terminal.deadline(Duration::from_secs(3)),
-            "new session",
-            |screen| screen.contains("new session"),
-        )
-        .expect("new session should reset the idle transcript");
+    start_new_session(&mut terminal);
     terminal
         .send_text(terminal.deadline(Duration::from_secs(3)), "/resume")
         .expect("open the saved-session picker");
@@ -1031,19 +1044,7 @@ data: [DONE]
             |screen| screen.contains("weighing options") && screen.contains("final answer"),
         )
         .expect("answer should settle beside its thinking");
-    terminal
-        .send_text(terminal.deadline(Duration::from_secs(3)), "/new")
-        .expect("open a fresh session");
-    terminal
-        .send_key(terminal.deadline(Duration::from_secs(3)), Key::Enter)
-        .expect("submit /new");
-    terminal
-        .wait_for_screen(
-            terminal.deadline(Duration::from_secs(3)),
-            "new session",
-            |screen| screen.contains("new session"),
-        )
-        .expect("new session should render");
+    start_new_session(&mut terminal);
     terminal
         .send_text(terminal.deadline(Duration::from_secs(3)), "/resume")
         .expect("open the picker");

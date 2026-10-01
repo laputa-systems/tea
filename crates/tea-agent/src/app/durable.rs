@@ -2953,6 +2953,14 @@ pub(super) fn core_usage(usage: &tea_session::Usage) -> Usage {
     }
 }
 
+/// The durable directory of one session in a workspace.
+pub(super) fn session_directory(tea_home: &Path, workspace: &Path, session_id: &str) -> PathBuf {
+    tea_home
+        .join("sessions")
+        .join(workspace_key(workspace))
+        .join(format!("{session_id}.tea"))
+}
+
 fn workspace_key(workspace: &Path) -> String {
     Digest::from_bytes(workspace.to_string_lossy().as_bytes()).to_hex()
 }

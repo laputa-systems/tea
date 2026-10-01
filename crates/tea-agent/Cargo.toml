@@ -64,6 +64,11 @@ name = "pty_streaming"
 path = "tests/pty_streaming.rs"
 required-features = ["pty-harness"]
 
+[[test]]
+name = "pty_isolation"
+path = "tests/pty_isolation.rs"
+required-features = ["pty-harness"]
+
 # Raw stdio exchange with the fake MCP server; its presence also makes Cargo
 # build the fixture binary that the MCP unit tests spawn.
 [[test]]

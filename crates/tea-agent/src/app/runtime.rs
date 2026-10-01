@@ -105,6 +105,10 @@ pub struct App {
     pub(super) mcp: Option<Arc<super::mcp::McpManager>>,
     /// MCP server problems already shown, so each is reported once.
     pub(super) mcp_reported: std::collections::BTreeSet<String>,
+    /// The relay link when this process is a headful session runtime.
+    pub(super) runtime_link: Option<Arc<crate::detach::RemoteLink>>,
+    /// Session directory whose attachment record this runtime published.
+    pub(super) published_attachment: Option<PathBuf>,
     /// Number of front-contiguous semantic entries already written once into
     /// native terminal scrollback for this presentation generation.
     pub(super) committed_entries: usize,
@@ -137,6 +141,8 @@ impl App {
             workspace: None,
             mcp: None,
             mcp_reported: std::collections::BTreeSet::new(),
+            runtime_link: None,
+            published_attachment: None,
             committed_entries: 0,
             committed_entry_ids: Vec::new(),
             rendered_projection_generation: 0,
@@ -146,9 +152,19 @@ impl App {
 
     /// Initialize the durable host configuration and run the terminal loop on Smol.
     pub fn run(&mut self) -> Result<(), AppError> {
+        self.run_with_terminal(crate::terminal::TerminalGuard::enter)
+    }
+
+    fn run_with_terminal(
+        &mut self,
+        enter: impl FnOnce() -> Result<TerminalGuard, TerminalError>,
+    ) -> Result<(), AppError> {
         self.assemble_host()?;
+        if let Some(session) = self.options.resume_session().map(str::to_owned) {
+            self.resume_session(&session)?;
+        }
         let loop_result = {
-            let mut terminal = crate::terminal::TerminalGuard::enter()?;
+            let mut terminal = enter()?;
             let loop_result = smol::block_on(self.event_loop(&mut terminal));
             if self.quitting && loop_result.is_ok() {
                 // A quit requested from a modal surface must still finish on
@@ -182,6 +198,19 @@ impl App {
                 "{loop_error}; durable root cleanup requires recovery: {cleanup_error}"
             ))),
         }
+    }
+
+    /// Run as the session-owned runtime of a headful session.
+    ///
+    /// The application is unchanged except that it presents through a relay
+    /// attached over `link`. Losing the relay detaches the terminal without
+    /// cancelling anything; the runtime keeps driving admitted work, settles
+    /// it durably, and returns once it is idle with no terminal attached.
+    pub fn run_runtime(&mut self, link: Arc<crate::detach::RemoteLink>) -> Result<(), AppError> {
+        self.runtime_link = Some(Arc::clone(&link));
+        let result = self.run_with_terminal(|| crate::terminal::TerminalGuard::enter_remote(link));
+        self.retract_attachment();
+        result
     }
 
     /// Run one explicit prompt without entering terminal mode, writing only streamed assistant
@@ -462,9 +491,16 @@ impl App {
     }
 
     async fn event_loop(&mut self, terminal: &mut TerminalGuard) -> Result<(), AppError> {
+        let started = std::time::Instant::now();
         loop {
             self.drain_events();
             self.reap_task();
+            self.publish_attachment();
+            if self.detached_and_idle(terminal, started) {
+                // No terminal and nothing admitted: a session runtime does not
+                // linger as a hidden service. The session stays reopenable.
+                break;
+            }
             // The detached root receiver is the terminal's structured join
             // boundary: core settles active children and their workspaces
             // before it sends this completion. Keep retrying the sticky root
@@ -478,6 +514,13 @@ impl App {
             }
             self.redraw(terminal)?;
             if let Some(event) = terminal.poll_event(Duration::from_millis(20))? {
+                if event == crate::terminal::TerminalEvent::Reattached {
+                    // A fresh terminal has no scrollback from this session:
+                    // present the whole view again from current state.
+                    self.committed_entries = 0;
+                    self.committed_entry_ids.clear();
+                    continue;
+                }
                 self.handle_terminal_event(terminal, event)?;
             }
             // Terminal input is synchronous by design. Yield after each poll
@@ -485,6 +528,55 @@ impl App {
             smol::future::yield_now().await;
         }
         Ok(())
+    }
+
+    /// Whether a session runtime has lost its terminal and has no work left.
+    fn detached_and_idle(&self, terminal: &TerminalGuard, started: std::time::Instant) -> bool {
+        let Some(link) = &self.runtime_link else {
+            return false;
+        };
+        if !terminal.is_detached() || self.durable_task.is_some() || self.agent_is_active() {
+            return false;
+        }
+        // Before the first relay attaches, allow it a bounded moment.
+        link.generation() > 0 || started.elapsed() > Duration::from_secs(10)
+    }
+
+    /// Publish this runtime in the attached session's directory so
+    /// `tea --attach SESSION` can find it directly, and withdraw the record
+    /// from a session it no longer serves.
+    fn publish_attachment(&mut self) {
+        let Some(link) = self.runtime_link.clone() else {
+            return;
+        };
+        let current = match (&self.tea_home, &self.workspace, self.state.session_id()) {
+            (Some(home), Some(workspace), Some(session)) => Some((
+                super::durable::session_directory(home, workspace, session),
+                session.to_owned(),
+            )),
+            _ => None,
+        };
+        if current.as_ref().map(|(directory, _)| directory) == self.published_attachment.as_ref() {
+            return;
+        }
+        self.retract_attachment();
+        link.set_session(current.as_ref().map(|(_, session)| session.clone()));
+        if let Some((directory, session)) = current {
+            let record = crate::detach::AttachmentRecord {
+                pid: std::process::id(),
+                socket: link.socket().to_path_buf(),
+                session_id: session,
+            };
+            if record.publish(&directory).is_ok() {
+                self.published_attachment = Some(directory);
+            }
+        }
+    }
+
+    fn retract_attachment(&mut self) {
+        if let Some(directory) = self.published_attachment.take() {
+            crate::detach::AttachmentRecord::retract(&directory, std::process::id());
+        }
     }
 
     async fn settle_owned_root(&mut self) -> Result<(), AppError> {

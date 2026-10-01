@@ -13,6 +13,7 @@ pub mod app;
 pub mod build_info;
 pub mod cli;
 pub mod composer;
+pub mod detach;
 pub mod editor;
 pub mod render;
 pub mod terminal;

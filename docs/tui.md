@@ -15,17 +15,16 @@ managed background sessions. Independent tea invocations may each own one
 session, but tea provides no resident process that supervises or routes among
 them.
 
-The TUI itself is disposable. A future crash-isolation implementation may put
-the attached `SessionSupervisor` behind a session-owned process boundary so a
-TUI crash does not cancel already-admitted work. That is explicitly not a
-daemon architecture: the runtime process must be bound to one exact session,
-use only minimal session-local IPC, accept no request to enumerate/create/open
-or switch other sessions, and never become a reusable broker. Reattachment
-must name the exact session directly.
-
-This is a permitted lifetime boundary, not a requirement that the current
-terminal already runs out-of-process. Orderly terminal shutdown may continue to
-cancel and join work according to the documented shutdown contract.
+The TUI itself is disposable. A headful `tea` runs as two processes: a
+session-owned **runtime** (this terminal application with its
+`SessionSupervisor`) and a **relay** that owns the real terminal and forwards
+bytes over one private Unix socket. Killing the relay or closing its terminal
+does not cancel admitted work; the runtime finishes, settles durably, and exits
+once idle. `tea --attach SESSION_ID` reattaches to the exact session. See
+[headful crash isolation](crash-isolation.md) for the boundary and lifecycle.
+This is not a daemon architecture: a runtime serves one terminal and at most
+one root session, never enumerates or routes among sessions, and does not
+outlive settled work.
 
 ## Scrollback-native presentation
 

@@ -11,6 +11,7 @@ mod dump;
 mod error;
 mod export;
 mod gc;
+mod headful;
 pub mod help;
 mod inspect;
 mod rebuild_meta;
@@ -44,6 +45,8 @@ pub struct CliOptions {
     prompt: Option<OsString>,
     tea_home: Option<PathBuf>,
     thinking: Option<ThinkingLevel>,
+    resume: Option<String>,
+    attach: Option<String>,
 }
 
 impl CliOptions {
@@ -92,6 +95,14 @@ impl CliOptions {
     pub fn tea_home(&self) -> Option<&std::path::Path> {
         self.tea_home.as_deref()
     }
+    /// Session to open at startup.
+    pub fn resume_session(&self) -> Option<&str> {
+        self.resume.as_deref()
+    }
+    /// Session whose runtime a terminal should reattach to.
+    pub fn attach_session(&self) -> Option<&str> {
+        self.attach.as_deref()
+    }
     pub fn thinking_level(&self) -> ThinkingLevel {
         self.thinking.unwrap_or_default()
     }
@@ -107,6 +118,27 @@ impl CliOptions {
             OptionKey::Prompt => &mut self.prompt,
             OptionKey::TeaHome => {
                 if self.tea_home.replace(PathBuf::from(value)).is_some() {
+                    return Err(CliError::DuplicateOption(option.error_name));
+                }
+                return Ok(());
+            }
+            OptionKey::Resume | OptionKey::Attach => {
+                let value = match value.into_string() {
+                    Ok(value) if !value.trim().is_empty() => value,
+                    Ok(_) => return Err(CliError::EmptyValue(option.error_name)),
+                    Err(value) => {
+                        return Err(CliError::InvalidValue {
+                            flag: option.error_name,
+                            value,
+                        })
+                    }
+                };
+                let slot = if option.key == OptionKey::Resume {
+                    &mut self.resume
+                } else {
+                    &mut self.attach
+                };
+                if slot.replace(value).is_some() {
                     return Err(CliError::DuplicateOption(option.error_name));
                 }
                 return Ok(());
@@ -397,7 +429,9 @@ where
     I: IntoIterator<Item = T>,
     T: Into<OsString>,
 {
-    match CliOptions::parse_command(args.into_iter().map(Into::into)) {
+    let args = args.into_iter().map(Into::into).collect::<Vec<OsString>>();
+    let forwarded = args.iter().skip(1).cloned().collect::<Vec<_>>();
+    match CliOptions::parse_command(args) {
         Ok(CliCommand::Help) => {
             print!("{}", help::render_root());
             ExitCode::SUCCESS
@@ -435,6 +469,20 @@ where
         },
         Ok(CliCommand::Options(options)) => {
             let prompt = options.prompt().map(OsStr::to_owned);
+            if prompt.is_none() {
+                // A headful session runs as a session-owned runtime behind a
+                // disposable terminal relay; headless runs stay in process.
+                if let Some(socket) = std::env::var_os(crate::detach::RUNTIME_SOCKET_ENV) {
+                    return headful::run_runtime(options, socket);
+                }
+                if headful::isolation_enabled() {
+                    return headful::run_relay(&options, forwarded);
+                }
+                if options.attach_session().is_some() {
+                    eprintln!("tea: --attach needs an interactive terminal");
+                    return ExitCode::from(2);
+                }
+            }
             let mut app = App::new(options);
             let result = match prompt {
                 Some(prompt) => match prompt.to_str() {
