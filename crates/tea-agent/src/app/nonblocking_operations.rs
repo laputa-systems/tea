@@ -258,21 +258,34 @@ mod tests {
         let cancellation = CancellationToken::new();
         let task_cancellation = cancellation.clone();
         let task_root = root.clone();
+        // Cancel only once the process demonstrably runs. A fixed delay
+        // raced the blocking pool under load and cancelled before spawn.
+        let (sender, receiver) = smol::channel::bounded(1);
+        let updates = ToolUpdateSink::new(move |update| {
+            let _ = sender.try_send(update);
+        });
         let task = smol::spawn(async move {
             let operations = NonblockingCodingOperations;
             let environment = CommandEnvironment::empty();
             operations
                 .execute_command(
-                    "sleep 30",
+                    "printf ready; sleep 30",
                     &task_root,
                     Duration::from_secs(300),
                     &environment,
                     task_cancellation,
-                    ToolUpdateSink::disabled(),
+                    updates,
                 )
                 .await
         });
-        smol::block_on(smol::Timer::after(Duration::from_millis(50)));
+        smol::block_on(async {
+            smol::future::race(receiver.recv(), async {
+                smol::Timer::after(Duration::from_secs(10)).await;
+                Err(smol::channel::RecvError)
+            })
+            .await
+        })
+        .expect("the command starts and streams");
         let started = Instant::now();
         cancellation.cancel();
         let result = smol::block_on(task);

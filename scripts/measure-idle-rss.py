@@ -5,6 +5,12 @@ This resource probe intentionally admits only Tea's built-in `mock` provider. It
 does not load provider credentials, send a prompt, or run an evaluation. Supply
 the same release binary and sampling arguments for the archived baseline and the
 working tree; compare the JSON `maximum_rss_kib` values outside this repository.
+
+A headful `tea` may run as a terminal relay plus a session runtime process.
+`maximum_rss_kib` is therefore the combined resident size of the started
+process and all of its descendants at each sample; `process_count` and the
+per-sample `processes` breakdown show what was summed. `--in-process` sets
+`TEA_IN_PROCESS=1` to measure the single-process mode.
 """
 
 from __future__ import annotations
@@ -35,15 +41,22 @@ def parser() -> argparse.ArgumentParser:
     command.add_argument("--samples", type=int, default=5)
     command.add_argument("--sample-delay-seconds", type=float, default=0.2)
     command.add_argument("--settle-seconds", type=float, default=1.0)
+    command.add_argument(
+        "--in-process",
+        action="store_true",
+        help="keep the interactive session in one process (TEA_IN_PROCESS=1)",
+    )
     return command
 
 
-def process_environment(home: Path) -> dict[str, str]:
+def process_environment(home: Path, in_process: bool) -> dict[str, str]:
     environment = {
         "HOME": str(home),
         "TERM": "xterm-256color",
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
     }
+    if in_process:
+        environment["TEA_IN_PROCESS"] = "1"
     for name in ("LANG", "LC_ALL", "TZ"):
         if value := os.environ.get(name):
             environment[name] = value
@@ -63,6 +76,39 @@ def rss_kib(pid: int) -> int:
     if len(fields) != 1 or not fields[0].isdigit():
         raise RuntimeError("the idle process has no readable RSS sample")
     return int(fields[0])
+
+
+def descendants(pid: int) -> list[int]:
+    """The process and every descendant, by walking the parent table."""
+    completed = subprocess.run(
+        ["ps", "-A", "-o", "pid=", "-o", "ppid="],
+        check=True,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    children: dict[int, list[int]] = {}
+    for line in completed.stdout.splitlines():
+        fields = line.split()
+        if len(fields) == 2 and fields[0].isdigit() and fields[1].isdigit():
+            children.setdefault(int(fields[1]), []).append(int(fields[0]))
+    found = [pid]
+    index = 0
+    while index < len(found):
+        found.extend(children.get(found[index], []))
+        index += 1
+    return found
+
+
+def combined_rss_kib(pid: int) -> dict[int, int]:
+    sizes = {}
+    for member in descendants(pid):
+        try:
+            sizes[member] = rss_kib(member)
+        except (RuntimeError, subprocess.CalledProcessError):
+            continue
+    return sizes
 
 
 def stop(process: subprocess.Popen[bytes], master: int) -> None:
@@ -116,7 +162,7 @@ def run(arguments: argparse.Namespace) -> dict[str, object]:
                 "mock",
             ],
             cwd=workspace,
-            env=process_environment(home),
+            env=process_environment(home, arguments.in_process),
             stdin=slave,
             stdout=slave,
             stderr=slave,
@@ -127,15 +173,21 @@ def run(arguments: argparse.Namespace) -> dict[str, object]:
         if process.poll() is not None:
             raise RuntimeError("the mock-only idle TUI exited before sampling")
         samples = []
+        breakdowns = []
         for sample in range(arguments.samples):
-            samples.append(rss_kib(process.pid))
+            sizes = combined_rss_kib(process.pid)
+            samples.append(sum(sizes.values()))
+            breakdowns.append(sorted(sizes.values()))
             if sample + 1 < arguments.samples:
                 time.sleep(arguments.sample_delay_seconds)
         return {
-            "schema_version": "tea-idle-rss/v1",
+            "schema_version": "tea-idle-rss/v2",
             "provider": "mock",
             "prompt_sent": False,
+            "in_process": arguments.in_process,
             "sample_count": len(samples),
+            "process_count": max(len(sizes) for sizes in breakdowns),
+            "processes": breakdowns,
             "rss_kib": samples,
             "maximum_rss_kib": max(samples),
         }

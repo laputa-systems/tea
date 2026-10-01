@@ -12,7 +12,10 @@ lint:
 # the host presentation contract.
 test:
 	cargo test --workspace --locked
-	cargo test -p tea-agent --features pty-harness --test pty_streaming --locked
+	cargo test -p tea-core --all-features --locked
+	cargo test -p tea-providers --all-features --locked
+	cargo test -p tea-agent --features mcp-fixture --locked
+	cargo test -p tea-agent --features pty-harness --test pty_streaming --test pty_isolation --locked
 
 # Build and run the deterministic suite inside Linux AArch64. Docker's
 # platform selection also makes this usable from an x86_64 or Apple host.
