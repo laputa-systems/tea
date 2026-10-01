@@ -25,6 +25,21 @@ pub(super) fn host_configuration(
     ))
 }
 
+/// Add the optional Luau codemode composition tool to root runs.
+///
+/// Codemode only composes tools the run already authorizes; it adds no
+/// capability of its own. Its description lists no tools, so it stays stable
+/// across extension and MCP tool sets; scripts call declared tools by name and
+/// find others with `search_tools`.
+pub(super) fn install_codemode(configuration: &mut AgentConfiguration) {
+    configuration
+        .tools
+        .insert(Arc::new(tea_luau::codemode::CodemodeTool::new(
+            &[],
+            tea_luau::codemode::CodemodeLimits::default(),
+        )));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

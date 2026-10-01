@@ -2451,6 +2451,7 @@ fn subagent_child_lanes_reject_public_resume_and_prompt_drives() {
                 &ToolContext {
                     cancellation: CancellationToken::new(),
                     provenance,
+                    composition: None,
                 },
                 &spawned.agent_id.to_string(),
             )
@@ -2949,6 +2950,7 @@ fn subagent_terminal_results_are_queryable_after_reopen_without_host_reactivatio
                 &ToolContext {
                     cancellation: CancellationToken::new(),
                     provenance,
+                    composition: None,
                 },
                 &spawned.agent_id.to_string(),
             )
@@ -2981,6 +2983,7 @@ fn subagent_terminal_results_are_queryable_after_reopen_without_host_reactivatio
                 ToolContext {
                     cancellation: CancellationToken::new(),
                     provenance: wait_provenance,
+                    composition: None,
                 },
                 WaitAgentsRequest {
                     targets: vec![spawned.agent_id.to_string()],
@@ -3031,6 +3034,7 @@ fn subagent_terminalization_retains_inline_and_artifact_reports_with_nochange_or
                 &ToolContext {
                     cancellation: CancellationToken::new(),
                     provenance,
+                    composition: None,
                 },
                 &inline_child.agent_id.to_string(),
             )
@@ -3087,6 +3091,7 @@ fn subagent_terminalization_retains_inline_and_artifact_reports_with_nochange_or
                 &ToolContext {
                     cancellation: CancellationToken::new(),
                     provenance,
+                    composition: None,
                 },
                 &artifact_child.agent_id.to_string(),
             )
@@ -3154,6 +3159,7 @@ fn subagent_terminalization_retains_inline_and_artifact_reports_with_nochange_or
                 ToolContext {
                     cancellation: CancellationToken::new(),
                     provenance: wait_provenance,
+                    composition: None,
                 },
                 WaitAgentsRequest {
                     targets: vec![artifact_child.agent_id.to_string()],
@@ -3453,6 +3459,7 @@ fn subagent_wait_observes_only_cleanup_ready_results_and_interrupt_is_idempotent
                 &ToolContext {
                     cancellation: CancellationToken::new(),
                     provenance: provenance.clone(),
+                    composition: None,
                 },
                 &spawned.agent_id.to_string(),
             )
@@ -3476,6 +3483,7 @@ fn subagent_wait_observes_only_cleanup_ready_results_and_interrupt_is_idempotent
                 ToolContext {
                     cancellation: CancellationToken::new(),
                     provenance: provenance.clone(),
+                    composition: None,
                 },
                 WaitAgentsRequest {
                     targets: vec![spawned.agent_id.to_string()],
@@ -3495,6 +3503,7 @@ fn subagent_wait_observes_only_cleanup_ready_results_and_interrupt_is_idempotent
                 &ToolContext {
                     cancellation: CancellationToken::new(),
                     provenance: provenance.clone(),
+                    composition: None,
                 },
                 &spawned.agent_id.to_string(),
             )
@@ -3514,6 +3523,7 @@ fn subagent_wait_observes_only_cleanup_ready_results_and_interrupt_is_idempotent
                 ToolContext {
                     cancellation: CancellationToken::new(),
                     provenance: provenance.clone(),
+                    composition: None,
                 },
                 WaitAgentsRequest {
                     targets: vec![spawned.agent_id.to_string()],
@@ -3532,6 +3542,7 @@ fn subagent_wait_observes_only_cleanup_ready_results_and_interrupt_is_idempotent
                 &ToolContext {
                     cancellation: CancellationToken::new(),
                     provenance,
+                    composition: None,
                 },
                 &spawned.agent_id.to_string(),
             )
@@ -3576,6 +3587,7 @@ fn subagent_wait_timeout_and_cancellation_drop_notifier_wakers() {
                     ToolContext {
                         cancellation: CancellationToken::new(),
                         provenance: provenance.clone(),
+                        composition: None,
                     },
                     wait_request.clone(),
                 )
@@ -3717,6 +3729,7 @@ fn subagent_wait_keeps_requested_order_while_list_sorts_by_task_name() {
                 &ToolContext {
                     cancellation: CancellationToken::new(),
                     provenance: provenance.clone(),
+                    composition: None,
                 },
                 &handles[1].agent_id.to_string(),
             )
@@ -3727,6 +3740,7 @@ fn subagent_wait_keeps_requested_order_while_list_sorts_by_task_name() {
                 ToolContext {
                     cancellation: CancellationToken::new(),
                     provenance: provenance.clone(),
+                    composition: None,
                 },
                 WaitAgentsRequest {
                     targets: vec![
@@ -3748,6 +3762,7 @@ fn subagent_wait_keeps_requested_order_while_list_sorts_by_task_name() {
                 &ToolContext {
                     cancellation: CancellationToken::new(),
                     provenance: provenance.clone(),
+                    composition: None,
                 },
                 &handles[0].agent_id.to_string(),
             )
@@ -3758,6 +3773,7 @@ fn subagent_wait_keeps_requested_order_while_list_sorts_by_task_name() {
             .list(&ToolContext {
                 cancellation: CancellationToken::new(),
                 provenance: provenance.clone(),
+                composition: None,
             })
             .expect("list observes current root children");
         assert_eq!(
@@ -3773,6 +3789,7 @@ fn subagent_wait_keeps_requested_order_while_list_sorts_by_task_name() {
                 ToolContext {
                     cancellation: CancellationToken::new(),
                     provenance,
+                    composition: None,
                 },
                 WaitAgentsRequest {
                     targets: vec![
@@ -3829,6 +3846,7 @@ fn apply_agent_changes_commits_a_proven_delta_and_replays_without_reapplying() {
                 &ToolContext {
                     cancellation: CancellationToken::new(),
                     provenance: provenance.clone(),
+                    composition: None,
                 },
                 &spawned.agent_id.to_string(),
             )
@@ -3854,6 +3872,7 @@ fn apply_agent_changes_commits_a_proven_delta_and_replays_without_reapplying() {
                 ToolContext {
                     cancellation: CancellationToken::new(),
                     provenance: provenance.clone(),
+                    composition: None,
                 },
                 delta_id.clone(),
             )
@@ -3890,6 +3909,7 @@ fn apply_agent_changes_commits_a_proven_delta_and_replays_without_reapplying() {
                 ToolContext {
                     cancellation: CancellationToken::new(),
                     provenance,
+                    composition: None,
                 },
                 delta_id,
             )
@@ -3939,6 +3959,7 @@ fn apply_agent_changes_validates_host_outcomes_and_ignores_post_begin_cancellati
                 &ToolContext {
                     cancellation: CancellationToken::new(),
                     provenance: provenance.clone(),
+                    composition: None,
                 },
                 &spawned.agent_id.to_string(),
             )
@@ -3964,6 +3985,7 @@ fn apply_agent_changes_validates_host_outcomes_and_ignores_post_begin_cancellati
                     ToolContext {
                         cancellation: CancellationToken::new(),
                         provenance: provenance.clone(),
+                        composition: None,
                     },
                     delta_id.clone(),
                 )
@@ -3986,6 +4008,7 @@ fn apply_agent_changes_validates_host_outcomes_and_ignores_post_begin_cancellati
                 ToolContext {
                     cancellation: cancelled,
                     provenance,
+                    composition: None,
                 },
                 delta_id,
             )
@@ -4026,6 +4049,7 @@ fn wait_targets_are_owner_scoped_and_timeout_rereads_the_boundary_snapshot() {
                 ToolContext {
                     cancellation: CancellationToken::new(),
                     provenance: provenance.clone(),
+                    composition: None,
                 },
                 WaitAgentsRequest {
                     targets: vec![spawned.agent_id.to_string(), spawned.agent_id.to_string()],
@@ -4048,6 +4072,7 @@ fn wait_targets_are_owner_scoped_and_timeout_rereads_the_boundary_snapshot() {
                 ToolContext {
                     cancellation: CancellationToken::new(),
                     provenance: provenance.clone(),
+                    composition: None,
                 },
                 WaitAgentsRequest {
                     targets: vec![older.to_string()],
@@ -4064,6 +4089,7 @@ fn wait_targets_are_owner_scoped_and_timeout_rereads_the_boundary_snapshot() {
                 ToolContext {
                     cancellation: CancellationToken::new(),
                     provenance: provenance.clone(),
+                    composition: None,
                 },
                 WaitAgentsRequest {
                     targets: vec!["replay_task".into()],
@@ -4082,6 +4108,7 @@ fn wait_targets_are_owner_scoped_and_timeout_rereads_the_boundary_snapshot() {
                 ToolContext {
                     cancellation: cancelled,
                     provenance: provenance.clone(),
+                    composition: None,
                 },
                 WaitAgentsRequest {
                     targets: vec!["replay_task".into()],
@@ -4100,6 +4127,7 @@ fn wait_targets_are_owner_scoped_and_timeout_rereads_the_boundary_snapshot() {
                     &ToolContext {
                         cancellation: CancellationToken::new(),
                         provenance: provenance.clone(),
+                        composition: None,
                     },
                     &spawned.agent_id.to_string(),
                 )
@@ -4118,6 +4146,7 @@ fn wait_targets_are_owner_scoped_and_timeout_rereads_the_boundary_snapshot() {
                 ToolContext {
                     cancellation: CancellationToken::new(),
                     provenance: provenance.clone(),
+                    composition: None,
                 },
                 WaitAgentsRequest {
                     targets: vec!["replay_task".into()],

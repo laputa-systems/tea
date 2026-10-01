@@ -1109,6 +1109,7 @@ name = "tea-luau"
 version = "1.0.0"
 dependencies = [
  "mlua",
+ "smol",
  "tea-core",
  "tea-protocol",
 ]

@@ -20,4 +20,5 @@ pub use bindings::{
     CapabilityResponse, LuauCapability, PureCapability, PURE_CAPABILITY_V1,
 };
 pub use runtime::LuaToolHandler;
+pub(crate) use runtime::{json_to_lua, lua_to_json};
 pub use specs::{HandlerLimits, ToolHandlerInitError, ToolHandlerSpec};

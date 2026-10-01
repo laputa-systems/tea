@@ -752,7 +752,7 @@ fn parse_capability_request(
 /// it crosses the host capability boundary. Tables are either string-keyed
 /// objects or contiguous one-indexed arrays; mixed/sparse tables are rejected
 /// instead of gaining a host-specific interpretation.
-fn lua_to_json(value: Value) -> Result<JsonValue, String> {
+pub(crate) fn lua_to_json(value: Value) -> Result<JsonValue, String> {
     match value {
         Value::Nil => Ok(JsonValue::Null),
         Value::Boolean(value) => Ok(JsonValue::Bool(value)),
@@ -885,7 +885,7 @@ fn required_string(table: &Table, field: &str) -> Result<String, String> {
     })
 }
 
-fn json_to_lua(lua: &Lua, value: &JsonValue) -> mlua::Result<Value> {
+pub(crate) fn json_to_lua(lua: &Lua, value: &JsonValue) -> mlua::Result<Value> {
     match value {
         JsonValue::Null => Ok(Value::Nil),
         JsonValue::Bool(value) => Ok(Value::Boolean(*value)),
@@ -1079,6 +1079,7 @@ mod tests {
             ToolContext {
                 cancellation: CancellationToken::new(),
                 provenance: RunProvenance::default(),
+                composition: None,
             },
             ToolUpdateSink::disabled(),
         ))
@@ -1113,6 +1114,7 @@ mod tests {
             ToolContext {
                 cancellation: CancellationToken::new(),
                 provenance,
+                composition: None,
             },
             ToolUpdateSink::disabled(),
         ))
@@ -1184,6 +1186,7 @@ mod tests {
             ToolContext {
                 cancellation: CancellationToken::new(),
                 provenance: RunProvenance::default(),
+                composition: None,
             },
             ToolUpdateSink::disabled(),
         ))
@@ -1236,6 +1239,7 @@ mod tests {
             ToolContext {
                 cancellation,
                 provenance: RunProvenance::default(),
+                composition: None,
             },
             ToolUpdateSink::disabled(),
         ))
@@ -1275,6 +1279,7 @@ mod tests {
             ToolContext {
                 cancellation: cancellation.clone(),
                 provenance: RunProvenance::default(),
+                composition: None,
             },
             ToolUpdateSink::disabled(),
         );
@@ -1349,6 +1354,7 @@ mod tests {
             ToolContext {
                 cancellation: CancellationToken::new(),
                 provenance: RunProvenance::default(),
+                composition: None,
             },
             sink,
         ))
@@ -1400,6 +1406,7 @@ mod tests {
             ToolContext {
                 cancellation: CancellationToken::new(),
                 provenance: RunProvenance::default(),
+                composition: None,
             },
             sink,
         ))
@@ -1443,6 +1450,7 @@ mod tests {
             ToolContext {
                 cancellation: CancellationToken::new(),
                 provenance: RunProvenance::default(),
+                composition: None,
             },
             sink,
         ))
@@ -1475,6 +1483,7 @@ mod tests {
             ToolContext {
                 cancellation: CancellationToken::new(),
                 provenance: RunProvenance::default(),
+                composition: None,
             },
             sink,
         ))
@@ -1521,6 +1530,7 @@ mod tests {
                 ToolContext {
                     cancellation: CancellationToken::new(),
                     provenance: RunProvenance::default(),
+                    composition: None,
                 },
                 sink,
             ))
@@ -1567,6 +1577,7 @@ mod tests {
             ToolContext {
                 cancellation: cancellation.clone(),
                 provenance: RunProvenance::default(),
+                composition: None,
             },
             sink,
         );
@@ -1606,6 +1617,7 @@ mod tests {
             ToolContext {
                 cancellation: CancellationToken::new(),
                 provenance: RunProvenance::default(),
+                composition: None,
             },
             ToolUpdateSink::disabled(),
         ))

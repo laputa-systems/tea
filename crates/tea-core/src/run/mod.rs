@@ -30,6 +30,7 @@ use std::sync::mpsc::TrySendError;
 use std::sync::{Arc, Mutex, Weak};
 use std::task::{Poll, Waker};
 
+pub(crate) mod nested;
 mod tool_execution;
 
 enum PreparedToolCall {

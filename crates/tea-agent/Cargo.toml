@@ -49,6 +49,7 @@ toml_edit = "=0.25.13"
 [dev-dependencies]
 # Published package name; the library target remains `ptytest` for consumers.
 laputa-ptytest = "=0.1.1"
+tea-core = { path = "../tea-core", features = ["testing"] }
 
 [[test]]
 name = "pty_streaming"

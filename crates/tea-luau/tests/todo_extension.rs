@@ -168,6 +168,7 @@ impl TodoFixture {
                     ToolContext {
                         cancellation: tea_core::scheduler::CancellationToken::new(),
                         provenance: RunProvenance::default(),
+                        composition: None,
                     },
                     ToolUpdateSink::new(move |update| {
                         sink_updates.lock().expect("update lock").push(update)

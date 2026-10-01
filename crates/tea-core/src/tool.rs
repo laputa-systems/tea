@@ -498,6 +498,146 @@ pub struct ToolContext {
     /// Typed durable attribution for this exact tool execution. Sessionless
     /// embeddings receive the explicit default rather than hidden metadata.
     pub provenance: crate::effect::RunProvenance,
+    /// Run-scoped composition facilities, present only for a tool whose
+    /// [`AgentTool::composition_access`] asks for them.
+    pub composition: Option<ToolComposition>,
+}
+
+/// Which run-scoped composition facilities a trusted tool receives.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum CompositionAccess {
+    /// None: an ordinary capability.
+    #[default]
+    None,
+    /// Read the run's tool catalog and current declarations (discovery).
+    Catalog,
+    /// Catalog plus nested calls of other tools through the run's normal
+    /// validation, hooks, effect gate, and cancellation (codemode).
+    Calls,
+}
+
+/// One authorized tool as seen by a composition tool.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ToolCatalogEntry {
+    /// The model-visible interface.
+    pub declaration: ToolDeclaration,
+    /// How the tool is exposed to the model.
+    pub exposure: ToolExposure,
+    /// Whether a composition tool may call it.
+    pub script_callable: bool,
+}
+
+/// Run-scoped facilities handed to a trusted composition tool.
+///
+/// The catalog is exactly the run's executable registry, so composition never
+/// grants authority. Nested calls are serviced by the owning run while the
+/// composition tool executes; they settle before the composition tool's own
+/// result does and never become detached work.
+#[derive(Clone)]
+pub struct ToolComposition {
+    pub(crate) catalog: Arc<[ToolCatalogEntry]>,
+    pub(crate) declared: Arc<std::collections::BTreeSet<String>>,
+    pub(crate) calls: Option<crate::run::nested::NestedCalls>,
+}
+
+impl std::fmt::Debug for ToolComposition {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ToolComposition")
+            .field("catalog", &self.catalog.len())
+            .field("declared", &self.declared)
+            .field("calls", &self.calls.is_some())
+            .finish()
+    }
+}
+
+impl ToolComposition {
+    /// Construct a catalog-only view, for tests and hosts that drive a
+    /// discovery tool directly.
+    pub fn catalog_only(
+        catalog: impl Into<Arc<[ToolCatalogEntry]>>,
+        declared: impl IntoIterator<Item = String>,
+    ) -> Self {
+        Self {
+            catalog: catalog.into(),
+            declared: Arc::new(declared.into_iter().collect()),
+            calls: None,
+        }
+    }
+
+    /// Every authorized tool in registry order.
+    pub fn catalog(&self) -> &[ToolCatalogEntry] {
+        &self.catalog
+    }
+
+    /// Whether the tool is declared to the model in the current request.
+    pub fn is_declared(&self, name: &str) -> bool {
+        self.declared.contains(name)
+    }
+
+    /// Whether this view can make nested calls.
+    pub fn can_call(&self) -> bool {
+        self.calls.is_some()
+    }
+
+    /// Call another authorized tool through the owning run.
+    ///
+    /// The call is validated, policy-checked, attributed, and settled exactly
+    /// like a model-issued call, but its result is returned here instead of
+    /// joining the transcript. Failures resolve to an error result.
+    pub fn call(&self, name: &str, arguments: SerializedJson) -> NestedCallFuture {
+        match &self.calls {
+            Some(calls) => calls.submit(name, arguments),
+            None => NestedCallFuture::ready_error(
+                name,
+                "this tool has no permission to call other tools",
+            ),
+        }
+    }
+}
+
+/// A pending nested tool call.
+pub struct NestedCallFuture {
+    pub(crate) state: NestedCallState,
+}
+
+pub(crate) enum NestedCallState {
+    Ready(Option<AgentToolResult>),
+    Pending(Arc<crate::run::nested::NestedSlot>),
+}
+
+impl NestedCallFuture {
+    pub(crate) fn ready_error(name: &str, message: &str) -> Self {
+        Self {
+            state: NestedCallState::Ready(Some(AgentToolResult {
+                tool_call_id: ToolCallId::new(format!("nested-{name}"))
+                    .unwrap_or_else(|_| ToolCallId::new("nested").expect("non-empty")),
+                content: message.to_owned(),
+                details: None,
+                usage: None,
+                added_tool_names: Vec::new(),
+                terminate: false,
+                is_error: true,
+                failure: Some(ToolFailure::recoverable()),
+            })),
+        }
+    }
+}
+
+impl Future for NestedCallFuture {
+    type Output = AgentToolResult;
+
+    fn poll(
+        self: Pin<&mut Self>,
+        context: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        match &mut self.get_mut().state {
+            NestedCallState::Ready(result) => std::task::Poll::Ready(
+                result.take().expect("nested call future polled after completion"),
+            ),
+            NestedCallState::Pending(slot) => slot.poll_result(context),
+        }
+    }
 }
 
 /// How the scheduler settles a started tool after run cancellation.
@@ -564,6 +704,17 @@ pub trait AgentTool: Send + Sync {
     /// only through a composition tool such as codemode.
     fn exposure(&self) -> ToolExposure {
         ToolExposure::Direct
+    }
+    /// Run-scoped composition facilities this trusted tool needs.
+    fn composition_access(&self) -> CompositionAccess {
+        CompositionAccess::None
+    }
+    /// Whether a composition tool (such as codemode) may call this tool.
+    ///
+    /// Composition tools themselves are never callable from a script, which
+    /// rules out recursive composition.
+    fn script_callable(&self) -> bool {
+        true
     }
     /// Execute the call on the caller-owned executor.
     fn execute<'a>(
@@ -735,6 +886,11 @@ impl ToolRegistry {
     /// Return registered names in prompt/source order.
     pub fn names(&self) -> impl Iterator<Item = &str> {
         self.order.iter().map(String::as_str)
+    }
+
+    /// Iterate registered tools in registry order.
+    pub fn iter(&self) -> impl Iterator<Item = &Arc<dyn AgentTool>> {
+        self.order.iter().filter_map(|name| self.tools.get(name))
     }
 
     /// Return prompt definitions in registry order.

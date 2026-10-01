@@ -13,6 +13,8 @@ pub mod async_runtime;
 pub mod builtins;
 /// Closed, deterministic source bundles and their manifests.
 pub mod bundle;
+/// Luau codemode: model-authored scripts that compose tool calls.
+pub mod codemode;
 /// Per-VM execution of closed bundle-local Luau modules.
 pub mod bundle_runtime;
 /// Versioned, capability-scoped extension ABI values and host gates.

@@ -154,6 +154,15 @@ pub enum EffectSubject {
         /// Stable hook category.
         hook: HookInvocation,
     },
+    /// A tool call made by a composition tool while it executes. It shares
+    /// validation, hooks, and settlement with model-issued calls, but its
+    /// result returns to the composition tool instead of the transcript.
+    NestedToolExecution {
+        /// The composition tool call that issued this call.
+        parent_tool_call_id: crate::state::ToolCallId,
+        /// The nested call.
+        call: ToolCall,
+    },
     /// A named host timer.
     Timer {
         /// Stable timer category selected by the host.
@@ -213,7 +222,9 @@ impl EffectSubject {
             Self::DurableWrite { .. } => EffectKind::DurableWrite,
             Self::ProviderRequest { .. } => EffectKind::ProviderRequest,
             Self::CompactionProviderRequest { .. } => EffectKind::CompactionProviderRequest,
-            Self::ToolExecution { .. } => EffectKind::ToolExecution,
+            Self::ToolExecution { .. } | Self::NestedToolExecution { .. } => {
+                EffectKind::ToolExecution
+            }
             Self::HookInvocation { .. } => EffectKind::HookInvocation,
             Self::Timer { .. } => EffectKind::Timer,
             Self::ArtifactWrite { .. } => EffectKind::ArtifactWrite,

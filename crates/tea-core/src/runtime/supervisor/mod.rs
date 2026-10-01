@@ -5358,6 +5358,10 @@ where
             EffectSubject::HookInvocation { hook } => {
                 self.append_hook_fact(action.id(), hook, "started", None)
             }
+            EffectSubject::NestedToolExecution {
+                parent_tool_call_id,
+                call,
+            } => self.append_nested_tool_fact(action.id(), parent_tool_call_id, call, None),
             subject => Err(self.fault(format!(
                 "core emitted host-only effect {:?} without a durable supervisor procedure",
                 subject.kind()
@@ -5393,6 +5397,18 @@ where
             (EffectSubject::HookInvocation { hook }, EffectOutcome::HookInvocation(outcome)) => {
                 self.append_hook_fact(action.id(), hook, "settled", Some(&outcome))
             }
+            (
+                EffectSubject::NestedToolExecution {
+                    parent_tool_call_id,
+                    call,
+                },
+                EffectOutcome::ToolExecution(outcome),
+            ) => self.append_nested_tool_fact(
+                action.id(),
+                parent_tool_call_id,
+                call,
+                Some(&outcome.result),
+            ),
             (subject, outcome) => Err(self.fault(format!(
                 "effect subject {:?} settled with mismatched outcome {outcome:?}",
                 subject.kind()
@@ -6174,6 +6190,65 @@ where
         self.mutate(|session| {
             session.append_fact(SessionFact::Custom {
                 type_name: "tea.hook-effect.v1".into(),
+                payload: JsonValue::object(fields),
+            })?;
+            Ok(())
+        })
+    }
+
+    /// Durable evidence of one nested tool call made by a composition tool.
+    ///
+    /// The call's result returns to the composition tool rather than the
+    /// transcript, so these facts are the only durable trace of its effect:
+    /// a `started` fact before execution and a `settled` fact with a bounded
+    /// result afterwards. A started fact without a settlement records a call
+    /// interrupted by a crash.
+    fn append_nested_tool_fact(
+        &mut self,
+        action_id: EffectId,
+        parent: &tea_core::state::ToolCallId,
+        call: &ToolCall,
+        result: Option<&tea_core::tool::AgentToolResult>,
+    ) -> Result<(), EffectGateError> {
+        const RESULT_LIMIT: usize = 4 * 1024;
+        let mut fields = vec![
+            (
+                "operation_id",
+                JsonValue::String(self.operation_id.to_string()),
+            ),
+            ("epoch_id", JsonValue::String(self.epoch_id.to_string())),
+            ("effect_id", JsonValue::String(action_id.0.to_string())),
+            (
+                "phase",
+                JsonValue::String(if result.is_some() { "settled" } else { "started" }.into()),
+            ),
+            ("parent_tool_call_id", JsonValue::String(parent.to_string())),
+            ("tool_call_id", JsonValue::String(call.id.to_string())),
+            ("tool_name", JsonValue::String(call.name.clone())),
+        ];
+        match result {
+            None => fields.push((
+                "arguments",
+                JsonValue::String(tea_core::tool::truncate_middle(
+                    call.arguments.as_str(),
+                    RESULT_LIMIT,
+                )),
+            )),
+            Some(result) => {
+                fields.push(("is_error", JsonValue::Bool(result.is_error)));
+                fields.push((
+                    "content",
+                    JsonValue::String(tea_core::tool::truncate_middle(
+                        &result.content,
+                        RESULT_LIMIT,
+                    )),
+                ));
+                fields.push(("content_bytes", JsonValue::from(result.content.len() as u64)));
+            }
+        }
+        self.mutate(|session| {
+            session.append_fact(SessionFact::Custom {
+                type_name: "tea.nested-tool-effect.v1".into(),
                 payload: JsonValue::object(fields),
             })?;
             Ok(())

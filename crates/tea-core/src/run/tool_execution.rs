@@ -198,8 +198,12 @@ impl RunHandle {
         let mut pending = Vec::new();
         for prepared_call in &prepared {
             if let PreparedToolCall::Execute { tool, effect } = &prepared_call.preparation {
-                let future =
-                    self.start_tool_future(tool, prepared_call.call.clone(), updates.clone());
+                let future = self.start_tool_future(
+                    agent,
+                    tool,
+                    prepared_call.call.clone(),
+                    updates.clone(),
+                );
                 pending.push(PendingToolExecution {
                     source_index: prepared_call.source_index,
                     call: prepared_call.call.clone(),
@@ -376,7 +380,7 @@ impl RunHandle {
             PreparedToolCall::Immediate { result, terminate } => Ok((*result, terminate)),
             PreparedToolCall::Execute { tool, effect } => {
                 let updates = PendingToolUpdates::default();
-                let future = self.start_tool_future(&tool, call.clone(), updates.clone());
+                let future = self.start_tool_future(agent, &tool, call.clone(), updates.clone());
                 let mut future = future;
                 let cancellation_settlement_mode = tool.cancellation_settlement_mode();
                 // A tool can synchronously emit an update that cancels the
@@ -423,6 +427,19 @@ impl RunHandle {
         agent: &AgentInner,
         call: &mut ToolCall,
     ) -> Result<PreparedToolCall, CoreError> {
+        self.prepare_tool_call_for(agent, call, None).await
+    }
+
+    /// Prepare a model-issued call, or a nested call made by the composition
+    /// tool executing `nested_parent`. Both paths share validation, hooks,
+    /// and effect attribution; only exposure rules and the effect subject
+    /// differ.
+    pub(super) async fn prepare_tool_call_for(
+        &self,
+        agent: &AgentInner,
+        call: &mut ToolCall,
+        nested_parent: Option<&crate::state::ToolCallId>,
+    ) -> Result<PreparedToolCall, CoreError> {
         let Some(tool) = self.configuration.tools.get(&call.name).cloned() else {
             return Ok(PreparedToolCall::Immediate {
                 result: Box::new(error_tool_result(
@@ -432,7 +449,15 @@ impl RunHandle {
                 terminate: false,
             });
         };
-        if let Some(message) = undeclared_tool_message(agent, tool.as_ref()) {
+        let exposure_message = match nested_parent {
+            None => undeclared_tool_message(agent, tool.as_ref()),
+            // Scripts may call any authorized tool, declared or not, except
+            // composition tools and tools reserved for the model.
+            Some(_) => (!tool.script_callable()
+                || tool.composition_access() != crate::tool::CompositionAccess::None)
+                .then(|| format!("Tool {} cannot be called from a script", call.name)),
+        };
+        if let Some(message) = exposure_message {
             return Ok(PreparedToolCall::Immediate {
                 result: Box::new(error_tool_result(call, message)),
                 terminate: false,
@@ -506,17 +531,23 @@ impl RunHandle {
                 terminate: false,
             });
         }
-        let effect = self
-            .begin_effect(EffectSubject::ToolExecution { call: call.clone() })
-            .await?;
+        let subject = match nested_parent {
+            None => EffectSubject::ToolExecution { call: call.clone() },
+            Some(parent) => EffectSubject::NestedToolExecution {
+                parent_tool_call_id: parent.clone(),
+                call: call.clone(),
+            },
+        };
+        let effect = self.begin_effect(subject).await?;
         Ok(PreparedToolCall::Execute {
             tool,
             effect: Box::new(effect),
         })
     }
 
-    fn start_tool_future<'a>(
-        &self,
+    pub(super) fn start_tool_future<'a>(
+        &'a self,
+        agent: &'a AgentInner,
         tool: &'a Arc<dyn AgentTool>,
         call: ToolCall,
         updates: PendingToolUpdates,
@@ -527,17 +558,60 @@ impl RunHandle {
             let updates = updates.clone();
             move |update| updates.push((update_call_id.clone(), update_tool_name.clone(), update))
         });
-        tool.execute(
+        let access = tool.composition_access();
+        let nested = (access == crate::tool::CompositionAccess::Calls)
+            .then(|| super::nested::NestedCalls::new(call.id.clone()));
+        let composition = (access != crate::tool::CompositionAccess::None).then(|| {
+            crate::tool::ToolComposition {
+                catalog: self.tool_catalog(),
+                declared: Arc::new(self.declared_tool_names(agent)),
+                calls: nested.clone(),
+            }
+        });
+        let future = tool.execute(
             call,
             ToolContext {
                 cancellation: self.cancellation.clone(),
                 provenance: self.configuration.provenance.clone(),
+                composition,
             },
             update_sink,
-        )
+        );
+        match nested {
+            Some(calls) => self.with_nested_calls(agent, calls, future),
+            None => future,
+        }
     }
 
-    async fn finalize_executed_tool(
+    /// The run's authorized tools as composition tools see them.
+    fn tool_catalog(&self) -> Arc<[crate::tool::ToolCatalogEntry]> {
+        self.configuration
+            .tools
+            .iter()
+            .map(|tool| crate::tool::ToolCatalogEntry {
+                declaration: crate::tool::ToolDeclaration::from_tool(tool.as_ref()),
+                exposure: tool.exposure(),
+                script_callable: tool.script_callable()
+                    && tool.composition_access() == crate::tool::CompositionAccess::None,
+            })
+            .collect()
+    }
+
+    /// Tool names declared to the model by the canonical transcript.
+    fn declared_tool_names(&self, agent: &AgentInner) -> std::collections::BTreeSet<String> {
+        let state = agent.state.lock().expect("agent state mutex poisoned");
+        crate::state::EffectiveConfiguration::replay(&state.messages)
+            .map(|configuration| {
+                configuration
+                    .tools
+                    .iter()
+                    .map(|tool| tool.name.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    pub(super) async fn finalize_executed_tool(
         &self,
         agent: &AgentInner,
         call: &ToolCall,
@@ -817,7 +891,7 @@ impl RunHandle {
     }
 }
 
-fn normalize_result_failure(result: &mut AgentToolResult) {
+pub(super) fn normalize_result_failure(result: &mut AgentToolResult) {
     if result.is_error && result.failure.is_none() {
         result.failure = Some(crate::tool::ToolFailure::recoverable());
     }

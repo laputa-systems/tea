@@ -119,6 +119,7 @@ fn resume_restores_a_committed_apply_result_without_reapplying_the_delta() {
                 &ToolContext {
                     cancellation: CancellationToken::new(),
                     provenance: provenance.clone(),
+                    composition: None,
                 },
                 &spawned.agent_id.to_string(),
             )
@@ -141,6 +142,7 @@ fn resume_restores_a_committed_apply_result_without_reapplying_the_delta() {
                 ToolContext {
                     cancellation: CancellationToken::new(),
                     provenance,
+                    composition: None,
                 },
                 delta_id.clone(),
             )

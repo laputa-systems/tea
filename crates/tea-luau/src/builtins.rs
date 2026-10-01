@@ -321,6 +321,7 @@ mod tests {
                     ToolContext {
                         cancellation: tea_core::scheduler::CancellationToken::new(),
                         provenance: RunProvenance::default(),
+                        composition: None,
                     },
                     ToolUpdateSink::disabled(),
                 ),
@@ -451,6 +452,7 @@ mod tests {
         let context = ToolContext {
             cancellation: tea_core::scheduler::CancellationToken::new(),
             provenance: RunProvenance::default(),
+            composition: None,
         };
         let call = |name: &str, arguments: &str| ToolCall {
             id: ToolCallId::new(format!("coding-{name}")).expect("test call ID is valid"),
@@ -687,6 +689,7 @@ mod tests {
         let context = ToolContext {
             cancellation: tea_core::scheduler::CancellationToken::new(),
             provenance: RunProvenance::default(),
+            composition: None,
         };
         let execute = |id: &str, arguments: &str| {
             block_on(
@@ -1100,6 +1103,7 @@ mod tests {
         let context = ToolContext {
             cancellation: tea_core::scheduler::CancellationToken::new(),
             provenance: RunProvenance::default(),
+            composition: None,
         };
         let execute = |id: &str, arguments: &str| {
             block_on(resolved.tools.get("web").expect("web resolves").execute(

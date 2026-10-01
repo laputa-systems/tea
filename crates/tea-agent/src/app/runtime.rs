@@ -251,11 +251,18 @@ impl App {
             CodingHost::with_operations(&workspace, Arc::new(NonblockingCodingOperations))
                 .map_err(|error| AppError::Setup(format!("invalid --cwd: {error}")))?;
         self.workspace = Some(coding_host.workspace().as_path().to_path_buf());
-        let configuration = if self.options.provider() == Some(OsStr::new(mock::PROVIDER_ID)) {
+        let mut configuration = if self.options.provider() == Some(OsStr::new(mock::PROVIDER_ID)) {
             mock::configuration()
         } else {
             host_configuration(&workspace.to_string_lossy())?
         };
+        if self
+            .tui_config
+            .as_ref()
+            .is_some_and(|config| config.features.codemode)
+        {
+            super::host::install_codemode(&mut configuration);
+        }
         self.configuration = Some(configuration);
         self.state
             .set_extension_commands(super::durable::bundled_host_commands()?);

@@ -28,6 +28,7 @@ pub mod state;
 #[cfg(feature = "testing")]
 pub mod testing;
 pub mod tool;
+pub mod tool_search;
 pub mod trace;
 pub mod transcript;
 

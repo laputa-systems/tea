@@ -67,6 +67,8 @@ pub(super) struct AnthropicTuiConfig {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(super) struct FeatureConfig {
     pub(super) subagents: bool,
+    /// Optional Luau codemode composition tool for root runs.
+    pub(super) codemode: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -436,14 +438,19 @@ fn parse_features(path: &Path, source: &str, item: &Item) -> Result<FeatureConfi
             "root table [features] must be a TOML table",
         )
     })?;
-    reject_unknown_keys(path, source, table, &["subagents"], "[features]")?;
-    let subagents = match table.get("subagents") {
-        None => false,
-        Some(item) => item.as_bool().ok_or_else(|| {
-            error_for_item(path, source, item, "[features].subagents must be a boolean")
-        })?,
+    reject_unknown_keys(path, source, table, &["subagents", "codemode"], "[features]")?;
+    let flag = |key: &str| -> Result<bool, ConfigError> {
+        match table.get(key) {
+            None => Ok(false),
+            Some(item) => item.as_bool().ok_or_else(|| {
+                error_for_item(path, source, item, format!("[features].{key} must be a boolean"))
+            }),
+        }
     };
-    Ok(FeatureConfig { subagents })
+    Ok(FeatureConfig {
+        subagents: flag("subagents")?,
+        codemode: flag("codemode")?,
+    })
 }
 
 fn parse_subagents(
@@ -809,7 +816,10 @@ timeout_seconds = 600
         assert_eq!(
             load_tui_config(&enabled).expect("enabled config"),
             TuiConfig {
-                features: FeatureConfig { subagents: true },
+                features: FeatureConfig {
+                    subagents: true,
+                    codemode: false,
+                },
                 subagents: SubagentTuiConfig {
                     provider: Some("openrouter".into()),
                     models: Some(vec![

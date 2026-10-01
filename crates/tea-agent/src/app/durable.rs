@@ -3462,6 +3462,111 @@ mod tests {
     }
 
     #[test]
+    fn durable_codemode_calls_luau_builtins_and_records_nested_evidence() {
+        let home = temporary_home();
+        let workspace = home.join("workspace");
+        fs::create_dir_all(&workspace).expect("fixture workspace creates");
+        fs::write(workspace.join("notes.txt"), "alpha\nbeta\ngamma\n").expect("fixture file");
+        let mut configuration =
+            host_configuration(&workspace.to_string_lossy()).expect("host configuration builds");
+        super::super::host::install_codemode(&mut configuration);
+        let script = r#"
+            local text = call("read", { path = "notes.txt" })
+            local count = 0
+            for _ in string.gmatch(text, "%a+") do count += 1 end
+            local ok, missing = try_call("read", { path = "absent.txt" })
+            print("words", count, "missing ok", ok)
+        "#;
+        let arguments = tea_protocol::JsonValue::object([(
+            "script",
+            tea_protocol::JsonValue::from(script),
+        )])
+        .to_json_string()
+        .expect("arguments");
+        let provider = tea_core::testing::ScriptedProvider::new([
+            tea_core::testing::ScriptedTurn::new()
+                .tool_call("call-code", "codemode", &arguments)
+                .end_tool_use(),
+            tea_core::testing::ScriptedTurn::new().text("done").stop(),
+        ]);
+        let model = ModelDescriptor {
+            provider: "fixture".into(),
+            model: "codemode-fixture".into(),
+            revision: None,
+        };
+        let harness = create_host_harness(HostHarnessConfig {
+            tea_home: &home,
+            workspace: &workspace,
+            local_base_url: None,
+            configuration,
+            model,
+            provider: Arc::new(provider.clone()) as Arc<dyn ModelProvider>,
+            thinking_level: Some(ThinkingLevel::Off),
+            compactor: None,
+            automatic_compaction: AutomaticCompactionPolicy::disabled(),
+            subagents: None,
+            cache_warming: None,
+        })
+        .expect("codemode fixture host creates");
+        smol::block_on(harness.run_root_prompt("count words")).expect("durable prompt settles");
+
+        // The codemode tool is declared; the script reached the Luau `read`
+        // builtin through the run's ordinary tool path.
+        assert!(provider.requests()[0]
+            .tools()
+            .iter()
+            .any(|tool| tool.name == "codemode"));
+        let snapshot = harness.snapshot().expect("snapshot");
+        let results = snapshot
+            .entries()
+            .iter()
+            .filter_map(|stored| match &stored.body {
+                tea_session::SessionEntry::ToolResult(result) => Some(result.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(results.len(), 1, "only the codemode call joins the transcript");
+        let content = format!("{:?}", results[0]);
+        assert!(content.contains("words\\t3\\tmissing ok\\tfalse"), "{content}");
+        let nested = snapshot
+            .facts()
+            .iter()
+            .filter_map(|stored| match &stored.fact {
+                tea_session::SessionFact::Custom { type_name, payload }
+                    if type_name == "tea.nested-tool-effect.v1" =>
+                {
+                    Some(payload.clone())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let phases = nested
+            .iter()
+            .map(|payload| {
+                (
+                    payload.get("tool_call_id").and_then(tea_protocol::JsonValue::as_str).map(str::to_owned),
+                    payload.get("phase").and_then(tea_protocol::JsonValue::as_str).map(str::to_owned),
+                    payload.get("is_error").and_then(tea_protocol::JsonValue::as_bool),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            phases,
+            [
+                (Some("call-code.1".into()), Some("started".into()), None),
+                (Some("call-code.1".into()), Some("settled".into()), Some(false)),
+                (Some("call-code.2".into()), Some("started".into()), None),
+                (Some("call-code.2".into()), Some("settled".into()), Some(true)),
+            ]
+        );
+        assert!(nested.iter().all(|payload| {
+            payload.get("parent_tool_call_id").and_then(tea_protocol::JsonValue::as_str)
+                == Some("call-code")
+        }));
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
     fn durable_todo_state_survives_reopen_and_keeps_allocating_new_identities() {
         let home = temporary_home();
         let workspace = home.join("workspace");
