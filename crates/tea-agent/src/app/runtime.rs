@@ -100,6 +100,11 @@ pub struct App {
     /// Lazy host-owned adapter construction for root and future child lanes.
     pub(super) provider_factory: Option<Arc<ProviderFactory>>,
     pub(super) workspace: Option<PathBuf>,
+    /// Explicitly configured local MCP servers, owned by the session runtime
+    /// and started on first use. Dropping the app shuts them down.
+    pub(super) mcp: Option<Arc<super::mcp::McpManager>>,
+    /// MCP server problems already shown, so each is reported once.
+    pub(super) mcp_reported: std::collections::BTreeSet<String>,
     /// Number of front-contiguous semantic entries already written once into
     /// native terminal scrollback for this presentation generation.
     pub(super) committed_entries: usize,
@@ -130,6 +135,8 @@ impl App {
             registry: ProviderRegistry::new(),
             provider_factory: None,
             workspace: None,
+            mcp: None,
+            mcp_reported: std::collections::BTreeSet::new(),
             committed_entries: 0,
             committed_entry_ids: Vec::new(),
             rendered_projection_generation: 0,
@@ -263,6 +270,16 @@ impl App {
         {
             super::host::install_codemode(&mut configuration);
         }
+        if self
+            .tui_config
+            .as_ref()
+            .is_some_and(|config| !config.mcp_servers.is_empty())
+        {
+            // MCP tools are deferred; discovery loads them on demand.
+            configuration
+                .tools
+                .insert(Arc::new(tea_core::tool_search::ToolSearchTool::default()));
+        }
         self.configuration = Some(configuration);
         self.state
             .set_extension_commands(super::durable::bundled_host_commands()?);
@@ -287,6 +304,54 @@ impl App {
             }
         }
         Ok(())
+    }
+
+    /// Optional services installed into root epochs.
+    pub(super) fn host_services(&mut self) -> super::durable::HostServices {
+        super::durable::HostServices {
+            cache_warming: self.cache_warming_policy(),
+            dynamic_tools: self.mcp_manager().map(|manager| {
+                manager as Arc<dyn tea_core::runtime::DynamicToolSource>
+            }),
+        }
+    }
+
+    /// Start configured MCP servers in the background on first use.
+    fn mcp_manager(&mut self) -> Option<Arc<super::mcp::McpManager>> {
+        if self.mcp.is_none() {
+            let servers = self
+                .tui_config
+                .as_ref()
+                .map(|config| config.mcp_servers.clone())
+                .unwrap_or_default();
+            if servers.is_empty() {
+                return None;
+            }
+            let workspace = self
+                .workspace
+                .clone()
+                .or_else(|| std::env::current_dir().ok())?;
+            self.mcp = Some(super::mcp::McpManager::start(servers, workspace));
+        }
+        self.mcp.clone()
+    }
+
+    /// Show each MCP server failure or exit once, as a notice.
+    pub(super) fn report_mcp_problems(&mut self) {
+        let Some(manager) = self.mcp.clone() else {
+            return;
+        };
+        for (name, status) in manager.statuses() {
+            let problem = match status {
+                super::mcp::ServerStatus::Failed(message) => format!("failed: {message}"),
+                super::mcp::ServerStatus::Exited(message) => format!("exited: {message}"),
+                _ => continue,
+            };
+            let line = format!("MCP server {name} {problem}");
+            if self.mcp_reported.insert(line.clone()) {
+                self.state.notice(line);
+            }
+        }
     }
 
     /// The terminal's active-work cache-warming policy, unless disabled.
@@ -1104,7 +1169,7 @@ impl App {
             compactor: self.compactor.clone(),
             automatic_compaction,
             subagents,
-            cache_warming: self.cache_warming_policy(),
+            services: self.host_services(),
         };
         let harness = if mock_coding_operations {
             super::durable::create_mock_host_harness(config)?
@@ -1187,7 +1252,7 @@ impl App {
             compactor: self.compactor.clone(),
             automatic_compaction,
             subagents,
-            cache_warming: self.cache_warming_policy(),
+            services: self.host_services(),
         };
         let harness = if mock_coding_operations {
             super::durable::reopen_mock_host_harness(input)?

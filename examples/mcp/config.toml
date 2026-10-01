@@ -1,0 +1,18 @@
+# Explicitly configured local stdio MCP servers. Nothing is discovered
+# ambiently, and servers inherit only PATH, HOME, USER, LOGNAME, LANG,
+# LC_ALL, TMPDIR, and TERM from tea; pass anything else, including
+# credentials, through `env`.
+
+[mcp.servers.tracker]
+command = "/path/to/tea/target/debug/tea-mcp-fixture"
+args = []
+# env = { TRACKER_TOKEN = "..." }
+# cwd = "/path/to/workspace"          # default: the tea workspace
+# exposure = "deferred"               # "deferred" (default), "direct", or "composition"
+# startup_timeout_seconds = 30        # initialize + tools/list
+# call_timeout_seconds = 120          # each tools/call
+# enabled = true
+
+# Optional: let a Luau script compose MCP and ordinary tools.
+# [features]
+# codemode = true

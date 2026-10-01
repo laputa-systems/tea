@@ -20,6 +20,12 @@ pub mod ui;
 #[cfg(feature = "live-verification")]
 pub mod verification;
 
+/// The fake MCP stdio server (feature `mcp-fixture`).
+#[cfg(feature = "mcp-fixture")]
+pub mod mcp_fixture {
+    pub use crate::app::mcp::fixture::serve;
+}
+
 pub use app::{
     run_session_command, App, AppError, AppState, CliCommand, CliOptions, NoticeSeverity,
     SessionCommand, ToolProjection, ToolState, TranscriptEntry, UiSurface,

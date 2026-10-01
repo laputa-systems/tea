@@ -23,6 +23,8 @@ pub(super) struct TuiConfig {
     pub(super) subagents: SubagentTuiConfig,
     pub(super) anthropic: AnthropicTuiConfig,
     pub(super) cache_warming: CacheWarmingTuiConfig,
+    /// Explicitly configured local stdio MCP servers, in name order.
+    pub(super) mcp_servers: Vec<super::mcp::McpServerConfig>,
 }
 
 /// Active-work prompt-cache warming. Enabled by default as in Pi: it only
@@ -326,7 +328,7 @@ fn parse_tui_config(path: &Path, source: &str) -> Result<TuiConfig, ConfigError>
         path,
         source,
         root,
-        &["features", "subagents", "anthropic", "cache_warming"],
+        &["features", "subagents", "anthropic", "cache_warming", "mcp"],
         "root",
     )?;
 
@@ -364,12 +366,164 @@ fn parse_tui_config(path: &Path, source: &str) -> Result<TuiConfig, ConfigError>
             }
         }
     };
+    let mcp_servers = match root.get("mcp") {
+        None => Vec::new(),
+        Some(item) => parse_mcp(path, source, item)?,
+    };
     Ok(TuiConfig {
         features,
         subagents,
         anthropic,
         cache_warming,
+        mcp_servers,
     })
+}
+
+fn parse_mcp(
+    path: &Path,
+    source: &str,
+    item: &Item,
+) -> Result<Vec<super::mcp::McpServerConfig>, ConfigError> {
+    let table = item.as_table().ok_or_else(|| {
+        error_for_item(path, source, item, "root table [mcp] must be a TOML table")
+    })?;
+    reject_unknown_keys(path, source, table, &["servers"], "[mcp]")?;
+    let Some(servers) = table.get("servers") else {
+        return Ok(Vec::new());
+    };
+    let servers = servers.as_table().ok_or_else(|| {
+        error_for_item(path, source, servers, "[mcp.servers] must be a TOML table")
+    })?;
+    let mut configs = Vec::new();
+    for (name, item) in servers.iter() {
+        let label = format!("[mcp.servers.{name}]");
+        if name.is_empty()
+            || name.len() > 32
+            || !name
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric() || character == '_' || character == '-')
+        {
+            return Err(error_for_item(
+                path,
+                source,
+                item,
+                format!("{label}: server names use 1-32 ASCII letters, digits, '_' or '-'"),
+            ));
+        }
+        let server = item.as_table().ok_or_else(|| {
+            error_for_item(path, source, item, format!("{label} must be a TOML table"))
+        })?;
+        reject_unknown_keys(
+            path,
+            source,
+            server,
+            &[
+                "command",
+                "args",
+                "env",
+                "cwd",
+                "exposure",
+                "enabled",
+                "startup_timeout_seconds",
+                "call_timeout_seconds",
+            ],
+            &label,
+        )?;
+        let string_field = |key: &str| -> Result<Option<String>, ConfigError> {
+            match server.get(key) {
+                None => Ok(None),
+                Some(item) => item.as_str().map(|value| Some(value.to_owned())).ok_or_else(|| {
+                    error_for_item(path, source, item, format!("{label}.{key} must be a string"))
+                }),
+            }
+        };
+        if let Some(item) = server.get("enabled") {
+            let enabled = item.as_bool().ok_or_else(|| {
+                error_for_item(path, source, item, format!("{label}.enabled must be a boolean"))
+            })?;
+            if !enabled {
+                continue;
+            }
+        }
+        let command = string_field("command")?
+            .filter(|command| !command.trim().is_empty())
+            .ok_or_else(|| {
+                error_for_item(path, source, item, format!("{label}.command is required"))
+            })?;
+        let args = match server.get("args") {
+            None => Vec::new(),
+            Some(item) => item
+                .as_array()
+                .and_then(|values| {
+                    values
+                        .iter()
+                        .map(|value| value.as_str().map(str::to_owned))
+                        .collect::<Option<Vec<_>>>()
+                })
+                .ok_or_else(|| {
+                    error_for_item(
+                        path,
+                        source,
+                        item,
+                        format!("{label}.args must be an array of strings"),
+                    )
+                })?,
+        };
+        let env = match server.get("env") {
+            None => std::collections::BTreeMap::new(),
+            Some(item) => {
+                let invalid = || {
+                    error_for_item(
+                        path,
+                        source,
+                        item,
+                        format!("{label}.env must be a table of strings"),
+                    )
+                };
+                let pairs: Vec<(String, String)> = match item.as_table_like() {
+                    Some(table) => table
+                        .iter()
+                        .map(|(key, value)| {
+                            value
+                                .as_str()
+                                .map(|value| (key.to_owned(), value.to_owned()))
+                                .ok_or_else(invalid)
+                        })
+                        .collect::<Result<_, _>>()?,
+                    None => return Err(invalid()),
+                };
+                pairs.into_iter().collect()
+            }
+        };
+        let exposure = match string_field("exposure")?.as_deref() {
+            None | Some("deferred") => tea_core::tool::ToolExposure::Deferred,
+            Some("direct") => tea_core::tool::ToolExposure::Direct,
+            Some("composition") => tea_core::tool::ToolExposure::Composition,
+            Some(_) => {
+                return Err(error_for_item(
+                    path,
+                    source,
+                    server.get("exposure").expect("exposure present"),
+                    format!("{label}.exposure must be \"deferred\", \"direct\", or \"composition\""),
+                ));
+            }
+        };
+        let startup =
+            bounded_u64(path, source, server, &label, "startup_timeout_seconds", 30, 1, 300)?;
+        let call =
+            bounded_u64(path, source, server, &label, "call_timeout_seconds", 120, 1, 3_600)?;
+        configs.push(super::mcp::McpServerConfig {
+            name: name.to_owned(),
+            command,
+            args,
+            env,
+            cwd: string_field("cwd")?.map(PathBuf::from),
+            exposure,
+            startup_timeout: Duration::from_secs(startup),
+            call_timeout: Duration::from_secs(call),
+        });
+    }
+    Ok(configs)
 }
 
 fn parse_anthropic(
@@ -562,7 +716,7 @@ fn reject_unknown_keys(
         if !allowed.contains(&key) {
             let message = if table_name == "root" {
                 format!(
-                    "unknown root key {key:?}; only [features], [subagents], [anthropic], and [cache_warming] are allowed"
+                    "unknown root key {key:?}; only [features], [subagents], [anthropic], [cache_warming], and [mcp] are allowed"
                 )
             } else {
                 format!("unknown {table_name} key {key:?}")
@@ -678,6 +832,20 @@ fn optional_u64(
     minimum: u64,
     maximum: u64,
 ) -> Result<u64, ConfigError> {
+    bounded_u64(path, source, table, "[subagents]", key, default, minimum, maximum)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn bounded_u64(
+    path: &Path,
+    source: &str,
+    table: &Table,
+    table_name: &str,
+    key: &str,
+    default: u64,
+    minimum: u64,
+    maximum: u64,
+) -> Result<u64, ConfigError> {
     let Some(item) = table.get(key) else {
         return Ok(default);
     };
@@ -686,7 +854,7 @@ fn optional_u64(
             path,
             source,
             item,
-            format!("[subagents].{key} must be an integer"),
+            format!("{table_name}.{key} must be an integer"),
         )
     })?;
     let value = u64::try_from(value)
@@ -697,7 +865,7 @@ fn optional_u64(
             path,
             source,
             item,
-            format!("[subagents].{key} must be between {minimum} and {maximum}"),
+            format!("{table_name}.{key} must be between {minimum} and {maximum}"),
         )
     })
 }
@@ -832,6 +1000,7 @@ timeout_seconds = 600
                 },
                 anthropic: AnthropicTuiConfig::default(),
                 cache_warming: CacheWarmingTuiConfig::default(),
+                mcp_servers: Vec::new(),
             }
         );
 
@@ -887,6 +1056,59 @@ timeout_seconds = 600
             &tea_home("anthropic-key"),
             "[anthropic]\napi_key = \"secret\"\n",
             "unknown [anthropic] key",
+        );
+    }
+
+    #[test]
+    fn mcp_servers_are_explicit_strict_and_skippable() {
+        let home = tea_home("mcp");
+        write_config(
+            &home,
+            r#"
+[features]
+codemode = true
+
+[mcp.servers.tracker]
+command = "/usr/local/bin/tracker-mcp"
+args = ["--stdio"]
+env = { TRACKER_TOKEN = "from-config" }
+exposure = "direct"
+call_timeout_seconds = 30
+
+[mcp.servers.off]
+command = "unused"
+enabled = false
+"#,
+        );
+        let config = load_tui_config(&home).expect("mcp config");
+        assert!(config.features.codemode);
+        assert_eq!(config.mcp_servers.len(), 1);
+        let server = &config.mcp_servers[0];
+        assert_eq!(server.name, "tracker");
+        assert_eq!(server.args, ["--stdio"]);
+        assert_eq!(server.env["TRACKER_TOKEN"], "from-config");
+        assert_eq!(server.exposure, tea_core::tool::ToolExposure::Direct);
+        assert_eq!(server.call_timeout, Duration::from_secs(30));
+        assert_eq!(server.startup_timeout, Duration::from_secs(30));
+        expect_error(
+            &tea_home("mcp-command"),
+            "[mcp.servers.x]\nargs = []\n",
+            "[mcp.servers.x].command is required",
+        );
+        expect_error(
+            &tea_home("mcp-url"),
+            "[mcp.servers.x]\nurl = \"https://example.invalid\"\n",
+            "unknown [mcp.servers.x] key",
+        );
+        expect_error(
+            &tea_home("mcp-name"),
+            "[mcp.servers.\"bad name\"]\ncommand = \"x\"\n",
+            "server names use",
+        );
+        expect_error(
+            &tea_home("mcp-timeout"),
+            "[mcp.servers.x]\ncommand = \"x\"\ncall_timeout_seconds = 0\n",
+            "[mcp.servers.x].call_timeout_seconds must be between",
         );
     }
 

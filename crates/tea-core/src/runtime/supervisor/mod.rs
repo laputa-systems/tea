@@ -4003,7 +4003,8 @@ where
             .cache_warming_prompt_tokens(last_prompt_tokens(
                 &self.snapshot()?,
                 &lane_runtime.lane_id,
-            ));
+            ))
+            .with_dynamic_tools_resolved();
         let messages = self.core_messages(&lane_runtime, &configuration, recovery.as_ref())?;
         let internal_input = extension_continuation_input(&self.snapshot()?, &operation_id)?;
         let provider_surface_digest = configuration

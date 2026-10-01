@@ -325,6 +325,7 @@ impl App {
                     return Ok(());
                 }
             }
+            self.report_mcp_problems();
             if let Err(error) = harness.submit_input(input) {
                 self.state.notice(error.to_string());
                 return Ok(());

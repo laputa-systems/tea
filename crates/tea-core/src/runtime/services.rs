@@ -114,6 +114,19 @@ pub struct RuntimeServices {
     prompt_layout_scope: crate::measurement::PromptCacheScope,
     prompt_layout_policy: crate::measurement::PromptLayoutPolicy,
     cache_warming: Option<crate::cache_warming::CacheWarmingPolicy>,
+    dynamic_tools: Option<Arc<dyn DynamicToolSource>>,
+}
+
+/// Trusted host tools whose set may change between epochs, such as tools of
+/// local MCP servers that connect in the background.
+///
+/// The supervisor takes one snapshot when an epoch starts, so every run sees
+/// an immutable registry. A snapshot must be cheap; a source still connecting
+/// returns what it has, and later epochs see the rest. Snapshot tools are
+/// added beside the trusted tools and must not reuse their names.
+pub trait DynamicToolSource: Send + Sync {
+    /// Tools available to the next epoch, in a stable order.
+    fn snapshot(&self) -> Vec<Arc<dyn crate::tool::AgentTool>>;
 }
 
 impl std::fmt::Debug for RuntimeServices {
@@ -157,6 +170,7 @@ impl RuntimeServices {
             prompt_layout_scope: crate::measurement::PromptCacheScope::default(),
             prompt_layout_policy: crate::measurement::PromptLayoutPolicy::default(),
             cache_warming: None,
+            dynamic_tools: None,
         }
     }
 
@@ -177,6 +191,24 @@ impl RuntimeServices {
     /// records on the owning operation and never become session entries.
     pub fn cache_warming(mut self, policy: crate::cache_warming::CacheWarmingPolicy) -> Self {
         self.cache_warming = Some(policy);
+        self
+    }
+
+    /// Add host tools resolved freshly at the start of each epoch.
+    pub fn dynamic_tools(mut self, source: Arc<dyn DynamicToolSource>) -> Self {
+        self.dynamic_tools = Some(source);
+        self
+    }
+
+    /// Freeze the dynamic tool source into this epoch's trusted tools.
+    pub(crate) fn with_dynamic_tools_resolved(mut self) -> Self {
+        if let Some(source) = &self.dynamic_tools {
+            for tool in source.snapshot() {
+                if self.trusted_tools.get(tool.name()).is_none() {
+                    self.trusted_tools.insert(tool);
+                }
+            }
+        }
         self
     }
 

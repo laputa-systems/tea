@@ -33,7 +33,7 @@ pub use events::{
     TeaEventTryRecvError, TeaObservationSnapshot, ValidationStage,
 };
 pub use hosted::{HostedEpoch, HostedEpochInput};
-pub use services::{RuntimePolicyIdentities, RuntimeServices};
+pub use services::{DynamicToolSource, RuntimePolicyIdentities, RuntimeServices};
 pub use subagents::{
     ApplyAgentChangesResult, ApplyWorkspaceDeltaRequest, CHILD_SUBAGENT_INSTRUCTION_SUFFIX,
     FinalizeSubagentRequest, InterruptAgentResult, PrepareSubagentRequest, PreparedSubagent,

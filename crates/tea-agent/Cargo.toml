@@ -10,12 +10,20 @@ license = "MIT OR Apache-2.0"
 name = "tea"
 path = "src/main.rs"
 
+# The fake MCP stdio server for offline tests and the local MCP example.
+[[bin]]
+name = "tea-mcp-fixture"
+path = "src/bin/tea-mcp-fixture.rs"
+required-features = ["mcp-fixture"]
+
 [lib]
 path = "src/lib.rs"
 
 [features]
 # Compiles the real-binary PTY regression harness. The tests supply their own loopback endpoint.
 pty-harness = []
+# Builds the fake MCP stdio server used by offline MCP tests and the example.
+mcp-fixture = []
 # Direct ChatGPT-subscription Codex support remains opt-in so ordinary Tea
 # terminal builds do not link OAuth, PKCE, or credential-persistence code.
 provider-codex = ["tea-providers/provider-codex"]
@@ -55,6 +63,13 @@ tea-core = { path = "../tea-core", features = ["testing"] }
 name = "pty_streaming"
 path = "tests/pty_streaming.rs"
 required-features = ["pty-harness"]
+
+# Raw stdio exchange with the fake MCP server; its presence also makes Cargo
+# build the fixture binary that the MCP unit tests spawn.
+[[test]]
+name = "mcp_fixture"
+path = "tests/mcp_fixture.rs"
+required-features = ["mcp-fixture"]
 
 [[example]]
 name = "codex-luna-verification"

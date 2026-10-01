@@ -13,6 +13,7 @@ mod durable;
 mod error;
 mod host;
 mod input;
+pub(crate) mod mcp;
 mod mock;
 mod nonblocking_operations;
 mod persistence;
