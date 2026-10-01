@@ -762,7 +762,7 @@ fn reduce_agent_graph_prefix<'a>(
                 SessionEntry::AssistantMessage(assistant),
                 PayloadRef::Inline(crate::JsonValue::String(report)),
             ) = (entry, &terminal.report)
-                && assistant.content != *report
+                && assistant.text() != *report
             {
                 return Err(Corruption::new(format!(
                     "agent terminal result {} inline report differs from its final assistant entry",

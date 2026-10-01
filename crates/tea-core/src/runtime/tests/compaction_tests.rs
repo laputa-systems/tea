@@ -47,11 +47,7 @@ impl Compactor for RequestMaterialCompactor {
     ) -> CompactionFuture<'a> {
         let observed_requests = Arc::clone(&self.requests);
         Box::pin(async move {
-            let request = ModelRequest {
-                system_prompt: COMPACTION_SYSTEM_PROMPT.into(),
-                context: COMPACTION_CONTEXT.into(),
-                ..ModelRequest::default()
-            };
+            let request = compaction_request();
             let ticket = requests.begin_provider_request(request.clone()).await?;
             observed_requests
                 .lock()
@@ -321,13 +317,9 @@ fn automatic_compaction_persists_exact_request_and_reopens_without_reinvocation(
             material,
             JsonValue::object([
                 ("format", JsonValue::String("tea-model-request".into())),
-                ("version", JsonValue::from(1_u64)),
-                (
-                    "system_prompt",
-                    JsonValue::String(COMPACTION_SYSTEM_PROMPT.into()),
-                ),
-                ("context", JsonValue::String(COMPACTION_CONTEXT.into())),
-                ("tools", JsonValue::Array(Vec::new())),
+                ("version", JsonValue::from(2_u64)),
+                ("purpose", JsonValue::String("compaction".into())),
+                ("transcript", compaction_request().transcript.canonical_json()),
                 ("model", JsonValue::Null),
                 ("thinking_level", JsonValue::String("off".into())),
                 ("session_id", JsonValue::Null),
@@ -338,11 +330,7 @@ fn automatic_compaction_persists_exact_request_and_reopens_without_reinvocation(
                 .lock()
                 .expect("fixture compactor request mutex")
                 .as_slice(),
-            &[ModelRequest {
-                system_prompt: COMPACTION_SYSTEM_PROMPT.into(),
-                context: COMPACTION_CONTEXT.into(),
-                ..ModelRequest::default()
-            }]
+            &[compaction_request()]
         );
         assert!(
             snapshot.entries().iter().any(|entry| matches!(
@@ -399,4 +387,16 @@ fn automatic_compaction_persists_exact_request_and_reopens_without_reinvocation(
             "passive reopen reconstructs the checkpoint without another compactor request"
         );
     });
+}
+
+fn compaction_request() -> ModelRequest {
+    ModelRequest {
+        purpose: crate::scheduler::RequestPurpose::Compaction,
+        transcript: crate::transcript::Transcript::standalone(
+            COMPACTION_SYSTEM_PROMPT,
+            Vec::new(),
+            [crate::transcript::user_message(COMPACTION_CONTEXT)],
+        ),
+        ..ModelRequest::default()
+    }
 }

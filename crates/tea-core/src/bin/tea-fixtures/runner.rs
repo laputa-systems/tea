@@ -107,35 +107,17 @@ impl HookSet for FixtureHooks {
                 policy.transform_append_host_message.clone(),
             ));
         }
-        Ok(context)
-    }
-
-    fn convert_to_llm(
-        &self,
-        context: ContextEnvelope,
-    ) -> Result<String, tea_core::error::HookError> {
+        // The final transformed envelope is exactly what becomes the typed
+        // request transcript.
         if let Some(request_contexts) = &self.request_contexts {
             request_contexts
                 .lock()
                 .expect("fixture quality request-context mutex poisoned")
                 .push(context.clone());
         }
-        if let Some(policy) = &self.context_hooks {
-            let host_messages = context
-                .host_messages
-                .iter()
-                .map(SerializedJson::as_str)
-                .collect::<Vec<_>>()
-                .join("|");
-            return Ok(format!("{}{}", policy.convert_prefix, host_messages));
-        }
-        Ok(context
-            .messages
-            .into_iter()
-            .map(|message| format!("{message:?}"))
-            .collect::<Vec<_>>()
-            .join("\n"))
+        Ok(context)
     }
+
 
     fn prepare_next_turn(
         &self,
@@ -449,6 +431,20 @@ pub(super) async fn run_fixture(fixture: Fixture) -> Result<JsonValue, String> {
                 if matches!(event.kind, AgentEventKind::ProviderRequestObserved { .. }) {
                     continue;
                 }
+                // Configuration messages are Tea's transcript-ordered prompt
+                // and tool declarations. The declarative Pi-parity grammar has
+                // no message events for them; their effect is asserted through
+                // request capture instead.
+                if matches!(
+                    &event.kind,
+                    AgentEventKind::MessageStart {
+                        message: AgentMessage::System { .. }
+                    } | AgentEventKind::MessageEnd {
+                        message: AgentMessage::System { .. }
+                    }
+                ) {
+                    continue;
+                }
                 events.push(normalize_event(event_sequence, event, turn_offset)?);
                 event_sequence = event_sequence.saturating_add(1);
             }
@@ -468,7 +464,9 @@ pub(super) async fn run_fixture(fixture: Fixture) -> Result<JsonValue, String> {
         .rev()
         .find_map(|message| match message {
             AgentMessage::Assistant { stop_reason, .. } => *stop_reason,
-            AgentMessage::User { .. } | AgentMessage::ToolResult { .. } => None,
+            AgentMessage::User { .. }
+            | AgentMessage::ToolResult { .. }
+            | AgentMessage::System { .. } => None,
         })
         .ok_or_else(|| "Rust agent did not retain a terminal assistant response".to_owned())?;
     if !model_provider
@@ -524,6 +522,7 @@ pub(super) async fn run_fixture(fixture: Fixture) -> Result<JsonValue, String> {
                 snapshot
                     .messages
                     .iter()
+                    .filter(|message| !matches!(message, AgentMessage::System { .. }))
                     .map(normalize_message)
                     .collect::<Result<Vec<_>, _>>()?,
             ),
@@ -550,14 +549,19 @@ pub(super) async fn run_fixture(fixture: Fixture) -> Result<JsonValue, String> {
         ),
         ("error", JsonValue::Null),
     ];
-    if context_hooks.is_some() {
+    if let Some(context_hooks) = &context_hooks {
         let requests = model_provider
             .requests
             .lock()
             .expect("fixture model request mutex poisoned");
         result_fields.push((
             "request_trace",
-            JsonValue::Array(requests.iter().map(normalize_request).collect()),
+            JsonValue::Array(
+                requests
+                    .iter()
+                    .map(|request| normalize_request(request, &context_hooks.convert_prefix))
+                    .collect(),
+            ),
         ));
     } else if quality_capture_requests {
         let requests = model_provider

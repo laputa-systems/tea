@@ -58,6 +58,22 @@ pub enum CoreError {
     PromptLayoutRejected {
         continuity: crate::measurement::PromptContinuity,
     },
+    /// A request declared a tool the run is not authorized to execute, or
+    /// declared it with an interface different from its registration.
+    UnauthorizedToolDeclaration {
+        /// Declared tool name.
+        name: String,
+    },
+    /// A configuration update was structurally invalid.
+    InvalidConfiguration {
+        /// Bounded diagnostic.
+        message: String,
+    },
+    /// A model router failed or selected a model outside its approved set.
+    ModelRouting {
+        /// Bounded diagnostic.
+        message: String,
+    },
 }
 
 /// A state-machine transition was rejected.
@@ -114,6 +130,14 @@ impl fmt::Display for CoreError {
             Self::PromptLayoutRejected { continuity } => {
                 write!(f, "prompt layout policy rejected {continuity:?} continuity")
             }
+            Self::UnauthorizedToolDeclaration { name } => write!(
+                f,
+                "request declares tool {name:?} outside the run's authorized registry"
+            ),
+            Self::InvalidConfiguration { message } => {
+                write!(f, "invalid model configuration update: {message}")
+            }
+            Self::ModelRouting { message } => write!(f, "model routing failed: {message}"),
         }
     }
 }

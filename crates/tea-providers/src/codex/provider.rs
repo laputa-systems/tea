@@ -962,7 +962,7 @@ fn codex_request_observation(
     );
     components.insert(
         "tool_transport".into(),
-        stable_fingerprint(if request.tools.is_empty() {
+        stable_fingerprint(if request.tools().is_empty() {
             b"no-tools"
         } else {
             b"function-tools"
@@ -1002,7 +1002,6 @@ mod tests {
         CodexCredential, FileCredentialStore, InMemoryCredentialStore, SecretString,
     };
     use crate::codex::oauth::{CodexOAuthClient, OAuthError, OAuthHttpClient, OsRandomSource};
-    use crate::hooks::{ContextEnvelope, HookSet};
     use crate::json::JsonValue;
     use crate::scheduler::{ModelEventStream, ModelProvider};
     use crate::state::{AgentMessage, MessageId, ModelDescriptor, ThinkingLevel};
@@ -1140,9 +1139,9 @@ mod tests {
         (format!("http://{address}/responses"), server, retried)
     }
 
-    fn request(context: String, session_id: &str) -> ModelRequest {
+    fn request(messages: Vec<AgentMessage>, session_id: &str) -> ModelRequest {
         ModelRequest {
-            context,
+            transcript: crate::transcript::Transcript::new(messages),
             model: Some(ModelDescriptor {
                 provider: "codex".into(),
                 model: "gpt-test".into(),
@@ -1337,16 +1336,10 @@ mod tests {
                 .with_request_capture(capture.clone()),
         );
         let cancellation = CancellationToken::new();
-        let initial_context = crate::codex::CodexContextHook
-            .convert_to_llm(ContextEnvelope {
-                version: 1,
-                messages: vec![AgentMessage::User {
-                    id: MessageId(1),
-                    content: "first prompt".into(),
-                }],
-                host_messages: Vec::new(),
-            })
-            .expect("first Codex context should convert");
+        let initial_context = vec![AgentMessage::User {
+            id: MessageId(1),
+            content: "first prompt".into(),
+        }];
         let mut first_source = smol::block_on(provider.stream(
             request(initial_context, "durable-session"),
             cancellation.clone(),
@@ -1373,26 +1366,21 @@ mod tests {
                 _ => None,
             })
             .expect("first response should preserve encrypted reasoning");
-        let next_context = crate::codex::CodexContextHook
-            .convert_to_llm(ContextEnvelope {
-                version: 1,
-                messages: vec![
-                    AgentMessage::User {
-                        id: MessageId(1),
-                        content: "first prompt".into(),
-                    },
-                    AgentMessage::Assistant {
-                        id: MessageId(2),
-                        content: "first answer".into(),
-                        tool_calls: Vec::new(),
-                        stop_reason: Some(StopReason::Stop),
-                        error_message: None,
-                        opaque_context: vec![opaque],
-                    },
-                ],
-                host_messages: Vec::new(),
-            })
-            .expect("second Codex context should convert");
+        let next_context = vec![
+            AgentMessage::User {
+                id: MessageId(1),
+                content: "first prompt".into(),
+            },
+            AgentMessage::Assistant {
+                id: MessageId(2),
+                content: crate::state::text_content("first answer"),
+                tool_calls: Vec::new(),
+                stop_reason: Some(StopReason::Stop),
+                error_message: None,
+                opaque_context: vec![opaque],
+                origin: None,
+            },
+        ];
         let mut second_source = smol::block_on(provider.stream(
             request(next_context, "durable-session"),
             cancellation.clone(),
@@ -1511,7 +1499,7 @@ mod tests {
         );
         let cancellation = CancellationToken::new();
         let mut source = smol::block_on(provider.stream(
-            request("[]".into(), "durable-session"),
+            request(Vec::new(), "durable-session"),
             cancellation.clone(),
         ))
         .expect("response source should start");
@@ -1634,7 +1622,7 @@ mod tests {
         );
         let cancellation = CancellationToken::new();
         let mut source = smol::block_on(provider.stream(
-            request("[]".into(), "durable-session"),
+            request(Vec::new(), "durable-session"),
             cancellation.clone(),
         ))
         .expect("response source should start");
@@ -1686,7 +1674,7 @@ mod tests {
         );
         let cancellation = CancellationToken::new();
         let mut source = smol::block_on(provider.stream(
-            request("[]".into(), "durable-session"),
+            request(Vec::new(), "durable-session"),
             cancellation.clone(),
         ))
         .expect("response source should start");
@@ -1748,22 +1736,16 @@ mod tests {
             CodexConfig::try_new(auth, model.clone())
                 .expect("explicit live Codex configuration should be valid"),
         );
-        let context = crate::codex::CodexContextHook
-            .convert_to_llm(ContextEnvelope {
-                version: 1,
-                messages: vec![AgentMessage::User {
-                    id: MessageId(1),
-                    content: "Reply with exactly: tea codex smoke ok".into(),
-                }],
-                host_messages: Vec::new(),
-            })
-            .expect("live smoke context should convert to Responses input");
+        let context = vec![AgentMessage::User {
+            id: MessageId(1),
+            content: "Reply with exactly: tea codex smoke ok".into(),
+        }];
         let session_id = new_identifier("tea-live-smoke")
             .expect("live smoke session identity should use secure randomness");
         let cancellation = CancellationToken::new();
         let mut source = smol::block_on(provider.stream(
             ModelRequest {
-                context,
+                transcript: crate::transcript::Transcript::new(context),
                 model: Some(ModelDescriptor {
                     provider: "codex".into(),
                     model,

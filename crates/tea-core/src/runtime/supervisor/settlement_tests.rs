@@ -17,7 +17,7 @@ fn fixture_resolved_harness(
 ) -> ResolvedHarness {
     ResolvedHarness {
         identity,
-        system_prompt: String::new(),
+        system_prompt: Default::default(),
         extension_tools: ToolRegistry::default(),
         host_commands: Vec::new(),
         idle_hooks: Vec::new(),
@@ -84,7 +84,7 @@ fn after_tool_commits_memory_with_its_tool_result() {
             ProvisionedEntry {
                 id: assistant_entry_id.clone(),
                 body: SessionEntry::AssistantMessage(AssistantMessageEntry {
-                    content: String::new(),
+                    content: tea_session::AssistantContentEntry::text_content(String::new()),
                     tool_calls: vec![AssistantToolCall::new(
                         call.id.to_string(),
                         call.name.clone(),
@@ -94,6 +94,7 @@ fn after_tool_commits_memory_with_its_tool_result() {
                     error_message: None,
                     opaque_context: Vec::new(),
                     metadata: Metadata::new(),
+                    origin: None,
                 }),
             },
         )

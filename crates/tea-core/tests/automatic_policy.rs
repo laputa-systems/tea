@@ -438,7 +438,7 @@ fn a_threshold_compaction_with_nothing_to_compact_is_skipped_rather_than_failed(
             "a compaction with an empty source must not reach the compactor"
         );
         assert_eq!(provider.requests().len(), 2);
-        assert!(matches!(agent.snapshot().messages.last(), Some(AgentMessage::Assistant { content, .. }) if content == "done"));
+        assert!(matches!(agent.snapshot().messages.last(), Some(AgentMessage::Assistant { content, .. }) if tea_core::state::assistant_text(content) == "done"));
         Ok::<(), CoreError>(())
     })
     .expect("a turn with nothing to compact still completes");
@@ -679,8 +679,9 @@ fn failed_automatic_compaction_does_not_mutate_the_pre_transaction_transcript() 
             .expect_err("failed compaction stops at the configured boundary");
         assert!(matches!(error, CoreError::AutomaticCompaction { .. }));
         let messages = agent.snapshot().messages;
-        assert_eq!(messages.len(), 3);
-        assert!(matches!(messages[2], AgentMessage::ToolResult { ref content, .. } if content == "raw tool output"));
+        assert_eq!(messages.len(), 4);
+        assert!(matches!(messages[1], AgentMessage::System { .. }));
+        assert!(matches!(messages[3], AgentMessage::ToolResult { ref content, .. } if content == "raw tool output"));
         Ok::<(), CoreError>(())
     })
     .expect("automatic transaction failure is non-mutating");
@@ -730,7 +731,7 @@ fn automatic_request_exposes_a_split_turn_prefix_without_cutting_tool_pairs() {
         ));
         assert!(matches!(
             request.split_turn_prefix.as_slice(),
-            [AgentMessage::User { .. }]
+            [AgentMessage::User { .. }, AgentMessage::System { .. }]
         ));
         Ok::<(), CoreError>(())
     })
@@ -766,8 +767,9 @@ fn cancelled_automatic_compaction_leaves_the_pre_transaction_transcript_unchange
         let run = agent.start_prompt("start")?;
         assert_eq!(run.drive().await, Err(CoreError::Cancelled));
         let messages = agent.snapshot().messages;
-        assert_eq!(messages.len(), 3);
-        assert!(matches!(messages[2], AgentMessage::ToolResult { ref content, .. } if content == "raw tool output"));
+        assert_eq!(messages.len(), 4);
+        assert!(matches!(messages[1], AgentMessage::System { .. }));
+        assert!(matches!(messages[3], AgentMessage::ToolResult { ref content, .. } if content == "raw tool output"));
         assert!(matches!(
             run.events().iter().find_map(|event| match &event.kind {
                 AgentEventKind::AutomaticCompactionEnd { outcome, .. } => Some(outcome),

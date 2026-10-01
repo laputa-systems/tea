@@ -515,7 +515,7 @@ fn entry_kind(entry: &SessionEntry) -> &'static str {
         SessionEntry::BranchSummary(_) => "branch_summary",
         SessionEntry::ModelChanged(_) => "model_changed",
         SessionEntry::ThinkingChanged(_) => "thinking_changed",
-        SessionEntry::ToolActivationChanged(_) => "tool_activation_changed",
+        SessionEntry::ConfigurationChanged(_) => "configuration_changed",
         SessionEntry::HarnessRevisionChanged(_) => "harness_revision_changed",
         SessionEntry::PluginMemory(_) => "plugin_memory",
         SessionEntry::Custom(_) => "custom",
@@ -553,7 +553,7 @@ fn entry_search_text(entry: &SessionEntry) -> Result<String, ToolError> {
                 })
                 .collect::<Vec<_>>()
                 .join("\n");
-            Ok(format!("{}\n{calls}", assistant.content))
+            Ok(format!("{}\n{calls}", assistant.text()))
         }
         SessionEntry::ToolResult(result) => {
             let projection = result
@@ -579,7 +579,13 @@ fn entry_search_text(entry: &SessionEntry) -> Result<String, ToolError> {
             entry.revision.as_deref().unwrap_or_default()
         )),
         SessionEntry::ThinkingChanged(entry) => Ok(entry.level.clone()),
-        SessionEntry::ToolActivationChanged(entry) => Ok(entry.active_tool_names.join("\n")),
+        SessionEntry::ConfigurationChanged(entry) => Ok(entry
+            .sections
+            .iter()
+            .filter_map(|section| section.content.clone())
+            .chain(entry.tools_added.iter().map(|tool| tool.name.clone()))
+            .collect::<Vec<_>>()
+            .join("\n")),
         SessionEntry::HarnessRevisionChanged(entry) => {
             Ok(format!("{} {}", entry.revision_id, entry.snapshot_id))
         }

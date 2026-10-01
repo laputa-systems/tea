@@ -371,8 +371,7 @@ mod tests {
                     ]),
                 ),
                 2 => {
-                    let delta_id = JsonValue::parse(&request.context)
-                        .ok()
+                    let delta_id = Some(request.transcript.canonical_json())
                         .and_then(|value| find_delta_id(&value, 0))
                         .expect("wait result exposes the durable delta ID");
                     tool_turn(

@@ -114,8 +114,9 @@ pub enum SessionEntry {
     ModelChanged(ModelChangedEntry),
     /// A thinking-level change.
     ThinkingChanged(ThinkingChangedEntry),
-    /// A change in visible or enabled tool names.
-    ToolActivationChanged(ToolActivationChangedEntry),
+    /// A model-visible configuration change (prompt sections and declared
+    /// tools) at this point in conversation order.
+    ConfigurationChanged(ConfigurationChangedEntry),
     /// A durable branch-level harness revision transition.
     HarnessRevisionChanged(HarnessRevisionChangedEntry),
     /// Typed plugin-owned memory, validated and persisted by Rust.
@@ -130,10 +131,10 @@ impl SessionEntry {
         match self {
             Self::UserMessage(_) | Self::AssistantMessage(_) | Self::ToolResult(_) => true,
             Self::Compaction(_) | Self::BranchSummary(_) => true,
-            Self::ModelChanged(_)
-            | Self::ThinkingChanged(_)
-            | Self::ToolActivationChanged(_)
-            | Self::HarnessRevisionChanged(_) => false,
+            Self::ConfigurationChanged(_) => true,
+            Self::ModelChanged(_) | Self::ThinkingChanged(_) | Self::HarnessRevisionChanged(_) => {
+                false
+            }
             Self::PluginMemory(entry) => entry.visibility == MemoryVisibility::ModelVisible,
             Self::Custom(entry) => entry.model_visible,
         }
@@ -167,7 +168,7 @@ impl SessionEntry {
             | Self::BranchSummary(_)
             | Self::ModelChanged(_)
             | Self::ThinkingChanged(_)
-            | Self::ToolActivationChanged(_)
+            | Self::ConfigurationChanged(_)
             | Self::HarnessRevisionChanged(_) => {}
         }
         if let Self::Compaction(entry) = self
@@ -233,11 +234,12 @@ impl ProvisionedEntry {
         Self {
             id,
             body: SessionEntry::AssistantMessage(AssistantMessageEntry {
-                content: content.into(),
+                content: AssistantContentEntry::text_content(content),
                 tool_calls,
                 stop_reason: None,
                 error_message: None,
                 opaque_context: Vec::new(),
+                origin: None,
                 metadata: Metadata::new(),
             }),
         }
@@ -256,8 +258,8 @@ pub struct UserMessageEntry {
 /// Assistant message semantics.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AssistantMessageEntry {
-    /// Settled assistant text.
-    pub content: String,
+    /// Settled ordered answer text and provider-exposed thinking.
+    pub content: Vec<AssistantContentEntry>,
     /// Provider tool calls in their original source order.
     pub tool_calls: Vec<AssistantToolCall>,
     /// Provider stop reason when retained.
@@ -270,8 +272,51 @@ pub struct AssistantMessageEntry {
     /// matching provider adapter is responsible for deciding whether and how
     /// to replay it on a later request.
     pub opaque_context: Vec<OpaqueProviderContextEntry>,
+    /// Physical model that produced the response, when recorded.
+    pub origin: Option<ModelChangedEntry>,
     /// Host-owned stable metadata.
     pub metadata: Metadata,
+}
+
+impl AssistantMessageEntry {
+    /// Concatenated answer text, excluding thinking.
+    pub fn text(&self) -> String {
+        let mut text = String::new();
+        for block in &self.content {
+            if let AssistantContentEntry::Text(block) = block {
+                text.push_str(block);
+            }
+        }
+        text
+    }
+}
+
+/// One ordered piece of durable assistant output.
+#[derive(Clone, Debug, PartialEq)]
+pub enum AssistantContentEntry {
+    /// Answer text.
+    Text(String),
+    /// Provider-exposed thinking with optional provider-private replay material.
+    Thinking {
+        /// Visible thinking text.
+        text: String,
+        /// Replay material interpreted only by the issuing provider adapter.
+        signature: Option<OpaqueProviderContextEntry>,
+    },
+    /// Withheld reasoning represented only by opaque replay material.
+    RedactedThinking(OpaqueProviderContextEntry),
+}
+
+impl AssistantContentEntry {
+    /// Content of a text-only reply; empty text has no blocks.
+    pub fn text_content(text: impl Into<String>) -> Vec<Self> {
+        let text = text.into();
+        if text.is_empty() {
+            Vec::new()
+        } else {
+            vec![Self::Text(text)]
+        }
+    }
 }
 
 /// One bounded provider-private continuation item retained with an assistant turn.
@@ -426,11 +471,40 @@ pub struct ThinkingChangedEntry {
     pub level: String,
 }
 
-/// Tool activation semantic state.
+/// One section change in a durable configuration update.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ToolActivationChangedEntry {
-    /// Deterministically ordered active tool names.
-    pub active_tool_names: Vec<String>,
+pub struct PromptSectionChange {
+    /// Section identity.
+    pub id: String,
+    /// Replacement text, or `None` to remove the section.
+    pub content: Option<String>,
+}
+
+/// One model-visible tool declaration.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ToolDeclarationRecord {
+    /// Tool name.
+    pub name: String,
+    /// Model-facing description.
+    pub description: String,
+    /// JSON Schema-compatible parameter value.
+    pub schema: JsonValue,
+}
+
+/// A model-visible configuration change in conversation order.
+///
+/// The first one on a branch is the initial configuration; later ones change
+/// it. Replaying them in branch order yields the configuration in force at any
+/// entry, so forks and reopen reproduce the same configuration history. The
+/// entry declares tools; it never grants a capability.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ConfigurationChangedEntry {
+    /// Section replacements, additions, and removals in application order.
+    pub sections: Vec<PromptSectionChange>,
+    /// Complete declarations of tools that become available here.
+    pub tools_added: Vec<ToolDeclarationRecord>,
+    /// Names of tools that stop being available here.
+    pub tools_removed: Vec<String>,
 }
 
 /// Immutable branch-level harness revision transition.
@@ -1798,8 +1872,8 @@ pub struct EffectiveLaneConfiguration {
     pub model: Option<ModelChangedEntry>,
     /// Most recent selected thinking level.
     pub thinking_level: Option<String>,
-    /// Most recent deterministic active tool names.
-    pub active_tool_names: Vec<String>,
+    /// Names of the tools declared after replaying configuration entries.
+    pub declared_tool_names: Vec<String>,
     /// Branch-derived active harness revision.
     pub harness_revision: Option<HarnessRevisionId>,
 }

@@ -24,8 +24,11 @@ pub enum TranscriptEntry {
     User {
         text: String,
     },
+    /// One assistant reply. Provider-exposed thinking is presentation kept
+    /// beside, never inside, the answer text.
     Assistant {
         text: String,
+        thinking: String,
         streaming: bool,
     },
     Tool(ToolProjection),
@@ -337,7 +340,7 @@ impl AppState {
                     );
                 }
             }
-            AgentEventKind::MessageUpdate { text_delta, .. } => {
+            AgentEventKind::MessageUpdate { delta, .. } => {
                 // Streaming text is carried as `PreviewEvent` in live
                 // subscriptions. Retain this branch only for direct
                 // state-projection tests and callers without an observation
@@ -345,21 +348,27 @@ impl AppState {
                 if run.is_some() {
                     return;
                 }
-                if let Some(index) = self.streaming_line {
-                    if let Some(TranscriptEntry::Assistant { text, .. }) =
-                        self.transcript.get_mut(index)
-                    {
-                        text.push_str(text_delta);
-                    }
-                } else {
+                if self.streaming_line.is_none() {
                     self.push_entry(
                         sequence,
                         TranscriptEntry::Assistant {
-                            text: text_delta.clone(),
+                            text: String::new(),
+                            thinking: String::new(),
                             streaming: true,
                         },
                     );
                     self.streaming_line = self.transcript.len().checked_sub(1);
+                }
+                if let Some(TranscriptEntry::Assistant { text, thinking, .. }) = self
+                    .streaming_line
+                    .and_then(|index| self.transcript.get_mut(index))
+                {
+                    match delta {
+                        tea_core::event::MessageDelta::Text(delta) => text.push_str(delta),
+                        tea_core::event::MessageDelta::Thinking(delta) => {
+                            thinking.push_str(delta)
+                        }
+                    }
                 }
             }
             AgentEventKind::MessageEnd { message } => {
@@ -373,8 +382,15 @@ impl AppState {
                     let preview_index = run.and_then(|run| {
                         self.active_assistant_previews
                             .get(&PreviewIdentity::assistant(run.clone(), *id))
+                            .or_else(|| {
+                                self.active_assistant_previews.get(
+                                    &PreviewIdentity::assistant_thinking(run.clone(), *id),
+                                )
+                            })
                             .map(|line| line.transcript_index)
                     });
+                    let answer = tea_core::state::assistant_text(content);
+                    let reasoning = tea_core::state::assistant_thinking(content);
                     let index = preview_index
                         .or_else(|| run.is_none().then_some(self.streaming_line).flatten());
                     if let Some(index) = index {
@@ -385,10 +401,14 @@ impl AppState {
                                 };
                                 self.transcript_sequences[index] = sequence;
                             }
-                        } else if let Some(TranscriptEntry::Assistant { text, streaming }) =
-                            self.transcript.get_mut(index)
+                        } else if let Some(TranscriptEntry::Assistant {
+                            text,
+                            thinking,
+                            streaming,
+                        }) = self.transcript.get_mut(index)
                         {
-                            *text = content.clone();
+                            *text = answer;
+                            *thinking = reasoning;
                             *streaming = false;
                             self.transcript_sequences[index] = sequence;
                         }
@@ -403,7 +423,8 @@ impl AppState {
                         self.push_entry(
                             sequence,
                             TranscriptEntry::Assistant {
-                                text: content.clone(),
+                                text: answer,
+                                thinking: reasoning,
                                 streaming: false,
                             },
                         );
@@ -613,6 +634,12 @@ impl AppState {
                 text,
                 truncated,
                 ..
+            }
+            | PreviewEvent::AssistantThinking {
+                sequence,
+                text,
+                truncated,
+                ..
             } => self.apply_assistant_preview(identity, Some(sequence.0), text, *truncated),
             PreviewEvent::ToolProgress {
                 sequence,
@@ -808,7 +835,8 @@ impl AppState {
                         None,
                         entry_id,
                         TranscriptEntry::Assistant {
-                            text: content.clone(),
+                            text: tea_core::state::assistant_text(content),
+                            thinking: tea_core::state::assistant_thinking(content),
                             streaming: false,
                         },
                     );
@@ -842,6 +870,8 @@ impl AppState {
                     }),
                 );
             }
+            // Configuration is model context, not a conversation row.
+            AgentMessage::System { .. } => {}
         }
     }
 
@@ -1300,18 +1330,44 @@ impl AppState {
         text: &str,
         truncated: bool,
     ) {
-        if !matches!(&identity.target, PreviewTarget::AssistantMessage { .. }) {
-            return;
+        let (message_id, is_thinking) = match &identity.target {
+            PreviewTarget::AssistantMessage { message_id } => (*message_id, false),
+            PreviewTarget::AssistantThinking { message_id } => (*message_id, true),
+            PreviewTarget::ToolCall { .. } => return,
+        };
+        // Answer text and thinking of one message share a row; whichever
+        // preview arrives first creates it and the other attaches to it.
+        let sibling = if is_thinking {
+            PreviewIdentity::assistant(identity.run.clone(), message_id)
+        } else {
+            PreviewIdentity::assistant_thinking(identity.run.clone(), message_id)
+        };
+        if !self.active_assistant_previews.contains_key(&identity) {
+            if let Some(index) = self
+                .active_assistant_previews
+                .get(&sibling)
+                .map(|line| line.transcript_index)
+            {
+                self.active_assistant_previews.insert(
+                    identity.clone(),
+                    AssistantPreviewLine {
+                        transcript_index: index,
+                        truncated: false,
+                    },
+                );
+            }
         }
         if let Some(line) = self.active_assistant_previews.get_mut(&identity) {
             let index = line.transcript_index;
             let prepend_ellipsis = truncated && !line.truncated;
             line.truncated |= truncated;
             if let Some(TranscriptEntry::Assistant {
-                text: rendered,
+                text: answer,
+                thinking,
                 streaming,
             }) = self.transcript.get_mut(index)
             {
+                let rendered = if is_thinking { thinking } else { answer };
                 if prepend_ellipsis {
                     rendered.insert(0, '…');
                 }
@@ -1325,10 +1381,16 @@ impl AppState {
             self.active_assistant_previews.remove(&identity);
         }
         let index = self.transcript.len();
+        let (answer, thinking) = if is_thinking {
+            (String::new(), preview_text(text, truncated))
+        } else {
+            (preview_text(text, truncated), String::new())
+        };
         self.push_entry(
             sequence,
             TranscriptEntry::Assistant {
-                text: preview_text(text, truncated),
+                text: answer,
+                thinking,
                 streaming: true,
             },
         );
@@ -1714,6 +1776,7 @@ fn durable_message_matches(entry: &TranscriptEntry, message: &AgentMessage) -> b
         (
             TranscriptEntry::Assistant {
                 text,
+                thinking,
                 streaming: false,
             },
             AgentMessage::Assistant {
@@ -1721,7 +1784,10 @@ fn durable_message_matches(entry: &TranscriptEntry, message: &AgentMessage) -> b
                 error_message: None,
                 ..
             },
-        ) => text == content,
+        ) => {
+            *text == tea_core::state::assistant_text(content)
+                && *thinking == tea_core::state::assistant_thinking(content)
+        }
         (
             TranscriptEntry::Error { text },
             AgentMessage::Assistant {
@@ -1794,7 +1860,15 @@ fn full_transcript_detail_lines(entries: &[TranscriptEntry]) -> Vec<String> {
                 lines.push("User".into());
                 lines.extend(text.lines().map(str::to_owned));
             }
-            TranscriptEntry::Assistant { text, streaming } => {
+            TranscriptEntry::Assistant {
+                text,
+                thinking,
+                streaming,
+            } => {
+                if !thinking.is_empty() {
+                    lines.push("Thinking".into());
+                    lines.extend(thinking.lines().map(str::to_owned));
+                }
                 lines.push(if *streaming {
                     "Assistant (streaming)".into()
                 } else {

@@ -166,7 +166,7 @@ fn expected_artifact_lengths(
             | SessionEntry::BranchSummary(_)
             | SessionEntry::ModelChanged(_)
             | SessionEntry::ThinkingChanged(_)
-            | SessionEntry::ToolActivationChanged(_)
+            | SessionEntry::ConfigurationChanged(_)
             | SessionEntry::HarnessRevisionChanged(_) => {}
         }
     }

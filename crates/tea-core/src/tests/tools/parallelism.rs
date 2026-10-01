@@ -36,9 +36,6 @@ impl HookSet for NormalizingHook {
         Ok(context)
     }
 
-    fn convert_to_llm(&self, _context: ContextEnvelope) -> Result<String, crate::error::HookError> {
-        Ok("fixture context".into())
-    }
 }
 
 impl AgentTool for ExclusiveFixtureTool {
@@ -350,9 +347,15 @@ fn tool_turn_executes_then_continues_the_model_loop() {
 
         let snapshot = agent.snapshot();
         assert_eq!(snapshot.phase, AgentPhase::Idle);
-        assert_eq!(snapshot.messages.len(), 4);
+        assert_eq!(snapshot.messages.len(), 5);
+        // The first request declares the run's tools in a leading
+        // configuration message after the prompt.
         assert!(matches!(
             snapshot.messages[1],
+            crate::state::AgentMessage::System { .. }
+        ));
+        assert!(matches!(
+            snapshot.messages[2],
             crate::state::AgentMessage::Assistant { ref tool_calls, .. }
                 if tool_calls == &vec![AgentToolCall {
                     id: call_id.clone(),
@@ -361,14 +364,14 @@ fn tool_turn_executes_then_continues_the_model_loop() {
                 }]
         ));
         assert!(matches!(
-            snapshot.messages[2],
+            snapshot.messages[3],
             crate::state::AgentMessage::ToolResult { ref tool_call_id, ref content, is_error: false, .. }
                 if tool_call_id == &call_id && content == "echoed: hello"
         ));
         assert!(matches!(
-            snapshot.messages[3],
+            snapshot.messages[4],
             crate::state::AgentMessage::Assistant { ref content, ref tool_calls, .. }
-                if content == "done" && tool_calls.is_empty()
+                if crate::state::assistant_text(content) == "done" && tool_calls.is_empty()
         ));
 
         Ok::<(), CoreError>(())
@@ -408,11 +411,12 @@ fn recovered_assistant_tool_calls_use_the_shared_scheduler_before_the_next_reque
                 },
                 AgentMessage::Assistant {
                     id: MessageId(2),
-                    content: String::new(),
+                    content: crate::state::text_content(String::new()),
                     tool_calls: recovered_calls.clone(),
                     stop_reason: Some(StopReason::ToolUse),
                     error_message: None,
                     opaque_context: Vec::new(),
+                    origin: None,
                 },
             ],
             recovered_calls.clone(),
@@ -434,7 +438,7 @@ fn recovered_assistant_tool_calls_use_the_shared_scheduler_before_the_next_reque
         assert_eq!(provider.requests().len(), 1);
         assert!(matches!(
             agent.snapshot().messages.last(),
-            Some(AgentMessage::Assistant { content, .. }) if content == "continued after recovery"
+            Some(AgentMessage::Assistant { content, .. }) if crate::state::assistant_text(content) == "continued after recovery"
         ));
         Ok::<(), CoreError>(())
     })
@@ -482,11 +486,12 @@ fn recovery_resumes_only_the_missing_suffix_of_a_partially_committed_tool_batch(
                 },
                 AgentMessage::Assistant {
                     id: MessageId(2),
-                    content: String::new(),
+                    content: crate::state::text_content(String::new()),
                     tool_calls: calls,
                     stop_reason: Some(StopReason::ToolUse),
                     error_message: None,
                     opaque_context: Vec::new(),
+                    origin: None,
                 },
                 AgentMessage::ToolResult {
                     id: MessageId(3),
@@ -570,11 +575,12 @@ fn recovery_keeps_a_later_committed_result_without_reexecuting_it() {
                 },
                 AgentMessage::Assistant {
                     id: MessageId(2),
-                    content: String::new(),
+                    content: crate::state::text_content(String::new()),
                     tool_calls: calls,
                     stop_reason: Some(StopReason::ToolUse),
                     error_message: None,
                     opaque_context: Vec::new(),
+                    origin: None,
                 },
                 AgentMessage::ToolResult {
                     id: MessageId(3),
@@ -659,7 +665,7 @@ fn after_tool_metadata_is_preserved_in_the_transcript() {
 
         run.drive().await?;
 
-        let message = &agent.snapshot().messages[2];
+        let message = &agent.snapshot().messages[3];
         let crate::state::AgentMessage::ToolResult {
             tool_call_id,
             details: Some(details),
@@ -723,7 +729,7 @@ fn invalid_tool_arguments_become_an_error_result_and_the_model_can_continue() {
         assert_eq!(provider.requests().len(), 2);
         assert!(executed.lock().expect("test tool mutex").is_empty());
         assert!(matches!(
-            agent.snapshot().messages[2],
+            agent.snapshot().messages[3],
             crate::state::AgentMessage::ToolResult { is_error: true, .. }
         ));
         assert!(run.events().iter().any(|event| {
@@ -737,7 +743,7 @@ fn invalid_tool_arguments_become_an_error_result_and_the_model_can_continue() {
         }));
         assert!(matches!(
             agent.snapshot().messages.last(),
-            Some(crate::state::AgentMessage::Assistant { content, .. }) if content == "recovered"
+            Some(crate::state::AgentMessage::Assistant { content, .. }) if crate::state::assistant_text(content) == "recovered"
         ));
 
         Ok::<(), CoreError>(())

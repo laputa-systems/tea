@@ -125,7 +125,9 @@ fn continuation_agent_end_contains_only_messages_created_by_continuation() {
         ));
 
         let first_messages = agent_end_messages(&first_run);
-        assert_eq!(first_messages.len(), 3);
+        // Prompt, the run's initial configuration, the tool call, and its result.
+        assert_eq!(first_messages.len(), 4);
+        assert!(matches!(first_messages[1], AgentMessage::System { .. }));
         assert!(
             matches!(first_messages[0], AgentMessage::User { ref content, .. } if content == "initial prompt")
         );
@@ -137,7 +139,7 @@ fn continuation_agent_end_contains_only_messages_created_by_continuation() {
         assert_eq!(continuation_messages.len(), 1);
         assert!(matches!(
             &continuation_messages[0],
-            AgentMessage::Assistant { content, .. } if content == "continued response"
+            AgentMessage::Assistant { content, .. } if tea_core::state::assistant_text(content) == "continued response"
         ));
         assert!(!continuation_messages.iter().any(|message| matches!(
             message,

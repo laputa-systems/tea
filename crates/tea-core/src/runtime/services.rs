@@ -409,7 +409,7 @@ impl RuntimeServices {
             tools.insert(tool);
         }
         let mut builder = Agent::builder()
-            .system_prompt(resolved.system_prompt().to_owned())
+            .system_prompt(resolved.system_prompt().clone())
             .tools(tools)
             .model_provider(Arc::clone(&self.provider))
             .hooks(resolved.hooks())

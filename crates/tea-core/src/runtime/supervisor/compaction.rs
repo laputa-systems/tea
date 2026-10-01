@@ -375,14 +375,15 @@ fn compaction_reason_label(operation: &CompactionOperation) -> &'static str {
 }
 
 fn compaction_summary(messages: &[crate::state::AgentMessage]) -> Option<String> {
-    messages.iter().find_map(|message| match message {
-        crate::state::AgentMessage::User { content, .. }
-        | crate::state::AgentMessage::Assistant { content, .. }
-        | crate::state::AgentMessage::ToolResult { content, .. }
-            if !content.trim().is_empty() =>
-        {
-            Some(content.clone())
-        }
-        _ => None,
+    messages.iter().find_map(|message| {
+        let content = match message {
+            crate::state::AgentMessage::User { content, .. }
+            | crate::state::AgentMessage::ToolResult { content, .. } => content.clone(),
+            crate::state::AgentMessage::Assistant { content, .. } => {
+                crate::state::assistant_text(content)
+            }
+            crate::state::AgentMessage::System { .. } => return None,
+        };
+        (!content.trim().is_empty()).then_some(content)
     })
 }

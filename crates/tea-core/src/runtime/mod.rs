@@ -22,7 +22,8 @@ pub use artifact::{
 };
 pub use context::{
     ContextAnnotation, ContextProjectionPatch, DerivedContext, ProviderLimits,
-    derive_model_context, derive_model_context_with_patch,
+    assistant_content_from_entry, configuration_update_from_entry, derive_model_context,
+    derive_model_context_with_patch,
 };
 pub use events::{
     ArtifactEvent, DiagnosticCode, HarnessEvent, HarnessSnapshotView, LIVE_PREVIEW_LIMIT,

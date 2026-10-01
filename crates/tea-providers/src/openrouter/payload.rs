@@ -20,13 +20,7 @@ pub(super) fn build_payload(
     config: &OpenRouterConfig,
     request: &ModelRequest,
 ) -> Result<Vec<u8>, String> {
-    let messages = JsonValue::parse(&request.context)
-        .map_err(|_| "OpenRouter received invalid converted context".to_owned())?;
-    let messages = messages
-        .as_array()
-        .ok_or_else(|| "OpenRouter converted context must be an array".to_owned())?
-        .to_owned();
-    let mut messages = messages;
+    let mut messages = crate::openai::chat_conversation(request)?;
     if request.thinking_level != crate::state::ThinkingLevel::Off {
         // Pi's OpenRouter compatibility profile replays an empty
         // `reasoning_content` field on assistant messages. DeepSeek uses that
@@ -50,12 +44,12 @@ pub(super) fn build_payload(
     let mut chat_messages = Vec::with_capacity(messages.len() + 1);
     chat_messages.push(json_value!({
         "role": "system",
-        "content": request.system_prompt.clone()
+        "content": request.system_prompt()
     }));
     chat_messages.extend(messages);
     let tools = request
-        .tools
-        .iter()
+        .tools()
+        .into_iter()
         .filter(|tool| {
             config
                 .model_tool_allowlist

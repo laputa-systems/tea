@@ -85,8 +85,15 @@ impl ObservationRun {
 /// Individually coalescible live-preview subject within one core attempt.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum PreviewTarget {
-    /// One streaming assistant message.
+    /// Answer text of one streaming assistant message.
     AssistantMessage {
+        /// Core message identity.
+        message_id: MessageId,
+    },
+    /// Provider-exposed thinking of one streaming assistant message. It is a
+    /// separate subject so a thinking preview is never coalesced into answer
+    /// text.
+    AssistantThinking {
         /// Core message identity.
         message_id: MessageId,
     },
@@ -115,6 +122,14 @@ impl PreviewIdentity {
         }
     }
 
+    /// Identify the thinking stream of an assistant message.
+    pub fn assistant_thinking(run: ObservationRun, message_id: MessageId) -> Self {
+        Self {
+            run,
+            target: PreviewTarget::AssistantThinking { message_id },
+        }
+    }
+
     /// Identify one tool-progress stream.
     pub fn tool(run: ObservationRun, tool_call_id: ToolCallId) -> Self {
         Self {
@@ -134,6 +149,18 @@ pub enum PreviewEvent {
         /// Monotonic event sequence within `identity.run`.
         sequence: EventSequence,
         /// Bounded text accumulated since this subscriber's prior preview.
+        text: String,
+        /// Earlier bytes were discarded to preserve the preview bound.
+        truncated: bool,
+    },
+    /// Incremental provider-exposed thinking from one incomplete assistant
+    /// message. Presentation only; it is never answer text.
+    AssistantThinking {
+        /// Coalescing and terminal-fence key.
+        identity: PreviewIdentity,
+        /// Monotonic event sequence within `identity.run`.
+        sequence: EventSequence,
+        /// Bounded thinking text accumulated since this subscriber's prior preview.
         text: String,
         /// Earlier bytes were discarded to preserve the preview bound.
         truncated: bool,
@@ -159,13 +186,17 @@ impl PreviewEvent {
     /// Borrow the identity that coalesces this update.
     pub fn identity(&self) -> &PreviewIdentity {
         match self {
-            Self::AssistantText { identity, .. } | Self::ToolProgress { identity, .. } => identity,
+            Self::AssistantText { identity, .. }
+            | Self::AssistantThinking { identity, .. }
+            | Self::ToolProgress { identity, .. } => identity,
         }
     }
 
     fn sequence(&self) -> EventSequence {
         match self {
-            Self::AssistantText { sequence, .. } | Self::ToolProgress { sequence, .. } => *sequence,
+            Self::AssistantText { sequence, .. }
+            | Self::AssistantThinking { sequence, .. }
+            | Self::ToolProgress { sequence, .. } => *sequence,
         }
     }
 
@@ -192,12 +223,36 @@ impl PreviewEvent {
                 activity: Some(activity),
                 truncated,
             }),
-            Self::ToolProgress { .. } | Self::AssistantText { .. } => None,
+            Self::ToolProgress { .. }
+            | Self::AssistantText { .. }
+            | Self::AssistantThinking { .. } => None,
         }
     }
 
     fn coalesce(self, newer: Self) -> Self {
         match (self, newer) {
+            (
+                Self::AssistantThinking {
+                    identity,
+                    text,
+                    truncated,
+                    ..
+                },
+                Self::AssistantThinking {
+                    sequence,
+                    text: newer_text,
+                    truncated: newer_truncated,
+                    ..
+                },
+            ) => {
+                let (text, overflowed) = retain_preview_text_suffix(&text, &newer_text);
+                Self::AssistantThinking {
+                    identity,
+                    sequence,
+                    text,
+                    truncated: truncated || newer_truncated || overflowed,
+                }
+            }
             (
                 Self::AssistantText {
                     identity,
@@ -299,7 +354,10 @@ impl TeaEvent {
         match &event.kind {
             AgentEventKind::MessageEnd {
                 message: AgentMessage::Assistant { id, .. },
-            } => vec![PreviewIdentity::assistant(run.clone(), *id)],
+            } => vec![
+                PreviewIdentity::assistant(run.clone(), *id),
+                PreviewIdentity::assistant_thinking(run.clone(), *id),
+            ],
             AgentEventKind::ToolExecutionEnd { tool_call_id, .. } => {
                 vec![PreviewIdentity::tool(run.clone(), tool_call_id.clone())]
             }
@@ -772,17 +830,8 @@ impl EventHub {
     /// growing partial message snapshot for each token.
     pub(crate) fn publish_agent(&self, run: ObservationRun, event: &AgentEvent) {
         let event = match &event.kind {
-            AgentEventKind::MessageUpdate {
-                message_id,
-                text_delta,
-            } => {
-                let (text, truncated) = bounded_preview_text(text_delta, MAX_PREVIEW_TEXT_BYTES);
-                TeaEvent::Preview(PreviewEvent::AssistantText {
-                    identity: PreviewIdentity::assistant(run, *message_id),
-                    sequence: event.sequence,
-                    text,
-                    truncated,
-                })
+            AgentEventKind::MessageUpdate { message_id, delta } => {
+                TeaEvent::Preview(assistant_preview(run, *message_id, event.sequence, delta))
             }
             AgentEventKind::ToolExecutionUpdate {
                 tool_call_id,
@@ -853,21 +902,11 @@ fn project_owned_agent_event(run: ObservationRun, event: AgentEvent) -> Option<T
     match event {
         AgentEvent {
             sequence,
-            kind:
-                AgentEventKind::MessageUpdate {
-                    message_id,
-                    text_delta,
-                },
+            kind: AgentEventKind::MessageUpdate { message_id, delta },
             ..
-        } => {
-            let (text, truncated) = bounded_preview_text(&text_delta, MAX_PREVIEW_TEXT_BYTES);
-            Some(TeaEvent::Preview(PreviewEvent::AssistantText {
-                identity: PreviewIdentity::assistant(run, message_id),
-                sequence,
-                text,
-                truncated,
-            }))
-        }
+        } => Some(TeaEvent::Preview(assistant_preview(
+            run, message_id, sequence, &delta,
+        ))),
         AgentEvent {
             sequence,
             kind:
@@ -1126,6 +1165,29 @@ fn record_completed_run_fence(fences: &mut VecDeque<ObservationRun>, run: Observ
     fences.push_back(run);
 }
 
+fn assistant_preview(
+    run: ObservationRun,
+    message_id: MessageId,
+    sequence: EventSequence,
+    delta: &tea_core::event::MessageDelta,
+) -> PreviewEvent {
+    let (text, truncated) = bounded_preview_text(delta.as_str(), MAX_PREVIEW_TEXT_BYTES);
+    match delta {
+        tea_core::event::MessageDelta::Text(_) => PreviewEvent::AssistantText {
+            identity: PreviewIdentity::assistant(run, message_id),
+            sequence,
+            text,
+            truncated,
+        },
+        tea_core::event::MessageDelta::Thinking(_) => PreviewEvent::AssistantThinking {
+            identity: PreviewIdentity::assistant_thinking(run, message_id),
+            sequence,
+            text,
+            truncated,
+        },
+    }
+}
+
 fn bounded_preview_text(value: &str, limit: usize) -> (String, bool) {
     if value.len() <= limit {
         return (value.to_owned(), false);
@@ -1139,6 +1201,20 @@ fn bounded_preview_text(value: &str, limit: usize) -> (String, bool) {
 
 fn normalize_preview(preview: PreviewEvent) -> PreviewEvent {
     match preview {
+        PreviewEvent::AssistantThinking {
+            identity,
+            sequence,
+            text,
+            truncated,
+        } => {
+            let (text, overflowed) = bounded_preview_text(&text, MAX_PREVIEW_TEXT_BYTES);
+            PreviewEvent::AssistantThinking {
+                identity,
+                sequence,
+                text,
+                truncated: truncated || overflowed,
+            }
+        }
         PreviewEvent::AssistantText {
             identity,
             sequence,
@@ -1246,11 +1322,12 @@ mod observation_tests {
     fn assistant_message(id: u64, content: &str) -> AgentMessage {
         AgentMessage::Assistant {
             id: MessageId(id),
-            content: content.into(),
+            content: tea_core::state::text_content(content),
             tool_calls: Vec::new(),
             stop_reason: None,
             error_message: None,
             opaque_context: Vec::new(),
+            origin: None,
         }
     }
 
@@ -1317,7 +1394,7 @@ mod observation_tests {
                 sequence: EventSequence(1),
                 kind: AgentEventKind::MessageUpdate {
                     message_id: MessageId(1),
-                    text_delta: "one exact fragment".into(),
+                    delta: tea_core::event::MessageDelta::Text("one exact fragment".into()),
                 },
             },
         );

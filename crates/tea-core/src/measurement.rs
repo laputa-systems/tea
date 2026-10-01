@@ -5,10 +5,50 @@
 //! [`ModelRequest`] values is byte-identical before transport serialization. Hosts can use this
 //! as a cacheability proxy and pair it with `Usage::cache_read_tokens` when a provider reports
 //! real cache accounting.
+//!
+//! A request is measured through its [`RequestLayout`] for the transport's configuration
+//! projection. When a transport carries configuration updates in place, an update appends to the
+//! context and the leading prompt and tools stay unchanged. When it collapses them, the leading
+//! prompt or tool list changes and the measurement honestly reports a domain change.
 
 use crate::scheduler::{AdapterRequestObservation, ModelRequest};
+use crate::state::{ModelDescriptor, ThinkingLevel};
+use crate::tool::ToolDeclaration;
+use crate::transcript::ConfigurationProjection;
 use std::sync::Mutex;
 use tea_protocol::JsonValue;
+
+/// The cache-relevant layout of one request under one configuration projection.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct RequestLayout {
+    /// Leading system prompt.
+    pub system_prompt: String,
+    /// Leading ordered tool declarations.
+    pub tools: Vec<ToolDeclaration>,
+    /// Canonical identity-free conversation bytes after the leading position.
+    pub context: String,
+    /// Physical model.
+    pub model: Option<ModelDescriptor>,
+    /// Reasoning level.
+    pub thinking_level: ThinkingLevel,
+    /// Session/cache identity.
+    pub session_id: Option<String>,
+}
+
+impl RequestLayout {
+    /// Derive the layout of a request for one projection.
+    pub fn new(request: &ModelRequest, projection: ConfigurationProjection) -> Self {
+        let resolved = request.transcript.resolve(projection);
+        Self {
+            system_prompt: resolved.leading.system_prompt(),
+            tools: resolved.leading.tools,
+            context: request.transcript.layout_context(projection),
+            model: request.model.clone(),
+            thinking_level: request.thinking_level,
+            session_id: request.session_id.clone(),
+        }
+    }
+}
 
 /// Opaque serving/cache scope.  Scope identity is equality-only: callers must
 /// not infer provider cache-key details from this value.
@@ -86,7 +126,7 @@ pub enum PromptLayoutPolicy {
 /// joining continuity across fresh [`crate::Agent`] instances.
 #[derive(Debug)]
 pub struct PromptLayoutLedger {
-    previous: Mutex<Option<ModelRequest>>,
+    previous: Mutex<Option<RequestLayout>>,
     /// One host-authorized exception for the next request boundary. Candidate
     /// hooks cannot obtain or set this permit; it is consumed before policy
     /// enforcement so it cannot leak to a later request.
@@ -128,10 +168,10 @@ impl PromptLayoutLedger {
         self.scope
     }
 
-    /// Observe one exact core [`ModelRequest`] immediately before provider
+    /// Observe one exact core [`RequestLayout`] immediately before provider
     /// effect. A missing predecessor is explicit in `continuity` and leaves
     /// prefix lengths unavailable rather than manufacturing zero evidence.
-    pub fn observe(&self, request: &ModelRequest) -> PromptCacheMeasurement {
+    pub fn observe(&self, request: &RequestLayout) -> PromptCacheMeasurement {
         let mut previous = self.previous.lock().expect("prompt layout ledger poisoned");
         let measurement = self.measure_against(previous.as_ref(), request);
         *previous = Some(request.clone());
@@ -144,15 +184,15 @@ impl PromptLayoutLedger {
     /// serialize the paired `measure`/`commit` sequence with other dispatches
     /// that share this ledger; use [`Self::observe`] for one atomic diagnostic
     /// observation when no intervening effect boundary is needed.
-    pub fn measure(&self, request: &ModelRequest) -> PromptCacheMeasurement {
+    pub fn measure(&self, request: &RequestLayout) -> PromptCacheMeasurement {
         let previous = self.previous.lock().expect("prompt layout ledger poisoned");
         self.measure_against(previous.as_ref(), request)
     }
 
     fn measure_against(
         &self,
-        previous: Option<&ModelRequest>,
-        request: &ModelRequest,
+        previous: Option<&RequestLayout>,
+        request: &RequestLayout,
     ) -> PromptCacheMeasurement {
         let mut measurement = measure_request_layout(previous, request, None, None);
         measurement.cache_scope = self.scope;
@@ -177,7 +217,7 @@ impl PromptLayoutLedger {
     }
 
     /// Commit a request after its observation/effect intent boundary succeeds.
-    pub fn commit(&self, request: &ModelRequest) {
+    pub fn commit(&self, request: &RequestLayout) {
         *self.previous.lock().expect("prompt layout ledger poisoned") = Some(request.clone());
     }
 
@@ -232,8 +272,8 @@ pub struct DeterministicPrefixEvidence {
 /// `None` means no preceding request exists in this core run. A returned zero
 /// is meaningful evidence that a predecessor existed but shared no bytes.
 pub fn deterministic_request_prefix_evidence(
-    previous: Option<&ModelRequest>,
-    current: &ModelRequest,
+    previous: Option<&RequestLayout>,
+    current: &RequestLayout,
 ) -> Option<DeterministicPrefixEvidence> {
     let previous = previous?;
     let previous = canonical_request_surface_bytes(previous);
@@ -322,8 +362,8 @@ pub struct PromptCacheMeasurement {
 
 /// Compare a request with an optional immediately preceding request.
 pub fn measure_prompt_cacheability(
-    previous: Option<&ModelRequest>,
-    current: &ModelRequest,
+    previous: Option<&RequestLayout>,
+    current: &RequestLayout,
 ) -> PromptCacheMeasurement {
     measure_request_layout(previous, current, None, None)
 }
@@ -334,8 +374,8 @@ pub fn measure_prompt_cacheability(
 /// is pure and intentionally cannot invoke hooks, project context, rebuild tools, or serialize a
 /// second request.
 pub fn measure_request_layout(
-    previous: Option<&ModelRequest>,
-    current: &ModelRequest,
+    previous: Option<&RequestLayout>,
+    current: &RequestLayout,
     previous_adapter: Option<&AdapterRequestObservation>,
     current_adapter: Option<&AdapterRequestObservation>,
 ) -> PromptCacheMeasurement {
@@ -439,8 +479,8 @@ pub fn measure_request_layout(
 }
 
 fn cache_domains_match(
-    previous: &ModelRequest,
-    current: &ModelRequest,
+    previous: &RequestLayout,
+    current: &RequestLayout,
     current_tools: &[u8],
 ) -> bool {
     previous.system_prompt == current.system_prompt
@@ -450,7 +490,7 @@ fn cache_domains_match(
         && previous.session_id == current.session_id
 }
 
-fn cache_domain_fingerprint(request: &ModelRequest, tools: &[u8]) -> u64 {
+fn cache_domain_fingerprint(request: &RequestLayout, tools: &[u8]) -> u64 {
     let mut bytes = Vec::with_capacity(
         request
             .system_prompt
@@ -480,7 +520,7 @@ fn cache_domain_fingerprint(request: &ModelRequest, tools: &[u8]) -> u64 {
     stable_fingerprint(&bytes)
 }
 
-fn tool_order_fingerprint(request: &ModelRequest) -> u64 {
+fn tool_order_fingerprint(request: &RequestLayout) -> u64 {
     let mut bytes = Vec::new();
     for tool in &request.tools {
         bytes.extend_from_slice(tool.name.as_bytes());
@@ -489,7 +529,7 @@ fn tool_order_fingerprint(request: &ModelRequest) -> u64 {
     stable_fingerprint(&bytes)
 }
 
-fn model_fingerprint(request: &ModelRequest) -> u64 {
+fn model_fingerprint(request: &RequestLayout) -> u64 {
     let mut bytes = Vec::new();
     if let Some(model) = &request.model {
         bytes.extend_from_slice(model.provider.as_bytes());
@@ -503,7 +543,7 @@ fn model_fingerprint(request: &ModelRequest) -> u64 {
     stable_fingerprint(&bytes)
 }
 
-fn thinking_fingerprint(request: &ModelRequest) -> u64 {
+fn thinking_fingerprint(request: &RequestLayout) -> u64 {
     stable_fingerprint(format!("{:?}", request.thinking_level).as_bytes())
 }
 
@@ -532,7 +572,7 @@ fn compare_adapter_components(
     }
 }
 
-fn tool_definition_bytes(request: &ModelRequest) -> Vec<u8> {
+fn tool_definition_bytes(request: &RequestLayout) -> Vec<u8> {
     let definitions = request
         .tools
         .iter()
@@ -541,10 +581,6 @@ fn tool_definition_bytes(request: &ModelRequest) -> Vec<u8> {
                 ("name", JsonValue::from(tool.name.clone())),
                 ("description", JsonValue::from(tool.description.clone())),
                 ("schema", tool.schema.clone()),
-                (
-                    "execution_mode",
-                    JsonValue::from(format!("{:?}", tool.execution_mode)),
-                ),
             ])
         })
         .collect::<Vec<_>>();
@@ -554,7 +590,7 @@ fn tool_definition_bytes(request: &ModelRequest) -> Vec<u8> {
         .into_bytes()
 }
 
-fn canonical_request_surface_bytes(request: &ModelRequest) -> Vec<u8> {
+fn canonical_request_surface_bytes(request: &RequestLayout) -> Vec<u8> {
     let tools = tool_definition_bytes(request);
     let mut bytes = Vec::with_capacity(
         request
@@ -626,11 +662,9 @@ fn stable_fingerprint(bytes: &[u8]) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scheduler::ModelRequest;
-    use crate::state::{ModelDescriptor, ThinkingLevel};
 
-    fn request(context: &str) -> ModelRequest {
-        ModelRequest {
+    fn request(context: &str) -> RequestLayout {
+        RequestLayout {
             system_prompt: "system".into(),
             context: context.into(),
             tools: Vec::new(),

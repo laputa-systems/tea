@@ -617,7 +617,7 @@ fn openrouter_request_observation(
     );
     components.insert(
         "tool_transport".into(),
-        stable_fingerprint(if request.tools.is_empty() {
+        stable_fingerprint(if request.tools().is_empty() {
             b"no-tools"
         } else {
             b"function-tools-require-parameters"
@@ -1300,8 +1300,7 @@ data: [DONE]
         let mut source = smol::block_on(
             provider.stream(
                 ModelRequest {
-                    context: "[]".into(),
-                    tools: ["read", "bash", "edit", "find"]
+                    transcript: crate::test_support::transcript(&"", &["read", "bash", "edit", "find"]
                         .into_iter()
                         .map(|name| ToolDefinition {
                             name: name.into(),
@@ -1311,8 +1310,9 @@ data: [DONE]
                             requires_exclusive_batch: false,
                             cancellation_settlement_mode:
                                 crate::tool::CancellationSettlementMode::DropFuture,
-                        })
-                        .collect(),
+                        exposure: crate::tool::ToolExposure::Direct,
+                    })
+                        .collect::<Vec<_>>(), &"[]"),
                     model: Some(crate::state::ModelDescriptor {
                         provider: "openrouter".into(),
                         model: "test-model".into(),
@@ -1494,7 +1494,7 @@ data: [DONE]
         let cancellation = CancellationToken::new();
         let mut source = smol::block_on(provider.stream(
             ModelRequest {
-                context: "[]".into(),
+                transcript: crate::test_support::transcript(&"", &Vec::new(), &"[]"),
                 model: Some(crate::state::ModelDescriptor {
                     provider: "openrouter".into(),
                     model: "test-model".into(),
@@ -1595,8 +1595,7 @@ data: [DONE]
                 .with_temperature(0.0)
                 .with_seed(42),
             &ModelRequest {
-                system_prompt: "system".into(),
-                context: "[]".into(),
+                transcript: crate::test_support::transcript(&"system", &Vec::new(), &"[]"),
                 model: Some(ModelDescriptor {
                     provider: "openrouter".into(),
                     model: "openai/gpt-5.6-luna".into(),
@@ -1648,7 +1647,7 @@ data: [DONE]
         let payload = build_payload(
             &config,
             &ModelRequest {
-                context: r#"[{"role":"assistant","content":null,"tool_calls":[]}]"#.into(),
+                transcript: crate::test_support::transcript(&"", &Vec::new(), &r#"[{"role":"assistant","content":"answer","tool_calls":[]}]"#),
                 thinking_level: ThinkingLevel::High,
                 ..ModelRequest::default()
             },
@@ -1674,7 +1673,7 @@ data: [DONE]
         let payload = build_payload(
             &config,
             &ModelRequest {
-                context: "[]".into(),
+                transcript: crate::test_support::transcript(&"", &Vec::new(), &"[]"),
                 ..ModelRequest::default()
             },
         )
@@ -1691,7 +1690,7 @@ data: [DONE]
         let payload = build_payload(
             &config,
             &ModelRequest {
-                context: "[]".into(),
+                transcript: crate::test_support::transcript(&"", &Vec::new(), &"[]"),
                 ..ModelRequest::default()
             },
         )
@@ -1715,16 +1714,16 @@ data: [DONE]
             execution_mode: ToolExecutionMode::Sequential,
             requires_exclusive_batch: false,
             cancellation_settlement_mode: crate::tool::CancellationSettlementMode::DropFuture,
-        };
+        exposure: crate::tool::ToolExposure::Direct,
+    };
         let payload = build_payload(
             &config,
             &ModelRequest {
-                context: "[]".into(),
-                tools: vec![
+                transcript: crate::test_support::transcript(&"", &vec![
                     definition("read"),
                     definition("bash"),
                     definition("tea_history_search"),
-                ],
+                ], &"[]"),
                 ..ModelRequest::default()
             },
         )
@@ -1748,8 +1747,7 @@ data: [DONE]
         let payload = super::payload::build_payload(
             &config,
             &ModelRequest {
-                context: "[]".into(),
-                tools: vec![ToolDefinition {
+                transcript: crate::test_support::transcript(&"", &vec![ToolDefinition {
                     name: "work_complete".into(),
                     description: "finish the assignment".into(),
                     schema: JsonValue::Object(std::collections::BTreeMap::new()),
@@ -1757,7 +1755,8 @@ data: [DONE]
                     requires_exclusive_batch: false,
                     cancellation_settlement_mode:
                         crate::tool::CancellationSettlementMode::DropFuture,
-                }],
+                exposure: crate::tool::ToolExposure::Direct,
+            }], &"[]"),
                 ..ModelRequest::default()
             },
         )
@@ -1783,8 +1782,7 @@ data: [DONE]
         let payload = super::payload::build_payload(
             &config,
             &ModelRequest {
-                context: "[]".into(),
-                tools: vec![ToolDefinition {
+                transcript: crate::test_support::transcript(&"", &vec![ToolDefinition {
                     name: "read".into(),
                     description: "read".into(),
                     schema: JsonValue::Object(std::collections::BTreeMap::new()),
@@ -1792,7 +1790,8 @@ data: [DONE]
                     requires_exclusive_batch: false,
                     cancellation_settlement_mode:
                         crate::tool::CancellationSettlementMode::DropFuture,
-                }],
+                exposure: crate::tool::ToolExposure::Direct,
+            }], &"[]"),
                 ..ModelRequest::default()
             },
         )
@@ -1812,7 +1811,7 @@ data: [DONE]
         let provider = OpenRouterProvider::new(OpenRouterConfig::try_new("key", "model").unwrap());
         let cancellation = CancellationToken::new();
         let request = ModelRequest {
-            context: "[]".into(),
+            transcript: crate::test_support::transcript(&"", &Vec::new(), &"[]"),
             ..ModelRequest::default()
         };
         let stream = provider.response_stream(request, cancellation);
@@ -1823,7 +1822,7 @@ data: [DONE]
 
         let stream = provider.response_stream(
             ModelRequest {
-                context: "[]".into(),
+                transcript: crate::test_support::transcript(&"", &Vec::new(), &"[]"),
                 model: Some(ModelDescriptor {
                     provider: "openrouter".into(),
                     model: "other-model".into(),

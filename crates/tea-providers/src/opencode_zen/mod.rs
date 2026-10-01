@@ -423,7 +423,7 @@ fn opencode_zen_request_observation(
     );
     components.insert(
         "tool_transport".into(),
-        stable_fingerprint(if request.tools.is_empty() {
+        stable_fingerprint(if request.tools().is_empty() {
             b"no-tools"
         } else {
             b"function-tools"
@@ -631,8 +631,7 @@ mod tests {
         let payload = build_payload(
             &config.with_max_tokens(4096),
             &ModelRequest {
-                system_prompt: "system".into(),
-                context: "[]".into(),
+                transcript: crate::test_support::transcript(&"system", &Vec::new(), &"[]"),
                 model: Some(ModelDescriptor {
                     provider: "opencode-zen".into(),
                     model: "muse-spark-1.2-contributor-free".into(),
@@ -674,7 +673,7 @@ mod tests {
         let payload = build_payload(
             &config,
             &ModelRequest {
-                context: "[]".into(),
+                transcript: crate::test_support::transcript(&"", &Vec::new(), &"[]"),
                 ..ModelRequest::default()
             },
         )

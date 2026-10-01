@@ -325,13 +325,6 @@ impl HookSet for ReplacementContextHooks {
         Ok(context)
     }
 
-    fn convert_to_llm(&self, context: ContextEnvelope) -> Result<String, crate::error::HookError> {
-        Ok(context
-            .host_messages
-            .last()
-            .map(|message| message.as_str().to_owned())
-            .unwrap_or_else(|| "state-context".into()))
-    }
 
     fn prepare_next_turn(
         &self,
@@ -430,14 +423,6 @@ impl HookSet for AbortDuringBeforeToolHook {
         Ok(context)
     }
 
-    fn convert_to_llm(&self, context: ContextEnvelope) -> Result<String, crate::error::HookError> {
-        Ok(context
-            .messages
-            .into_iter()
-            .map(|message| format!("{message:?}"))
-            .collect::<Vec<_>>()
-            .join("\n"))
-    }
 
     fn before_tool_call_async<'a>(
         &'a self,
@@ -489,12 +474,4 @@ impl HookSet for MetadataAfterToolHook {
         Ok(context)
     }
 
-    fn convert_to_llm(&self, context: ContextEnvelope) -> Result<String, crate::error::HookError> {
-        Ok(context
-            .messages
-            .into_iter()
-            .map(|message| format!("{message:?}"))
-            .collect::<Vec<_>>()
-            .join("\n"))
-    }
 }

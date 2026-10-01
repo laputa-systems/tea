@@ -5,7 +5,8 @@ use tea_core::Agent;
 use tea_core::compaction::{CompactionContext, CompactionFuture, CompactionResult, Compactor};
 use tea_core::error::HookError;
 use tea_core::hooks::{AfterToolCall, BeforeToolCall, ContextEnvelope, HookSet};
-use tea_core::measurement::measure_prompt_cacheability;
+use tea_core::measurement::{RequestLayout, measure_prompt_cacheability};
+use tea_core::transcript::ConfigurationProjection;
 use tea_core::measurement::{
     ExpectedPromptLayoutTransition, PromptCacheScope, PromptContinuity, PromptLayoutLedger,
     PromptLayoutPolicy,
@@ -51,13 +52,21 @@ impl HookSet for RewritingHooks {
         Ok(AfterToolCall::default())
     }
 
-    fn transform_context(&self, context: ContextEnvelope) -> Result<ContextEnvelope, HookError> {
+    /// Rewrite earlier user text on every request, so a later request is no
+    /// longer an append-only extension of the previous one.
+    fn transform_context(
+        &self,
+        mut context: ContextEnvelope,
+    ) -> Result<ContextEnvelope, HookError> {
+        let count = context.messages.len();
+        for message in &mut context.messages {
+            if let tea_core::state::AgentMessage::User { content, .. } = message {
+                *content = format!("rewritten:{count}");
+            }
+        }
         Ok(context)
     }
 
-    fn convert_to_llm(&self, context: ContextEnvelope) -> Result<String, HookError> {
-        Ok(format!("rewritten:{}", context.messages.len()))
-    }
 }
 
 impl ModelProvider for RecordingProvider {
@@ -83,10 +92,10 @@ impl ModelProvider for RecordingProvider {
 /// logical workspace precede the assignment, which is the final variable
 /// context item. The fixture leaves tools empty only because their ordered
 /// definitions are constant across the two requests under comparison.
-fn task_mode_child_request_with_assignment_last(task: &str, model: &str) -> ModelRequest {
+fn task_mode_child_request_with_assignment_last(task: &str, model: &str) -> RequestLayout {
     let mut system_prompt = "stable Tea v2 child system prompt".to_owned();
     tea_core::runtime::append_child_subagent_instruction_suffix(&mut system_prompt);
-    ModelRequest {
+    RequestLayout {
         system_prompt,
         tools: Vec::new(),
         model: Some(ModelDescriptor {
@@ -132,6 +141,10 @@ fn adjacent_text_turns_keep_the_prior_context_prefix() {
         .expect("recording provider mutex poisoned")
         .clone();
     assert_eq!(requests.len(), 3);
+    let requests = requests
+        .iter()
+        .map(|request| RequestLayout::new(request, ConfigurationProjection::Collapsed))
+        .collect::<Vec<_>>();
     let measurements = requests
         .windows(2)
         .map(|pair| measure_prompt_cacheability(Some(&pair[0]), &pair[1]))
@@ -401,7 +414,7 @@ fn explicit_host_domain_transition_permit_is_one_use_and_does_not_weaken_hook_re
     assert_eq!(
         error,
         tea_core::error::CoreError::PromptLayoutRejected {
-            continuity: PromptContinuity::Discontinuous,
+            continuity: PromptContinuity::Rebased,
         }
     );
     assert_eq!(

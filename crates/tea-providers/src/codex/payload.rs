@@ -24,12 +24,7 @@ pub(super) fn build_payload(
     request: &ModelRequest,
     session_id: &str,
 ) -> Result<Vec<u8>, String> {
-    let input = JsonValue::parse(&request.context)
-        .map_err(|_| "Codex received invalid converted Responses context".to_owned())?;
-    let input = input
-        .as_array()
-        .ok_or_else(|| "Codex converted Responses context must be an array".to_owned())?
-        .to_vec();
+    let input = super::context::responses_input(request)?;
     if session_id.is_empty() || session_id.chars().any(char::is_control) {
         return Err("Codex session identity is invalid".into());
     }
@@ -54,11 +49,9 @@ pub(super) fn build_payload(
     let object = payload
         .as_object_mut()
         .expect("Codex payload is always an object");
-    if !request.system_prompt.trim().is_empty() {
-        object.insert(
-            "instructions".into(),
-            JsonValue::String(request.system_prompt.clone()),
-        );
+    let system_prompt = request.system_prompt();
+    if !system_prompt.trim().is_empty() {
+        object.insert("instructions".into(), JsonValue::String(system_prompt));
     }
     if let Some(effort) = reasoning_effort(request.thinking_level) {
         object.insert(
@@ -69,10 +62,10 @@ pub(super) fn build_payload(
             ]),
         );
     }
-    if !request.tools.is_empty() {
+    let request_tools = request.tools();
+    if !request_tools.is_empty() {
         let mut names = BTreeSet::new();
-        let tools = request
-            .tools
+        let tools = request_tools
             .iter()
             .map(|tool| {
                 if tool.name.trim().is_empty() || !names.insert(tool.name.clone()) {
@@ -117,8 +110,7 @@ mod tests {
         let payload = build_payload(
             &config(),
             &ModelRequest {
-                system_prompt: "system".into(),
-                context: r#"[{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}]"#.into(),
+                transcript: crate::test_support::transcript(&"system", &Vec::new(), &r#"[{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}]"#),
                 model: Some(ModelDescriptor {
                     provider: "codex".into(),
                     model: "gpt-5-codex".into(),
@@ -174,8 +166,7 @@ mod tests {
         let payload = build_payload(
             &config(),
             &ModelRequest {
-                context: r#"[]"#.into(),
-                tools: vec![crate::tool::ToolDefinition {
+                transcript: crate::test_support::transcript(&"", &vec![crate::tool::ToolDefinition {
                     name: "read".into(),
                     description: "Read a file".into(),
                     schema: JsonValue::object([("type", JsonValue::String("object".into()))]),
@@ -183,7 +174,8 @@ mod tests {
                     requires_exclusive_batch: false,
                     cancellation_settlement_mode:
                         crate::tool::CancellationSettlementMode::DropFuture,
-                }],
+                exposure: crate::tool::ToolExposure::Direct,
+            }], &r#"[]"#),
                 ..ModelRequest::default()
             },
             "session_1",

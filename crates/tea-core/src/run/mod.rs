@@ -423,11 +423,12 @@ impl RunHandle {
             let mut state = agent.state.lock().expect("agent state mutex poisoned");
             let message = AgentMessage::Assistant {
                 id: state.allocate_message_id(),
-                content: String::new(),
+                content: Vec::new(),
                 tool_calls: Vec::new(),
                 stop_reason: Some(StopReason::Error),
                 error_message: Some(error.to_string()),
                 opaque_context: Vec::new(),
+                origin: None,
             };
             state.partial_response = None;
             state.pending_tool_calls.clear();
@@ -644,15 +645,21 @@ impl RunHandle {
                     .await?;
             }
             let turn_model = request.model.clone();
-            let request_layout = agent.prompt_layout_ledger.measure(&request);
-            let request_continuity = request_layout.continuity;
-            let expected_transition = agent.prompt_layout_ledger.take_expected_transition();
             let provider = agent
                 .provider
                 .read()
                 .expect("agent provider lock poisoned")
                 .clone()
                 .ok_or(CoreError::MissingModelProvider)?;
+            let layout = crate::measurement::RequestLayout::new(
+                &request,
+                provider
+                    .capabilities(request.model.as_ref())
+                    .configuration_projection(),
+            );
+            let request_layout = agent.prompt_layout_ledger.measure(&layout);
+            let request_continuity = request_layout.continuity;
+            let expected_transition = agent.prompt_layout_ledger.take_expected_transition();
             self.emit(
                 &agent,
                 AgentEventKind::PromptLayoutObserved {
@@ -691,7 +698,7 @@ impl RunHandle {
             // content-free observation boundary. Commit it immediately before
             // transport dispatch so failed preparation never becomes a
             // predecessor for the next logical request.
-            agent.prompt_layout_ledger.commit(&request);
+            agent.prompt_layout_ledger.commit(&layout);
             let mut stream = match provider.stream(request, self.cancellation.clone()).await {
                 Ok(stream) => stream,
                 Err(error) => {
@@ -1002,12 +1009,12 @@ impl RunHandle {
         &self,
         agent: &AgentInner,
         run_id: RunId,
-        context: Option<crate::hooks::ContextEnvelope>,
+        mut context: Option<crate::hooks::ContextEnvelope>,
         model_override: Option<&ModelDescriptor>,
         thinking_override: Option<ThinkingLevel>,
     ) -> Result<ModelRequest, CoreError> {
-        let (context, system_prompt, model, thinking_level, tools) = {
-            let mut state = agent.state.lock().expect("agent state mutex poisoned");
+        {
+            let state = agent.state.lock().expect("agent state mutex poisoned");
             if !matches!(state.phase, AgentPhase::Running(id) | AgentPhase::Cancelling(id) if id == run_id)
             {
                 return Err(CoreError::InvalidTransition(
@@ -1018,6 +1025,11 @@ impl RunHandle {
                     ),
                 ));
             }
+        }
+        self.synchronize_configuration(agent, context.as_mut())
+            .await?;
+        let (context, selected_model, thinking_level) = {
+            let mut state = agent.state.lock().expect("agent state mutex poisoned");
             state.is_streaming = true;
             (
                 context.unwrap_or_else(|| crate::hooks::ContextEnvelope {
@@ -1025,31 +1037,148 @@ impl RunHandle {
                     messages: state.messages.clone(),
                     host_messages: state.host_messages.clone(),
                 }),
-                self.configuration.system_prompt.clone(),
                 model_override.cloned().or_else(|| state.model.clone()),
                 thinking_override.unwrap_or(state.thinking_level),
-                self.configuration.tools.definitions(),
             )
         };
-        let provider_context = self.build_provider_context(agent, context).await?;
+        let transcript = self.build_transcript(agent, context).await?;
         Ok(ModelRequest {
-            system_prompt,
-            context: provider_context.context,
-            tools,
-            model,
+            purpose: crate::scheduler::RequestPurpose::Turn,
+            transcript,
+            model: selected_model,
+            selected_model: None,
             thinking_level,
             session_id: self.configuration.provenance.session_id.clone(),
+            max_output_tokens: None,
         })
     }
 
-    /// Build the exact provider-facing prompt used by a request or by an automatic compactor.
-    /// Keeping this pipeline in one helper prevents compaction from silently skipping model
-    /// projection or host context transforms.
-    async fn build_provider_context(
+    /// The configuration this run wants the next request to declare.
+    ///
+    /// The prompt comes from the run's immutable configuration. Direct tools
+    /// are declared in registry order. A deferred tool stays declared once it
+    /// has been loaded, and becomes declared when a tool result since the most
+    /// recent system message names it in `added_tool_names`. Only tools in the
+    /// run's executable registry can ever be declared; discovery exposes an
+    /// already-authorized capability and never grants one.
+    fn desired_configuration(
+        &self,
+        messages: &[AgentMessage],
+    ) -> (
+        Option<crate::state::EffectiveConfiguration>,
+        crate::state::EffectiveConfiguration,
+    ) {
+        use crate::tool::{ToolDeclaration, ToolExposure};
+        let registry = &self.configuration.tools;
+        let current = crate::state::EffectiveConfiguration::replay(messages);
+        let mut tools = registry.declarations(ToolExposure::Direct);
+        let deferred = |name: &str| {
+            registry
+                .get(name)
+                .filter(|tool| tool.exposure() == ToolExposure::Deferred)
+        };
+        let retain = |tools: &mut Vec<ToolDeclaration>, name: &str| {
+            if tools.iter().any(|tool| tool.name == name) {
+                return;
+            }
+            if let Some(tool) = deferred(name) {
+                tools.push(ToolDeclaration::from_tool(tool.as_ref()));
+            }
+        };
+        if let Some(current) = &current {
+            for tool in &current.tools {
+                retain(&mut tools, &tool.name);
+            }
+        }
+        let last_system = messages
+            .iter()
+            .rposition(|message| matches!(message, AgentMessage::System { .. }))
+            .map_or(0, |index| index + 1);
+        for message in &messages[last_system..] {
+            if let AgentMessage::ToolResult {
+                added_tool_names, ..
+            } = message
+            {
+                for name in added_tool_names {
+                    retain(&mut tools, name);
+                }
+            }
+        }
+        let desired =
+            crate::state::EffectiveConfiguration::new(&self.configuration.system_prompt, tools);
+        (current, desired)
+    }
+
+    /// Append the configuration change, if any, that the next request needs.
+    ///
+    /// The change is committed through the effect gate before it joins the
+    /// canonical transcript, so a durable host records it in conversation
+    /// order and reopen reproduces the same configuration history.
+    async fn synchronize_configuration(
+        &self,
+        agent: &AgentInner,
+        envelope: Option<&mut crate::hooks::ContextEnvelope>,
+    ) -> Result<(), CoreError> {
+        let update = {
+            let state = agent.state.lock().expect("agent state mutex poisoned");
+            let (current, desired) = self.desired_configuration(&state.messages);
+            match current {
+                Some(current) => current.diff(&desired),
+                None => Some(desired.as_initial_update()),
+            }
+        };
+        let Some(update) = update.filter(|update| !update.is_empty()) else {
+            return Ok(());
+        };
+        update
+            .validate()
+            .map_err(|error| CoreError::InvalidConfiguration {
+                message: error.to_string(),
+            })?;
+        let durable_write = self
+            .begin_effect(EffectSubject::DurableWrite {
+                write: crate::effect::DurableWriteRequest::ConfigurationUpdate {
+                    update: update.clone(),
+                },
+            })
+            .await?;
+        self.settle_effect(
+            durable_write,
+            EffectOutcome::DurableWrite(crate::effect::EffectCompletion::Succeeded),
+        )
+        .await?;
+        let message = {
+            let mut state = agent.state.lock().expect("agent state mutex poisoned");
+            let message = AgentMessage::System {
+                id: state.allocate_message_id(),
+                update,
+            };
+            state.append_message(message.clone());
+            message
+        };
+        if let Some(envelope) = envelope {
+            envelope.messages.push(message.clone());
+        }
+        self.emit(
+            agent,
+            AgentEventKind::MessageStart {
+                message: message.clone(),
+            },
+        )
+        .await?;
+        self.emit(agent, AgentEventKind::MessageEnd { message })
+            .await?;
+        Ok(())
+    }
+
+    /// Build the exact typed transcript used by a request or by an automatic
+    /// compactor. Keeping this pipeline in one helper prevents compaction from
+    /// silently skipping model projection or host context transforms.
+    async fn build_transcript(
         &self,
         agent: &AgentInner,
         context: crate::hooks::ContextEnvelope,
-    ) -> Result<crate::compaction::ProviderContext, CoreError> {
+    ) -> Result<crate::transcript::Transcript, CoreError> {
         let projected_context = project_model_context(context, &agent.tool_result_projection);
         let transform_effect = self
             .begin_effect(EffectSubject::HookInvocation {
@@ -1063,23 +1192,47 @@ impl RunHandle {
             .await;
         self.settle_hook(transform_effect, &transformed).await?;
         let transformed = transformed?;
-        let convert_effect = self
-            .begin_effect(EffectSubject::HookInvocation {
-                hook: HookInvocation::ConvertToLlm,
-            })
-            .await?;
-        let converted = self
-            .configuration
-            .hooks
-            .convert_to_llm_async(transformed, self.cancellation.clone())
-            .await;
-        self.settle_hook(convert_effect, &converted).await?;
+        let canonical_configuration = {
+            let state = agent.state.lock().expect("agent state mutex poisoned");
+            state
+                .messages
+                .iter()
+                .filter(|message| matches!(message, AgentMessage::System { .. }))
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        let mut transcript = crate::transcript::Transcript {
+            messages: transformed.messages,
+            host_notes: transformed
+                .host_messages
+                .into_iter()
+                .map(|message| message.0)
+                .collect(),
+        };
+        restore_canonical_configuration(&mut transcript, &canonical_configuration);
+        validate_declared_tools(&transcript, &self.configuration.tools)?;
+        Ok(transcript)
+    }
+
+    /// Build the typed transcripts an automatic compactor may use.
+    pub(crate) async fn build_provider_context(
+        &self,
+        agent: &AgentInner,
+        source: crate::hooks::ContextEnvelope,
+        active: crate::hooks::ContextEnvelope,
+    ) -> Result<crate::compaction::ProviderContext, CoreError> {
+        let source = self.build_transcript(agent, source).await?;
+        let active = self.build_transcript(agent, active).await?;
+        let (model, thinking_level) = {
+            let state = agent.state.lock().expect("agent state mutex poisoned");
+            (state.model.clone(), state.thinking_level)
+        };
         Ok(crate::compaction::ProviderContext {
-            system_prompt: self.configuration.system_prompt.clone(),
-            context: converted?,
-            tools: self.configuration.tools.definitions(),
+            source,
+            active: Some(active),
+            model,
+            thinking_level,
             session_id: self.configuration.provenance.session_id.clone(),
-            active_context: None,
         })
     }
 
@@ -1274,33 +1427,21 @@ impl RunHandle {
             },
         )
         .await?;
-        let provider_context = async {
-            let source_provider_context = self
-                .build_provider_context(
-                    agent,
-                    crate::hooks::ContextEnvelope {
-                        version: context.version as u16,
-                        messages: source_messages.clone(),
-                        host_messages: context.host_messages.clone(),
-                    },
-                )
-                .await?;
-            let active_provider_context = self
-                .build_provider_context(
-                    agent,
-                    crate::hooks::ContextEnvelope {
-                        version: context.version as u16,
-                        messages: context.messages.clone(),
-                        host_messages: context.host_messages.clone(),
-                    },
-                )
-                .await?;
-            Ok::<_, CoreError>(crate::compaction::ProviderContext {
-                active_context: Some(active_provider_context.context),
-                ..source_provider_context
-            })
-        }
-        .await;
+        let provider_context = self
+            .build_provider_context(
+                agent,
+                crate::hooks::ContextEnvelope {
+                    version: context.version as u16,
+                    messages: source_messages.clone(),
+                    host_messages: context.host_messages.clone(),
+                },
+                crate::hooks::ContextEnvelope {
+                    version: context.version as u16,
+                    messages: context.messages.clone(),
+                    host_messages: context.host_messages.clone(),
+                },
+            )
+            .await;
         let provider_context = match provider_context {
             Ok(provider_context) => provider_context,
             Err(error) => {
@@ -1364,12 +1505,17 @@ impl RunHandle {
                 id: operation.id,
                 request: crate::compaction::CompactorRequestObservation {
                     layout: request_layout,
-                    provider_context_bytes: Some(provider_context.context.len()),
-                    tool_count: Some(provider_context.tools.len()),
+                    provider_context_bytes: Some(
+                        provider_context
+                            .source
+                            .layout_context(crate::transcript::ConfigurationProjection::InPlace)
+                            .len(),
+                    ),
+                    tool_count: Some(provider_context.source.tools().len()),
                     tools_execution_prohibited: true,
-                    // Provider contexts are opaque to tea-core. A concrete
-                    // compactor may record a stronger provider-format check.
-                    source_is_active_context_prefix: None,
+                    source_is_active_context_prefix: Some(
+                        provider_context.source_is_active_prefix(),
+                    ),
                 },
             },
         )
@@ -1921,10 +2067,12 @@ impl RunHandle {
             agent,
             AgentEventKind::ContextEstimate {
                 estimated_context_tokens: Some(estimated_context_tokens),
-                input_bytes: request
-                    .system_prompt
-                    .len()
-                    .saturating_add(request.context.len()),
+                input_bytes: request.system_prompt().len().saturating_add(
+                    request
+                        .transcript
+                        .layout_context(crate::transcript::ConfigurationProjection::InPlace)
+                        .len(),
+                ),
                 message_count,
                 message_bytes,
                 tool_result_bytes,
@@ -2034,7 +2182,7 @@ impl RunHandle {
         model: Option<ModelDescriptor>,
     ) -> Result<(ProviderResponse, Option<u64>), CoreError> {
         let mut assistant_id = None;
-        let mut assistant_text = String::new();
+        let mut content = AssistantContentBuilder::default();
         let mut tool_calls = Vec::new();
         let mut opaque_context = Vec::new();
         let mut reason = None;
@@ -2071,50 +2219,31 @@ impl RunHandle {
                     .await?;
                 }
                 ModelStreamEvent::TextDelta(delta) => {
-                    let (message_id, first_delta) = {
-                        let mut state = agent.state.lock().expect("agent state mutex poisoned");
-                        let first_delta = assistant_id.is_none();
-                        let id = *assistant_id.get_or_insert_with(|| state.allocate_message_id());
-                        if first_delta {
-                            state.append_message(AgentMessage::Assistant {
-                                id,
-                                content: String::new(),
-                                tool_calls: Vec::new(),
-                                stop_reason: None,
-                                error_message: None,
-                                opaque_context: Vec::new(),
-                            });
-                        }
-                        assistant_text.push_str(&delta);
-                        state.append_partial_response_delta(&delta);
-                        (id, first_delta)
-                    };
-                    if first_delta {
-                        self.emit(
-                            agent,
-                            AgentEventKind::MessageStart {
-                                message: AgentMessage::Assistant {
-                                    id: message_id,
-                                    content: String::new(),
-                                    tool_calls: Vec::new(),
-                                    stop_reason: None,
-                                    error_message: None,
-                                    opaque_context: Vec::new(),
-                                },
-                            },
-                        )
-                        .await?;
-                    }
-                    self.emit(
+                    content.text(&delta);
+                    self.emit_assistant_delta(
                         agent,
-                        AgentEventKind::MessageUpdate {
-                            message_id,
-                            text_delta: delta,
-                        },
+                        &mut assistant_id,
+                        &model,
+                        crate::event::MessageDelta::Text(delta),
                     )
                     .await?;
                 }
-                ModelStreamEvent::ToolCall(call) => tool_calls.push(call),
+                ModelStreamEvent::ThinkingDelta(delta) => {
+                    content.thinking(&delta);
+                    self.emit_assistant_delta(
+                        agent,
+                        &mut assistant_id,
+                        &model,
+                        crate::event::MessageDelta::Thinking(delta),
+                    )
+                    .await?;
+                }
+                ModelStreamEvent::ThinkingSignature(item) => content.signature(item),
+                ModelStreamEvent::RedactedThinking(item) => content.redacted(item),
+                ModelStreamEvent::ToolCall(call) => {
+                    content.close();
+                    tool_calls.push(call)
+                }
                 ModelStreamEvent::OpaqueProviderContext(item) => opaque_context.push(item),
                 ModelStreamEvent::Usage(update) => {
                     if let Some(current) = usage.as_mut() {
@@ -2144,9 +2273,11 @@ impl RunHandle {
         let reason = reason.ok_or(CoreError::UnsupportedModelStream {
             message: "model stream ended without a terminal event".into(),
         })?;
+        let content = content.finish();
         let response = ProviderResponse {
             stop_reason: reason,
-            assistant_text: assistant_text.clone(),
+            content: content.clone(),
+            origin: model.clone(),
             tool_calls: tool_calls.clone(),
             opaque_context: opaque_context.clone(),
             error_message: error_message.clone(),
@@ -2159,11 +2290,12 @@ impl RunHandle {
             let id = assistant_id.unwrap_or_else(|| state.allocate_message_id());
             let assistant = AgentMessage::Assistant {
                 id,
-                content: assistant_text,
+                content,
                 tool_calls: tool_calls.clone(),
                 stop_reason: Some(reason),
                 error_message: error_message.clone(),
                 opaque_context,
+                origin: model.clone(),
             };
             state.partial_response = None;
             state.is_streaming = false;
@@ -2208,6 +2340,57 @@ impl RunHandle {
                 .await?;
         }
         Ok((response, valid_input_tokens))
+    }
+
+    /// Publish one transient assistant fragment, creating the placeholder
+    /// message at the first fragment of either kind.
+    async fn emit_assistant_delta(
+        &self,
+        agent: &AgentInner,
+        assistant_id: &mut Option<crate::state::MessageId>,
+        model: &Option<ModelDescriptor>,
+        delta: crate::event::MessageDelta,
+    ) -> Result<(), CoreError> {
+        let (message_id, first_delta) = {
+            let mut state = agent.state.lock().expect("agent state mutex poisoned");
+            let first_delta = assistant_id.is_none();
+            let id = *assistant_id.get_or_insert_with(|| state.allocate_message_id());
+            if first_delta {
+                state.append_message(AgentMessage::Assistant {
+                    id,
+                    content: Vec::new(),
+                    tool_calls: Vec::new(),
+                    stop_reason: None,
+                    error_message: None,
+                    opaque_context: Vec::new(),
+                    origin: model.clone(),
+                });
+            }
+            if let crate::event::MessageDelta::Text(text) = &delta {
+                state.append_partial_response_delta(text);
+            }
+            (id, first_delta)
+        };
+        if first_delta {
+            self.emit(
+                agent,
+                AgentEventKind::MessageStart {
+                    message: AgentMessage::Assistant {
+                        id: message_id,
+                        content: Vec::new(),
+                        tool_calls: Vec::new(),
+                        stop_reason: None,
+                        error_message: None,
+                        opaque_context: Vec::new(),
+                        origin: model.clone(),
+                    },
+                },
+            )
+            .await?;
+        }
+        self.emit(agent, AgentEventKind::MessageUpdate { message_id, delta })
+            .await?;
+        Ok(())
     }
 
     /// Refuse tool calls from a length-truncated assistant response. The
@@ -2283,11 +2466,12 @@ impl RunHandle {
             } else {
                 let message = AgentMessage::Assistant {
                     id: state.allocate_message_id(),
-                    content: String::new(),
+                    content: Vec::new(),
                     tool_calls: Vec::new(),
                     stop_reason: Some(StopReason::Aborted),
                     error_message: Some("Operation aborted".into()),
                     opaque_context: Vec::new(),
+                    origin: None,
                 };
                 state.append_message(message.clone());
                 Some(message)
@@ -2648,8 +2832,7 @@ fn estimate_message_bytes(message: &AgentMessage) -> usize {
             tool_calls,
             error_message,
             ..
-        } => content
-            .len()
+        } => crate::state::content_bytes(content)
             .saturating_add(error_message.as_ref().map_or(0, String::len))
             .saturating_add(
                 tool_calls
@@ -2684,7 +2867,151 @@ fn estimate_message_bytes(message: &AgentMessage) -> usize {
                     .map_or(0, str::len),
             )
             .saturating_add(32),
+        // The estimate covers canonical conversation messages. The prompt and
+        // tool surface is measured by the provider-confirmed input checkpoint,
+        // exactly as before configuration joined the transcript.
+        AgentMessage::System { .. } => 0,
     }
+}
+
+/// Reduces provider stream events into ordered assistant content blocks.
+///
+/// Consecutive deltas of one kind extend the current block. A thinking block
+/// ends at its signature, at another content kind, or at a tool call; a later
+/// thinking delta then starts a new block. This keeps interleaved thinking and
+/// text in provider order without a provider-specific block index.
+#[derive(Default)]
+struct AssistantContentBuilder {
+    blocks: Vec<crate::state::AssistantContent>,
+    thinking_open: bool,
+}
+
+impl AssistantContentBuilder {
+    fn text(&mut self, delta: &str) {
+        self.thinking_open = false;
+        if let Some(crate::state::AssistantContent::Text { text }) = self.blocks.last_mut() {
+            text.push_str(delta);
+        } else {
+            self.blocks
+                .push(crate::state::AssistantContent::text(delta.to_owned()));
+        }
+    }
+
+    fn thinking(&mut self, delta: &str) {
+        if self.thinking_open
+            && let Some(crate::state::AssistantContent::Thinking { text, .. }) =
+                self.blocks.last_mut()
+        {
+            text.push_str(delta);
+            return;
+        }
+        self.blocks
+            .push(crate::state::AssistantContent::thinking(delta.to_owned()));
+        self.thinking_open = true;
+    }
+
+    fn signature(&mut self, item: crate::state::OpaqueProviderContextItem) {
+        if self.thinking_open
+            && let Some(crate::state::AssistantContent::Thinking { signature, .. }) =
+                self.blocks.last_mut()
+        {
+            *signature = Some(item);
+        } else {
+            self.blocks.push(crate::state::AssistantContent::Thinking {
+                text: String::new(),
+                signature: Some(item),
+            });
+        }
+        self.thinking_open = false;
+    }
+
+    fn redacted(&mut self, data: crate::state::OpaqueProviderContextItem) {
+        self.thinking_open = false;
+        self.blocks
+            .push(crate::state::AssistantContent::RedactedThinking { data });
+    }
+
+    fn close(&mut self) {
+        self.thinking_open = false;
+    }
+
+    fn finish(self) -> Vec<crate::state::AssistantContent> {
+        self.blocks
+    }
+}
+
+/// Keep configuration under core ownership across context hooks.
+///
+/// Hooks may replace or rewrite conversation content, but configuration
+/// messages are canonical. When a hook's result does not carry exactly the
+/// canonical configuration messages, they are removed and one leading message
+/// with the canonical current configuration replaces them. A request therefore
+/// never loses its prompt and tools, nor gains a configuration the run did not
+/// commit.
+fn restore_canonical_configuration(
+    transcript: &mut crate::transcript::Transcript,
+    canonical: &[AgentMessage],
+) {
+    let present = transcript
+        .messages
+        .iter()
+        .filter(|message| matches!(message, AgentMessage::System { .. }))
+        .collect::<Vec<_>>();
+    if present.len() == canonical.len()
+        && present
+            .iter()
+            .zip(canonical)
+            .all(|(present, canonical)| *present == canonical)
+    {
+        return;
+    }
+    let Some(current) = crate::state::EffectiveConfiguration::replay(canonical) else {
+        transcript
+            .messages
+            .retain(|message| !matches!(message, AgentMessage::System { .. }));
+        return;
+    };
+    let id = canonical
+        .first()
+        .map(AgentMessage::id)
+        .unwrap_or(crate::state::MessageId(u64::MAX - 1));
+    transcript
+        .messages
+        .retain(|message| !matches!(message, AgentMessage::System { .. }));
+    transcript.messages.insert(
+        0,
+        AgentMessage::System {
+            id,
+            update: current.as_initial_update(),
+        },
+    );
+}
+
+/// Reject a request whose current configuration declares a tool the run is
+/// not authorized to execute, or declares it with a different interface.
+///
+/// Hooks may rewrite context, but they cannot widen the model's tool surface:
+/// every declared tool must be an executable, non-composition-only tool in
+/// the run's registry with exactly its registered declaration.
+fn validate_declared_tools(
+    transcript: &crate::transcript::Transcript,
+    registry: &crate::tool::ToolRegistry,
+) -> Result<(), CoreError> {
+    for declared in transcript.tools() {
+        let Some(tool) = registry.get(&declared.name) else {
+            return Err(CoreError::UnauthorizedToolDeclaration {
+                name: declared.name,
+            });
+        };
+        if tool.exposure() == crate::tool::ToolExposure::Composition
+            || crate::tool::ToolDeclaration::from_tool(tool.as_ref()) != declared
+        {
+            return Err(CoreError::UnauthorizedToolDeclaration {
+                name: declared.name,
+            });
+        }
+    }
+    Ok(())
 }
 
 impl Drop for RunHandle {
@@ -2966,11 +3293,13 @@ fn automatic_checkpoint_rejection(
                 if !tool_calls.is_empty() {
                     return Some(crate::compaction::CompactionRejection::UnexpectedToolCall);
                 }
-                text_bytes = text_bytes.saturating_add(content.trim().len());
+                text_bytes = text_bytes
+                    .saturating_add(crate::state::assistant_text(content).trim().len());
             }
             AgentMessage::ToolResult { .. } => {
                 return Some(crate::compaction::CompactionRejection::UnexpectedToolCall);
             }
+            AgentMessage::System { .. } => {}
         }
     }
     (text_bytes == 0).then_some(crate::compaction::CompactionRejection::EmptyCheckpoint)

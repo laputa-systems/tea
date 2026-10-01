@@ -14,11 +14,14 @@ use tea_core::compaction::{
     Compactor, ProviderContext,
 };
 use tea_core::effect::CompactionProviderEffectOutcome;
-use tea_core::hooks::{ContextEnvelope, HookSet};
-use tea_core::scheduler::{CancellationToken, ModelProvider, ModelRequest, ModelStreamEvent};
-use tea_core::state::{AgentMessage, MessageId, ModelDescriptor, StopReason, ThinkingLevel, Usage};
-use tea_protocol::JsonValue;
-use tea_providers::openai::OpenAiContextHook;
+use tea_core::scheduler::{
+    CancellationToken, ModelProvider, ModelRequest, ModelStreamEvent, RequestPurpose,
+};
+use tea_core::state::{
+    AgentMessage, ConfigurationUpdate, MessageId, ModelDescriptor, StopReason, ThinkingLevel,
+    Usage,
+};
+use tea_core::transcript::{ConfigurationProjection, Transcript};
 
 const SUMMARY_SYSTEM_PROMPT: &str = r#"You compact coding-agent conversation history.
 Produce a concise structured summary that preserves everything needed to continue the work.
@@ -60,20 +63,10 @@ constraints, unresolved work, and the next concrete actions. Return only the upd
 the same Markdown sections as the system instructions; do not call tools."#;
 const CACHE_FRIENDLY_CONTEXT_SAFETY_MARGIN: u64 = 4_096;
 
-/// Identify the two request shapes this host emits for provider-backed compaction.
-///
-/// Provider adapters cannot otherwise distinguish a regular conversation request
-/// from the standalone summary request or the cache-friendly summary update.
-pub(super) fn is_compaction_request(request: &ModelRequest) -> bool {
-    request.system_prompt == SUMMARY_SYSTEM_PROMPT
-        || request.context.contains(UPDATE_SUMMARIZATION_INSTRUCTIONS)
-}
-
 /// One immutable provider/model compactor for a durable runtime-service bundle.
 pub(super) struct ProviderCompactor {
     provider: Arc<dyn ModelProvider>,
     model: ModelDescriptor,
-    context_hook: Arc<dyn HookSet>,
     tool_free_requests: bool,
     thinking_level: ThinkingLevel,
 }
@@ -90,23 +83,10 @@ impl fmt::Debug for ProviderCompactor {
 impl ProviderCompactor {
     /// Bind one compactor to the exact provider/model descriptor selected by the host.
     pub(super) fn new(model: ModelDescriptor, provider: Arc<dyn ModelProvider>) -> Self {
-        let context_hook: Arc<dyn HookSet> = {
-            #[cfg(feature = "provider-codex")]
-            if model.provider == "codex" {
-                Arc::new(tea_providers::codex::CodexContextHook)
-            } else {
-                Arc::new(OpenAiContextHook)
-            }
-            #[cfg(not(feature = "provider-codex"))]
-            {
-                Arc::new(OpenAiContextHook)
-            }
-        };
         Self {
             provider,
             tool_free_requests: model.provider == "codex",
             model,
-            context_hook,
             thinking_level: ThinkingLevel::Off,
         }
     }
@@ -183,7 +163,6 @@ impl ProviderCompactor {
         requests: Option<&'a dyn CompactionRequestPort>,
     ) -> CompactionFuture<'a> {
         let configured = self.configured(&context);
-        let context_hook = Arc::clone(&self.context_hook);
         let tool_free_requests = self.tool_free_requests;
         let thinking_level = self.thinking_level;
         Box::pin(async move {
@@ -195,7 +174,6 @@ impl ProviderCompactor {
                 model,
                 context.messages.clone(),
                 None,
-                context_hook.as_ref(),
                 tool_free_requests,
                 context.session_id.clone(),
                 thinking_level,
@@ -225,7 +203,6 @@ impl ProviderCompactor {
         requests: Option<&'a dyn CompactionRequestPort>,
     ) -> CompactionFuture<'a> {
         let configured = self.configured(&context);
-        let context_hook = Arc::clone(&self.context_hook);
         let tool_free_requests = self.tool_free_requests;
         let thinking_level = self.thinking_level;
         Box::pin(async move {
@@ -243,7 +220,6 @@ impl ProviderCompactor {
                 model,
                 messages_to_summarize.clone(),
                 source_context,
-                context_hook.as_ref(),
                 tool_free_requests,
                 context.session_id.clone(),
                 thinking_level,
@@ -289,11 +265,7 @@ fn summary_message(
 fn next_message_id(messages: &[AgentMessage]) -> MessageId {
     let used = messages
         .iter()
-        .map(|message| match message {
-            AgentMessage::User { id, .. }
-            | AgentMessage::Assistant { id, .. }
-            | AgentMessage::ToolResult { id, .. } => id.0,
-        })
+        .map(|message| message.id().0)
         .collect::<BTreeSet<_>>();
     let mut candidate = 1_u64;
     while used.contains(&candidate) {
@@ -306,68 +278,79 @@ fn prepare_summary_request(
     model: ModelDescriptor,
     messages: Vec<AgentMessage>,
     source_context: Option<&ProviderContext>,
-    context_hook: &dyn HookSet,
     tool_free_requests: bool,
     session_id: Option<String>,
     thinking_level: ThinkingLevel,
 ) -> Result<PreparedSummaryRequest, CompactionError> {
-    // The converted context is provider-owned. Codex uses Responses `input`
-    // items rather than the older `{role, content: string}` shape, so the
-    // cache-friendly update instruction must preserve that exact boundary.
-    let codex_responses_context = model.provider == "codex";
-    let (system_prompt, context, tools, layout, source_is_active_context_prefix) =
-        if let Some(source) = source_context {
-            // Tool execution is prohibited by the compactor stream, but retaining
-            // the definitions keeps the prompt-facing envelope aligned with the
-            // ordinary request for an honest adapter-domain observation.
-            (
-                source.system_prompt.clone(),
-                append_update_instruction(&source.context, codex_responses_context)?,
-                if tool_free_requests {
-                    Vec::new()
-                } else {
-                    source.tools.clone()
-                },
-                CompactionRequestLayout::ExactReplay,
-                Some(true),
-            )
-        } else {
-            (
-                SUMMARY_SYSTEM_PROMPT.into(),
-                convert_messages(context_hook, messages)?,
-                Vec::new(),
-                CompactionRequestLayout::StandaloneFallback,
-                None,
-            )
-        };
+    let (transcript, layout, source_is_active_context_prefix) = if let Some(source) =
+        source_context
+    {
+        // Reuse the active request's exact typed transcript and append one
+        // summary instruction, so the summary request extends the cached
+        // conversation prefix. Tool execution is prohibited by the compactor
+        // stream; retaining the declarations keeps the prompt-facing envelope
+        // aligned with the ordinary request.
+        let mut transcript = source.source.clone();
+        let next_id = transcript
+            .messages
+            .iter()
+            .map(|message| message.id().0)
+            .max()
+            .unwrap_or(0);
+        if tool_free_requests {
+            let tools_removed = transcript
+                .tools()
+                .into_iter()
+                .map(|tool| tool.name)
+                .collect::<Vec<_>>();
+            if !tools_removed.is_empty() {
+                transcript.messages.push(AgentMessage::System {
+                    id: MessageId(next_id.saturating_add(1)),
+                    update: ConfigurationUpdate {
+                        tools_removed,
+                        ..ConfigurationUpdate::default()
+                    },
+                });
+            }
+        }
+        transcript.messages.push(AgentMessage::User {
+            id: MessageId(next_id.saturating_add(2)),
+            content: UPDATE_SUMMARIZATION_INSTRUCTIONS.into(),
+        });
+        (
+            transcript,
+            CompactionRequestLayout::ExactReplay,
+            Some(source.source_is_active_prefix()),
+        )
+    } else {
+        // The standalone request has its own summary configuration; the
+        // conversation's configuration messages are not part of what it
+        // summarizes.
+        let conversation = messages
+            .into_iter()
+            .filter(|message| !matches!(message, AgentMessage::System { .. }));
+        (
+            Transcript::standalone(SUMMARY_SYSTEM_PROMPT, Vec::new(), conversation),
+            CompactionRequestLayout::StandaloneFallback,
+            None,
+        )
+    };
     let session_id = source_context
         .and_then(|source| source.session_id.clone())
         .or(session_id);
     Ok(PreparedSummaryRequest {
         request: ModelRequest {
-            system_prompt,
-            context,
-            tools,
+            purpose: RequestPurpose::Compaction,
+            transcript,
             model: Some(model),
+            selected_model: None,
             thinking_level,
             session_id,
+            max_output_tokens: None,
         },
         layout,
         source_is_active_context_prefix,
     })
-}
-
-fn convert_messages(
-    context_hook: &dyn HookSet,
-    messages: Vec<AgentMessage>,
-) -> Result<String, CompactionError> {
-    context_hook
-        .convert_to_llm(ContextEnvelope {
-            version: 1,
-            messages,
-            host_messages: Vec::new(),
-        })
-        .map_err(|error| CompactionError::failed(error.to_string()))
 }
 
 async fn summarize(
@@ -439,6 +422,10 @@ async fn summarize_ungated(
                 request_observation = Some(observation)
             }
             ModelStreamEvent::TextDelta(delta) => summary.push_str(&delta),
+            // Exposed thinking is never part of the summary text.
+            ModelStreamEvent::ThinkingDelta(_)
+            | ModelStreamEvent::ThinkingSignature(_)
+            | ModelStreamEvent::RedactedThinking(_) => {}
             ModelStreamEvent::Usage(reported) => usage = Some(reported),
             // A compaction summary is an ordinary, tool-free assistant turn.
             // Provider-private continuation state belongs only to the source
@@ -500,12 +487,12 @@ fn baseline_prompt_fingerprint() -> u64 {
 }
 
 fn source_context_fits(source: &ProviderContext, request: &AutomaticCompactionRequest) -> bool {
-    if let Some(active_context) = &source.active_context {
-        if !is_exact_message_prefix(&source.context, active_context) {
-            return false;
-        }
+    if source.active.is_some() && !source.source_is_active_prefix() {
+        return false;
     }
-    let tool_bytes = source
+    let resolved = source.source.resolve(ConfigurationProjection::Collapsed);
+    let tool_bytes = resolved
+        .leading
         .tools
         .iter()
         .map(|tool| {
@@ -516,10 +503,16 @@ fn source_context_fits(source: &ProviderContext, request: &AutomaticCompactionRe
                 .saturating_add(tool.description.len())
         })
         .sum::<usize>();
-    let source_bytes = source
-        .system_prompt
+    let source_bytes = resolved
+        .leading
+        .system_prompt()
         .len()
-        .saturating_add(source.context.len())
+        .saturating_add(
+            source
+                .source
+                .layout_context(ConfigurationProjection::Collapsed)
+                .len(),
+        )
         .saturating_add(tool_bytes);
     let source_tokens = (source_bytes as u64).saturating_add(3) / 4;
     source_tokens
@@ -528,99 +521,105 @@ fn source_context_fits(source: &ProviderContext, request: &AutomaticCompactionRe
         <= request.context_budget_tokens
 }
 
-fn is_exact_message_prefix(source: &str, active: &str) -> bool {
-    let Ok(JsonValue::Array(source_messages)) = JsonValue::parse(source) else {
-        return false;
-    };
-    let Ok(JsonValue::Array(active_messages)) = JsonValue::parse(active) else {
-        return false;
-    };
-    active_messages.starts_with(&source_messages)
-}
-
-fn append_update_instruction(
-    context: &str,
-    codex_responses_context: bool,
-) -> Result<String, CompactionError> {
-    append_instruction(
-        context,
-        UPDATE_SUMMARIZATION_INSTRUCTIONS,
-        codex_responses_context,
-    )
-}
-
-/// Append exactly one host instruction to an already converted provider context.
-///
-/// The observed request is the same JSON value passed to the provider; no hook
-/// or provider projection is rerun for measurement.
-fn append_instruction(
-    context: &str,
-    instruction: &str,
-    codex_responses_context: bool,
-) -> Result<String, CompactionError> {
-    let mut value = JsonValue::parse(context).map_err(|error| {
-        CompactionError::failed(format!("active provider context is not JSON: {error}"))
-    })?;
-    let JsonValue::Array(messages) = &mut value else {
-        return Err(CompactionError::failed(
-            "active provider context is not a message array",
-        ));
-    };
-    let instruction = if codex_responses_context {
-        JsonValue::object([
-            ("type", JsonValue::from("message")),
-            ("role", JsonValue::from("user")),
-            (
-                "content",
-                JsonValue::Array(vec![JsonValue::object([
-                    ("type", JsonValue::from("input_text")),
-                    ("text", JsonValue::from(instruction)),
-                ])]),
-            ),
-        ])
-    } else {
-        JsonValue::object([
-            ("role", JsonValue::from("user")),
-            ("content", JsonValue::from(instruction)),
-        ])
-    };
-    messages.push(instruction);
-    value
-        .to_json_string()
-        .map_err(|error| CompactionError::failed(error.to_string()))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tea_core::state::{PromptSection, SectionChange, SystemPrompt};
+    use tea_core::tool::ToolDeclaration;
+
+    fn model() -> ModelDescriptor {
+        ModelDescriptor {
+            provider: "codex".into(),
+            model: "gpt-test".into(),
+            revision: None,
+        }
+    }
+
+    fn source() -> ProviderContext {
+        let tool = ToolDeclaration::new(
+            "read",
+            "Read a file",
+            tea_protocol::JsonValue::object([("type", tea_protocol::JsonValue::from("object"))]),
+        );
+        let source = Transcript::standalone(
+            SystemPrompt::new(vec![PromptSection::new("base", "work")]).expect("prompt"),
+            vec![tool],
+            [tea_core::transcript::user_message("before")],
+        );
+        ProviderContext {
+            active: Some(source.clone()),
+            source,
+            model: Some(model()),
+            thinking_level: ThinkingLevel::Off,
+            session_id: Some("session".into()),
+        }
+    }
 
     #[test]
-    fn codex_cache_replay_update_uses_a_responses_input_message() {
-        let context = r#"[{"type":"message","role":"user","content":[{"type":"input_text","text":"before"}]}]"#;
-        let updated = append_update_instruction(context, true)
-            .expect("Codex cache-replay context should remain valid JSON");
-        let items = JsonValue::parse(&updated)
-            .expect("updated context should parse")
-            .as_array()
-            .expect("updated context should remain an array")
-            .to_vec();
-        let appended = items.last().expect("update instruction is appended");
-        assert_eq!(
-            appended.get("type").and_then(JsonValue::as_str),
-            Some("message")
-        );
-        assert_eq!(
-            appended.get("role").and_then(JsonValue::as_str),
-            Some("user")
-        );
-        assert_eq!(
-            appended
-                .get("content")
-                .and_then(JsonValue::as_array)
-                .and_then(|content| content.first())
-                .and_then(|part| part.get("type"))
-                .and_then(JsonValue::as_str),
-            Some("input_text"),
-        );
+    fn cache_replay_update_extends_the_active_transcript_with_a_user_instruction() {
+        let source = source();
+        let prepared = prepare_summary_request(
+            model(),
+            Vec::new(),
+            Some(&source),
+            false,
+            None,
+            ThinkingLevel::Off,
+        )
+        .expect("summary request prepares");
+        assert_eq!(prepared.request.purpose, RequestPurpose::Compaction);
+        assert_eq!(prepared.layout, CompactionRequestLayout::ExactReplay);
+        assert_eq!(prepared.source_is_active_context_prefix, Some(true));
+        let messages = &prepared.request.transcript.messages;
+        assert!(messages.starts_with(&source.source.messages));
+        assert!(matches!(
+            messages.last(),
+            Some(AgentMessage::User { content, .. }) if content == UPDATE_SUMMARIZATION_INSTRUCTIONS
+        ));
+        assert_eq!(prepared.request.tools().len(), 1);
+    }
+
+    #[test]
+    fn tool_free_providers_withdraw_tools_before_the_summary_instruction() {
+        let prepared = prepare_summary_request(
+            model(),
+            Vec::new(),
+            Some(&source()),
+            true,
+            None,
+            ThinkingLevel::Off,
+        )
+        .expect("summary request prepares");
+        assert!(prepared.request.tools().is_empty());
+        assert_eq!(prepared.request.system_prompt(), "work");
+    }
+
+    #[test]
+    fn standalone_summary_uses_its_own_configuration() {
+        let conversation = vec![
+            AgentMessage::System {
+                id: MessageId(1),
+                update: ConfigurationUpdate {
+                    sections: vec![SectionChange {
+                        id: "base".into(),
+                        content: Some("conversation prompt".into()),
+                    }],
+                    ..ConfigurationUpdate::default()
+                },
+            },
+            tea_core::transcript::user_message("hello"),
+        ];
+        let prepared = prepare_summary_request(
+            model(),
+            conversation,
+            None,
+            false,
+            None,
+            ThinkingLevel::Off,
+        )
+        .expect("summary request prepares");
+        assert_eq!(prepared.layout, CompactionRequestLayout::StandaloneFallback);
+        assert_eq!(prepared.request.system_prompt(), SUMMARY_SYSTEM_PROMPT);
+        assert!(prepared.request.tools().is_empty());
     }
 }

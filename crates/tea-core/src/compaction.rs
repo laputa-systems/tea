@@ -16,7 +16,6 @@ use crate::scheduler::{CancellationToken, ModelRequest};
 use crate::state::{
     AgentMessage, AgentPhase, MessageId, ModelDescriptor, RunPhase, RunState, StopReason,
 };
-use crate::tool::ToolDefinition;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::future::Future;
@@ -512,25 +511,36 @@ pub struct CompactionContext {
     pub provider_context: Option<ProviderContext>,
 }
 
-/// The provider-visible prompt snapshot available to an automatic compactor.
+/// The provider-visible request material available to an automatic compactor.
 ///
-/// `context` is intentionally opaque: the core does not impose a provider message schema. A
-/// host that understands its own conversion (for example the TUI's OpenAI-compatible adapter)
-/// may append a single summary instruction while preserving the exact preceding context bytes.
+/// Both transcripts are built through the same projection and hook pipeline
+/// as an ordinary request. A provider-backed compactor can append one summary
+/// instruction to `source` and keep the active request's configuration and
+/// conversation prefix, so the summary request reuses the cached prefix.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ProviderContext {
-    /// System instructions used for the active request.
-    pub system_prompt: String,
-    /// Converted provider conversation/context.
-    pub context: String,
-    /// Complete active provider context used to verify that `context` is an exact message-prefix.
-    /// Hosts that understand the conversion can reject cache-friendly summarization when a
-    /// transform reordered or injected content into the candidate source.
-    pub active_context: Option<String>,
-    /// Ordered prompt-facing tool definitions used for the active request.
-    pub tools: Vec<ToolDefinition>,
+    /// Typed transcript of the compaction source.
+    pub source: crate::transcript::Transcript,
+    /// Typed transcript of the complete active context, when built.
+    pub active: Option<crate::transcript::Transcript>,
+    /// Model selected for the active request.
+    pub model: Option<ModelDescriptor>,
+    /// Reasoning level of the active request.
+    pub thinking_level: crate::state::ThinkingLevel,
     /// Stable host-owned session/cache identity from the active request.
     pub session_id: Option<String>,
+}
+
+impl ProviderContext {
+    /// Whether the source transcript is an exact message prefix of the active
+    /// one. A transform that reordered or injected content fails this check,
+    /// and a cache-friendly compactor must then use a standalone request.
+    pub fn source_is_active_prefix(&self) -> bool {
+        self.active.as_ref().is_some_and(|active| {
+            active.messages.starts_with(&self.source.messages)
+                && active.host_notes == self.source.host_notes
+        })
+    }
 }
 
 /// A validated-on-return proposal from a [`Compactor`].
@@ -1415,6 +1425,19 @@ pub(crate) async fn commit_replacement_durably(
     replacement_messages: Vec<AgentMessage>,
 ) -> Result<(), CoreError> {
     reserve_durable_replacement_commit(agent, run, operation.source_history_revision)?;
+    // A fresh identity above every source and replacement message; adopting
+    // the replacement advances the agent's allocator beyond it.
+    let configuration_id = MessageId(
+        source_messages
+            .iter()
+            .chain(&replacement_messages)
+            .map(|message| message.id().0)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1),
+    );
+    let replacement_messages =
+        preserve_configuration(&source_messages, replacement_messages, configuration_id);
     let write = run
         .begin_effect(EffectSubject::DurableWrite {
             write: DurableWriteRequest::CompactionReplacement {
@@ -1569,6 +1592,9 @@ pub(crate) fn validate_messages(messages: &[AgentMessage]) -> Result<(), Compact
                 }
             },
             AgentMessage::User { .. } => {}
+            AgentMessage::System { update, .. } => update
+                .validate()
+                .map_err(|error| CompactionError::invalid(error.to_string()))?,
         }
     }
     let missing_results = tool_calls
@@ -1586,11 +1612,52 @@ pub(crate) fn validate_messages(messages: &[AgentMessage]) -> Result<(), Compact
 }
 
 fn message_id(message: &AgentMessage) -> MessageId {
-    match message {
-        AgentMessage::User { id, .. }
-        | AgentMessage::Assistant { id, .. }
-        | AgentMessage::ToolResult { id, .. } => *id,
+    message.id()
+}
+
+/// Keep the configuration in force across a context replacement.
+///
+/// A replacement summarizes a prefix and retains a suffix. When the summarized
+/// prefix contained configuration messages, the replacement gains one leading
+/// system message with the configuration in force at the end of that prefix.
+/// Configuration changes inside the retained suffix stay where they were, so
+/// no later configuration is applied to earlier history. Original history is
+/// not deleted: a durable host retains it beside the replacement.
+pub(crate) fn preserve_configuration(
+    source: &[AgentMessage],
+    mut replacement: Vec<AgentMessage>,
+    id: MessageId,
+) -> Vec<AgentMessage> {
+    let retained_suffix = source
+        .iter()
+        .rev()
+        .zip(replacement.iter().rev())
+        .take_while(|(source, replacement)| source == replacement)
+        .count();
+    let prefix = &source[..source.len() - retained_suffix];
+    let Some(prefix_configuration) = crate::state::EffectiveConfiguration::replay(prefix) else {
+        return replacement;
+    };
+    let checkpoint_len = replacement.len() - retained_suffix;
+    let checkpoint_configuration =
+        crate::state::EffectiveConfiguration::replay(&replacement[..checkpoint_len]);
+    if checkpoint_configuration
+        .is_some_and(|configuration| configuration.same_content(&prefix_configuration))
+    {
+        return replacement;
     }
+    replacement.retain(|message| {
+        !matches!(message, AgentMessage::System { .. })
+            || source[source.len() - retained_suffix..].contains(message)
+    });
+    replacement.insert(
+        0,
+        AgentMessage::System {
+            id,
+            update: prefix_configuration.as_initial_update(),
+        },
+    );
+    replacement
 }
 
 /// Construct privacy-safe source facts without retaining prompt or tool-result content.
@@ -1621,8 +1688,7 @@ pub(crate) fn messages_bytes(messages: &[AgentMessage]) -> usize {
                 tool_calls,
                 error_message,
                 ..
-            } => content
-                .len()
+            } => crate::state::content_bytes(content)
                 .saturating_add(error_message.as_ref().map_or(0, String::len))
                 .saturating_add(
                     tool_calls
@@ -1648,6 +1714,7 @@ pub(crate) fn messages_bytes(messages: &[AgentMessage]) -> usize {
                 .saturating_add(tool_name.len())
                 .saturating_add(content.len())
                 .saturating_add(details.as_ref().map_or(0, |details| details.as_str().len())),
+            AgentMessage::System { update, .. } => update.approximate_bytes(),
         };
         total.saturating_add(body).saturating_add(16)
     })

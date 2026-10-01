@@ -289,6 +289,7 @@ fn fixture_tool(name: &str) -> ToolDefinition {
         execution_mode: ToolExecutionMode::Parallel,
         requires_exclusive_batch: false,
         cancellation_settlement_mode: CancellationSettlementMode::DropFuture,
+        exposure: tea_core::tool::ToolExposure::Direct,
     }
 }
 

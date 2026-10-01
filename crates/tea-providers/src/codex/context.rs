@@ -1,62 +1,33 @@
 //! Typed Tea-transcript conversion for Codex Responses `input` items.
 
-use crate::error::HookError;
-use crate::hooks::{AfterToolCall, AgentLoopTurnUpdate, BeforeToolCall, ContextEnvelope, HookSet};
 use crate::json::JsonValue;
+use crate::scheduler::ModelRequest;
 use crate::state::AgentMessage;
+use crate::transcript::ConfigurationProjection;
 
-/// Convert Tea's canonical transcript to Codex Responses input items.
+/// Convert a typed request transcript to Codex Responses input items.
 ///
-/// System instructions deliberately remain outside this converter: the
-/// provider sends the effective Tea system prompt in top-level `instructions`.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct CodexContextHook;
-
-impl HookSet for CodexContextHook {
-    fn before_tool_call(&self, _call: &crate::tool::ToolCall) -> Result<BeforeToolCall, HookError> {
-        Ok(BeforeToolCall::Allow)
+/// System instructions deliberately remain outside the input: the provider
+/// sends the current Tea system prompt in top-level `instructions`, so a
+/// configuration change is collapsed into that field. Codex-scoped encrypted
+/// reasoning is replayed beside the assistant turn that produced it; visible
+/// reasoning summaries are presentation only and are never replayed as text.
+pub fn responses_input(request: &ModelRequest) -> Result<Vec<JsonValue>, String> {
+    let transcript = request.transcript.prepared_for(request.model.as_ref());
+    let resolved = transcript.resolve(ConfigurationProjection::Collapsed);
+    let mut input = Vec::new();
+    for message in &resolved.messages {
+        append_message(&mut input, message);
     }
-
-    fn after_tool_call(
-        &self,
-        _call: &crate::tool::ToolCall,
-        _result: &crate::tool::AgentToolResult,
-    ) -> Result<AfterToolCall, HookError> {
-        Ok(AfterToolCall::default())
+    // Host additions are explicitly developer context, never a user-authored
+    // message. This mirrors the OpenAI projection's semantic boundary.
+    for note in &resolved.host_notes {
+        input.push(message_item("developer", note));
     }
-
-    fn transform_context(&self, context: ContextEnvelope) -> Result<ContextEnvelope, HookError> {
-        Ok(context)
-    }
-
-    fn convert_to_llm(&self, context: ContextEnvelope) -> Result<String, HookError> {
-        let mut input = Vec::new();
-        for message in &context.messages {
-            append_message(&mut input, message)?;
-        }
-        // Host additions are explicitly developer context, never a user-authored
-        // message. This mirrors the existing OpenAI hook's semantic boundary.
-        for message in context.host_messages {
-            input.push(message_item("developer", message.as_str()));
-        }
-        JsonValue::Array(input)
-            .to_json_string()
-            .map_err(|error| HookError::new("codex_convert_to_llm", error.to_string()))
-    }
-
-    fn should_stop_after_turn(&self, _context: &ContextEnvelope) -> Result<bool, HookError> {
-        Ok(false)
-    }
-
-    fn prepare_next_turn(
-        &self,
-        _context: ContextEnvelope,
-    ) -> Result<AgentLoopTurnUpdate, HookError> {
-        Ok(AgentLoopTurnUpdate::default())
-    }
+    Ok(input)
 }
 
-fn append_message(input: &mut Vec<JsonValue>, message: &AgentMessage) -> Result<(), HookError> {
+fn append_message(input: &mut Vec<JsonValue>, message: &AgentMessage) {
     match message {
         AgentMessage::User { content, .. } => input.push(message_item("user", content)),
         AgentMessage::Assistant {
@@ -73,8 +44,9 @@ fn append_message(input: &mut Vec<JsonValue>, message: &AgentMessage) -> Result<
                     input.push(reasoning);
                 }
             }
+            let content = crate::state::assistant_text(content);
             if !content.is_empty() || tool_calls.is_empty() {
-                input.push(message_item("assistant", content));
+                input.push(message_item("assistant", &content));
             }
             for call in tool_calls {
                 input.push(JsonValue::object([
@@ -100,8 +72,8 @@ fn append_message(input: &mut Vec<JsonValue>, message: &AgentMessage) -> Result<
             ),
             ("output", JsonValue::String(content.clone())),
         ])),
+        AgentMessage::System { .. } => {}
     }
-    Ok(())
 }
 
 /// Reconstruct the minimal upstream reasoning-item shape from Tea's opaque
@@ -177,11 +149,10 @@ mod tests {
 
     #[test]
     fn keeps_encrypted_reasoning_private_but_replayable() {
-        let context = ContextEnvelope {
-            version: 1,
-            messages: vec![AgentMessage::Assistant {
+        let request = ModelRequest {
+            transcript: crate::transcript::Transcript::new(vec![AgentMessage::Assistant {
                 id: MessageId(1),
-                content: "visible".into(),
+                content: crate::state::text_content("visible"),
                 tool_calls: vec![AgentToolCall {
                     id: ToolCallId::new("call_1").unwrap(),
                     name: "read".into(),
@@ -196,13 +167,12 @@ mod tests {
                     r#"{"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"provider-private summary"}],"encrypted_content":"opaque-encrypted-state"}"#,
                 )
                 .unwrap()],
-            }],
-            host_messages: Vec::new(),
+                origin: None,
+            }]),
+            ..ModelRequest::default()
         };
 
-        let encoded = CodexContextHook.convert_to_llm(context).unwrap();
-        let input = JsonValue::parse(&encoded).unwrap();
-        let items = input.as_array().unwrap();
+        let items = responses_input(&request).unwrap();
         assert_eq!(
             items[0].get("type").and_then(JsonValue::as_str),
             Some("reasoning")

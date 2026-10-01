@@ -1461,6 +1461,39 @@ pub(crate) fn compose_system_prompt(spec: &HarnessSnapshotSpec) -> String {
     sections.join("\n\n")
 }
 
+/// The sectioned prompt of one snapshot, in composition order.
+///
+/// Section identities are stable across revisions so a later revision that
+/// changes one plugin's prompt produces a section update rather than a new
+/// prompt. Duplicate descriptor identities receive an ordinal suffix.
+pub(crate) fn compose_system_prompt_sections(
+    spec: &HarnessSnapshotSpec,
+) -> crate::state::SystemPrompt {
+    let mut sections = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    let mut push = |id: String, content: &str| {
+        let mut unique = id.clone();
+        let mut ordinal = 1;
+        while !seen.insert(unique.clone()) {
+            ordinal += 1;
+            unique = format!("{id}#{ordinal}");
+        }
+        sections.push(crate::state::PromptSection::new(unique, content));
+    };
+    push("base".into(), &spec.base_system_prompt);
+    if let Some(addendum) = &spec.self_extension_addendum {
+        push("self-extension".into(), addendum);
+    }
+    for section in &spec.prompt_sections {
+        push(format!("section:{}", section.id), &section.content);
+    }
+    for section in &spec.plugin_prompt_sections {
+        push(format!("plugin:{}", section.id), &section.content);
+    }
+    crate::state::SystemPrompt::new(sections)
+        .unwrap_or_else(|_| crate::state::SystemPrompt::single(compose_system_prompt(spec)))
+}
+
 /// Combine the host hook implementation identity with the source-pinned
 /// session-plugin hook contribution for one snapshot.
 pub(crate) fn runtime_hook_bundle_digest(

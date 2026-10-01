@@ -110,7 +110,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     })?;
     for entry in runtime.snapshot()?.entries() {
         if let SessionEntry::AssistantMessage(message) = &entry.body {
-            println!("{}", message.content);
+            println!("{}", message.text());
         }
     }
     Ok(())

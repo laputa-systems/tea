@@ -707,9 +707,9 @@ fn record_message(turn: &mut Option<PendingTurn>, message: &AgentMessage) {
         }
         AgentMessage::User { .. } => {}
         AgentMessage::Assistant { content, .. } => {
-            turn.output = Some(content.clone());
+            turn.output = Some(crate::state::assistant_text(content));
         }
-        AgentMessage::ToolResult { .. } => {}
+        AgentMessage::ToolResult { .. } | AgentMessage::System { .. } => {}
     }
 }
 
@@ -797,7 +797,7 @@ mod tests {
             AgentEventKind::MessageEnd {
                 message: AgentMessage::Assistant {
                     id: MessageId(2),
-                    content: "world".into(),
+                    content: crate::state::text_content("world"),
                     tool_calls: vec![AgentToolCall {
                         id: call_id.clone(),
                         name: "echo".into(),
@@ -806,6 +806,7 @@ mod tests {
                     stop_reason: Some(StopReason::ToolUse),
                     error_message: None,
                     opaque_context: Vec::new(),
+                    origin: None,
                 },
             },
         );
@@ -917,7 +918,7 @@ mod tests {
                 turn_id: TurnId(2),
                 measurement: crate::measurement::measure_prompt_cacheability(
                     None,
-                    &crate::scheduler::ModelRequest::default(),
+                    &crate::measurement::RequestLayout::default(),
                 ),
             },
         );
@@ -974,10 +975,10 @@ mod tests {
     #[test]
     fn trace_retains_content_free_logical_and_adapter_cache_diagnostics() {
         let observer = TraceObserver::new("cache-diagnostics", Vec::<TraceEvent>::new());
-        let previous = crate::scheduler::ModelRequest {
+        let previous = crate::measurement::RequestLayout {
             system_prompt: "stable".into(),
             context: "retained annotation=a".into(),
-            ..crate::scheduler::ModelRequest::default()
+            ..crate::measurement::RequestLayout::default()
         };
         let mut current = previous.clone();
         current.context = "retained annotation=b".into();

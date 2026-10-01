@@ -322,9 +322,7 @@ mod tests {
         let payload = local_payload(
             &config,
             crate::scheduler::ModelRequest {
-                system_prompt: "system".into(),
-                context: "[{\"role\":\"user\",\"content\":\"hello\"}]".into(),
-                tools: vec![ToolDefinition {
+                transcript: crate::test_support::transcript(&"system", &vec![ToolDefinition {
                     name: "edit".into(),
                     description: "change a file".into(),
                     schema: JsonValue::object([("type", JsonValue::from("object"))]),
@@ -332,7 +330,8 @@ mod tests {
                     requires_exclusive_batch: false,
                     cancellation_settlement_mode:
                         crate::tool::CancellationSettlementMode::DropFuture,
-                }],
+                exposure: crate::tool::ToolExposure::Direct,
+            }], &"[{\"role\":\"user\",\"content\":\"hello\"}]"),
                 model: Some(ModelDescriptor {
                     provider: "local".into(),
                     model: "caller/local-model".into(),
@@ -340,6 +339,7 @@ mod tests {
                 }),
                 thinking_level: ThinkingLevel::High,
                 session_id: None,
+                ..crate::scheduler::ModelRequest::default()
             },
         )
         .expect("payload should serialize");
@@ -406,9 +406,7 @@ data: [DONE]
             .with_request_timeout(std::time::Duration::from_secs(5));
         let provider = LocalProvider::new(config);
         let request = ModelRequest {
-            system_prompt: "system".into(),
-            context: "[{\"role\":\"user\",\"content\":\"hello\"}]".into(),
-            tools: Vec::new(),
+            transcript: crate::test_support::transcript(&"system", &Vec::new(), &"[{\"role\":\"user\",\"content\":\"hello\"}]"),
             model: Some(ModelDescriptor {
                 provider: "local".into(),
                 model: "caller/local-model".into(),
@@ -416,6 +414,7 @@ data: [DONE]
             }),
             thinking_level: ThinkingLevel::High,
             session_id: None,
+            ..crate::scheduler::ModelRequest::default()
         };
         let cancellation = CancellationToken::new();
         let mut source = smol::block_on(provider.stream(request, cancellation.clone()))
@@ -493,7 +492,7 @@ data: [DONE]
         let cancellation = CancellationToken::new();
         let mut source = smol::block_on(provider.stream(
             ModelRequest {
-                context: "[]".into(),
+                transcript: crate::test_support::transcript(&"", &Vec::new(), &"[]"),
                 model: Some(ModelDescriptor {
                     provider: "local".into(),
                     model: "caller/local-model".into(),

@@ -2078,36 +2078,7 @@ fn encode_entry(entry: &SessionEntry) -> JsonValue {
             ("content", JsonValue::String(entry.content.clone())),
             ("metadata", JsonValue::Object(entry.metadata.clone())),
         ]),
-        SessionEntry::AssistantMessage(entry) => JsonValue::object([
-            ("type", JsonValue::String("assistant_message".into())),
-            ("content", JsonValue::String(entry.content.clone())),
-            (
-                "tool_calls",
-                JsonValue::Array(
-                    entry
-                        .tool_calls
-                        .iter()
-                        .map(encode_assistant_tool_call)
-                        .collect(),
-                ),
-            ),
-            ("stop_reason", optional_string(entry.stop_reason.as_deref())),
-            (
-                "error_message",
-                optional_string(entry.error_message.as_deref()),
-            ),
-            (
-                "opaque_context",
-                JsonValue::Array(
-                    entry
-                        .opaque_context
-                        .iter()
-                        .map(encode_opaque_provider_context)
-                        .collect(),
-                ),
-            ),
-            ("metadata", JsonValue::Object(entry.metadata.clone())),
-        ]),
+        SessionEntry::AssistantMessage(entry) => encode_assistant_message(entry),
         SessionEntry::ToolResult(entry) => JsonValue::object([
             ("type", JsonValue::String("tool_result".into())),
             (
@@ -2169,13 +2140,44 @@ fn encode_entry(entry: &SessionEntry) -> JsonValue {
             ("type", JsonValue::String("thinking_changed".into())),
             ("level", JsonValue::String(entry.level.clone())),
         ]),
-        SessionEntry::ToolActivationChanged(entry) => JsonValue::object([
-            ("type", JsonValue::String("tool_activation_changed".into())),
+        SessionEntry::ConfigurationChanged(entry) => JsonValue::object([
+            ("type", JsonValue::String("configuration_changed".into())),
             (
-                "active_tool_names",
+                "sections",
                 JsonValue::Array(
                     entry
-                        .active_tool_names
+                        .sections
+                        .iter()
+                        .map(|change| {
+                            JsonValue::object([
+                                ("id", JsonValue::String(change.id.clone())),
+                                ("content", optional_string(change.content.as_deref())),
+                            ])
+                        })
+                        .collect(),
+                ),
+            ),
+            (
+                "tools_added",
+                JsonValue::Array(
+                    entry
+                        .tools_added
+                        .iter()
+                        .map(|tool| {
+                            JsonValue::object([
+                                ("name", JsonValue::String(tool.name.clone())),
+                                ("description", JsonValue::String(tool.description.clone())),
+                                ("schema", tool.schema.clone()),
+                            ])
+                        })
+                        .collect(),
+                ),
+            ),
+            (
+                "tools_removed",
+                JsonValue::Array(
+                    entry
+                        .tools_removed
                         .iter()
                         .cloned()
                         .map(JsonValue::String)
@@ -2230,29 +2232,9 @@ fn decode_entry(value: &JsonValue) -> Result<SessionEntry, String> {
             content: required_string(object, "content")?,
             metadata: required_metadata(object, "metadata")?,
         })),
-        "assistant_message" => Ok(SessionEntry::AssistantMessage(AssistantMessageEntry {
-            content: required_string(object, "content")?,
-            tool_calls: required_array(object, "tool_calls")?
-                .iter()
-                .map(decode_assistant_tool_call)
-                .collect::<Result<Vec<_>, _>>()?,
-            stop_reason: optional_string_of(object, "stop_reason")?,
-            error_message: optional_string_of(object, "error_message")?,
-            opaque_context: optional_value_of(object, "opaque_context")?
-                .map(|value| {
-                    value
-                        .as_array()
-                        .ok_or_else(|| {
-                            "field \"opaque_context\" must be an array or null".to_owned()
-                        })?
-                        .iter()
-                        .map(decode_opaque_provider_context)
-                        .collect::<Result<Vec<_>, _>>()
-                })
-                .transpose()?
-                .unwrap_or_default(),
-            metadata: required_metadata(object, "metadata")?,
-        })),
+        "assistant_message" => Ok(SessionEntry::AssistantMessage(decode_assistant_message(
+            object,
+        )?)),
         "tool_result" => Ok(SessionEntry::ToolResult(ToolResultEntry {
             tool_call_id: required_string(object, "tool_call_id")?,
             tool_name: required_string(object, "tool_name")?,
@@ -2297,9 +2279,30 @@ fn decode_entry(value: &JsonValue) -> Result<SessionEntry, String> {
         "thinking_changed" => Ok(SessionEntry::ThinkingChanged(ThinkingChangedEntry {
             level: required_string(object, "level")?,
         })),
-        "tool_activation_changed" => Ok(SessionEntry::ToolActivationChanged(
-            ToolActivationChangedEntry {
-                active_tool_names: string_array(required_array(object, "active_tool_names")?)?,
+        "configuration_changed" => Ok(SessionEntry::ConfigurationChanged(
+            ConfigurationChangedEntry {
+                sections: required_array(object, "sections")?
+                    .iter()
+                    .map(|value| {
+                        let change = self::object(value)?;
+                        Ok::<_, String>(PromptSectionChange {
+                            id: required_string(change, "id")?,
+                            content: optional_string_of(change, "content")?,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+                tools_added: required_array(object, "tools_added")?
+                    .iter()
+                    .map(|value| {
+                        let tool = self::object(value)?;
+                        Ok::<_, String>(ToolDeclarationRecord {
+                            name: required_string(tool, "name")?,
+                            description: required_string(tool, "description")?,
+                            schema: required_value(tool, "schema")?.clone(),
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+                tools_removed: string_array(required_array(object, "tools_removed")?)?,
             },
         )),
         "harness_revision_changed" => Ok(SessionEntry::HarnessRevisionChanged(
@@ -3338,6 +3341,172 @@ const MAX_OPAQUE_PROVIDER_CONTEXT_BYTES: usize = 1_048_576;
 const MAX_OPAQUE_PROVIDER_CONTEXT_PROVIDER_BYTES: usize = 64;
 const MAX_OPAQUE_PROVIDER_CONTEXT_KIND_BYTES: usize = 64;
 const MAX_OPAQUE_PROVIDER_CONTEXT_ITEM_ID_BYTES: usize = 512;
+
+/// Encode an assistant entry canonically.
+///
+/// `content` always carries the concatenated answer text. Ordered blocks are
+/// written only when the reply has thinking or more than one block, and the
+/// physical origin only when recorded, so text-only entries written before
+/// thinking support re-encode to identical bytes and keep their commit seal.
+fn encode_assistant_message(entry: &AssistantMessageEntry) -> JsonValue {
+    let mut fields = vec![
+        ("type", JsonValue::String("assistant_message".into())),
+        ("content", JsonValue::String(entry.text())),
+    ];
+    let text_only = entry.content.len() <= 1
+        && entry
+            .content
+            .iter()
+            .all(|block| matches!(block, AssistantContentEntry::Text(_)));
+    if !text_only {
+        fields.push((
+            "content_blocks",
+            JsonValue::Array(entry.content.iter().map(encode_assistant_block).collect()),
+        ));
+    }
+    fields.extend([
+        (
+            "tool_calls",
+            JsonValue::Array(
+                entry
+                    .tool_calls
+                    .iter()
+                    .map(encode_assistant_tool_call)
+                    .collect(),
+            ),
+        ),
+        ("stop_reason", optional_string(entry.stop_reason.as_deref())),
+        (
+            "error_message",
+            optional_string(entry.error_message.as_deref()),
+        ),
+        (
+            "opaque_context",
+            JsonValue::Array(
+                entry
+                    .opaque_context
+                    .iter()
+                    .map(encode_opaque_provider_context)
+                    .collect(),
+            ),
+        ),
+        ("metadata", JsonValue::Object(entry.metadata.clone())),
+    ]);
+    if let Some(origin) = &entry.origin {
+        fields.push((
+            "origin",
+            JsonValue::object([
+                ("provider", JsonValue::String(origin.provider.clone())),
+                ("model", JsonValue::String(origin.model.clone())),
+                ("revision", optional_string(origin.revision.as_deref())),
+            ]),
+        ));
+    }
+    JsonValue::object(fields)
+}
+
+fn encode_assistant_block(block: &AssistantContentEntry) -> JsonValue {
+    match block {
+        AssistantContentEntry::Text(text) => JsonValue::object([
+            ("type", JsonValue::String("text".into())),
+            ("text", JsonValue::String(text.clone())),
+        ]),
+        AssistantContentEntry::Thinking { text, signature } => JsonValue::object([
+            ("type", JsonValue::String("thinking".into())),
+            ("text", JsonValue::String(text.clone())),
+            (
+                "signature",
+                signature
+                    .as_ref()
+                    .map(encode_opaque_provider_context)
+                    .unwrap_or(JsonValue::Null),
+            ),
+        ]),
+        AssistantContentEntry::RedactedThinking(data) => JsonValue::object([
+            ("type", JsonValue::String("redacted_thinking".into())),
+            ("data", encode_opaque_provider_context(data)),
+        ]),
+    }
+}
+
+fn decode_assistant_message(
+    object: &BTreeMap<String, JsonValue>,
+) -> Result<AssistantMessageEntry, String> {
+    let text = required_string(object, "content")?;
+    let content = match optional_value_of(object, "content_blocks")? {
+        Some(blocks) => {
+            let blocks = blocks
+                .as_array()
+                .ok_or_else(|| "field \"content_blocks\" must be an array".to_owned())?
+                .iter()
+                .map(decode_assistant_block)
+                .collect::<Result<Vec<_>, _>>()?;
+            let entry = AssistantMessageEntry {
+                content: blocks,
+                tool_calls: Vec::new(),
+                stop_reason: None,
+                error_message: None,
+                opaque_context: Vec::new(),
+                origin: None,
+                metadata: Metadata::new(),
+            };
+            if entry.text() != text {
+                return Err("assistant content blocks disagree with content text".into());
+            }
+            entry.content
+        }
+        None => AssistantContentEntry::text_content(text),
+    };
+    let origin = optional_value_of(object, "origin")?
+        .map(|value| {
+            let origin = self::object(value)?;
+            Ok::<_, String>(ModelChangedEntry {
+                provider: required_string(origin, "provider")?,
+                model: required_string(origin, "model")?,
+                revision: optional_string_of(origin, "revision")?,
+            })
+        })
+        .transpose()?;
+    Ok(AssistantMessageEntry {
+        content,
+        tool_calls: required_array(object, "tool_calls")?
+            .iter()
+            .map(decode_assistant_tool_call)
+            .collect::<Result<Vec<_>, _>>()?,
+        stop_reason: optional_string_of(object, "stop_reason")?,
+        error_message: optional_string_of(object, "error_message")?,
+        opaque_context: optional_value_of(object, "opaque_context")?
+            .map(|value| {
+                value
+                    .as_array()
+                    .ok_or_else(|| "field \"opaque_context\" must be an array or null".to_owned())?
+                    .iter()
+                    .map(decode_opaque_provider_context)
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .transpose()?
+            .unwrap_or_default(),
+        origin,
+        metadata: required_metadata(object, "metadata")?,
+    })
+}
+
+fn decode_assistant_block(value: &JsonValue) -> Result<AssistantContentEntry, String> {
+    let block = object(value)?;
+    match required_string(block, "type")?.as_str() {
+        "text" => Ok(AssistantContentEntry::Text(required_string(block, "text")?)),
+        "thinking" => Ok(AssistantContentEntry::Thinking {
+            text: required_string(block, "text")?,
+            signature: optional_value_of(block, "signature")?
+                .map(decode_opaque_provider_context)
+                .transpose()?,
+        }),
+        "redacted_thinking" => Ok(AssistantContentEntry::RedactedThinking(
+            decode_opaque_provider_context(required_value(block, "data")?)?,
+        )),
+        other => Err(format!("unknown assistant content block type {other:?}")),
+    }
+}
 
 fn encode_opaque_provider_context(value: &OpaqueProviderContextEntry) -> JsonValue {
     JsonValue::object([

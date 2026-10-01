@@ -114,8 +114,12 @@ pub struct Agent {
 /// swaps all three fields together while the agent is idle; an active run retains
 /// the immutable snapshot it captured when ownership was reserved.
 pub struct AgentConfiguration {
-    /// System instructions sent with each model request.
-    pub system_prompt: String,
+    /// Sectioned system instructions declared to the model.
+    ///
+    /// The prompt is not attached to each request: the run declares it in the
+    /// transcript as a configuration message whenever it differs from the
+    /// configuration already in force.
+    pub system_prompt: crate::state::SystemPrompt,
     /// Ordered executable capabilities exposed to the model and tool scheduler.
     pub tools: ToolRegistry,
     /// Host policy hooks used at context and tool lifecycle boundaries.
@@ -133,7 +137,7 @@ pub struct AgentConfiguration {
 impl AgentConfiguration {
     /// Construct a prompt, tool registry, and hook set for future runs.
     pub fn new(
-        system_prompt: impl Into<String>,
+        system_prompt: impl Into<crate::state::SystemPrompt>,
         tools: ToolRegistry,
         hooks: Arc<dyn HookSet>,
     ) -> Self {
@@ -148,7 +152,7 @@ impl AgentConfiguration {
 
     /// Construct configuration with an explicit effect gate and provenance.
     pub fn with_effect_gate(
-        system_prompt: impl Into<String>,
+        system_prompt: impl Into<crate::state::SystemPrompt>,
         tools: ToolRegistry,
         hooks: Arc<dyn HookSet>,
         effect_gate: Arc<dyn EffectGate>,
@@ -398,7 +402,7 @@ impl Agent {
             .configuration
             .write()
             .expect("agent configuration lock poisoned");
-        state.system_prompt = configuration.system_prompt.clone();
+        state.system_prompt = configuration.system_prompt.render();
         *current = Arc::new(configuration);
         Ok(())
     }
@@ -661,7 +665,11 @@ impl Agent {
                     ));
                 }
                 Some(AgentMessage::Assistant { .. }) => true,
-                Some(AgentMessage::User { .. } | AgentMessage::ToolResult { .. }) => false,
+                Some(
+                    AgentMessage::User { .. }
+                    | AgentMessage::ToolResult { .. }
+                    | AgentMessage::System { .. },
+                ) => false,
             }
         };
         if !assistant_tail {

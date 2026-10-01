@@ -556,6 +556,15 @@ pub trait AgentTool: Send + Sync {
     fn cancellation_settlement_mode(&self) -> CancellationSettlementMode {
         CancellationSettlementMode::DropFuture
     }
+    /// How this already-authorized capability is exposed to the model.
+    ///
+    /// Exposure never grants authority: every exposure class names a tool in
+    /// the run's executable registry. It only selects whether the model sees
+    /// the declaration from the first request, after explicit discovery, or
+    /// only through a composition tool such as codemode.
+    fn exposure(&self) -> ToolExposure {
+        ToolExposure::Direct
+    }
     /// Execute the call on the caller-owned executor.
     fn execute<'a>(
         &'a self,
@@ -563,6 +572,70 @@ pub trait AgentTool: Send + Sync {
         context: ToolContext,
         updates: ToolUpdateSink,
     ) -> ToolFuture<'a>;
+}
+
+/// How an authorized tool is exposed to the model.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum ToolExposure {
+    /// Declared to the model from the first request.
+    #[default]
+    Direct,
+    /// Discoverable on demand. The declaration joins the transcript only after
+    /// an explicit discovery result loads it; composition tools may call it
+    /// at any time.
+    Deferred,
+    /// Never declared to the model; callable only through a composition tool.
+    Composition,
+}
+
+impl ToolExposure {
+    /// Stable lowercase label.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Direct => "direct",
+            Self::Deferred => "deferred",
+            Self::Composition => "composition",
+        }
+    }
+}
+
+/// The model-visible part of a tool definition.
+///
+/// This is exactly what a provider declares: no scheduling policy, exposure,
+/// or execution handle. Equal declarations describe the same interface to the
+/// model.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ToolDeclaration {
+    /// Stable tool name.
+    pub name: String,
+    /// Description supplied to the model.
+    pub description: String,
+    /// Raw JSON Schema-compatible parameter value.
+    pub schema: JsonValue,
+}
+
+// `JsonValue` numbers are finite by construction, so declaration equality is
+// reflexive and transcript messages can keep their `Eq` contract.
+impl Eq for ToolDeclaration {}
+
+impl ToolDeclaration {
+    /// Construct a declaration.
+    pub fn new(name: impl Into<String>, description: impl Into<String>, schema: JsonValue) -> Self {
+        Self {
+            name: name.into(),
+            description: description.into(),
+            schema,
+        }
+    }
+
+    /// Build the declaration of one capability.
+    pub fn from_tool(tool: &dyn AgentTool) -> Self {
+        Self {
+            name: tool.name().to_owned(),
+            description: tool.description().to_owned(),
+            schema: tool.schema().clone(),
+        }
+    }
 }
 
 /// Prompt-facing definition and scheduler safety contract for a tool.
@@ -587,6 +660,8 @@ pub struct ToolDefinition {
     pub requires_exclusive_batch: bool,
     /// How a started capability settles after enclosing-run cancellation.
     pub cancellation_settlement_mode: CancellationSettlementMode,
+    /// How the capability is exposed to the model.
+    pub exposure: ToolExposure,
 }
 
 impl ToolDefinition {
@@ -599,12 +674,22 @@ impl ToolDefinition {
             execution_mode: tool.execution_mode(),
             requires_exclusive_batch: tool.requires_exclusive_batch(),
             cancellation_settlement_mode: tool.cancellation_settlement_mode(),
+            exposure: tool.exposure(),
         }
     }
 
     /// Borrow the parameter schema using upstream Pi's terminology.
     pub fn parameters(&self) -> &JsonValue {
         &self.schema
+    }
+
+    /// The model-visible declaration.
+    pub fn declaration(&self) -> ToolDeclaration {
+        ToolDeclaration {
+            name: self.name.clone(),
+            description: self.description.clone(),
+            schema: self.schema.clone(),
+        }
     }
 }
 
@@ -661,8 +746,23 @@ impl ToolRegistry {
             .collect()
     }
 
+    /// Return declarations of tools with one exposure, in registry order.
+    pub fn declarations(&self, exposure: ToolExposure) -> Vec<ToolDeclaration> {
+        self.order
+            .iter()
+            .filter_map(|name| self.tools.get(name))
+            .filter(|tool| tool.exposure() == exposure)
+            .map(|tool| ToolDeclaration::from_tool(tool.as_ref()))
+            .collect()
+    }
+
     /// Whether no capabilities are registered.
     pub fn is_empty(&self) -> bool {
         self.tools.is_empty()
+    }
+
+    /// Number of registered capabilities.
+    pub fn len(&self) -> usize {
+        self.tools.len()
     }
 }

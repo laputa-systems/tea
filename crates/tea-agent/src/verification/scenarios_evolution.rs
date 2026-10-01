@@ -428,10 +428,14 @@ mod tests {
             self.marker_in_prompt
                 .lock()
                 .expect("prompt observation slot")
-                .push(request.system_prompt.contains(MARKER));
+                .push(request.system_prompt().contains(MARKER));
             let status = || JsonValue::object([("operation", JsonValue::String("status".into()))]);
             let current = || {
-                latest_status_revision(&request.context)
+                latest_status_revision(
+                    &request
+                        .transcript
+                        .layout_context(tea_core::transcript::ConfigurationProjection::Collapsed),
+                )
                     .expect("the preceding status result names the active revision")
             };
             let stream = match index {

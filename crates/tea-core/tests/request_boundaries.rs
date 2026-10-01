@@ -120,15 +120,6 @@ impl HookSet for RequestBoundaryHooks {
         Ok(context)
     }
 
-    fn convert_to_llm(&self, context: ContextEnvelope) -> Result<String, HookError> {
-        let host_messages = context
-            .host_messages
-            .iter()
-            .map(SerializedJson::as_str)
-            .collect::<Vec<_>>()
-            .join("|");
-        Ok(format!("converted:{host_messages}"))
-    }
 
     fn prepare_next_turn(
         &self,
@@ -197,7 +188,10 @@ fn public_request_boundaries_reach_sequential_provider_requests() {
 
         let requests = provider.requests();
         assert_eq!(requests.len(), 2);
-        assert_eq!(requests[0].context, "converted:host-only|transformed");
+        assert_eq!(
+            requests[0].transcript.host_notes,
+            vec!["host-only".to_owned(), "transformed".to_owned()]
+        );
         assert_eq!(
             requests[0].model,
             Some(ModelDescriptor {
@@ -208,7 +202,14 @@ fn public_request_boundaries_reach_sequential_provider_requests() {
         );
         assert_eq!(requests[0].thinking_level, ThinkingLevel::Low);
 
-        assert_eq!(requests[1].context, "converted:replacement|transformed");
+        assert_eq!(
+            requests[1].transcript.host_notes,
+            vec!["replacement".to_owned(), "transformed".to_owned()]
+        );
+        // The replacement context omitted the canonical configuration; the
+        // core restores it rather than sending a request without its tools.
+        assert_eq!(requests[1].tools(), requests[0].tools());
+        assert_eq!(requests[1].tools()[0].name, "echo");
         assert_eq!(
             requests[1].model,
             Some(ModelDescriptor {

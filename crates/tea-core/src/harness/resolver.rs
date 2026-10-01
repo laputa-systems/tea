@@ -6,7 +6,7 @@
 //! a lane by itself.  The supervisor remains responsible for writing a
 //! `HarnessRevisionChanged` semantic entry at an epoch boundary.
 
-use crate::harness::lineage::{compose_system_prompt, runtime_hook_bundle_digest};
+use crate::harness::lineage::{compose_system_prompt_sections, runtime_hook_bundle_digest};
 use crate::harness::{
     CandidateHypothesis, HarnessActor, HarnessCandidateDraft, HarnessCandidateV1, HarnessError,
     HarnessLineageError, HarnessRepository, HarnessRevisionV1, HarnessSnapshotV1,
@@ -95,8 +95,8 @@ pub struct HarnessApplyRequest {
 pub struct ResolvedHarness {
     /// Exact immutable attribution for the epoch.
     pub identity: HarnessIdentity,
-    /// Immutable system instructions derived from the selected snapshot.
-    pub(crate) system_prompt: String,
+    /// Immutable sectioned system instructions derived from the selected snapshot.
+    pub(crate) system_prompt: crate::state::SystemPrompt,
     /// Source-pinned executable extension tools. Trusted base tools remain in
     /// `RuntimeServices` and are combined only while constructing an agent.
     pub(crate) extension_tools: ToolRegistry,
@@ -158,7 +158,7 @@ impl std::fmt::Debug for ResolvedHarness {
 }
 
 impl ResolvedHarness {
-    pub(crate) fn system_prompt(&self) -> &str {
+    pub(crate) fn system_prompt(&self) -> &crate::state::SystemPrompt {
         &self.system_prompt
     }
 
@@ -1276,7 +1276,7 @@ fn resolve_snapshot(input: ResolveSnapshotInput<'_>) -> Result<ResolvedHarness, 
             input.snapshot.id.clone(),
             input.snapshot.spec.model_harness_profile.clone(),
         ),
-        system_prompt: compose_system_prompt(&input.snapshot.spec),
+        system_prompt: compose_system_prompt_sections(&input.snapshot.spec),
         extension_tools: input.plugin_tools,
         host_commands: input.host_commands,
         idle_hooks: input.idle_hooks,

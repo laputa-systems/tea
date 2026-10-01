@@ -23,7 +23,6 @@ use tea_core::state::{AgentMessage, MessageId, SerializedJson, ToolCallId};
 use tea_core::state::{ModelDescriptor, ThinkingLevel, Usage};
 use tea_core::tool::AgentToolResult;
 use tea_core::tool::ToolUpdate;
-use tea_core::tool::{ToolDefinition, ToolExecutionMode};
 use tea_session::{
     ArtifactStore, CustomEntry, Digest, DurabilityMode, EntryId, HarnessCatalogFact, JsonValue,
     JsonlSession, LaneId, Metadata, PayloadRef, ProvisionedEntry, SessionEntry, SessionFact,
@@ -1230,7 +1229,7 @@ fn preview_projection_keeps_streaming_text_as_one_run_scoped_line() {
     assert_eq!(app.state().transcript().len(), 1);
     assert!(matches!(
         &app.state().transcript()[0],
-        TranscriptEntry::Assistant { text, streaming: true } if text == "hello"
+        TranscriptEntry::Assistant { text, streaming: true, .. } if text == "hello"
     ));
 }
 
@@ -1392,11 +1391,12 @@ fn event_projection_makes_provider_failure_and_abort_explicit() {
         kind: tea_core::event::AgentEventKind::MessageEnd {
             message: AgentMessage::Assistant {
                 id: MessageId(2),
-                content: String::new(),
+                content: tea_core::state::text_content(String::new()),
                 tool_calls: Vec::new(),
                 stop_reason: Some(tea_core::state::StopReason::Error),
                 error_message: Some("provider rejected the request".into()),
                 opaque_context: Vec::new(),
+                origin: None,
             },
         },
     });
@@ -1556,6 +1556,7 @@ fn terminal_preview_fence_rejects_a_late_update_after_message_end() {
         app.state().transcript(),
         &[TranscriptEntry::Assistant {
             text: "partial".into(),
+            thinking: String::new(),
             streaming: true,
         }]
     );
@@ -1568,11 +1569,12 @@ fn terminal_preview_fence_rejects_a_late_update_after_message_end() {
             kind: tea_core::event::AgentEventKind::MessageEnd {
                 message: AgentMessage::Assistant {
                     id: message_id,
-                    content: "settled".into(),
+                    content: tea_core::state::text_content("settled"),
                     tool_calls: Vec::new(),
                     stop_reason: None,
                     error_message: None,
                     opaque_context: Vec::new(),
+                    origin: None,
                 },
             },
         },
@@ -1600,6 +1602,7 @@ fn terminal_preview_fence_rejects_a_late_update_after_message_end() {
         app.state().transcript(),
         &[TranscriptEntry::Assistant {
             text: "settled".into(),
+            thinking: String::new(),
             streaming: false,
         }],
         "a coalesced preview must not revive a semantic-final row after its run ends"
@@ -1620,19 +1623,21 @@ fn durable_resnapshot_keeps_only_the_entry_id_identical_scrollback_frontier() {
     };
     let previous = AgentMessage::Assistant {
         id: MessageId(32),
-        content: "old answer".into(),
+        content: tea_core::state::text_content("old answer"),
         tool_calls: Vec::new(),
         stop_reason: None,
         error_message: None,
         opaque_context: Vec::new(),
+        origin: None,
     };
     let replacement = AgentMessage::Assistant {
         id: MessageId(33),
-        content: "replacement answer".into(),
+        content: tea_core::state::text_content("replacement answer"),
         tool_calls: Vec::new(),
         stop_reason: None,
         error_message: None,
         opaque_context: Vec::new(),
+        origin: None,
     };
     app.state.restore_durable_messages(&[
         HostTranscriptMessage {
@@ -2081,11 +2086,12 @@ fn local_compactor_summarizes_and_preserves_the_core_retained_suffix() {
         };
         let retained = AgentMessage::Assistant {
             id: MessageId(2),
-            content: "recent work".into(),
+            content: tea_core::state::text_content("recent work"),
             tool_calls: Vec::new(),
             stop_reason: Some(tea_core::state::StopReason::Stop),
             error_message: None,
             opaque_context: Vec::new(),
+            origin: None,
         };
         let request = AutomaticCompactionRequest {
             reason: AutomaticCompactionReason::Threshold,
@@ -2140,9 +2146,26 @@ fn cache_friendly_compaction_appends_one_instruction_to_an_exact_source_prefix()
                 requests: Arc::clone(&requests),
             }),
         );
-        let source = r#"[{"content":"old work","role":"user"}]"#;
-        let active =
-            r#"[{"content":"old work","role":"user"},{"content":"retained","role":"assistant"}]"#;
+        let read = tea_core::tool::ToolDeclaration::new(
+            "read",
+            "read a workspace file",
+            tea_protocol::JsonValue::object([("type", tea_protocol::JsonValue::from("object"))]),
+        );
+        let source = tea_core::transcript::Transcript::standalone(
+            "active system",
+            vec![read],
+            [tea_core::transcript::user_message("old work")],
+        );
+        let mut active = source.clone();
+        active.messages.push(AgentMessage::Assistant {
+            id: MessageId(3),
+            content: tea_core::state::text_content("retained"),
+            tool_calls: Vec::new(),
+            stop_reason: Some(tea_core::state::StopReason::Stop),
+            error_message: None,
+            opaque_context: Vec::new(),
+            origin: None,
+        });
         let result = compactor
             .compact_automatic(
                 CompactionContext {
@@ -2157,21 +2180,10 @@ fn cache_friendly_compaction_appends_one_instruction_to_an_exact_source_prefix()
                     source_history_revision: 0,
                     host_messages: Vec::new(),
                     provider_context: Some(ProviderContext {
-                        system_prompt: "active system".into(),
-                        context: source.into(),
-                        active_context: Some(active.into()),
-                        tools: vec![ToolDefinition {
-                            name: "read".into(),
-                            description: "read a workspace file".into(),
-                            schema: tea_protocol::JsonValue::object([(
-                                "type",
-                                tea_protocol::JsonValue::from("object"),
-                            )]),
-                            execution_mode: ToolExecutionMode::Parallel,
-                            requires_exclusive_batch: false,
-                            cancellation_settlement_mode:
-                                tea_core::tool::CancellationSettlementMode::DropFuture,
-                        }],
+                        source,
+                        active: Some(active),
+                        model: None,
+                        thinking_level: tea_core::state::ThinkingLevel::Off,
                         session_id: Some("fixture-session".into()),
                     }),
                 },
@@ -2199,14 +2211,15 @@ fn cache_friendly_compaction_appends_one_instruction_to_an_exact_source_prefix()
         ));
         let requests = requests.lock().expect("summary request mutex poisoned");
         assert_eq!(requests.len(), 1);
-        assert_eq!(requests[0].system_prompt, "active system");
-        assert_eq!(requests[0].tools.len(), 1);
-        assert_eq!(requests[0].tools[0].name, "read");
-        let converted =
-            tea_protocol::JsonValue::parse(&requests[0].context).expect("summary context is JSON");
-        let tea_protocol::JsonValue::Array(messages) = converted else {
-            panic!("summary context is not a message array")
-        };
+        assert_eq!(requests[0].system_prompt(), "active system");
+        assert_eq!(requests[0].tools().len(), 1);
+        assert_eq!(requests[0].tools()[0].name, "read");
+        assert_eq!(
+            requests[0].purpose,
+            tea_core::scheduler::RequestPurpose::Compaction
+        );
+        let messages = tea_providers::openai::chat_conversation(&requests[0])
+            .expect("summary request projects");
         assert_eq!(messages.len(), 2);
         assert!(messages[1]
             .get("content")
@@ -2245,12 +2258,21 @@ fn cache_friendly_compaction_falls_back_when_a_transform_breaks_the_prefix() {
                     source_history_revision: 0,
                     host_messages: Vec::new(),
                     provider_context: Some(ProviderContext {
-                        system_prompt: "active system".into(),
-                        context: r#"[{"content":"old work","role":"user"}]"#.into(),
-                        active_context: Some(
-                            r#"[{"content":"injected metadata","role":"user"},{"content":"old work","role":"user"}]"#.into(),
+                        source: tea_core::transcript::Transcript::standalone(
+                            "active system",
+                            Vec::new(),
+                            [tea_core::transcript::user_message("old work")],
                         ),
-                        tools: Vec::new(),
+                        active: Some(tea_core::transcript::Transcript::standalone(
+                            "active system",
+                            Vec::new(),
+                            [
+                                tea_core::transcript::user_message("injected metadata"),
+                                tea_core::transcript::user_message("old work"),
+                            ],
+                        )),
+                        model: None,
+                        thinking_level: tea_core::state::ThinkingLevel::Off,
                         session_id: None,
                     }),
                 },
@@ -2279,9 +2301,9 @@ fn cache_friendly_compaction_falls_back_when_a_transform_breaks_the_prefix() {
         let requests = requests.lock().expect("summary request mutex poisoned");
         assert_eq!(requests.len(), 1);
         assert!(requests[0]
-            .system_prompt
+            .system_prompt()
             .contains("You compact coding-agent conversation history"));
-        assert!(!requests[0].system_prompt.contains("active system"));
+        assert!(!requests[0].system_prompt().contains("active system"));
     });
 }
 
@@ -2520,11 +2542,12 @@ fn restored_session_user_messages_rebuild_prompt_history() {
         },
         AgentMessage::Assistant {
             id: MessageId(2),
-            content: "durable response".into(),
+            content: tea_core::state::text_content("durable response"),
             tool_calls: Vec::new(),
             stop_reason: None,
             error_message: None,
             opaque_context: Vec::new(),
+            origin: None,
         },
         AgentMessage::User {
             id: MessageId(3),
@@ -2868,7 +2891,7 @@ fn a_published_activity_survives_the_rest_of_its_root_operation() {
         4,
         tea_core::event::AgentEventKind::MessageUpdate {
             message_id: MessageId(2),
-            text_delta: "thinking".into(),
+            delta: tea_core::event::MessageDelta::Text("thinking".into()),
         },
     ));
     state.apply_event(&tool_update(5, "bash", "compiling", None));

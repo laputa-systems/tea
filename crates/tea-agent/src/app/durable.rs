@@ -361,10 +361,7 @@ pub(crate) fn create_live_verification_harness(
     provider: Arc<dyn ModelProvider>,
     compactor_provider: Option<(ModelDescriptor, Arc<dyn ModelProvider>)>,
 ) -> Result<Arc<HostHarness>, AppError> {
-    let configuration = super::host::host_configuration_for_provider(
-        &workspace.to_string_lossy(),
-        Some(&model.provider),
-    )?;
+    let configuration = super::host::host_configuration(&workspace.to_string_lossy())?;
     let compactor = compactor_provider.map(|(model, provider)| {
         Arc::new(ProviderCompactor::new(model, provider).with_thinking_level(ThinkingLevel::Low))
     });
@@ -404,10 +401,7 @@ pub(crate) fn create_live_verification_child_harness(
             "live child verification requires matching explicit root and child descriptors".into(),
         ));
     }
-    let configuration = super::host::host_configuration_for_provider(
-        &workspace.to_string_lossy(),
-        Some(&root_model.provider),
-    )?;
+    let configuration = super::host::host_configuration(&workspace.to_string_lossy())?;
     create_live_verification_host_harness(
         HostHarnessConfig {
             tea_home,
@@ -439,10 +433,7 @@ pub(crate) fn create_live_verification_authoring_harness(
     model: ModelDescriptor,
     provider: Arc<dyn ModelProvider>,
 ) -> Result<Arc<HostHarness>, AppError> {
-    let configuration = super::host::host_configuration_for_provider(
-        &workspace.to_string_lossy(),
-        Some(&model.provider),
-    )?;
+    let configuration = super::host::host_configuration(&workspace.to_string_lossy())?;
     create_live_verification_host_harness(
         HostHarnessConfig {
             tea_home,
@@ -472,10 +463,7 @@ pub(crate) fn reopen_live_verification_harness(
     provider: Arc<dyn ModelProvider>,
     compactor_provider: Option<(ModelDescriptor, Arc<dyn ModelProvider>)>,
 ) -> Result<Arc<HostHarness>, AppError> {
-    let configuration = super::host::host_configuration_for_provider(
-        &workspace.to_string_lossy(),
-        Some(&model.provider),
-    )?;
+    let configuration = super::host::host_configuration(&workspace.to_string_lossy())?;
     let compactor = compactor_provider.map(|(model, provider)| {
         Arc::new(ProviderCompactor::new(model, provider).with_thinking_level(ThinkingLevel::Low))
     });
@@ -504,10 +492,7 @@ pub(crate) fn reopen_live_verification_authoring_harness(
     model: ModelDescriptor,
     provider: Arc<dyn ModelProvider>,
 ) -> Result<Arc<HostHarness>, AppError> {
-    let configuration = super::host::host_configuration_for_provider(
-        &workspace.to_string_lossy(),
-        Some(&model.provider),
-    )?;
+    let configuration = super::host::host_configuration(&workspace.to_string_lossy())?;
     let harness = reopen_live_verification_host_harness(HostHarnessReopen {
         tea_home,
         workspace,
@@ -536,10 +521,7 @@ pub(crate) fn create_live_verification_compaction_harness(
     compactor_provider: (ModelDescriptor, Arc<dyn ModelProvider>),
     automatic_compaction: AutomaticCompactionPolicy,
 ) -> Result<Arc<HostHarness>, AppError> {
-    let configuration = super::host::host_configuration_for_provider(
-        &workspace.to_string_lossy(),
-        Some(&root_model.provider),
-    )?;
+    let configuration = super::host::host_configuration(&workspace.to_string_lossy())?;
     let compactor = Arc::new(
         ProviderCompactor::new(compactor_provider.0, compactor_provider.1)
             .with_thinking_level(ThinkingLevel::Low),
@@ -574,10 +556,7 @@ pub(crate) fn reopen_live_verification_compaction_harness(
     compactor_provider: (ModelDescriptor, Arc<dyn ModelProvider>),
     automatic_compaction: AutomaticCompactionPolicy,
 ) -> Result<Arc<HostHarness>, AppError> {
-    let configuration = super::host::host_configuration_for_provider(
-        &workspace.to_string_lossy(),
-        Some(&root_model.provider),
-    )?;
+    let configuration = super::host::host_configuration(&workspace.to_string_lossy())?;
     let compactor = Arc::new(
         ProviderCompactor::new(compactor_provider.0, compactor_provider.1)
             .with_thinking_level(ThinkingLevel::Low),
@@ -669,10 +648,7 @@ fn create_host_harness_with_operations_and_mode(
         automatic_compaction,
     );
     let child_configuration = if subagent_policy.is_some() {
-        Some(super::host::host_configuration_for_provider(
-            &workspace.to_string_lossy(),
-            Some(&model.provider),
-        )?)
+        Some(super::host::host_configuration(&workspace.to_string_lossy())?)
     } else {
         None
     };
@@ -1258,10 +1234,7 @@ fn reopen_host_harness_with_operations_and_web_credential_source(
             // Keep model-facing context anchored to the durable, original
             // workspace spelling. Only child tool execution gets a physical
             // lease worktree later in `TuiSubagentHost::prepared`.
-            let child_configuration = super::host::host_configuration_for_provider(
-                &header.workspace,
-                Some(&stored_model.provider),
-            )?;
+            let child_configuration = super::host::host_configuration(&header.workspace)?;
             let resource_limits = HarnessResourceLimits::default();
             let child_harnesses = derive_child_harnesses(
                 Arc::clone(&artifacts),
@@ -1796,11 +1769,18 @@ pub(super) fn project_host_messages(
                     .collect::<Result<Vec<_>, AppError>>()?;
                 Some(AgentMessage::Assistant {
                     id: message_id,
-                    content: assistant.content.clone(),
+                    // Presentation keeps visible thinking but never replay
+                    // material.
+                    content: tea_core::runtime::assistant_content_from_entry(
+                        &assistant.content,
+                        false,
+                    )
+                    .map_err(|error| AppError::Setup(error.to_string()))?,
                     tool_calls,
                     stop_reason: None,
                     error_message: assistant.error_message.clone(),
                     opaque_context,
+                    origin: None,
                 })
             }
             SessionEntry::ToolResult(result) => Some(AgentMessage::ToolResult {
@@ -1821,23 +1801,25 @@ pub(super) fn project_host_messages(
             }),
             SessionEntry::Compaction(compaction) => Some(AgentMessage::Assistant {
                 id: message_id,
-                content: compaction.summary.clone(),
+                content: tea_core::state::text_content(compaction.summary.clone()),
                 tool_calls: Vec::new(),
                 stop_reason: None,
                 error_message: None,
                 opaque_context: Vec::new(),
+                origin: None,
             }),
             SessionEntry::BranchSummary(summary) => Some(AgentMessage::Assistant {
                 id: message_id,
-                content: summary.summary.clone(),
+                content: tea_core::state::text_content(summary.summary.clone()),
                 tool_calls: Vec::new(),
                 stop_reason: None,
                 error_message: None,
                 opaque_context: Vec::new(),
+                origin: None,
             }),
             SessionEntry::ModelChanged(_)
             | SessionEntry::ThinkingChanged(_)
-            | SessionEntry::ToolActivationChanged(_)
+            | SessionEntry::ConfigurationChanged(_)
             | SessionEntry::HarnessRevisionChanged(_)
             | SessionEntry::PluginMemory(_)
             | SessionEntry::Custom(_) => None,
@@ -2122,7 +2104,7 @@ fn root_harness_surface(
     configuration: &AgentConfiguration,
     policy: Option<&SubagentPolicy>,
 ) -> Result<(String, Vec<ToolPresentationDescriptor>), AppError> {
-    let mut prompt = configuration.system_prompt.clone();
+    let mut prompt = configuration.system_prompt.render();
     let mut definitions = configuration.tools.definitions();
     tea_core::runtime::append_root_subagent_surface(&mut prompt, &mut definitions, policy)
         .map_err(|error| AppError::Setup(error.to_string()))?;
@@ -2280,7 +2262,7 @@ fn child_harness_seeds(
         .models
         .iter()
         .map(|model| {
-            let mut prompt = configuration.system_prompt.clone();
+            let mut prompt = configuration.system_prompt.render();
             tea_core::runtime::append_child_subagent_instruction_suffix(&mut prompt);
             let automatic_compaction = model
                 .context_window
@@ -2440,7 +2422,7 @@ fn derive_child_harnesses(
 
 fn host_profile_digest(configuration: &AgentConfiguration) -> Digest {
     let mut writer = CanonicalHashWriter::new("tea-agent-host-profile", 2, 1);
-    writer.string("system_prompt", &configuration.system_prompt);
+    writer.string("system_prompt", &configuration.system_prompt.render());
     let definitions = configuration.tools.definitions();
     writer.u64("tool_count", definitions.len() as u64);
     for tool in definitions {
@@ -3293,7 +3275,12 @@ mod tests {
             request: ModelRequest,
             _cancellation: CancellationToken,
         ) -> ModelFuture<'a> {
-            let events = if request.context == r#"[{"content":"hello","role":"user"}]"# {
+            let conversation = tea_providers::openai::chat_conversation(&request)
+                .ok()
+                .map(tea_protocol::JsonValue::Array)
+                .and_then(|value| value.to_json_string().ok());
+            let events = if conversation.as_deref() == Some(r#"[{"content":"hello","role":"user"}]"#)
+            {
                 vec![
                     ModelStreamEvent::TextDelta("ok".into()),
                     ModelStreamEvent::End(StopReason::Stop),
@@ -4086,7 +4073,11 @@ data: [DONE]
             3,
             "root makes spawn, wait, and post-wait turns"
         );
-        let post_wait = &root_requests[2].context;
+        let post_wait = &root_requests[2]
+            .transcript
+            .canonical_json()
+            .to_json_string()
+            .expect("canonical transcript encodes");
         assert!(
             post_wait.contains("child finished isolated edit"),
             "the root's next provider request receives the durable child report"
@@ -4381,8 +4372,8 @@ data: [DONE]
             .lock()
             .expect("capturing provider request lock");
         let request = requests.first().expect("provider receives one request");
-        let names = request
-            .tools
+        let request_tools = request.tools();
+        let names = request_tools
             .iter()
             .map(|tool| tool.name.as_str())
             .collect::<Vec<_>>();
@@ -4403,7 +4394,7 @@ data: [DONE]
                 "tea_history_search",
             ]
         );
-        assert!(request.tools.iter().all(|tool| {
+        assert!(request_tools.iter().all(|tool| {
             !tool.description.is_empty()
                 && if tool.name == "web" {
                     tool.schema
@@ -4417,44 +4408,11 @@ data: [DONE]
                         == Some("object")
                 }
         }));
-        assert_eq!(
-            request
-                .tools
-                .iter()
-                .take(4)
-                .map(|tool| {
-                    (
-                        tool.execution_mode,
-                        tool.requires_exclusive_batch,
-                        tool.cancellation_settlement_mode,
-                    )
-                })
-                .collect::<Vec<_>>(),
-            [
-                (
-                    ToolExecutionMode::Parallel,
-                    false,
-                    tea_core::tool::CancellationSettlementMode::DropFuture,
-                ),
-                (
-                    ToolExecutionMode::Parallel,
-                    false,
-                    tea_core::tool::CancellationSettlementMode::DropFuture,
-                ),
-                (
-                    ToolExecutionMode::Parallel,
-                    true,
-                    tea_core::tool::CancellationSettlementMode::AwaitFuture,
-                ),
-                (
-                    ToolExecutionMode::Parallel,
-                    false,
-                    tea_core::tool::CancellationSettlementMode::DropFuture,
-                ),
-            ],
-        );
+        // The request carries only model-visible declarations. Host-only
+        // scheduling policy of the builtins is covered by the tea-luau
+        // builtin tests and the tool-definition digests.
         assert!(request
-            .system_prompt
+            .system_prompt()
             .contains("separate `write`, `grep`, or `ls` tools"));
         let _ = fs::remove_dir_all(home);
     }
@@ -4513,10 +4471,11 @@ data: [DONE]
             .requests
             .lock()
             .expect("capturing provider request lock");
-        let names = requests
+        let request_tools = requests
             .first()
             .expect("provider receives one request")
-            .tools
+            .tools();
+        let names = request_tools
             .iter()
             .map(|tool| tool.name.as_str())
             .collect::<Vec<_>>();
@@ -4582,7 +4541,7 @@ data: [DONE]
             artifacts,
             Arc::new(LuauExtensionEngine),
             host_profile_digest(&configuration),
-            configuration.system_prompt.clone(),
+            configuration.system_prompt.render(),
             model_profile(&model).expect("fixture model profile is valid"),
             SelfExtensionMode::Off,
             resource_limits.clone(),
@@ -4646,8 +4605,8 @@ data: [DONE]
                 .expect("capturing provider request lock")
                 .last()
                 .expect("hosted epoch sends a provider request")
-                .tools
-                .iter()
+                .tools()
+                .into_iter()
                 .find(|tool| tool.name == "read")
                 .expect("read remains in the provider surface")
                 .description
@@ -5212,7 +5171,7 @@ data: [DONE]
             Some(HostTranscriptMessage {
                 message: AgentMessage::Assistant { content, .. },
                 ..
-            }) if content == "durable"
+            }) if tea_core::state::assistant_text(content) == "durable"
         ));
 
         drop(reopened);

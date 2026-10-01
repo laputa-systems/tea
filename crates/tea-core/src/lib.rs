@@ -26,6 +26,7 @@ mod schema_validation;
 pub mod state;
 pub mod tool;
 pub mod trace;
+pub mod transcript;
 
 #[cfg(test)]
 mod tests;

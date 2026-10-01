@@ -107,7 +107,10 @@ pub fn retain_tool_result_with_projection(
         return Ok(RetainedToolResult {
             full_result: PayloadRef::Inline(full_value),
             artifact_policy_id: policy.policy_id.clone(),
-            model_projection: inline_projection(&model_result.content, model_details),
+            model_projection: with_added_tool_names(
+                inline_projection(&model_result.content, model_details),
+                model_result,
+            ),
             projection_strategy_id: PROJECTION_STRATEGY_ID.into(),
         });
     }
@@ -120,7 +123,10 @@ pub fn retain_tool_result_with_projection(
             media_type: descriptor.media_type,
         },
         artifact_policy_id: policy.policy_id.clone(),
-        model_projection: artifact_projection(&model_result.content, descriptor.artifact_id),
+        model_projection: with_added_tool_names(
+            artifact_projection(&model_result.content, descriptor.artifact_id),
+            model_result,
+        ),
         projection_strategy_id: PROJECTION_STRATEGY_ID.into(),
     })
 }
@@ -136,7 +142,10 @@ pub(crate) fn retain_direct_recovery_result_with_projection(
     Ok(RetainedToolResult {
         full_result: PayloadRef::Inline(full_value(raw_result, result_details(raw_result)?)),
         artifact_policy_id: policy.policy_id.clone(),
-        model_projection: inline_projection(&model_result.content, result_details(model_result)?),
+        model_projection: with_added_tool_names(
+            inline_projection(&model_result.content, result_details(model_result)?),
+            model_result,
+        ),
         projection_strategy_id: DIRECT_READER_PROJECTION_STRATEGY_ID.into(),
     })
 }
@@ -171,6 +180,28 @@ fn full_value(result: &AgentToolResult, details: JsonValue) -> JsonValue {
         ("is_error", JsonValue::Bool(result.is_error)),
         ("terminate", JsonValue::Bool(result.terminate)),
     ])
+}
+
+/// Record discovery requests with the model projection so reopen reproduces
+/// the tool exposure they request. The field is omitted when empty, keeping
+/// ordinary projections byte-identical to earlier sessions.
+fn with_added_tool_names(mut projection: JsonValue, result: &AgentToolResult) -> JsonValue {
+    if !result.added_tool_names.is_empty()
+        && let Some(object) = projection.as_object_mut()
+    {
+        object.insert(
+            "added_tool_names".into(),
+            JsonValue::Array(
+                result
+                    .added_tool_names
+                    .iter()
+                    .cloned()
+                    .map(JsonValue::String)
+                    .collect(),
+            ),
+        );
+    }
+    projection
 }
 
 fn inline_projection(content: &str, details: JsonValue) -> JsonValue {

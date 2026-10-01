@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex, RwLock};
 /// Configuration builder for an [`Agent`].
 #[derive(Default)]
 pub struct AgentBuilder {
-    system_prompt: String,
+    system_prompt: crate::state::SystemPrompt,
     model: Option<ModelDescriptor>,
     thinking_level: ThinkingLevel,
     host_messages: Vec<crate::state::SerializedJson>,
@@ -46,7 +46,7 @@ impl std::fmt::Debug for AgentBuilder {
 
 impl AgentBuilder {
     /// Set system instructions.
-    pub fn system_prompt(mut self, prompt: impl Into<String>) -> Self {
+    pub fn system_prompt(mut self, prompt: impl Into<crate::state::SystemPrompt>) -> Self {
         self.system_prompt = prompt.into();
         self
     }
@@ -205,11 +205,11 @@ impl AgentBuilder {
     pub fn build(self) -> Agent {
         let next_observer_id = self.observers.len() as u64;
         let mut state = AgentState::default();
-        state.system_prompt = self.system_prompt;
+        state.system_prompt = self.system_prompt.render();
         state.model = self.model;
         state.thinking_level = self.thinking_level;
         state.host_messages = self.host_messages;
-        let system_prompt = state.system_prompt.clone();
+        let system_prompt = self.system_prompt;
         Agent {
             inner: Arc::new(AgentInner {
                 state: Mutex::new(state),

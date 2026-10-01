@@ -196,11 +196,7 @@ impl AgentState {
 }
 
 fn message_id(message: &AgentMessage) -> MessageId {
-    match message {
-        AgentMessage::User { id, .. }
-        | AgentMessage::Assistant { id, .. }
-        | AgentMessage::ToolResult { id, .. } => *id,
-    }
+    message.id()
 }
 
 /// Owned, read-only view of agent state.

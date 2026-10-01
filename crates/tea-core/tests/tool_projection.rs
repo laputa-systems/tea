@@ -177,7 +177,7 @@ fn canonical_tool_data_stays_raw_while_next_model_context_is_curated() {
 
         let snapshot = agent.snapshot();
         assert!(matches!(
-            &snapshot.messages[2],
+            &snapshot.messages[3],
             AgentMessage::ToolResult {
                 content,
                 details: Some(details),
@@ -187,13 +187,18 @@ fn canonical_tool_data_stays_raw_while_next_model_context_is_curated() {
                 && details.as_str() == r#"{"raw":"unbounded host detail"}"#
         ));
         let requests = provider.requests.lock().unwrap();
-        assert!(
-            requests[1]
-                .context
-                .contains("[tool error status: retryable]")
-        );
-        assert!(requests[1].context.contains("… [truncated] …"));
-        assert!(!requests[1].context.contains("unbounded host detail"));
+        let projected = requests[1]
+            .transcript
+            .messages
+            .iter()
+            .find_map(|message| match message {
+                AgentMessage::ToolResult { content, .. } => Some(content.clone()),
+                _ => None,
+            })
+            .expect("projected tool result");
+        assert!(projected.contains("[tool error status: retryable]"));
+        assert!(projected.contains("… [truncated] …"));
+        assert!(!projected.contains("unbounded host detail"));
         Ok::<(), CoreError>(())
     })
     .expect("projection does not mutate canonical state");

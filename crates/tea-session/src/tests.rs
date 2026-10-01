@@ -5145,7 +5145,7 @@ fn jsonl_reopen_retains_redacted_opaque_provider_context_with_its_assistant_turn
                 id: EntryId::new("opaque-provider-context-assistant")
                     .expect("valid assistant entry ID"),
                 body: SessionEntry::AssistantMessage(AssistantMessageEntry {
-                    content: "visible assistant answer".into(),
+                    content: AssistantContentEntry::text_content("visible assistant answer"),
                     tool_calls: Vec::new(),
                     stop_reason: Some("stop".into()),
                     error_message: None,
@@ -5155,6 +5155,7 @@ fn jsonl_reopen_retains_redacted_opaque_provider_context_with_its_assistant_turn
                         item_id: Some("rs_1".into()),
                         payload: "encrypted-provider-state".into(),
                     }],
+                    origin: None,
                     metadata: Metadata::new(),
                 }),
             },
@@ -5203,10 +5204,11 @@ fn jsonl_reopen_retains_a_large_bounded_provider_reasoning_record() {
                 id: EntryId::new("large-opaque-provider-context-assistant")
                     .expect("valid assistant entry ID"),
                 body: SessionEntry::AssistantMessage(AssistantMessageEntry {
-                    content: String::new(),
+                    content: Vec::new(),
                     tool_calls: Vec::new(),
                     stop_reason: Some("stop".into()),
                     error_message: None,
+                    origin: None,
                     opaque_context: vec![OpaqueProviderContextEntry {
                         provider: "openrouter".into(),
                         kind: "reasoning_details".into(),
@@ -6593,4 +6595,170 @@ fn assert_rejected_agent_fact(mut session: MemorySession, fact: AgentSpawnedFact
         session.append_fact(SessionFact::AgentSpawned(fact)),
         Err(SessionError::Corruption(_))
     ));
+}
+
+#[test]
+fn jsonl_thinking_blocks_origin_and_configuration_entries_round_trip_and_keep_legacy_bytes() {
+    let directory = temporary_session_directory("thinking-configuration");
+    let mut session = JsonlSession::create(
+        &directory,
+        SessionHeader::new(
+            SessionId::new("thinking-configuration").expect("valid session ID"),
+            "workspace-test",
+            Metadata::new(),
+        ),
+        DurabilityMode::Strict,
+    )
+    .expect("session creates");
+    let signature = OpaqueProviderContextEntry {
+        provider: "anthropic".into(),
+        kind: "thinking_signature".into(),
+        item_id: None,
+        payload: "private-signature".into(),
+    };
+    let configuration = SessionEntry::ConfigurationChanged(ConfigurationChangedEntry {
+        sections: vec![
+            PromptSectionChange {
+                id: "base".into(),
+                content: Some("You are tea.".into()),
+            },
+            PromptSectionChange {
+                id: "old".into(),
+                content: None,
+            },
+        ],
+        tools_added: vec![ToolDeclarationRecord {
+            name: "read".into(),
+            description: "Read a file".into(),
+            schema: JsonValue::object([("type", JsonValue::from("object"))]),
+        }],
+        tools_removed: vec!["find".into()],
+    });
+    let thinking = SessionEntry::AssistantMessage(AssistantMessageEntry {
+        content: vec![
+            AssistantContentEntry::Thinking {
+                text: "plan".into(),
+                signature: Some(signature.clone()),
+            },
+            AssistantContentEntry::RedactedThinking(signature.clone()),
+            AssistantContentEntry::Text("answer".into()),
+        ],
+        tool_calls: Vec::new(),
+        stop_reason: Some("stop".into()),
+        error_message: None,
+        opaque_context: Vec::new(),
+        origin: Some(ModelChangedEntry {
+            provider: "anthropic".into(),
+            model: "claude-sonnet-5-5".into(),
+            revision: None,
+        }),
+        metadata: Metadata::new(),
+    });
+    let text_only = SessionEntry::AssistantMessage(AssistantMessageEntry {
+        content: AssistantContentEntry::text_content("plain"),
+        tool_calls: Vec::new(),
+        stop_reason: Some("stop".into()),
+        error_message: None,
+        opaque_context: Vec::new(),
+        origin: None,
+        metadata: Metadata::new(),
+    });
+    for (id, body) in [
+        ("configuration", configuration.clone()),
+        ("thinking", thinking.clone()),
+        ("text-only", text_only.clone()),
+    ] {
+        session
+            .append_entry(
+                &LaneId::main(),
+                ProvisionedEntry {
+                    id: EntryId::new(id).expect("valid entry ID"),
+                    body,
+                },
+            )
+            .expect("entry commits");
+    }
+    drop(session);
+
+    let reopened = JsonlSession::open(&directory, DurabilityMode::Strict)
+        .expect("sealed entries reopen");
+    let snapshot = reopened.snapshot().expect("snapshot");
+    let bodies = snapshot
+        .entries()
+        .iter()
+        .map(|entry| entry.body.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(bodies, vec![configuration, thinking, text_only]);
+    let reduction = reduce_lane(snapshot, LaneId::main()).expect("lane reduces");
+    assert_eq!(
+        reduction.effective_configuration.declared_tool_names,
+        vec!["read".to_owned()]
+    );
+    drop(reopened);
+
+    let raw = std::fs::read_to_string(directory.join("session.jsonl")).expect("log reads");
+    let lines = raw.lines().collect::<Vec<_>>();
+    let thinking_line = lines
+        .iter()
+        .find(|line| line.contains("\"plan\""))
+        .expect("thinking entry line");
+    assert!(thinking_line.contains("\"content_blocks\""));
+    assert!(thinking_line.contains("\"origin\""));
+    let text_line = lines
+        .iter()
+        .find(|line| line.contains("\"plain\""))
+        .expect("text-only entry line");
+    // Text-only entries keep the exact field set written before thinking
+    // support, so existing sessions re-encode identically under their seals.
+    assert!(!text_line.contains("\"content_blocks\""));
+    assert!(!text_line.contains("\"origin\""));
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+#[test]
+fn jsonl_rejects_assistant_blocks_that_disagree_with_their_content_text() {
+    let directory = temporary_session_directory("thinking-mismatch");
+    let mut session = JsonlSession::create(
+        &directory,
+        SessionHeader::new(
+            SessionId::new("thinking-mismatch").expect("valid session ID"),
+            "workspace-test",
+            Metadata::new(),
+        ),
+        DurabilityMode::Strict,
+    )
+    .expect("session creates");
+    session
+        .append_entry(
+            &LaneId::main(),
+            ProvisionedEntry {
+                id: EntryId::new("assistant").expect("valid entry ID"),
+                body: SessionEntry::AssistantMessage(AssistantMessageEntry {
+                    content: vec![
+                        AssistantContentEntry::Thinking {
+                            text: "plan".into(),
+                            signature: None,
+                        },
+                        AssistantContentEntry::Text("answer".into()),
+                    ],
+                    tool_calls: Vec::new(),
+                    stop_reason: Some("stop".into()),
+                    error_message: None,
+                    opaque_context: Vec::new(),
+                    origin: None,
+                    metadata: Metadata::new(),
+                }),
+            },
+        )
+        .expect("entry commits");
+    drop(session);
+    let path = directory.join("session.jsonl");
+    let raw = std::fs::read_to_string(&path).expect("log reads");
+    std::fs::write(
+        &path,
+        raw.replace("\"content\":\"answer\"", "\"content\":\"forged\""),
+    )
+    .expect("log rewrites");
+    assert!(JsonlSession::open(&directory, DurabilityMode::Strict).is_err());
+    let _ = std::fs::remove_dir_all(&directory);
 }

@@ -20,21 +20,16 @@ pub(super) fn build_payload(
     config: &OpencodeZenConfig,
     request: &ModelRequest,
 ) -> Result<Vec<u8>, String> {
-    // Context is OpenAiContextHook output: JSON array of Chat messages.
-    let messages = JsonValue::parse(&request.context)
-        .map_err(|_| "OpenCode Zen received invalid converted context".to_owned())?;
-    let messages = messages
-        .as_array()
-        .ok_or_else(|| "OpenCode Zen converted context must be an array".to_owned())?
-        .to_owned();
+    let messages = crate::openai::chat_conversation(request)?;
 
     // Build Responses `input` array from Chat messages + system_prompt
     let mut input: Vec<JsonValue> = Vec::with_capacity(messages.len() + 1);
 
-    if !request.system_prompt.trim().is_empty() {
+    let system_prompt = request.system_prompt();
+    if !system_prompt.trim().is_empty() {
         input.push(json_value!({
             "role": "system",
-            "content": request.system_prompt.clone()
+            "content": system_prompt
         }));
     }
 
@@ -147,8 +142,8 @@ pub(super) fn build_payload(
     }
 
     let tools = request
-        .tools
-        .iter()
+        .tools()
+        .into_iter()
         .map(|tool| {
             let schema = tool.schema.clone();
             // Real opencode client forces strict:false for OpenAI-family to avoid structured-output validation

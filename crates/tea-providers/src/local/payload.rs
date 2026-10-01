@@ -6,42 +6,22 @@ use crate::scheduler::ModelRequest;
 use crate::state::ThinkingLevel;
 
 pub(super) fn local_payload(config: &LocalConfig, request: ModelRequest) -> Result<String, String> {
-    let context = JsonValue::parse(request.context.trim())
-        .map_err(|_| "local context was not valid JSON".to_owned())?;
-    let JsonValue::Array(mut messages) = context else {
-        return Err("local context was not a JSON message array".to_owned());
-    };
+    let mut messages = crate::openai::chat_conversation(&request)?;
     messages.insert(
         0,
         JsonValue::object([
             ("role", JsonValue::from("system")),
-            ("content", JsonValue::from(request.system_prompt)),
+            ("content", JsonValue::from(request.system_prompt())),
         ]),
     );
-    let tools = request
-        .tools
-        .iter()
-        .map(|tool| {
-            JsonValue::object([
-                ("type", JsonValue::from("function")),
-                (
-                    "function",
-                    JsonValue::object([
-                        ("name", JsonValue::from(tool.name.clone())),
-                        ("description", JsonValue::from(tool.description.clone())),
-                        ("parameters", tool.schema.clone()),
-                    ]),
-                ),
-            ])
-        })
-        .collect::<Vec<_>>();
+    let tools = crate::openai::chat_tools(&request);
     let body = json_value!({
         "model": config.model.clone(),
         "messages": JsonValue::Array(messages),
         "temperature": config.temperature,
         "top_p": config.top_p,
         "min_p": config.min_p,
-        "max_tokens": config.max_tokens,
+        "max_tokens": request.max_output_tokens.map_or(config.max_tokens, u64::from),
         // Local OpenAI-compatible servers expose incremental responses as SSE.  The
         // provider owns decoding those records, so the request must opt into that wire mode.
         "stream": true,

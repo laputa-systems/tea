@@ -273,6 +273,98 @@ mod tests {
     }
 }
 
+/// One ordered piece of assistant output.
+///
+/// Answer text and provider-exposed thinking are distinct: thinking is
+/// reasoning the provider chose to show, never part of the answer. Each
+/// thinking block may carry provider-private replay material (a signature or
+/// encrypted continuation) that only the matching adapter may interpret; it is
+/// never rendered or passed to tools.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AssistantContent {
+    /// Visible answer text.
+    Text {
+        /// Exact text.
+        text: String,
+    },
+    /// Provider-exposed reasoning summary or text.
+    Thinking {
+        /// Visible thinking text. It may be empty when the provider withheld
+        /// it but still issued replay material.
+        text: String,
+        /// Provider-private replay material for this block, when issued.
+        signature: Option<OpaqueProviderContextItem>,
+    },
+    /// Reasoning withheld by the provider and represented only by opaque
+    /// replay material.
+    RedactedThinking {
+        /// Provider-private encrypted block.
+        data: OpaqueProviderContextItem,
+    },
+}
+
+impl AssistantContent {
+    /// Construct a text block.
+    pub fn text(text: impl Into<String>) -> Self {
+        Self::Text { text: text.into() }
+    }
+
+    /// Construct a thinking block without replay material.
+    pub fn thinking(text: impl Into<String>) -> Self {
+        Self::Thinking {
+            text: text.into(),
+            signature: None,
+        }
+    }
+}
+
+/// Concatenate the answer text of assistant content, excluding thinking.
+pub fn assistant_text(content: &[AssistantContent]) -> String {
+    let mut text = String::new();
+    for block in content {
+        if let AssistantContent::Text { text: block } = block {
+            text.push_str(block);
+        }
+    }
+    text
+}
+
+/// Concatenate the visible thinking text of assistant content.
+pub fn assistant_thinking(content: &[AssistantContent]) -> String {
+    let mut text = String::new();
+    for block in content {
+        if let AssistantContent::Thinking { text: block, .. } = block {
+            if !text.is_empty() && !block.is_empty() {
+                text.push_str("\n\n");
+            }
+            text.push_str(block);
+        }
+    }
+    text
+}
+
+/// Approximate model-visible bytes of assistant content: answer and thinking
+/// text, excluding provider-private replay material.
+pub fn content_bytes(content: &[AssistantContent]) -> usize {
+    content
+        .iter()
+        .map(|block| match block {
+            AssistantContent::Text { text } | AssistantContent::Thinking { text, .. } => text.len(),
+            AssistantContent::RedactedThinking { .. } => 0,
+        })
+        .sum()
+}
+
+/// Build the canonical content of an assistant reply containing only text.
+pub fn text_content(text: impl Into<String>) -> Vec<AssistantContent> {
+    let text = text.into();
+    if text.is_empty() {
+        Vec::new()
+    } else {
+        vec![AssistantContent::Text { text }]
+    }
+}
+
 /// A message retained in the canonical conversation history.
 ///
 /// This is the Rust spelling of upstream Pi's `AgentMessage`. The core currently
@@ -286,7 +378,9 @@ pub enum AgentMessage {
     /// Provider response, including any textual partial/final content.
     Assistant {
         id: MessageId,
-        content: String,
+        /// Ordered answer text and provider-exposed thinking.
+        content: Vec<AssistantContent>,
+        /// Source-ordered tool calls, after all content blocks.
         tool_calls: Vec<AgentToolCall>,
         /// Terminal model stop reason, when this is the finalized assistant message.
         /// `None` is used for a partial streaming snapshot.
@@ -298,6 +392,11 @@ pub enum AgentMessage {
         /// It is durable and ordered with this assistant output, but never
         /// rendered as transcript text or exposed to tools.
         opaque_context: Vec<OpaqueProviderContextItem>,
+        /// Physical model that produced this response, when known.
+        ///
+        /// Replay of thinking signatures and other provider-private material
+        /// is valid only for the same physical model.
+        origin: Option<ModelDescriptor>,
     },
     /// Result injected after a tool invocation.
     ToolResult {
@@ -314,6 +413,34 @@ pub enum AgentMessage {
         /// Typed host classification for an error result, when supplied.
         failure: Option<crate::tool::ToolFailure>,
     },
+    /// Model-visible configuration at this point in conversation order.
+    ///
+    /// The first system message is the initial configuration; later ones
+    /// change it. See [`EffectiveConfiguration::replay`].
+    System {
+        id: MessageId,
+        update: ConfigurationUpdate,
+    },
+}
+
+impl AgentMessage {
+    /// Stable message identity.
+    pub fn id(&self) -> MessageId {
+        match self {
+            Self::User { id, .. }
+            | Self::Assistant { id, .. }
+            | Self::ToolResult { id, .. }
+            | Self::System { id, .. } => *id,
+        }
+    }
+
+    /// Answer text of an assistant message, or `None` for other messages.
+    pub fn assistant_text(&self) -> Option<String> {
+        match self {
+            Self::Assistant { content, .. } => Some(assistant_text(content)),
+            _ => None,
+        }
+    }
 }
 
 /// A tool call embedded in an assistant message.

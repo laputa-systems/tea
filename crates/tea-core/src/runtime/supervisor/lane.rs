@@ -173,8 +173,8 @@ mod tests {
         }
     }
 
-    fn request(context: &str) -> ModelRequest {
-        ModelRequest {
+    fn request(context: &str) -> crate::measurement::RequestLayout {
+        crate::measurement::RequestLayout {
             system_prompt: "stable child prompt".into(),
             context: context.into(),
             tools: Vec::new(),

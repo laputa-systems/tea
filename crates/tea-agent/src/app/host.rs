@@ -1,8 +1,8 @@
 use std::sync::Arc;
 use tea_core::agent::AgentConfiguration;
-use tea_core::hooks::HookSet;
+use tea_core::hooks::NoHooks;
 use tea_core::tool::ToolRegistry;
-use tea_providers::{openai::OpenAiContextHook, ModelDescriptor, ProviderRegistry};
+use tea_providers::{ModelDescriptor, ProviderRegistry};
 
 use super::error::AppError;
 
@@ -10,85 +10,24 @@ use super::error::AppError;
 ///
 /// The terminal intentionally never constructs an unmanaged [`tea_core::Agent`]. Its only
 /// execution authority is the session-owned durable harness, which captures this configuration
-/// in a committed revision before starting an epoch.
+/// in a committed revision before starting an epoch. Requests carry a typed transcript; each
+/// provider adapter owns its wire projection, so the host installs no provider-specific hooks.
 pub(super) fn host_configuration(
     logical_workspace_label: &str,
-) -> Result<AgentConfiguration, AppError> {
-    host_configuration_for_provider(logical_workspace_label, None)
-}
-
-/// Assemble a host configuration whose transcript encoder matches one exact
-/// selected provider. The provider remains an explicit host choice; the core
-/// only sees the provider-neutral hook port.
-pub(super) fn host_configuration_for_provider(
-    logical_workspace_label: &str,
-    provider: Option<&str>,
 ) -> Result<AgentConfiguration, AppError> {
     // The durable coding builtins are resolved as Luau extensions. Leaving the
     // trusted base registry empty makes a missing or invalid builtin fail
     // closed instead of restoring a compiled Rust tool implementation.
-    let hooks: Arc<dyn HookSet> = {
-        #[cfg(feature = "provider-codex")]
-        if provider == Some("codex") {
-            Arc::new(tea_providers::codex::CodexContextHook)
-        } else {
-            Arc::new(OpenAiContextHook)
-        }
-        #[cfg(not(feature = "provider-codex"))]
-        {
-            let _ = provider;
-            Arc::new(OpenAiContextHook)
-        }
-    };
     Ok(AgentConfiguration::new(
         format!("Current working directory: {logical_workspace_label}"),
         ToolRegistry::default(),
-        hooks,
+        Arc::new(NoHooks),
     ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[cfg(feature = "provider-codex")]
-    #[test]
-    fn codex_host_context_uses_responses_items() {
-        use tea_core::hooks::ContextEnvelope;
-        use tea_core::state::{AgentMessage, MessageId};
-        use tea_protocol::JsonValue;
-
-        let configuration = host_configuration_for_provider("/public/workspace", Some("codex"))
-            .expect("Codex host configuration assembles");
-        let encoded = configuration
-            .hooks
-            .convert_to_llm(ContextEnvelope {
-                version: 1,
-                messages: vec![AgentMessage::User {
-                    id: MessageId(1),
-                    content: "public input".into(),
-                }],
-                host_messages: Vec::new(),
-            })
-            .expect("Codex context converts");
-        let input = JsonValue::parse(&encoded).expect("Responses input is JSON");
-        let item = input
-            .as_array()
-            .and_then(|items| items.first())
-            .expect("one user item");
-        assert_eq!(
-            item.get("type").and_then(JsonValue::as_str),
-            Some("message")
-        );
-        let content = item
-            .get("content")
-            .and_then(JsonValue::as_array)
-            .expect("content array");
-        assert_eq!(
-            content[0].get("type").and_then(JsonValue::as_str),
-            Some("input_text")
-        );
-    }
 
     #[test]
     fn host_configuration_keeps_the_logical_workspace_outside_tool_authority() {
@@ -99,14 +38,11 @@ mod tests {
         std::fs::create_dir_all(&physical).expect("physical workspace creates");
         let configuration =
             host_configuration("/stable/logical/workspace").expect("host configuration assembles");
+        let prompt = configuration.system_prompt.render();
 
-        assert!(configuration
-            .system_prompt
-            .contains("Current working directory: /stable/logical/workspace"));
+        assert!(prompt.contains("Current working directory: /stable/logical/workspace"));
         assert!(
-            !configuration
-                .system_prompt
-                .contains(&*physical.to_string_lossy()),
+            !prompt.contains(&*physical.to_string_lossy()),
             "the prompt must not disclose the authority-bearing physical path"
         );
         let _ = std::fs::remove_dir_all(physical);
@@ -126,16 +62,13 @@ mod tests {
             .expect("first child configuration assembles");
         let second = host_configuration("/stable/logical/workspace")
             .expect("second child configuration assembles");
-        let first_request = tea_core::scheduler::ModelRequest {
-            system_prompt: first.system_prompt,
+        let layout = |prompt: String| tea_core::measurement::RequestLayout {
+            system_prompt: prompt,
             context: "stable child assignment".into(),
-            ..tea_core::scheduler::ModelRequest::default()
+            ..tea_core::measurement::RequestLayout::default()
         };
-        let second_request = tea_core::scheduler::ModelRequest {
-            system_prompt: second.system_prompt,
-            context: "stable child assignment".into(),
-            ..tea_core::scheduler::ModelRequest::default()
-        };
+        let first_request = layout(first.system_prompt.render());
+        let second_request = layout(second.system_prompt.render());
         let measurement = tea_core::measurement::measure_prompt_cacheability(
             Some(&first_request),
             &second_request,

@@ -691,7 +691,7 @@ fn has_exact_assistant_response(snapshot: &tea_session::SessionSnapshot, expecte
         .iter()
         .rev()
         .find_map(|entry| match &entry.body {
-            SessionEntry::AssistantMessage(message) => Some(message.content.trim() == expected),
+            SessionEntry::AssistantMessage(message) => Some(message.text().trim() == expected),
             _ => None,
         })
         .unwrap_or(false)

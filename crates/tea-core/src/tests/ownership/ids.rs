@@ -57,13 +57,12 @@ impl HookSet for MarkerHooks {
 
     fn transform_context(
         &self,
-        context: ContextEnvelope,
+        mut context: ContextEnvelope,
     ) -> Result<ContextEnvelope, crate::error::HookError> {
+        context
+            .host_messages
+            .push(crate::state::SerializedJson::new(self.marker));
         Ok(context)
-    }
-
-    fn convert_to_llm(&self, _context: ContextEnvelope) -> Result<String, crate::error::HookError> {
-        Ok(self.marker.into())
     }
 }
 
@@ -126,12 +125,12 @@ fn idle_configuration_replacement_is_atomic_and_preserves_agent_state() {
         agent.clear_all_queues();
         agent.start_prompt("second")?.drive().await?;
         let requests = provider.requests();
-        assert_eq!(requests[0].system_prompt, "old prompt");
-        assert_eq!(requests[0].tools[0].name, "old_tool");
-        assert_eq!(requests[0].context, "old hook");
-        assert_eq!(requests[1].system_prompt, "new prompt");
-        assert_eq!(requests[1].tools[0].name, "new_tool");
-        assert_eq!(requests[1].context, "new hook");
+        assert_eq!(requests[0].system_prompt(), "old prompt");
+        assert_eq!(requests[0].tools()[0].name, "old_tool");
+        assert_eq!(requests[0].transcript.host_notes, ["old hook"]);
+        assert_eq!(requests[1].system_prompt(), "new prompt");
+        assert_eq!(requests[1].tools()[0].name, "new_tool");
+        assert_eq!(requests[1].transcript.host_notes, ["new hook"]);
 
         Ok::<(), CoreError>(())
     })
@@ -244,11 +243,7 @@ fn restoring_messages_is_idle_only_and_advances_message_ids() {
         let next_id = snapshot
             .messages
             .iter()
-            .map(|message| match message {
-                AgentMessage::User { id, .. }
-                | AgentMessage::Assistant { id, .. }
-                | AgentMessage::ToolResult { id, .. } => id.0,
-            })
+            .map(|message| message.id().0)
             .max()
             .expect("restored and new messages remain present");
         assert!(next_id > 40);
@@ -317,11 +312,7 @@ fn generated_run_message_and_event_ids_are_monotonic_after_cancellation() {
         let ids = snapshot
             .messages
             .iter()
-            .map(|message| match message {
-                crate::state::AgentMessage::User { id, .. }
-                | crate::state::AgentMessage::Assistant { id, .. }
-                | crate::state::AgentMessage::ToolResult { id, .. } => id.0,
-            })
+            .map(|message| message.id().0)
             .collect::<Vec<_>>();
         // The cancelled prompt is retained as message 1; the next prompt and
         // its response receive fresh IDs rather than reusing that durable

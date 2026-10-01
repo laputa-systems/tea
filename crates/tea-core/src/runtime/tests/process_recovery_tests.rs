@@ -164,9 +164,6 @@ impl HookSet for BlockAfterProviderFinal {
         NoHooks.transform_context(context)
     }
 
-    fn convert_to_llm(&self, context: ContextEnvelope) -> Result<String, HookError> {
-        NoHooks.convert_to_llm(context)
-    }
 
     fn should_stop_after_turn_async<'a>(
         &'a self,
@@ -260,7 +257,7 @@ fn sigkill_after_committed_provider_final_settles_without_replay() {
         matches!(
             &entry.body,
             SessionEntry::AssistantMessage(message)
-                if message.content == "durably committed final response" && message.stop_reason.as_deref() == Some("stop")
+                if message.text() == "durably committed final response" && message.stop_reason.as_deref() == Some("stop")
         )
     }));
     assert!(

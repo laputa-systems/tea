@@ -22,7 +22,7 @@ use tea_core::scheduler::{
 };
 use tea_core::state::{AgentToolCall, ModelDescriptor, SerializedJson, StopReason, ToolCallId};
 use tea_core::tool::{ToolRegistry, ToolUpdateSink};
-use tea_providers::{openai::OpenAiContextHook, ConfiguredProvider};
+use tea_providers::ConfiguredProvider;
 
 pub(super) const PROVIDER_ID: &str = "mock";
 pub(super) const DEFAULT_MODEL_ID: &str = "mock";
@@ -58,7 +58,7 @@ pub(super) fn configuration() -> AgentConfiguration {
     AgentConfiguration::new(
         "You are a safe terminal mock. Produce concise Markdown or code samples. Coding tools use safe mock capabilities and never change workspace files or start processes.",
         ToolRegistry::default(),
-        Arc::new(OpenAiContextHook),
+        Arc::new(tea_core::hooks::NoHooks),
     )
 }
 
@@ -93,7 +93,7 @@ impl ModelProvider for MockProvider {
     ) -> ModelFuture<'a> {
         let events = if cancellation.is_cancelled() {
             vec![ModelStreamEvent::End(StopReason::Cancelled)]
-        } else if super::compaction::is_compaction_request(&request) {
+        } else if request.purpose == tea_core::scheduler::RequestPurpose::Compaction {
             vec![
                 ModelStreamEvent::TextDelta(COMPACTION_SUMMARY.into()),
                 ModelStreamEvent::End(StopReason::Stop),

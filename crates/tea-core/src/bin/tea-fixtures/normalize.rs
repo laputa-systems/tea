@@ -5,9 +5,17 @@ use tea_core::scheduler::ModelRequest;
 use tea_core::state::{AgentMessage, StopReason, ThinkingLevel};
 use tea_protocol::JsonValue;
 
-pub(super) fn normalize_request(request: &ModelRequest) -> JsonValue {
+/// The fixture contract records host-only request context in the declarative
+/// spelling `<convert_prefix><host notes joined by |>`.
+pub(super) fn normalize_request(request: &ModelRequest, convert_prefix: &str) -> JsonValue {
     JsonValue::object([
-        ("context", JsonValue::from(request.context.clone())),
+        (
+            "context",
+            JsonValue::from(format!(
+                "{convert_prefix}{}",
+                request.transcript.host_notes.join("|")
+            )),
+        ),
         (
             "model",
             request
@@ -37,16 +45,14 @@ pub(super) fn normalize_quality_request(
     context: &ContextEnvelope,
 ) -> Result<JsonValue, String> {
     Ok(JsonValue::object([
-        (
-            "system_prompt",
-            JsonValue::from(request.system_prompt.clone()),
-        ),
+        ("system_prompt", JsonValue::from(request.system_prompt())),
         (
             "messages",
             JsonValue::Array(
                 context
                     .messages
                     .iter()
+                    .filter(|message| !matches!(message, AgentMessage::System { .. }))
                     .map(normalize_message)
                     .collect::<Result<Vec<_>, _>>()?,
             ),
@@ -65,7 +71,7 @@ pub(super) fn normalize_quality_request(
             "tools",
             JsonValue::Array(
                 request
-                    .tools
+                    .tools()
                     .iter()
                     .map(|tool| {
                         JsonValue::object([
@@ -144,11 +150,11 @@ pub(super) fn normalize_event(
             "message_end",
             JsonValue::object([("role", JsonValue::from(message_role_name(message)))]),
         ),
-        AgentEventKind::MessageUpdate { text_delta, .. } => (
+        AgentEventKind::MessageUpdate { delta, .. } => (
             "message_update",
             JsonValue::object([
                 ("role", JsonValue::from("assistant")),
-                ("delta", JsonValue::from(text_delta.clone())),
+                ("delta", JsonValue::from(delta.as_str().to_owned())),
             ]),
         ),
         AgentEventKind::ToolExecutionStart {
@@ -199,14 +205,16 @@ pub(super) fn normalize_message(message: &AgentMessage) -> Result<JsonValue, Str
         AgentMessage::User { content, .. } | AgentMessage::ToolResult { content, .. } => {
             vec![text_content(content)]
         }
+        AgentMessage::System { .. } => Vec::new(),
         AgentMessage::Assistant {
             content,
             tool_calls,
             ..
         } => {
             let mut parts = Vec::new();
+            let content = tea_core::state::assistant_text(content);
             if !content.is_empty() {
-                parts.push(text_content(content));
+                parts.push(text_content(&content));
             }
             for tool_call in tool_calls {
                 parts.push(JsonValue::object([
@@ -241,6 +249,7 @@ fn message_role_name(message: &AgentMessage) -> &'static str {
         AgentMessage::User { .. } => "user",
         AgentMessage::Assistant { .. } => "assistant",
         AgentMessage::ToolResult { .. } => "tool_result",
+        AgentMessage::System { .. } => "system",
     }
 }
 

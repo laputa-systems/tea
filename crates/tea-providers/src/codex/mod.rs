@@ -22,7 +22,7 @@ pub use auth::{
 #[cfg(any(test, feature = "provider-codex-test-support"))]
 pub use config::{CodexCapturedRequest, CodexRequestCapture};
 pub use config::{CodexConfig, CodexConfigError, CodexTextVerbosity};
-pub use context::CodexContextHook;
+pub use context::responses_input;
 pub use credentials::{
     CodexClientCredentialStore, CodexCredential, CredentialError, CredentialStore,
     FileCredentialStore, InMemoryCredentialStore, SecretString, abbreviate_account_id,

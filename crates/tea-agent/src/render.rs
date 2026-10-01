@@ -668,7 +668,18 @@ fn entry_lines_for_entry(entry: &TranscriptEntry, width: u16) -> Vec<RenderLine>
             wrap_lines(text, width, Theme::default().style(Role::Muted))
         }
         TranscriptEntry::User { text } => rail_lines(text, width),
-        TranscriptEntry::Assistant { text, streaming } => markdown_lines(text, width, !streaming),
+        TranscriptEntry::Assistant {
+            text,
+            thinking,
+            streaming,
+        } => {
+            let mut lines = thinking_lines(thinking, width, *streaming);
+            if !lines.is_empty() && !text.is_empty() {
+                lines.push(RenderLine::plain(String::new(), Style::default()));
+            }
+            lines.extend(markdown_lines(text, width, !streaming));
+            lines
+        }
         TranscriptEntry::Tool(tool) => tool_projection_lines(tool, width),
         TranscriptEntry::Error { text } => wrap_lines(
             strip_prefix(text, "assistant error: "),
@@ -684,6 +695,48 @@ fn entry_lines_for_entry(entry: &TranscriptEntry, width: u16) -> Vec<RenderLine>
             },
         ),
     }
+}
+
+/// Maximum thinking rows shown inline; the complete text stays in the detail surface.
+const THINKING_PREVIEW_ROWS: usize = 6;
+
+/// Render provider-exposed thinking as a muted block distinct from the answer.
+///
+/// While streaming, the latest rows stay visible. Once settled, the first rows
+/// are committed to scrollback with a count of omitted rows, so long reasoning
+/// does not flood native history. The detail surface keeps the full text.
+fn thinking_lines(thinking: &str, width: u16, streaming: bool) -> Vec<RenderLine> {
+    let thinking = thinking.trim();
+    if thinking.is_empty() {
+        return Vec::new();
+    }
+    let style = Theme::default().style(Role::Muted);
+    let body = wrap_lines(thinking, width.saturating_sub(2).max(1), style);
+    let mut lines = vec![RenderLine::plain("∴ thinking", style)];
+    let total = body.len();
+    let (visible, omitted_before, omitted_after) = if total <= THINKING_PREVIEW_ROWS {
+        (&body[..], 0, 0)
+    } else if streaming {
+        (&body[total - THINKING_PREVIEW_ROWS..], total - THINKING_PREVIEW_ROWS, 0)
+    } else {
+        (&body[..THINKING_PREVIEW_ROWS], 0, total - THINKING_PREVIEW_ROWS)
+    };
+    if omitted_before > 0 {
+        lines.push(RenderLine::plain(
+            format!("  … {omitted_before} earlier thinking rows"),
+            style,
+        ));
+    }
+    lines.extend(visible.iter().map(|line| {
+        RenderLine::plain(format!("  {}", line.text), style)
+    }));
+    if omitted_after > 0 {
+        lines.push(RenderLine::plain(
+            format!("  … {omitted_after} more thinking rows (Ctrl+O)"),
+            style,
+        ));
+    }
+    lines
 }
 
 fn tool_projection_lines(tool: &ToolProjection, width: u16) -> Vec<RenderLine> {
@@ -1325,6 +1378,7 @@ mod tests {
             },
             TranscriptEntry::Assistant {
                 text: "partial".into(),
+                thinking: String::new(),
                 streaming: true,
             },
         ];
@@ -1419,18 +1473,19 @@ mod tests {
         let assistant_text = "```rust\nfn main() {}\n```";
         let assistant = tea_core::state::AgentMessage::Assistant {
             id: tea_core::state::MessageId(2),
-            content: assistant_text.into(),
+            content: tea_core::state::text_content(assistant_text),
             tool_calls: Vec::new(),
             stop_reason: Some(tea_core::state::StopReason::Stop),
             error_message: None,
             opaque_context: Vec::new(),
+            origin: None,
         };
         state.apply_event(&tea_core::event::AgentEvent {
             run_id: tea_core::state::RunId(1),
             sequence: tea_core::event::EventSequence(2),
             kind: tea_core::event::AgentEventKind::MessageUpdate {
                 message_id: tea_core::state::MessageId(2),
-                text_delta: assistant_text.into(),
+                delta: tea_core::event::MessageDelta::Text(assistant_text.into()),
             },
         });
         state.apply_event(&tea_core::event::AgentEvent {

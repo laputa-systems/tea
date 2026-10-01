@@ -147,7 +147,7 @@ fn delta_is_visible_while_the_provider_stream_is_still_open() {
             &event.kind,
             AgentEventKind::MessageUpdate {
                 message_id,
-                text_delta: delta,
+                delta: tea_core::event::MessageDelta::Text(delta),
             } if *message_id == message_start_id && delta == "first delta"
         )
     }));
@@ -195,7 +195,7 @@ fn message_updates_are_deltas_while_final_assistant_content_remains_complete() {
         .filter_map(|event| match event.kind {
             AgentEventKind::MessageUpdate {
                 message_id: update_id,
-                text_delta: delta,
+                delta: tea_core::event::MessageDelta::Text(delta),
             } => Some((update_id, delta)),
             _ => None,
         })
@@ -214,7 +214,8 @@ fn message_updates_are_deltas_while_final_assistant_content_remains_complete() {
     assert_eq!(smol::block_on(drive), Ok(()));
     assert!(matches!(
         agent.snapshot().messages.last(),
-        Some(AgentMessage::Assistant { content, .. }) if content == "one two three"
+        Some(AgentMessage::Assistant { content, .. })
+            if tea_core::state::assistant_text(content) == "one two three"
     ));
 }
 
@@ -252,7 +253,8 @@ fn live_partial_response_is_bounded_without_truncating_the_final_message() {
     assert_eq!(smol::block_on(drive), Ok(()));
     assert!(matches!(
         agent.snapshot().messages.last(),
-        Some(AgentMessage::Assistant { content, .. }) if content == &response
+        Some(AgentMessage::Assistant { content, .. })
+            if tea_core::state::assistant_text(content) == response
     ));
 }
 

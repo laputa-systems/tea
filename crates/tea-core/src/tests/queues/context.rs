@@ -48,7 +48,10 @@ fn prepared_next_turn_context_survives_a_tool_continuation_without_queued_input(
             Some("initial-model")
         );
         assert_eq!(requests[0].thinking_level, ThinkingLevel::Low);
-        assert_eq!(requests[1].context, "replacement-context");
+        assert_eq!(
+            requests[1].transcript.host_notes.last().map(String::as_str),
+            Some("replacement-context")
+        );
         assert_eq!(
             requests[1].model.as_ref().map(|model| model.model.as_str()),
             Some("replacement-model")
@@ -78,7 +81,10 @@ fn host_only_context_is_explicit_and_reaches_only_the_converter_hook() {
 
         run.drive().await?;
 
-        assert_eq!(provider.requests()[0].context, "host-only-value");
+        assert_eq!(
+            provider.requests()[0].transcript.host_notes,
+            ["host-only-value"]
+        );
         assert_eq!(
             agent.snapshot().host_messages,
             [SerializedJson::new("host-only-value")]
@@ -169,7 +175,7 @@ fn follow_up_queue_extends_a_run_only_at_the_idle_boundary() {
         ));
         assert!(matches!(
             agent.snapshot().messages[3],
-            crate::state::AgentMessage::Assistant { ref content, .. } if content == "follow-up response"
+            crate::state::AgentMessage::Assistant { ref content, .. } if crate::state::assistant_text(content) == "follow-up response"
         ));
         assert!(!agent.has_queued_messages());
 
@@ -229,7 +235,7 @@ fn continue_requires_a_non_assistant_tail_unless_queue_input_is_available() {
             Some(AgentEventKind::AgentEnd { messages })
                 if messages.len() == 2
                     && matches!(messages[0], crate::state::AgentMessage::User { ref content, .. } if content == "queued continuation")
-                    && matches!(messages[1], crate::state::AgentMessage::Assistant { ref content, .. } if content == "continued response")
+                    && matches!(messages[1], crate::state::AgentMessage::Assistant { ref content, .. } if crate::state::assistant_text(content) == "continued response")
         ));
 
         Ok::<(), CoreError>(())

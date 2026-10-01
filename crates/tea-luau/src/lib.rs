@@ -745,8 +745,5 @@ mod tests {
             Ok(context)
         }
 
-        fn convert_to_llm(&self, _context: ContextEnvelope) -> Result<String, HookError> {
-            Ok("[]".to_owned())
-        }
     }
 }

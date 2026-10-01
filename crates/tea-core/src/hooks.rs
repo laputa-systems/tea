@@ -125,10 +125,12 @@ pub trait HookSet: Send + Sync {
         call: &ToolCall,
         result: &AgentToolResult,
     ) -> Result<AfterToolCall, HookError>;
-    /// Transform retained context before conversion to provider messages.
+    /// Transform retained context before it becomes the request transcript.
+    ///
+    /// The result is typed: adapters, not hooks, own wire conversion. A hook
+    /// may omit or annotate conversation content, but the core validates that
+    /// the configuration it leaves declares only already-authorized tools.
     fn transform_context(&self, context: ContextEnvelope) -> Result<ContextEnvelope, HookError>;
-    /// Convert the host envelope into the provider's serialized context format.
-    fn convert_to_llm(&self, context: ContextEnvelope) -> Result<String, HookError>;
     /// Decide whether the run should stop after the turn.
     fn should_stop_after_turn(&self, _context: &ContextEnvelope) -> Result<bool, HookError> {
         Ok(false)
@@ -175,15 +177,6 @@ pub trait HookSet: Send + Sync {
         Box::pin(std::future::ready(self.transform_context(context)))
     }
 
-    /// Asynchronous, cancellation-aware form of [`Self::convert_to_llm`].
-    fn convert_to_llm_async<'a>(
-        &'a self,
-        context: ContextEnvelope,
-        _cancellation: CancellationToken,
-    ) -> HookFuture<'a, String> {
-        Box::pin(std::future::ready(self.convert_to_llm(context)))
-    }
-
     /// Asynchronous, cancellation-aware form of [`Self::should_stop_after_turn`].
     fn should_stop_after_turn_async<'a>(
         &'a self,
@@ -224,13 +217,5 @@ impl HookSet for NoHooks {
     }
     fn transform_context(&self, context: ContextEnvelope) -> Result<ContextEnvelope, HookError> {
         Ok(context)
-    }
-    fn convert_to_llm(&self, context: ContextEnvelope) -> Result<String, HookError> {
-        Ok(context
-            .messages
-            .into_iter()
-            .map(|message| format!("{message:?}"))
-            .collect::<Vec<_>>()
-            .join("\n"))
     }
 }

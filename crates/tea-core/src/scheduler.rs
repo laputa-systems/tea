@@ -8,7 +8,8 @@ use crate::error::SchedulerError;
 use crate::state::{
     AgentToolCall, ModelDescriptor, OpaqueProviderContextItem, ThinkingLevel, ToolCallId,
 };
-use crate::tool::{AgentToolResult, ToolCall, ToolDefinition, ToolExecutionMode};
+use crate::transcript::{ConfigurationProjection, Transcript};
+use crate::tool::{AgentToolResult, ToolCall, ToolExecutionMode};
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
@@ -48,19 +49,59 @@ pub trait ModelProvider: Send + Sync {
         request: ModelRequest,
         cancellation: CancellationToken,
     ) -> ModelFuture<'a>;
+
+    /// Explicit capabilities of one physical model served by this provider.
+    ///
+    /// The default is deliberately conservative: no in-place configuration
+    /// updates, no exposed thinking, no known prompt-cache lifetime, and no
+    /// pricing. The core never infers a capability from a model name.
+    fn capabilities(&self, _model: Option<&ModelDescriptor>) -> ModelCapabilities {
+        ModelCapabilities::default()
+    }
+}
+
+/// Why a provider request is made.
+///
+/// Durable hosts and adapters distinguish request roles from this typed value,
+/// never from prompt text.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum RequestPurpose {
+    /// An ordinary model turn of an agent run.
+    #[default]
+    Turn,
+    /// A summary request owned by a compaction transaction.
+    Compaction,
+    /// A best-effort replay that keeps a provider prompt cache entry warm.
+    /// Its output never enters model context and its tool calls never run.
+    CacheMaintenance,
+}
+
+impl RequestPurpose {
+    /// Stable lowercase label.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Turn => "turn",
+            Self::Compaction => "compaction",
+            Self::CacheMaintenance => "cache_maintenance",
+        }
+    }
 }
 
 /// Provider request assembled by the core.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ModelRequest {
-    /// System instructions that remain separate from conversation messages.
-    pub system_prompt: String,
-    /// Serialized conversation/context envelope.
-    pub context: String,
-    /// Prompt-facing executable capabilities in registry/source order.
-    pub tools: Vec<ToolDefinition>,
-    /// Provider-independent model identity selected for this request.
+    /// Role of this request.
+    pub purpose: RequestPurpose,
+    /// Ordered typed transcript, including system configuration messages.
+    ///
+    /// The current system prompt and declared tools are derived from it; see
+    /// [`Self::system_prompt`] and [`Self::tools`].
+    pub transcript: Transcript,
+    /// Physical model identity this request is dispatched to.
     pub model: Option<ModelDescriptor>,
+    /// Model selected by the user or host when it differs from the physical
+    /// dispatch (for example a virtual model resolved by a router).
+    pub selected_model: Option<ModelDescriptor>,
     /// Reasoning level selected for this request.
     ///
     /// This is request-scoped: a `prepare_next_turn` hook may replace it for a
@@ -73,6 +114,83 @@ pub struct ModelRequest {
     /// header or cache key; a missing value means the embedding has no durable
     /// session identity for this request.
     pub session_id: Option<String>,
+    /// Request-specific output-token cap, overriding the adapter default.
+    ///
+    /// Cache maintenance uses this to request minimal output. Adapters for
+    /// which a smaller cap changes cache-relevant request content must not
+    /// declare cache-maintenance replay as safe.
+    pub max_output_tokens: Option<u32>,
+}
+
+impl ModelRequest {
+    /// The system prompt in force at the end of the transcript.
+    pub fn system_prompt(&self) -> String {
+        self.transcript.system_prompt()
+    }
+
+    /// The tool declarations in force at the end of the transcript.
+    pub fn tools(&self) -> Vec<crate::tool::ToolDeclaration> {
+        self.transcript.tools()
+    }
+}
+
+/// Explicit, provider-declared facts about one physical model.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ModelCapabilities {
+    /// How the transport carries configuration changes after the first message.
+    pub configuration_updates: ConfigurationUpdateSupport,
+    /// Whether the provider can return thinking separately from answer text.
+    pub exposes_thinking: bool,
+    /// Prompt-cache lifetimes and replay safety, when declared.
+    pub prompt_cache: Option<PromptCacheCapability>,
+    /// Exact token prices, when declared.
+    pub pricing: Option<ModelPricing>,
+    /// Known context capacity in tokens.
+    pub context_window: Option<u64>,
+}
+
+impl ModelCapabilities {
+    /// The configuration projection used by this transport.
+    pub fn configuration_projection(&self) -> ConfigurationProjection {
+        if self.configuration_updates.system_messages {
+            ConfigurationProjection::InPlace
+        } else {
+            ConfigurationProjection::Collapsed
+        }
+    }
+}
+
+/// In-place configuration-update support.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ConfigurationUpdateSupport {
+    /// Later system messages are accepted in place.
+    pub system_messages: bool,
+    /// Tool additions and removals are accepted in place.
+    pub tool_changes: bool,
+}
+
+/// Declared prompt-cache behavior of one model.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PromptCacheCapability {
+    /// Lifetime in seconds of the cache entry an ordinary request writes.
+    pub ttl_seconds: u64,
+    /// Whether replaying an admitted request with minimal output reuses its
+    /// cache entry. False when the output cap or reasoning settings alter
+    /// cache-relevant request content.
+    pub minimal_output_replay: bool,
+}
+
+/// Exact token prices in decimal dollars per million tokens.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ModelPricing {
+    /// Uncached input tokens.
+    pub input: String,
+    /// Output tokens.
+    pub output: String,
+    /// Cache-read input tokens.
+    pub cache_read: String,
+    /// Cache-write input tokens.
+    pub cache_write: String,
 }
 
 /// Content-safe request facts observed by a provider adapter.
@@ -111,6 +229,18 @@ pub enum ModelStreamEvent {
     RequestObservation(AdapterRequestObservation),
     /// Incremental assistant text.
     TextDelta(String),
+    /// Incremental provider-exposed thinking text.
+    ///
+    /// Consecutive thinking deltas form one thinking block until a signature,
+    /// another content kind, or a tool call ends it.
+    ThinkingDelta(String),
+    /// Provider-private replay material that ends the current thinking block.
+    ///
+    /// When no thinking block is open, it ends an empty one. The core stores
+    /// it with that block and never renders it.
+    ThinkingSignature(OpaqueProviderContextItem),
+    /// A complete reasoning block withheld by the provider.
+    RedactedThinking(OpaqueProviderContextItem),
     /// A complete assistant tool call.
     ToolCall(AgentToolCall),
     /// Provider-private continuation state associated with the current assistant output.

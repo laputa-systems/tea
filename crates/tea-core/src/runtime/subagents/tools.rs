@@ -80,6 +80,7 @@ pub fn root_subagent_tool_definitions(
             execution_mode: ToolExecutionMode::Sequential,
             requires_exclusive_batch: false,
             cancellation_settlement_mode: CancellationSettlementMode::AwaitFuture,
+            exposure: tea_core::tool::ToolExposure::Direct,
         },
         ToolDefinition {
             name: "wait_agent".into(),
@@ -88,6 +89,7 @@ pub fn root_subagent_tool_definitions(
             execution_mode: ToolExecutionMode::Sequential,
             requires_exclusive_batch: false,
             cancellation_settlement_mode: CancellationSettlementMode::DropFuture,
+            exposure: tea_core::tool::ToolExposure::Direct,
         },
         ToolDefinition {
             name: "list_agents".into(),
@@ -96,6 +98,7 @@ pub fn root_subagent_tool_definitions(
             execution_mode: ToolExecutionMode::Parallel,
             requires_exclusive_batch: false,
             cancellation_settlement_mode: CancellationSettlementMode::DropFuture,
+            exposure: tea_core::tool::ToolExposure::Direct,
         },
         ToolDefinition {
             name: "interrupt_agent".into(),
@@ -104,6 +107,7 @@ pub fn root_subagent_tool_definitions(
             execution_mode: ToolExecutionMode::Sequential,
             requires_exclusive_batch: false,
             cancellation_settlement_mode: CancellationSettlementMode::AwaitFuture,
+            exposure: tea_core::tool::ToolExposure::Direct,
         },
         ToolDefinition {
             name: "apply_agent_changes".into(),
@@ -112,6 +116,7 @@ pub fn root_subagent_tool_definitions(
             execution_mode: ToolExecutionMode::Sequential,
             requires_exclusive_batch: true,
             cancellation_settlement_mode: CancellationSettlementMode::AwaitFuture,
+            exposure: tea_core::tool::ToolExposure::Direct,
         },
     ])
 }

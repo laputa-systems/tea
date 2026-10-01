@@ -187,7 +187,7 @@ fn explicit_model_error_preserves_the_assistant_failure_without_synthesizing_tra
                 stop_reason: Some(StopReason::Error),
                 error_message: Some(error_message),
                 ..
-            }) if content == "partial" && error_message == "model refused the request"
+            }) if crate::state::assistant_text(content) == "partial" && error_message == "model refused the request"
         ));
         assert!(matches!(
             run.events().last().map(|event| &event.kind),
@@ -277,7 +277,7 @@ fn length_stop_refuses_truncated_tool_calls_and_allows_a_recovery_turn() {
         assert_eq!(provider.requests().len(), 2);
         assert!(executed.lock().expect("test tool mutex").is_empty());
         assert!(matches!(
-            agent.snapshot().messages[1],
+            agent.snapshot().messages[2],
             crate::state::AgentMessage::Assistant {
                 stop_reason: Some(StopReason::Length),
                 ref tool_calls,
@@ -285,7 +285,7 @@ fn length_stop_refuses_truncated_tool_calls_and_allows_a_recovery_turn() {
             } if tool_calls.len() == 1 && tool_calls[0].id == call_id
         ));
         assert!(matches!(
-            agent.snapshot().messages[2],
+            agent.snapshot().messages[3],
             crate::state::AgentMessage::ToolResult {
                 ref tool_call_id,
                 is_error: true,
@@ -305,7 +305,7 @@ fn length_stop_refuses_truncated_tool_calls_and_allows_a_recovery_turn() {
         assert!(matches!(
             agent.snapshot().messages.last(),
             Some(crate::state::AgentMessage::Assistant { content, stop_reason: Some(StopReason::Stop), .. })
-                if content == "recovered after truncation"
+                if crate::state::assistant_text(content) == "recovered after truncation"
         ));
 
         Ok::<(), CoreError>(())
@@ -343,7 +343,7 @@ fn length_stop_without_tool_calls_continues_the_unfinished_response() {
                 ref content,
                 ref tool_calls,
                 ..
-            } if content == "partial analysis" && tool_calls.is_empty()
+            } if crate::state::assistant_text(content) == "partial analysis" && tool_calls.is_empty()
         ));
         assert!(matches!(
             agent.snapshot().messages.last(),
@@ -351,7 +351,7 @@ fn length_stop_without_tool_calls_continues_the_unfinished_response() {
                 content,
                 stop_reason: Some(StopReason::Stop),
                 ..
-            }) if content == "completed response"
+            }) if crate::state::assistant_text(content) == "completed response"
         ));
 
         Ok::<(), CoreError>(())
@@ -428,7 +428,7 @@ fn cancellation_during_an_async_before_hook_preserves_tool_result_then_allows_re
         assert_eq!(agent.snapshot().phase, AgentPhase::Idle);
         assert!(matches!(
             agent.snapshot().messages.last(),
-            Some(crate::state::AgentMessage::Assistant { content, .. }) if content == "reused normally"
+            Some(crate::state::AgentMessage::Assistant { content, .. }) if crate::state::assistant_text(content) == "reused normally"
         ));
         assert_eq!(provider.requests().len(), 3);
 

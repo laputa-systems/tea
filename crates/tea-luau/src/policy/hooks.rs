@@ -205,9 +205,6 @@ impl HookSet for LuaPolicyHookSet {
         self.inner.transform_context(context)
     }
 
-    fn convert_to_llm(&self, context: ContextEnvelope) -> Result<String, HookError> {
-        self.inner.convert_to_llm(context)
-    }
 
     fn should_stop_after_turn(&self, context: &ContextEnvelope) -> Result<bool, HookError> {
         self.inner.should_stop_after_turn(context)
@@ -278,13 +275,6 @@ impl HookSet for LuaPolicyHookSet {
         self.inner.transform_context_async(context, cancellation)
     }
 
-    fn convert_to_llm_async<'a>(
-        &'a self,
-        context: ContextEnvelope,
-        cancellation: CancellationToken,
-    ) -> HookFuture<'a, String> {
-        self.inner.convert_to_llm_async(context, cancellation)
-    }
 
     fn should_stop_after_turn_async<'a>(
         &'a self,

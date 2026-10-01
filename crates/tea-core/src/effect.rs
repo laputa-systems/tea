@@ -192,6 +192,12 @@ pub enum DurableWriteRequest {
         /// Complete source, operation, and replacement material.
         replacement: CompactionReplacement,
     },
+    /// A model-visible configuration change about to join the canonical
+    /// transcript before the next provider request.
+    ConfigurationUpdate {
+        /// The validated update in conversation order.
+        update: crate::state::ConfigurationUpdate,
+    },
 }
 
 impl EffectSubject {
@@ -229,8 +235,6 @@ pub enum HookInvocation {
     },
     /// Context transformation before provider conversion.
     TransformContext,
-    /// Context conversion into a provider-facing envelope.
-    ConvertToLlm,
     /// Request-scoped next-turn policy.
     PrepareNextTurn,
     /// Final post-turn stop policy.
@@ -293,8 +297,10 @@ impl EffectAction {
 pub struct ProviderResponse {
     /// Terminal provider stop reason.
     pub stop_reason: StopReason,
-    /// Complete assistant text accumulated by this response.
-    pub assistant_text: String,
+    /// Ordered answer text and provider-exposed thinking of this response.
+    pub content: Vec<crate::state::AssistantContent>,
+    /// Physical model that produced the response.
+    pub origin: Option<crate::state::ModelDescriptor>,
     /// Provider tool calls in their original source order.
     pub tool_calls: Vec<AgentToolCall>,
     /// Provider-private continuation items ordered with this response.

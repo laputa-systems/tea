@@ -471,7 +471,7 @@ fn context_entry_kind(entry: &SessionEntry) -> &'static str {
         SessionEntry::BranchSummary(_) => "branch_summary",
         SessionEntry::ModelChanged(_) => "model_changed",
         SessionEntry::ThinkingChanged(_) => "thinking_changed",
-        SessionEntry::ToolActivationChanged(_) => "tool_activation_changed",
+        SessionEntry::ConfigurationChanged(_) => "configuration_changed",
         SessionEntry::HarnessRevisionChanged(_) => "harness_revision_changed",
         SessionEntry::PluginMemory(_) => "plugin_memory",
         SessionEntry::Custom(_) => "custom",
@@ -728,7 +728,7 @@ fn source_turn_boundary(entry: &SessionEntry) -> bool {
         SessionEntry::ToolResult(_)
         | SessionEntry::ModelChanged(_)
         | SessionEntry::ThinkingChanged(_)
-        | SessionEntry::ToolActivationChanged(_)
+        | SessionEntry::ConfigurationChanged(_)
         | SessionEntry::HarnessRevisionChanged(_) => false,
     }
 }
@@ -1020,7 +1020,7 @@ fn message_for_entry(
             };
             Ok(vec![AgentMessage::Assistant {
                 id,
-                content: assistant.content.clone(),
+                content: assistant_content_from_entry(&assistant.content, retain_opaque_context)?,
                 tool_calls,
                 stop_reason: assistant
                     .stop_reason
@@ -1029,6 +1029,14 @@ fn message_for_entry(
                     .transpose()?,
                 error_message: assistant.error_message.clone(),
                 opaque_context,
+                origin: assistant
+                    .origin
+                    .as_ref()
+                    .map(|origin| tea_core::state::ModelDescriptor {
+                        provider: origin.provider.clone(),
+                        model: origin.model.clone(),
+                        revision: origin.revision.clone(),
+                    }),
             }])
         }
         SessionEntry::ToolResult(result) => {
@@ -1053,12 +1061,16 @@ fn message_for_entry(
                     cache_write_tokens: result.usage.cache_write_tokens,
                     cost: result.usage.cost.clone(),
                 })),
-                added_tool_names: Vec::new(),
+                added_tool_names: projection_added_tool_names(&result.model_projection)?,
                 terminate: result.terminate,
                 is_error: result.is_error,
                 failure: None,
             }])
         }
+        SessionEntry::ConfigurationChanged(change) => Ok(vec![AgentMessage::System {
+            id,
+            update: configuration_update_from_entry(change),
+        }]),
         SessionEntry::Compaction(entry) => {
             let PayloadRef::Inline(replacement) = &entry.replacement else {
                 return Err(HarnessError::invalid_state(
@@ -1112,11 +1124,161 @@ fn message_for_entry(
         )),
         SessionEntry::ModelChanged(_)
         | SessionEntry::ThinkingChanged(_)
-        | SessionEntry::ToolActivationChanged(_)
         | SessionEntry::HarnessRevisionChanged(_)
         | SessionEntry::PluginMemory(_)
         | SessionEntry::Custom(_) => Ok(Vec::new()),
     }
+}
+
+/// Convert a durable configuration entry to its transcript message body.
+pub fn configuration_update_from_entry(
+    change: &tea_session::ConfigurationChangedEntry,
+) -> tea_core::state::ConfigurationUpdate {
+    tea_core::state::ConfigurationUpdate {
+        sections: change
+            .sections
+            .iter()
+            .map(|section| tea_core::state::SectionChange {
+                id: section.id.clone(),
+                content: section.content.clone(),
+            })
+            .collect(),
+        tools_added: change
+            .tools_added
+            .iter()
+            .map(|tool| {
+                tea_core::tool::ToolDeclaration::new(
+                    tool.name.clone(),
+                    tool.description.clone(),
+                    tool.schema.clone(),
+                )
+            })
+            .collect(),
+        tools_removed: change.tools_removed.clone(),
+    }
+}
+
+/// Convert a transcript configuration update to its durable entry.
+pub(crate) fn configuration_entry_from_update(
+    update: &tea_core::state::ConfigurationUpdate,
+) -> tea_session::ConfigurationChangedEntry {
+    tea_session::ConfigurationChangedEntry {
+        sections: update
+            .sections
+            .iter()
+            .map(|section| tea_session::PromptSectionChange {
+                id: section.id.clone(),
+                content: section.content.clone(),
+            })
+            .collect(),
+        tools_added: update
+            .tools_added
+            .iter()
+            .map(|tool| tea_session::ToolDeclarationRecord {
+                name: tool.name.clone(),
+                description: tool.description.clone(),
+                schema: tool.schema.clone(),
+            })
+            .collect(),
+        tools_removed: update.tools_removed.clone(),
+    }
+}
+
+/// Convert durable assistant blocks to transcript content.
+///
+/// Provider-private replay material on thinking blocks is retained only when
+/// the projection retains opaque context; visible thinking text is kept.
+pub fn assistant_content_from_entry(
+    content: &[tea_session::AssistantContentEntry],
+    retain_opaque_context: bool,
+) -> Result<Vec<tea_core::state::AssistantContent>, HarnessError> {
+    let opaque = |item: &tea_session::OpaqueProviderContextEntry| {
+        OpaqueProviderContextItem::new(
+            item.provider.clone(),
+            item.kind.clone(),
+            item.item_id.clone(),
+            item.payload.clone(),
+        )
+        .map_err(|error| {
+            HarnessError::invalid_state(format!(
+                "durable assistant thinking replay material is invalid: {error}"
+            ))
+        })
+    };
+    let mut blocks = Vec::with_capacity(content.len());
+    for block in content {
+        match block {
+            tea_session::AssistantContentEntry::Text(text) => {
+                blocks.push(tea_core::state::AssistantContent::Text { text: text.clone() })
+            }
+            tea_session::AssistantContentEntry::Thinking { text, signature } => {
+                blocks.push(tea_core::state::AssistantContent::Thinking {
+                    text: text.clone(),
+                    signature: match signature {
+                        Some(signature) if retain_opaque_context => Some(opaque(signature)?),
+                        _ => None,
+                    },
+                })
+            }
+            tea_session::AssistantContentEntry::RedactedThinking(data) => {
+                if retain_opaque_context {
+                    blocks.push(tea_core::state::AssistantContent::RedactedThinking {
+                        data: opaque(data)?,
+                    });
+                }
+            }
+        }
+    }
+    Ok(blocks)
+}
+
+/// Convert transcript content to durable assistant blocks.
+pub(crate) fn assistant_content_entry(
+    content: &[tea_core::state::AssistantContent],
+) -> Vec<tea_session::AssistantContentEntry> {
+    let opaque = |item: &OpaqueProviderContextItem| tea_session::OpaqueProviderContextEntry {
+        provider: item.provider().to_owned(),
+        kind: item.kind().to_owned(),
+        item_id: item.item_id().map(str::to_owned),
+        payload: item.payload().to_owned(),
+    };
+    content
+        .iter()
+        .map(|block| match block {
+            tea_core::state::AssistantContent::Text { text } => {
+                tea_session::AssistantContentEntry::Text(text.clone())
+            }
+            tea_core::state::AssistantContent::Thinking { text, signature } => {
+                tea_session::AssistantContentEntry::Thinking {
+                    text: text.clone(),
+                    signature: signature.as_ref().map(opaque),
+                }
+            }
+            tea_core::state::AssistantContent::RedactedThinking { data } => {
+                tea_session::AssistantContentEntry::RedactedThinking(opaque(data))
+            }
+        })
+        .collect()
+}
+
+fn projection_added_tool_names(
+    projection: &tea_protocol::JsonValue,
+) -> Result<Vec<String>, HarnessError> {
+    let Some(names) = projection.get("added_tool_names") else {
+        return Ok(Vec::new());
+    };
+    names
+        .as_array()
+        .ok_or_else(|| {
+            HarnessError::invalid_state("tool-result added_tool_names must be an array")
+        })?
+        .iter()
+        .map(|name| {
+            name.as_str().map(str::to_owned).ok_or_else(|| {
+                HarnessError::invalid_state("tool-result added_tool_names must contain strings")
+            })
+        })
+        .collect()
 }
 
 fn validate_recovery_locator(result: &tea_session::ToolResultEntry) -> Result<(), HarnessError> {
@@ -1216,9 +1378,10 @@ fn compaction_replacement_message(
             stop_reason,
             error_message,
             opaque_context,
+            origin,
             ..
-        } => Ok(object([
-            ("content", JsonValue::String(content.clone())),
+        } => Ok(with_assistant_blocks(object([
+            ("content", JsonValue::String(tea_core::state::assistant_text(content))),
             (
                 "error_message",
                 error_message
@@ -1274,7 +1437,7 @@ fn compaction_replacement_message(
                         .collect::<Result<Vec<_>, HarnessError>>()?,
                 ),
             ),
-        ])),
+        ]), content, origin.as_ref())),
         AgentMessage::ToolResult {
             tool_call_id,
             tool_name,
@@ -1336,7 +1499,157 @@ fn compaction_replacement_message(
                 ),
             ]))
         }
+        AgentMessage::System { update, .. } => Ok(object([
+            ("role", JsonValue::String("system".into())),
+            (
+                "update",
+                tea_core::transcript::configuration_update_json(update),
+            ),
+        ])),
     }
+}
+
+/// Add ordered assistant blocks and origin to an encoded assistant message
+/// only when they carry more than its text, so text-only replacements keep
+/// their established encoding.
+fn with_assistant_blocks(
+    mut value: tea_protocol::JsonValue,
+    content: &[tea_core::state::AssistantContent],
+    origin: Option<&tea_core::state::ModelDescriptor>,
+) -> tea_protocol::JsonValue {
+    use tea_protocol::JsonValue;
+    let text_only = content.len() <= 1
+        && content
+            .iter()
+            .all(|block| matches!(block, tea_core::state::AssistantContent::Text { .. }));
+    let Some(fields) = value.as_object_mut() else {
+        return value;
+    };
+    if !text_only {
+        let opaque = |item: &OpaqueProviderContextItem| {
+            object([
+                ("item_id", optional_json_string(item.item_id())),
+                ("kind", JsonValue::String(item.kind().into())),
+                ("payload", JsonValue::String(item.payload().into())),
+                ("provider", JsonValue::String(item.provider().into())),
+            ])
+        };
+        fields.insert(
+            "content_blocks".into(),
+            JsonValue::Array(
+                content
+                    .iter()
+                    .map(|block| match block {
+                        tea_core::state::AssistantContent::Text { text } => object([
+                            ("text", JsonValue::String(text.clone())),
+                            ("type", JsonValue::String("text".into())),
+                        ]),
+                        tea_core::state::AssistantContent::Thinking { text, signature } => {
+                            object([
+                                (
+                                    "signature",
+                                    signature.as_ref().map(opaque).unwrap_or(JsonValue::Null),
+                                ),
+                                ("text", JsonValue::String(text.clone())),
+                                ("type", JsonValue::String("thinking".into())),
+                            ])
+                        }
+                        tea_core::state::AssistantContent::RedactedThinking { data } => object([
+                            ("data", opaque(data)),
+                            ("type", JsonValue::String("redacted_thinking".into())),
+                        ]),
+                    })
+                    .collect(),
+            ),
+        );
+    }
+    if let Some(origin) = origin {
+        fields.insert(
+            "origin".into(),
+            object([
+                ("model", JsonValue::String(origin.model.clone())),
+                ("provider", JsonValue::String(origin.provider.clone())),
+                ("revision", optional_json_string(origin.revision.as_deref())),
+            ]),
+        );
+    }
+    value
+}
+
+fn decode_assistant_blocks(
+    object: &std::collections::BTreeMap<String, tea_protocol::JsonValue>,
+) -> Result<Vec<tea_core::state::AssistantContent>, HarnessError> {
+    let text = required_compaction_string(object, "content")?;
+    let Some(blocks) = object.get("content_blocks").filter(|value| !value.is_null()) else {
+        return Ok(tea_core::state::text_content(text));
+    };
+    let opaque = |value: &tea_protocol::JsonValue| {
+        let item = value.as_object().ok_or_else(|| {
+            HarnessError::invalid_state("compaction replacement replay material must be an object")
+        })?;
+        OpaqueProviderContextItem::new(
+            required_compaction_string(item, "provider")?,
+            required_compaction_string(item, "kind")?,
+            optional_compaction_string(item, "item_id")?,
+            required_compaction_string(item, "payload")?,
+        )
+        .map_err(|error| {
+            HarnessError::invalid_state(format!(
+                "compaction replacement replay material is invalid: {error}"
+            ))
+        })
+    };
+    let content = blocks
+        .as_array()
+        .ok_or_else(|| HarnessError::invalid_state("content_blocks must be an array"))?
+        .iter()
+        .map(|block| {
+            let block = block.as_object().ok_or_else(|| {
+                HarnessError::invalid_state("assistant content block must be an object")
+            })?;
+            match required_compaction_string(block, "type")?.as_str() {
+                "text" => Ok(tea_core::state::AssistantContent::Text {
+                    text: required_compaction_string(block, "text")?,
+                }),
+                "thinking" => Ok(tea_core::state::AssistantContent::Thinking {
+                    text: required_compaction_string(block, "text")?,
+                    signature: block
+                        .get("signature")
+                        .filter(|value| !value.is_null())
+                        .map(opaque)
+                        .transpose()?,
+                }),
+                "redacted_thinking" => Ok(tea_core::state::AssistantContent::RedactedThinking {
+                    data: opaque(required_compaction_value(block, "data")?)?,
+                }),
+                other => Err(HarnessError::invalid_state(format!(
+                    "unknown assistant content block type {other:?}"
+                ))),
+            }
+        })
+        .collect::<Result<Vec<_>, HarnessError>>()?;
+    if tea_core::state::assistant_text(&content) != text {
+        return Err(HarnessError::invalid_state(
+            "assistant content blocks disagree with their text",
+        ));
+    }
+    Ok(content)
+}
+
+fn decode_origin(
+    object: &std::collections::BTreeMap<String, tea_protocol::JsonValue>,
+) -> Result<Option<tea_core::state::ModelDescriptor>, HarnessError> {
+    let Some(origin) = object.get("origin").filter(|value| !value.is_null()) else {
+        return Ok(None);
+    };
+    let origin = origin
+        .as_object()
+        .ok_or_else(|| HarnessError::invalid_state("assistant origin must be an object"))?;
+    Ok(Some(tea_core::state::ModelDescriptor {
+        provider: required_compaction_string(origin, "provider")?,
+        model: required_compaction_string(origin, "model")?,
+        revision: optional_compaction_string(origin, "revision")?,
+    }))
 }
 
 fn compaction_replacement_usage(usage: &Usage) -> tea_protocol::JsonValue {
@@ -1472,7 +1785,7 @@ fn decode_compaction_replacement_message(
                 .collect::<Result<Vec<_>, HarnessError>>()?;
             Ok(AgentMessage::Assistant {
                 id,
-                content: required_compaction_string(object, "content")?,
+                content: decode_assistant_blocks(object)?,
                 tool_calls,
                 stop_reason: optional_compaction_string(object, "stop_reason")?
                     .as_deref()
@@ -1480,6 +1793,7 @@ fn decode_compaction_replacement_message(
                     .transpose()?,
                 error_message: optional_compaction_string(object, "error_message")?,
                 opaque_context,
+                origin: decode_origin(object)?,
             })
         }
         "tool_result" => {
@@ -1528,6 +1842,13 @@ fn decode_compaction_replacement_message(
                 failure: None,
             })
         }
+        "system" => Ok(AgentMessage::System {
+            id,
+            update: tea_core::transcript::configuration_update_from_json(
+                required_compaction_value(object, "update")?,
+            )
+            .map_err(HarnessError::invalid_state)?,
+        }),
         other => Err(HarnessError::invalid_state(format!(
             "compaction replacement message has unknown role {other:?}",
         ))),
@@ -1659,8 +1980,8 @@ fn canonical_message_json(message: &AgentMessage) -> Result<String, HarnessError
             stop_reason,
             error_message,
             ..
-        } => object([
-            ("content", JsonValue::String(content.clone())),
+        } => with_assistant_blocks(object([
+            ("content", JsonValue::String(tea_core::state::assistant_text(content))),
             (
                 "error_message",
                 error_message
@@ -1698,7 +2019,7 @@ fn canonical_message_json(message: &AgentMessage) -> Result<String, HarnessError
                         .collect::<Result<Vec<_>, HarnessError>>()?,
                 ),
             ),
-        ]),
+        ]), content, None),
         AgentMessage::ToolResult {
             tool_call_id,
             tool_name,
@@ -1757,6 +2078,13 @@ fn canonical_message_json(message: &AgentMessage) -> Result<String, HarnessError
                 ),
             ])
         }
+        AgentMessage::System { update, .. } => object([
+            ("role", JsonValue::String("system".into())),
+            (
+                "update",
+                tea_core::transcript::configuration_update_json(update),
+            ),
+        ]),
     };
     value.to_json_string().map_err(|error| {
         HarnessError::invalid_state(format!(
@@ -1846,7 +2174,7 @@ mod tests {
                 timestamp_ms: 1,
             },
             body: SessionEntry::AssistantMessage(tea_session::AssistantMessageEntry {
-                content: "visible parent answer".into(),
+                content: tea_session::AssistantContentEntry::text_content("visible parent answer"),
                 tool_calls: Vec::new(),
                 stop_reason: Some("stop".into()),
                 error_message: None,
@@ -1857,6 +2185,7 @@ mod tests {
                     payload: "opaque-parent-state".into(),
                 }],
                 metadata: BTreeMap::new(),
+                origin: None,
             }),
         };
 
@@ -1898,7 +2227,7 @@ mod tests {
             },
             AgentMessage::Assistant {
                 id: MessageId(8),
-                content: "calling a tool".into(),
+                content: crate::state::text_content("calling a tool"),
                 tool_calls: vec![AgentToolCall {
                     id: ToolCallId::new("compact-call").expect("fixture call ID"),
                     name: "read_file".into(),
@@ -1915,6 +2244,7 @@ mod tests {
                     )
                     .expect("fixture opaque state"),
                 ],
+                origin: None,
             },
             AgentMessage::ToolResult {
                 id: MessageId(9),
@@ -2006,7 +2336,7 @@ mod tests {
             "assistant-one",
             1,
             SessionEntry::AssistantMessage(tea_session::AssistantMessageEntry {
-                content: "first calls".into(),
+                content: tea_session::AssistantContentEntry::text_content("first calls"),
                 tool_calls: vec![
                     tea_session::AssistantToolCall::new(
                         "reused-call",
@@ -2023,6 +2353,7 @@ mod tests {
                 error_message: None,
                 opaque_context: Vec::new(),
                 metadata: BTreeMap::new(),
+                origin: None,
             }),
         );
         let second_result = stored_tool_result("result-second", 2, "second-call", "second");
@@ -2031,7 +2362,7 @@ mod tests {
             "assistant-two",
             4,
             SessionEntry::AssistantMessage(tea_session::AssistantMessageEntry {
-                content: "second calls".into(),
+                content: tea_session::AssistantContentEntry::text_content("second calls"),
                 tool_calls: vec![tea_session::AssistantToolCall::new(
                     "reused-call",
                     "third",
@@ -2041,6 +2372,7 @@ mod tests {
                 error_message: None,
                 opaque_context: Vec::new(),
                 metadata: BTreeMap::new(),
+                origin: None,
             }),
         );
         let third_result = stored_tool_result("result-third", 5, "reused-call", "third");

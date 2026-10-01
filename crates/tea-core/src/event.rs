@@ -74,6 +74,28 @@ pub enum ProviderRequestSkipReason {
     ToolCircuitBreaker,
 }
 
+/// One transient assistant fragment.
+///
+/// Thinking and answer text stay distinct from the provider stream through
+/// every observer; a consumer must never present a thinking fragment as answer
+/// text.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum MessageDelta {
+    /// Answer text.
+    Text(String),
+    /// Provider-exposed thinking text.
+    Thinking(String),
+}
+
+impl MessageDelta {
+    /// Borrow the fragment text regardless of kind.
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Text(text) | Self::Thinking(text) => text,
+        }
+    }
+}
+
 /// Meaningful lifecycle payloads emitted by the core.
 #[allow(missing_docs)]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -162,7 +184,7 @@ pub enum AgentEventKind {
     TurnStart { turn_id: TurnId },
     /// A message became visible.
     MessageStart { message: AgentMessage },
-    /// An exact assistant text fragment from an active stream.
+    /// An exact assistant fragment from an active stream.
     ///
     /// The stable message ID joins this transient delta to its `MessageStart`
     /// and `MessageEnd` boundaries. It deliberately carries no growing
@@ -171,8 +193,8 @@ pub enum AgentEventKind {
     MessageUpdate {
         /// Assistant message receiving the fragment.
         message_id: crate::state::MessageId,
-        /// Exact text fragment delivered by the current v1 stream event.
-        text_delta: String,
+        /// Exact answer-text or thinking fragment.
+        delta: MessageDelta,
     },
     /// A message settled.
     MessageEnd { message: AgentMessage },

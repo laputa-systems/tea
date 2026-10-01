@@ -1274,8 +1274,13 @@ fn derive_configuration(
             SessionEntry::ThinkingChanged(thinking) => {
                 configuration.thinking_level = Some(thinking.level)
             }
-            SessionEntry::ToolActivationChanged(tools) => {
-                configuration.active_tool_names = tools.active_tool_names
+            SessionEntry::ConfigurationChanged(change) => {
+                let names = &mut configuration.declared_tool_names;
+                names.retain(|name| !change.tools_removed.contains(name));
+                for tool in change.tools_added {
+                    names.retain(|name| name != &tool.name);
+                    names.push(tool.name);
+                }
             }
             SessionEntry::HarnessRevisionChanged(revision) => {
                 configuration.harness_revision = Some(revision.revision_id)

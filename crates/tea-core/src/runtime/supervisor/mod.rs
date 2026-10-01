@@ -1954,7 +1954,7 @@ where
                     let SessionEntry::AssistantMessage(assistant) = body else {
                         return None;
                     };
-                    Some((entry.header.id.clone(), assistant.content.clone()))
+                    Some((entry.header.id.clone(), assistant.text()))
                 })
         });
         let Some((entry_id, content)) = assistant else {
@@ -2874,7 +2874,10 @@ where
         self.root_lane()
             .expect("root lane is registered for every supervisor")
             .prompt_layout_ledger
-            .measure(request)
+            .measure(&crate::measurement::RequestLayout::new(
+                request,
+                tea_core::transcript::ConfigurationProjection::Collapsed,
+            ))
     }
 
     /// Replace the reasoning level for future epochs and append the semantic change while idle.
@@ -5418,7 +5421,50 @@ where
             DurableWriteRequest::CompactionReplacement { replacement } => {
                 self.persist_compaction_replacement(replacement)
             }
+            DurableWriteRequest::ConfigurationUpdate { update } => {
+                self.persist_configuration_update(update)
+            }
         }
+    }
+
+    /// Commit one model-visible configuration change at the lane leaf before
+    /// the core appends it to the live transcript.
+    ///
+    /// The identity is derived from the epoch and the current leaf, so a
+    /// configuration change has exactly one position in branch order.
+    fn persist_configuration_update(
+        &mut self,
+        update: &tea_core::state::ConfigurationUpdate,
+    ) -> Result<(), EffectGateError> {
+        update
+            .validate()
+            .map_err(|error| self.fault(error.to_string()))?;
+        let snapshot = self.session_snapshot()?;
+        let leaf = reduce_lane(snapshot, self.lane.clone())
+            .map_err(|error| self.fault(error.to_string()))?
+            .lane_state
+            .leaf_id;
+        let entry_id = EntryId::new(durable_identifier(
+            "entry-configuration",
+            [
+                self.epoch_id.as_str(),
+                leaf.as_ref().map_or("root", EntryId::as_str),
+            ],
+        ))
+        .map_err(|error| self.fault(error.to_string()))?;
+        let lane = self.lane.clone();
+        self.mutate(|session| {
+            session.commit(SessionCommit::new(vec![SessionCommitItem::Entry {
+                lane_id: lane,
+                entry: ProvisionedEntry {
+                    id: entry_id,
+                    body: SessionEntry::ConfigurationChanged(
+                        super::context::configuration_entry_from_update(update),
+                    ),
+                },
+            }])?)?;
+            Ok(())
+        })
     }
 
     fn before_provider(
@@ -6140,12 +6186,8 @@ fn session_time_ms() -> u64 {
         .unwrap_or(0)
 }
 
-fn request_material(
-    request: &tea_core::scheduler::ModelRequest,
-) -> Result<JsonValue, EffectGateError> {
-    let model = request
-        .model
-        .as_ref()
+fn model_json(model: Option<&tea_core::state::ModelDescriptor>) -> JsonValue {
+    model
         .map(|model| {
             JsonValue::object([
                 ("provider", JsonValue::String(model.provider.clone())),
@@ -6160,38 +6202,25 @@ fn request_material(
                 ),
             ])
         })
-        .unwrap_or(JsonValue::Null);
-    let tools = request
-        .tools
-        .iter()
-        .map(|tool| {
-            JsonValue::object([
-                ("name", JsonValue::String(tool.name.clone())),
-                ("description", JsonValue::String(tool.description.clone())),
-                ("schema", tool.schema.clone()),
-                (
-                    "execution_mode",
-                    JsonValue::String(
-                        match tool.execution_mode {
-                            crate::tool::ToolExecutionMode::Sequential => "sequential",
-                            crate::tool::ToolExecutionMode::Parallel => "parallel",
-                        }
-                        .into(),
-                    ),
-                ),
-            ])
-        })
-        .collect::<Vec<_>>();
-    Ok(JsonValue::object([
+        .unwrap_or(JsonValue::Null)
+}
+
+/// Exact typed request material retained before provider dispatch.
+///
+/// Version 2 replaces the version 1 serialized context string with the typed
+/// transcript (including in-place configuration messages), and records the
+/// request purpose, the physical dispatch, and the selection when routing
+/// chose a different physical model. Version 1 material in older sessions is
+/// evidence only and is never reinterpreted.
+fn request_material(
+    request: &tea_core::scheduler::ModelRequest,
+) -> Result<JsonValue, EffectGateError> {
+    let mut fields = vec![
         ("format", JsonValue::String("tea-model-request".into())),
-        ("version", JsonValue::from(1_u64)),
-        (
-            "system_prompt",
-            JsonValue::String(request.system_prompt.clone()),
-        ),
-        ("context", JsonValue::String(request.context.clone())),
-        ("tools", JsonValue::Array(tools)),
-        ("model", model),
+        ("version", JsonValue::from(2_u64)),
+        ("purpose", JsonValue::String(request.purpose.label().into())),
+        ("transcript", request.transcript.canonical_json()),
+        ("model", model_json(request.model.as_ref())),
         (
             "thinking_level",
             JsonValue::String(thinking_level_name(request.thinking_level).into()),
@@ -6204,7 +6233,17 @@ fn request_material(
                 .map(JsonValue::String)
                 .unwrap_or(JsonValue::Null),
         ),
-    ]))
+    ];
+    if request.selected_model.is_some() {
+        fields.push((
+            "selected_model",
+            model_json(request.selected_model.as_ref()),
+        ));
+    }
+    if let Some(cap) = request.max_output_tokens {
+        fields.push(("max_output_tokens", JsonValue::from(u64::from(cap))));
+    }
+    Ok(JsonValue::object(fields))
 }
 
 fn provider_request_digest(request: &tea_core::scheduler::ModelRequest) -> Digest {
@@ -6212,9 +6251,16 @@ fn provider_request_digest(request: &tea_core::scheduler::ModelRequest) -> Diges
     // example Codex emits it in both a header and a prompt-cache key), so a
     // durable request surface must not treat two different identities as the
     // same physical request.
-    let mut writer = CanonicalHashWriter::new("tea-provider-request-surface-v2", 2, 1);
-    writer.string("system_prompt", &request.system_prompt);
-    writer.string("context", &request.context);
+    let mut writer = CanonicalHashWriter::new("tea-provider-request-surface-v3", 3, 1);
+    writer.string("purpose", request.purpose.label());
+    writer.string(
+        "transcript",
+        &request
+            .transcript
+            .canonical_json()
+            .to_json_string()
+            .expect("canonical transcript JSON always encodes"),
+    );
     writer.boolean("has_session_id", request.session_id.is_some());
     if let Some(session_id) = &request.session_id {
         writer.string("session_id", session_id);
@@ -6223,37 +6269,26 @@ fn provider_request_digest(request: &tea_core::scheduler::ModelRequest) -> Diges
         "thinking_level",
         thinking_discriminant(request.thinking_level),
     );
-    match &request.model {
-        Some(model) => {
-            writer.boolean("has_model", true);
-            writer.string("model_provider", &model.provider);
-            writer.string("model_name", &model.model);
-            writer.boolean("has_model_revision", model.revision.is_some());
-            if let Some(revision) = &model.revision {
-                writer.string("model_revision", revision);
+    for (label, model) in [
+        ("model", request.model.as_ref()),
+        ("selected_model", request.selected_model.as_ref()),
+    ] {
+        match model {
+            Some(model) => {
+                writer.boolean(&format!("has_{label}"), true);
+                writer.string(&format!("{label}_provider"), &model.provider);
+                writer.string(&format!("{label}_name"), &model.model);
+                writer.boolean(&format!("has_{label}_revision"), model.revision.is_some());
+                if let Some(revision) = &model.revision {
+                    writer.string(&format!("{label}_revision"), revision);
+                }
             }
+            None => writer.boolean(&format!("has_{label}"), false),
         }
-        None => writer.boolean("has_model", false),
     }
-    writer.u64("tool_count", request.tools.len() as u64);
-    for (index, tool) in request.tools.iter().enumerate() {
-        writer.u64("tool_index", index as u64);
-        writer.string("tool_name", &tool.name);
-        writer.string("tool_description", &tool.description);
-        writer.string(
-            "tool_schema",
-            &tool
-                .schema
-                .to_json_string()
-                .expect("protocol JSON values always encode canonically"),
-        );
-        writer.discriminant(
-            "tool_execution_mode",
-            match tool.execution_mode {
-                tea_core::tool::ToolExecutionMode::Sequential => 1,
-                tea_core::tool::ToolExecutionMode::Parallel => 2,
-            },
-        );
+    writer.boolean("has_max_output_tokens", request.max_output_tokens.is_some());
+    if let Some(cap) = request.max_output_tokens {
+        writer.u64("max_output_tokens", u64::from(cap));
     }
     writer.finish()
 }
@@ -6361,7 +6396,7 @@ fn assistant_entry(
         })
         .collect::<Result<Vec<_>, EffectGateError>>()?;
     Ok(tea_session::AssistantMessageEntry {
-        content: response.assistant_text.clone(),
+        content: super::context::assistant_content_entry(&response.content),
         tool_calls,
         stop_reason: Some(stop_reason_label(response.stop_reason).into()),
         error_message: response.error_message.clone(),
@@ -6375,6 +6410,14 @@ fn assistant_entry(
                 payload: item.payload().to_owned(),
             })
             .collect(),
+        origin: response
+            .origin
+            .as_ref()
+            .map(|origin| tea_session::ModelChangedEntry {
+                provider: origin.provider.clone(),
+                model: origin.model.clone(),
+                revision: origin.revision.clone(),
+            }),
         metadata: BTreeMap::new(),
     })
 }
@@ -6518,7 +6561,6 @@ fn hook_label(hook: &HookInvocation) -> String {
             tool_name,
         } => format!("after_tool:{tool_name}:{tool_call_id}"),
         HookInvocation::TransformContext => "transform_context".into(),
-        HookInvocation::ConvertToLlm => "convert_to_llm".into(),
         HookInvocation::PrepareNextTurn => "prepare_next_turn".into(),
         HookInvocation::ShouldStopAfterTurn => "should_stop_after_turn".into(),
     }
