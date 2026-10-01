@@ -688,9 +688,17 @@ fn source_ordered_selected_entries<'a>(
         }
 
         let mut result_entries = Vec::new();
+        // Configuration recorded after the batch applies from that point on;
+        // it follows every result of the batch, in branch order.
+        let mut configuration_entries = Vec::new();
         let mut next = cursor + 1;
         while next < branch.len() && !source_turn_boundary(&branch[next].body) {
             let candidate = &branch[next];
+            if matches!(candidate.body, SessionEntry::ConfigurationChanged(_))
+                && selected.contains(&candidate.header.id)
+            {
+                configuration_entries.push(candidate);
+            }
             if let SessionEntry::ToolResult(result) = &candidate.body
                 && selected.contains(&candidate.header.id)
             {
@@ -708,6 +716,7 @@ fn source_ordered_selected_entries<'a>(
         result_entries
             .sort_by_key(|(source_index, append_index, _)| (*source_index, *append_index));
         ordered.extend(result_entries.into_iter().map(|(_, _, entry)| entry));
+        ordered.extend(configuration_entries);
         cursor = next;
     }
     ordered

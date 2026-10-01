@@ -1081,6 +1081,7 @@ version = "1.0.0"
 dependencies = [
  "rustybench",
  "smol",
+ "tea-core",
  "tea-protocol",
  "tea-session",
  "tea-trace",

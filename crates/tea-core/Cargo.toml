@@ -11,6 +11,8 @@ path = "src/lib.rs"
 [features]
 default = []
 fixture-runner = ["dep:smol"]
+# Deterministic scripted provider for tests in this and dependent crates.
+testing = []
 
 [dependencies]
 tea-protocol = { path = "../tea-protocol" }
@@ -20,6 +22,7 @@ smol = { workspace = true, optional = true }
 
 [dev-dependencies]
 smol = { workspace = true }
+tea-core = { path = ".", features = ["testing"] }
 # Quality-only allocation profiling. This is the same `AllocProfiler::system()`
 # global-allocator pattern used by the local `e` project; it is never linked
 # into the core library or production adapters.

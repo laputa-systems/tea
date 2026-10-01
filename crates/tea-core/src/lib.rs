@@ -24,6 +24,8 @@ pub mod runtime;
 pub mod scheduler;
 mod schema_validation;
 pub mod state;
+#[cfg(feature = "testing")]
+pub mod testing;
 pub mod tool;
 pub mod trace;
 pub mod transcript;

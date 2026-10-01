@@ -432,6 +432,12 @@ impl RunHandle {
                 terminate: false,
             });
         };
+        if let Some(message) = undeclared_tool_message(agent, tool.as_ref()) {
+            return Ok(PreparedToolCall::Immediate {
+                result: Box::new(error_tool_result(call, message)),
+                terminate: false,
+            });
+        }
         if let Err(error) = tea_protocol::JsonValue::parse(call.arguments.as_str()) {
             return Ok(PreparedToolCall::Immediate {
                 result: Box::new(error_tool_result(
@@ -817,5 +823,33 @@ fn normalize_result_failure(result: &mut AgentToolResult) {
     }
     if !result.is_error {
         result.failure = None;
+    }
+}
+
+/// Refuse a direct model call to an authorized tool the model was not given.
+///
+/// A deferred tool is callable directly only after discovery declared it in
+/// the transcript; a composition-only tool never is. Composition tools reach
+/// both through their own validated path instead.
+fn undeclared_tool_message(agent: &AgentInner, tool: &dyn AgentTool) -> Option<String> {
+    let exposure = tool.exposure();
+    if exposure == crate::tool::ToolExposure::Direct {
+        return None;
+    }
+    let declared = {
+        let state = agent.state.lock().expect("agent state mutex poisoned");
+        crate::state::EffectiveConfiguration::replay(&state.messages)
+            .is_some_and(|configuration| configuration.tool(tool.name()).is_some())
+    };
+    match exposure {
+        crate::tool::ToolExposure::Deferred if !declared => Some(format!(
+            "Tool {} is available but not loaded. Load it with tool discovery before calling it directly.",
+            tool.name()
+        )),
+        crate::tool::ToolExposure::Composition => Some(format!(
+            "Tool {} is not callable directly; it is available only inside a composition script.",
+            tool.name()
+        )),
+        _ => None,
     }
 }
