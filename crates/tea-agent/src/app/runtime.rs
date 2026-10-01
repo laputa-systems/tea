@@ -241,6 +241,10 @@ impl App {
         if self.tui_config.is_none() {
             self.tui_config = Some(load_tui_config(&home)?);
         }
+        self.state.routing_available = self
+            .tui_config
+            .as_ref()
+            .is_some_and(|config| !config.approved_models.is_empty());
         let subagent_footer = self.tui_config.as_ref().and_then(|config| {
             config
                 .features
@@ -258,28 +262,11 @@ impl App {
             CodingHost::with_operations(&workspace, Arc::new(NonblockingCodingOperations))
                 .map_err(|error| AppError::Setup(format!("invalid --cwd: {error}")))?;
         self.workspace = Some(coding_host.workspace().as_path().to_path_buf());
-        let mut configuration = if self.options.provider() == Some(OsStr::new(mock::PROVIDER_ID)) {
+        let configuration = if self.options.provider() == Some(OsStr::new(mock::PROVIDER_ID)) {
             mock::configuration()
         } else {
-            host_configuration(&workspace.to_string_lossy())?
+            self.root_configuration(&workspace)?
         };
-        if self
-            .tui_config
-            .as_ref()
-            .is_some_and(|config| config.features.codemode)
-        {
-            super::host::install_codemode(&mut configuration);
-        }
-        if self
-            .tui_config
-            .as_ref()
-            .is_some_and(|config| !config.mcp_servers.is_empty())
-        {
-            // MCP tools are deferred; discovery loads them on demand.
-            configuration
-                .tools
-                .insert(Arc::new(tea_core::tool_search::ToolSearchTool::default()));
-        }
         self.configuration = Some(configuration);
         self.state
             .set_extension_commands(super::durable::bundled_host_commands()?);
@@ -306,9 +293,35 @@ impl App {
         Ok(())
     }
 
+    /// The host configuration for root runs, with the optional composition
+    /// and discovery tools the terminal config enables.
+    pub(super) fn root_configuration(
+        &self,
+        workspace: &std::path::Path,
+    ) -> Result<tea_core::agent::AgentConfiguration, AppError> {
+        let mut configuration = host_configuration(&workspace.to_string_lossy())?;
+        if let Some(config) = &self.tui_config {
+            if config.features.codemode {
+                super::host::install_codemode(&mut configuration);
+            }
+            if !config.mcp_servers.is_empty() {
+                // MCP tools are deferred; discovery loads them on demand.
+                configuration
+                    .tools
+                    .insert(Arc::new(tea_core::tool_search::ToolSearchTool::default()));
+            }
+        }
+        Ok(configuration)
+    }
+
     /// Optional services installed into root epochs.
     pub(super) fn host_services(&mut self) -> super::durable::HostServices {
         super::durable::HostServices {
+            approved_models: self
+                .tui_config
+                .as_ref()
+                .map(|config| config.approved_models.clone())
+                .unwrap_or_default(),
             cache_warming: self.cache_warming_policy(),
             dynamic_tools: self.mcp_manager().map(|manager| {
                 manager as Arc<dyn tea_core::runtime::DynamicToolSource>
@@ -389,6 +402,11 @@ impl App {
                 .as_ref()
                 .map(|config| config.anthropic)
                 .unwrap_or_default();
+            let approved = self
+                .tui_config
+                .as_ref()
+                .map(|config| config.approved_models.clone())
+                .unwrap_or_default();
             self.provider_factory = Some(Arc::new(
                 ProviderFactory::new(
                     self.registry,
@@ -396,7 +414,8 @@ impl App {
                     self.options.local_context_window(),
                     tea_home,
                 )
-                .with_anthropic(anthropic),
+                .with_anthropic(anthropic)
+                .with_routing(approved),
             ));
         }
         self.provider_factory

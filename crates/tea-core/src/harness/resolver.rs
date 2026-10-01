@@ -106,6 +106,8 @@ pub struct ResolvedHarness {
     pub(crate) idle_hooks: Vec<ResolvedIdleHook>,
     /// Immutable state contracts keyed by their fixed extension identity.
     pub(crate) extension_state_versions: BTreeMap<String, String>,
+    /// Extension-declared virtual models, keyed by their owning extension.
+    pub(crate) virtual_models: Vec<(String, crate::harness::extension::ExtensionVirtualModel)>,
     /// Host hooks wrapped by source-pinned extension hooks for this snapshot.
     pub(crate) hooks: Arc<dyn HookSet>,
     /// Immutable policy values selected for this resolved epoch.
@@ -172,6 +174,13 @@ impl ResolvedHarness {
 
     pub(crate) fn idle_hooks(&self) -> &[ResolvedIdleHook] {
         &self.idle_hooks
+    }
+
+    /// Extension-declared virtual models with their owning extension.
+    pub(crate) fn virtual_models(
+        &self,
+    ) -> &[(String, crate::harness::extension::ExtensionVirtualModel)] {
+        &self.virtual_models
     }
 
     /// Return the state contract pinned for one resolved extension.
@@ -532,7 +541,18 @@ impl HarnessResolver {
         let mut command_names = BTreeSet::new();
         let mut host_commands = Vec::new();
         let mut idle_hooks = Vec::new();
+        let mut virtual_models = Vec::new();
+        let mut virtual_ids = BTreeSet::new();
         for (plugin_id, resolved) in &resolved_extensions {
+            for model in &resolved.virtual_models {
+                if !virtual_ids.insert(model.id.clone()) {
+                    return Err(HarnessError::invalid_state(format!(
+                        "plugins declare duplicate virtual model {}",
+                        model.id
+                    )));
+                }
+                virtual_models.push((plugin_id.clone(), model.clone()));
+            }
             for command in &resolved.host_commands {
                 let description = command.description();
                 if self.reserved_command_names.contains(&description.name) {
@@ -571,6 +591,7 @@ impl HarnessResolver {
             host_commands,
             idle_hooks,
             extension_state_versions,
+            virtual_models,
             lifecycle,
             memory_collector,
             context_policies,
@@ -1281,6 +1302,7 @@ fn resolve_snapshot(input: ResolveSnapshotInput<'_>) -> Result<ResolvedHarness, 
         host_commands: input.host_commands,
         idle_hooks: input.idle_hooks,
         extension_state_versions: input.extension_state_versions,
+        virtual_models: input.virtual_models,
         hooks: input.hooks,
         automatic_compaction: input.runtime_services.automatic_compaction_policy().clone(),
         tool_result_projection: input
@@ -1308,6 +1330,7 @@ struct ResolveSnapshotInput<'a> {
     host_commands: Vec<ResolvedHostCommand>,
     idle_hooks: Vec<ResolvedIdleHook>,
     extension_state_versions: BTreeMap<String, String>,
+    virtual_models: Vec<(String, crate::harness::extension::ExtensionVirtualModel)>,
     lifecycle: PluginLifecycleRegistry,
     memory_collector: Arc<ExtensionMemoryCollector>,
     context_policies: ContextPolicyRegistry,
@@ -1409,6 +1432,7 @@ mod tests {
                 idle_hook: None,
                 context_policy: None,
                 lifecycle: None,
+                virtual_models: Vec::new(),
             })
         }
     }

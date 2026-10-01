@@ -215,7 +215,9 @@ impl App {
             return;
         };
         let length = match picker {
-            Picker::Model { filter, .. } => model_candidates(&self.registry, filter).len(),
+            Picker::Model { filter, .. } => {
+                model_candidates(&self.registry, filter, self.state.routing_available).len()
+            }
             Picker::CustomModel { .. } => return,
             Picker::Thinking { .. } => super::support::thinking_levels().len(),
             Picker::Session {
@@ -251,7 +253,8 @@ impl App {
         };
         match picker {
             Picker::Model { filter, selected } => {
-                let candidates = model_candidates(&self.registry, &filter);
+                let candidates =
+                    model_candidates(&self.registry, &filter, self.state.routing_available);
                 if let Some(candidate) = candidates.get(selected).copied() {
                     if let Some(model) = candidate.model_id() {
                         if let Err(error) =
@@ -402,9 +405,9 @@ impl App {
         }
         let workspace = self
             .workspace
-            .as_ref()
+            .clone()
             .ok_or_else(|| AppError::Setup("workspace is not initialized".into()))?;
-        super::host::host_configuration(&workspace.to_string_lossy())
+        self.root_configuration(&workspace)
     }
 }
 

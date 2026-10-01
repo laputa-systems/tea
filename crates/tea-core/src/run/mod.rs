@@ -196,6 +196,8 @@ pub(crate) struct RunPolicyState {
     /// against the exact same retained transcript.
     compaction_blocked_message_count: Option<usize>,
     compaction_cancelled: bool,
+    /// Physical model of this run's latest routed request.
+    routed_physical: Option<ModelDescriptor>,
 }
 
 #[derive(Clone, Debug)]
@@ -1066,16 +1068,170 @@ impl RunHandle {
                 thinking_override.unwrap_or(state.thinking_level),
             )
         };
+        let (model, selected_model, thinking_level) = self
+            .route_model(agent, selected_model, thinking_level)
+            .await?;
         let transcript = self.build_transcript(agent, context).await?;
         Ok(ModelRequest {
             purpose: crate::scheduler::RequestPurpose::Turn,
             transcript,
-            model: selected_model,
-            selected_model: None,
+            model,
+            selected_model,
             thinking_level,
             session_id: self.configuration.provenance.session_id.clone(),
             max_output_tokens: None,
         })
+    }
+
+    /// Resolve a virtual selection to one approved physical model.
+    ///
+    /// Returns the dispatched model, the selection when it differs, and the
+    /// reasoning level. A physical selection passes through unchanged.
+    async fn route_model(
+        &self,
+        agent: &AgentInner,
+        selected: Option<ModelDescriptor>,
+        thinking_level: ThinkingLevel,
+    ) -> Result<(Option<ModelDescriptor>, Option<ModelDescriptor>, ThinkingLevel), CoreError> {
+        let Some(selected) = selected else {
+            return Ok((None, None, thinking_level));
+        };
+        if selected.provider != crate::routing::VIRTUAL_PROVIDER {
+            return Ok((Some(selected), None, thinking_level));
+        }
+        let virtual_model = agent
+            .virtual_models
+            .iter()
+            .find(|candidate| candidate.descriptor == selected)
+            .ok_or_else(|| CoreError::ModelRouting {
+                message: format!(
+                    "virtual model {} has no router in this session",
+                    crate::routing::format_descriptor(&selected)
+                ),
+            })?;
+        if virtual_model.targets.is_empty() {
+            return Err(CoreError::ModelRouting {
+                message: format!(
+                    "virtual model {} has no host-approved targets",
+                    crate::routing::format_descriptor(&selected)
+                ),
+            });
+        }
+        let messages = agent
+            .state
+            .lock()
+            .expect("agent state mutex poisoned")
+            .messages
+            .clone();
+        let (reason, sticky, state) = {
+            let policy = self.policy.lock().expect("run policy mutex poisoned");
+            let after_user = messages
+                .iter()
+                .rev()
+                .find(|message| !matches!(message, AgentMessage::System { .. }))
+                .is_some_and(|message| matches!(message, AgentMessage::User { .. }));
+            let reason = if policy.overflow_retried_this_continuation {
+                crate::routing::RouteReason::Retry
+            } else if after_user {
+                crate::routing::RouteReason::User
+            } else {
+                crate::routing::RouteReason::Continuation
+            };
+            let state = virtual_model.state_namespace.as_ref().and_then(|namespace| {
+                agent
+                    .router_state
+                    .lock()
+                    .expect("router state mutex poisoned")
+                    .get(namespace)
+                    .cloned()
+                    .or_else(|| virtual_model.state.clone())
+            });
+            (reason, policy.routed_physical.clone(), state)
+        };
+        if reason != crate::routing::RouteReason::User
+            && virtual_model.continuations == crate::routing::ContinuationPolicy::Sticky
+        {
+            // Keep tool continuations and retries on the physical model that
+            // started this work: no router call, no state change.
+            let current = sticky
+                .or_else(|| crate::routing::latest_physical(&messages).cloned())
+                .filter(|model| virtual_model.approves(model));
+            if let Some(physical) = current {
+                self.policy
+                    .lock()
+                    .expect("run policy mutex poisoned")
+                    .routed_physical = Some(physical.clone());
+                return Ok((Some(physical), Some(selected), thinking_level));
+            }
+        }
+        let route = virtual_model
+            .router
+            .route(&crate::routing::RouteRequest {
+                selected: &selected,
+                thinking_level,
+                reason,
+                previous: crate::routing::latest_physical(&messages),
+                targets: &virtual_model.targets,
+                state: state.as_ref(),
+                messages: &messages,
+            })
+            .map_err(|error| CoreError::ModelRouting {
+                message: format!(
+                    "router for {} failed: {}",
+                    crate::routing::format_descriptor(&selected),
+                    error.message
+                ),
+            })?;
+        if !virtual_model.approves(&route.target) {
+            return Err(CoreError::ModelRouting {
+                message: format!(
+                    "router for {} chose {}, which is not a host-approved target",
+                    crate::routing::format_descriptor(&selected),
+                    crate::routing::format_descriptor(&route.target)
+                ),
+            });
+        }
+        if let Some(value) = route.state.filter(|value| Some(value) != state.as_ref()) {
+            let namespace = virtual_model.state_namespace.clone().ok_or_else(|| {
+                CoreError::ModelRouting {
+                    message: format!(
+                        "router for {} returned state but has no state namespace",
+                        crate::routing::format_descriptor(&selected)
+                    ),
+                }
+            })?;
+            let durable_write = self
+                .begin_effect(EffectSubject::DurableWrite {
+                    write: crate::effect::DurableWriteRequest::RouterState {
+                        namespace: namespace.clone(),
+                        value: crate::state::SerializedJson::new(value.to_json_string().map_err(
+                            |error| CoreError::ModelRouting {
+                                message: format!("router state is not JSON: {error}"),
+                            },
+                        )?),
+                    },
+                })
+                .await?;
+            self.settle_effect(
+                durable_write,
+                EffectOutcome::DurableWrite(crate::effect::EffectCompletion::Succeeded),
+            )
+            .await?;
+            agent
+                .router_state
+                .lock()
+                .expect("router state mutex poisoned")
+                .insert(namespace, value);
+        }
+        self.policy
+            .lock()
+            .expect("run policy mutex poisoned")
+            .routed_physical = Some(route.target.clone());
+        Ok((
+            Some(route.target),
+            Some(selected),
+            route.thinking_level.unwrap_or(thinking_level),
+        ))
     }
 
     /// Begin warming the prompt-cache entry of the exact request about to be

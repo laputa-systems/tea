@@ -25,6 +25,8 @@ pub(super) struct TuiConfig {
     pub(super) cache_warming: CacheWarmingTuiConfig,
     /// Explicitly configured local stdio MCP servers, in name order.
     pub(super) mcp_servers: Vec<super::mcp::McpServerConfig>,
+    /// Physical models virtual selections may route to, in approval order.
+    pub(super) approved_models: Vec<tea_core::state::ModelDescriptor>,
 }
 
 /// Active-work prompt-cache warming. Enabled by default as in Pi: it only
@@ -328,7 +330,7 @@ fn parse_tui_config(path: &Path, source: &str) -> Result<TuiConfig, ConfigError>
         path,
         source,
         root,
-        &["features", "subagents", "anthropic", "cache_warming", "mcp"],
+        &["features", "subagents", "anthropic", "cache_warming", "mcp", "routing"],
         "root",
     )?;
 
@@ -370,12 +372,49 @@ fn parse_tui_config(path: &Path, source: &str) -> Result<TuiConfig, ConfigError>
         None => Vec::new(),
         Some(item) => parse_mcp(path, source, item)?,
     };
+    let approved_models = match root.get("routing") {
+        None => Vec::new(),
+        Some(item) => {
+            let table = item.as_table().ok_or_else(|| {
+                error_for_item(path, source, item, "root table [routing] must be a TOML table")
+            })?;
+            reject_unknown_keys(path, source, table, &["approved_models"], "[routing]")?;
+            match table.get("approved_models") {
+                None => Vec::new(),
+                Some(item) => {
+                    let invalid = || {
+                        error_for_item(
+                            path,
+                            source,
+                            item,
+                            "[routing].approved_models must be an array of unique \"provider/model\" strings",
+                        )
+                    };
+                    let values = item.as_array().ok_or_else(invalid)?;
+                    let mut models: Vec<tea_core::state::ModelDescriptor> = Vec::new();
+                    for value in values.iter() {
+                        let model = value
+                            .as_str()
+                            .and_then(tea_core::routing::parse_descriptor)
+                            .filter(|model| model.provider != tea_core::routing::VIRTUAL_PROVIDER)
+                            .ok_or_else(invalid)?;
+                        if models.contains(&model) {
+                            return Err(invalid());
+                        }
+                        models.push(model);
+                    }
+                    models
+                }
+            }
+        }
+    };
     Ok(TuiConfig {
         features,
         subagents,
         anthropic,
         cache_warming,
         mcp_servers,
+        approved_models,
     })
 }
 
@@ -716,7 +755,7 @@ fn reject_unknown_keys(
         if !allowed.contains(&key) {
             let message = if table_name == "root" {
                 format!(
-                    "unknown root key {key:?}; only [features], [subagents], [anthropic], [cache_warming], and [mcp] are allowed"
+                    "unknown root key {key:?}; only [features], [subagents], [anthropic], [cache_warming], [mcp], and [routing] are allowed"
                 )
             } else {
                 format!("unknown {table_name} key {key:?}")
@@ -1001,6 +1040,7 @@ timeout_seconds = 600
                 anthropic: AnthropicTuiConfig::default(),
                 cache_warming: CacheWarmingTuiConfig::default(),
                 mcp_servers: Vec::new(),
+                approved_models: Vec::new(),
             }
         );
 
@@ -1110,6 +1150,30 @@ enabled = false
             "[mcp.servers.x]\ncommand = \"x\"\ncall_timeout_seconds = 0\n",
             "[mcp.servers.x].call_timeout_seconds must be between",
         );
+    }
+
+    #[test]
+    fn routing_approves_explicit_physical_models_only() {
+        let home = tea_home("routing");
+        write_config(
+            &home,
+            "[routing]\napproved_models = [\"anthropic/claude-opus-5-5\", \"openrouter/openai/gpt-5.6-luna\"]\n",
+        );
+        let approved = load_tui_config(&home).expect("routing config").approved_models;
+        assert_eq!(approved.len(), 2);
+        assert_eq!(approved[1].provider, "openrouter");
+        assert_eq!(approved[1].model, "openai/gpt-5.6-luna");
+        for invalid in [
+            "approved_models = [\"virtual/plan-build\"]",
+            "approved_models = [\"no-slash\"]",
+            "approved_models = [\"a/b\", \"a/b\"]",
+        ] {
+            expect_error(
+                &tea_home("routing-invalid"),
+                &format!("[routing]\n{invalid}\n"),
+                "[routing].approved_models must be",
+            );
+        }
     }
 
     #[test]

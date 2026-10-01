@@ -20,6 +20,7 @@ pub mod harness;
 pub mod hooks;
 pub mod measurement;
 pub mod queue;
+pub mod routing;
 pub mod run;
 pub mod runtime;
 pub mod scheduler;

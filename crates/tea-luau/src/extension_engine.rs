@@ -16,7 +16,7 @@ use tea_core::harness::extension::{
     ExtensionError, ExtensionHostCommand, ExtensionHostCommandDescription, ExtensionIdleHook,
     ExtensionIdleInput, ExtensionIdleResult, ExtensionLifecycle, ExtensionLimits,
     ExtensionMemoryCollector, ExtensionPromptSection, ExtensionSourceTree,
-    ExtensionToolDescription, ExtensionToolLimits, ResolvedExtension,
+    ExtensionToolDescription, ExtensionToolLimits, ExtensionVirtualModel, ResolvedExtension,
 };
 use tea_core::hooks::HookSet;
 use tea_protocol::{JsonNumber, JsonValue};
@@ -147,6 +147,43 @@ impl ExtensionEngine for LuauExtensionEngine {
                 policy: Arc::clone(&policy),
             }) as Arc<dyn ExtensionIdleHook>
         });
+        let virtual_models = policy
+            .virtual_models()
+            .iter()
+            .map(|model| {
+                let targets = model
+                    .targets
+                    .as_ref()
+                    .map(|targets| {
+                        targets
+                            .iter()
+                            .map(|target| {
+                                tea_core::routing::parse_descriptor(target).ok_or_else(|| {
+                                    ExtensionError::new(format!(
+                                        "virtual model {} target {target:?} must be provider/model",
+                                        model.id
+                                    ))
+                                })
+                            })
+                            .collect::<Result<Vec<_>, _>>()
+                    })
+                    .transpose()?;
+                Ok(ExtensionVirtualModel {
+                    id: model.id.clone(),
+                    name: model.name.clone(),
+                    targets,
+                    continuations: if model.routed_continuations {
+                        tea_core::routing::ContinuationPolicy::Routed
+                    } else {
+                        tea_core::routing::ContinuationPolicy::Sticky
+                    },
+                    router: Arc::new(LuauRouter {
+                        policy: Arc::clone(&policy),
+                        id: model.id.clone(),
+                    }),
+                })
+            })
+            .collect::<Result<Vec<_>, ExtensionError>>()?;
         Ok(ResolvedExtension {
             hooks,
             tools,
@@ -154,6 +191,7 @@ impl ExtensionEngine for LuauExtensionEngine {
             idle_hook,
             context_policy,
             lifecycle,
+            virtual_models,
         })
     }
 }
@@ -176,6 +214,24 @@ impl ExtensionHostCommand for LuauHostCommand {
         self.policy
             .execute_host_command(&self.description.name, input)
             .map_err(extension_error)
+    }
+}
+
+/// A declared virtual model's route function, evaluated in the extension's
+/// sandboxed policy VM with no capabilities.
+struct LuauRouter {
+    policy: Arc<LuaPolicy>,
+    id: String,
+}
+
+impl tea_core::routing::ModelRouter for LuauRouter {
+    fn route(
+        &self,
+        request: &tea_core::routing::RouteRequest<'_>,
+    ) -> Result<tea_core::routing::Route, tea_core::routing::RouteError> {
+        self.policy
+            .route_virtual_model(&self.id, request)
+            .map_err(|error| tea_core::routing::RouteError::new(error.to_string()))
     }
 }
 

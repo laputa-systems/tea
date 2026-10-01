@@ -207,6 +207,8 @@ pub struct LuaPolicy {
     /// Immutable state contract selected by a v3 bundle, if it requests the
     /// narrow `extension.state` capability.
     pub(super) state_version: Option<String>,
+    /// Declared virtual models; their route functions stay in the VM.
+    pub(super) virtual_models: Vec<super::parsing::PolicyVirtualModel>,
 }
 
 pub(super) struct PolicyRuntime {
@@ -227,6 +229,8 @@ pub(super) struct PolicyRuntime {
     pub(super) host_commands: Vec<PolicyHostCommandHandler>,
     /// Optional bounded callback evaluated after a durable operation settles.
     pub(super) on_idle: Option<Function>,
+    /// Deterministic virtual-model route functions by model id.
+    pub(super) virtual_routes: Vec<(String, Function)>,
     pub(super) interrupt_budget: Arc<AtomicUsize>,
     pub(super) max_interrupt_checks: usize,
 }

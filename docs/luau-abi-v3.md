@@ -19,7 +19,9 @@ An ABI-v3 entrypoint returns a table with:
   (`name`, `help`, optional `allowed_while_active`, and a sandboxed `handler`);
 - optional `on_idle`, a bounded callback evaluated only after a durable
   operation is terminal and its lane is idle;
-- optional resume_hooks; and
+- optional resume_hooks;
+- optional `virtual_models`, deterministic routers for host-approved physical
+  models (see [virtual models](virtual-models.md)); and
 - optional `state_version`, required exactly when the manifest requests
   `extension.state`.
 

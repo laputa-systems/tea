@@ -142,6 +142,7 @@ impl ExtensionEngine for ControlExtensionEngine {
             idle_hook: Some(Arc::new(ControlIdleHook)),
             context_policy: None,
             lifecycle: None,
+            virtual_models: Vec::new(),
         })
     }
 }

@@ -2,8 +2,8 @@
 
 use super::parsing::{
     parse_after_tool_output, parse_context_projection, parse_decision, parse_declaration,
-    parse_extension_result, parse_idle_result, parse_resume_state, policy_result_fields,
-    runtime_error,
+    parse_extension_result, parse_idle_result, parse_resume_state, parse_route,
+    policy_result_fields, runtime_error,
 };
 use super::types::{PolicyHostCommand, PolicyRuntime, PolicyTool};
 use super::{
@@ -101,6 +101,7 @@ impl LuaPolicy {
                 resume_hooks: declaration.resume_hooks,
                 host_commands: declaration.host_command_handlers,
                 on_idle: declaration.on_idle,
+                virtual_routes: declaration.virtual_routes,
                 interrupt_budget,
                 max_interrupt_checks: limits.max_interrupt_checks,
             }),
@@ -108,6 +109,7 @@ impl LuaPolicy {
             tools: declaration.tools,
             host_commands: declaration.host_commands,
             state_version: declaration.state_version,
+            virtual_models: declaration.virtual_models,
         })
     }
 
@@ -203,6 +205,7 @@ impl LuaPolicy {
                 resume_hooks: declaration.resume_hooks,
                 host_commands: declaration.host_command_handlers,
                 on_idle: declaration.on_idle,
+                virtual_routes: declaration.virtual_routes,
                 interrupt_budget,
                 max_interrupt_checks: limits.max_interrupt_checks,
             }),
@@ -210,6 +213,7 @@ impl LuaPolicy {
             tools: declaration.tools,
             host_commands: declaration.host_commands,
             state_version: declaration.state_version,
+            virtual_models: declaration.virtual_models,
         })
     }
 
@@ -256,6 +260,60 @@ impl LuaPolicy {
             .call::<Value>(input)
             .map_err(runtime_error)?;
         parse_extension_result(output)
+    }
+
+    /// Declared virtual models.
+    pub fn virtual_models(&self) -> &[super::PolicyVirtualModel] {
+        &self.virtual_models
+    }
+
+    /// Evaluate one declared virtual model's deterministic route function.
+    ///
+    /// The function receives a bounded summary of the request: `reason`,
+    /// `selected`, `thinking_level`, `previous`, `targets`, `state`,
+    /// `last_user_text` (at most 4096 bytes), `tool_results` since the last
+    /// user message, and `previous_turn_tool_results` for the turn before it
+    /// (each `{ name = ..., is_error = ... }`, at most 64).
+    pub fn route_virtual_model(
+        &self,
+        id: &str,
+        request: &tea_core::routing::RouteRequest<'_>,
+    ) -> Result<tea_core::routing::Route, PolicyError> {
+        let runtime = self.runtime.lock().map_err(|_| PolicyError::Runtime {
+            message: "policy VM lock was poisoned".to_owned(),
+        })?;
+        let route = runtime
+            .virtual_routes
+            .iter()
+            .find(|(candidate, _)| candidate == id)
+            .map(|(_, function)| function.clone())
+            .ok_or_else(|| PolicyError::Contract {
+                message: format!("unknown declared virtual model {id:?}"),
+            })?;
+        reset_interrupt_budget(&runtime);
+        let input = route_request_table(&runtime.lua, request)?;
+        let output = route.call::<Value>(input).map_err(runtime_error)?;
+        let parsed = parse_route(output)?;
+        let target =
+            tea_core::routing::parse_descriptor(&parsed.target).ok_or_else(|| PolicyError::Contract {
+                message: format!(
+                    "virtual model route target {:?} must be provider/model",
+                    parsed.target
+                ),
+            })?;
+        let thinking_level = parsed
+            .thinking_level
+            .map(|name| {
+                thinking_level_from_name(&name).ok_or_else(|| PolicyError::Contract {
+                    message: format!("virtual model route thinking_level {name:?} is unknown"),
+                })
+            })
+            .transpose()?;
+        Ok(tea_core::routing::Route {
+            target,
+            thinking_level,
+            state: parsed.state.map(|update| update.value),
+        })
     }
 
     /// Return whether the policy contributes an idle continuation callback.
@@ -568,6 +626,138 @@ fn extension_idle_input_table(lua: &Lua, input: &ExtensionIdleInput) -> Result<T
     set_optional_u64(&usage, "cache_write_tokens", input.usage.cache_write_tokens)?;
     table.set("usage", usage).map_err(runtime_error)?;
     Ok(table)
+}
+
+fn thinking_level_from_name(name: &str) -> Option<tea_core::state::ThinkingLevel> {
+    use tea_core::state::ThinkingLevel;
+    Some(match name {
+        "off" => ThinkingLevel::Off,
+        "minimal" => ThinkingLevel::Minimal,
+        "low" => ThinkingLevel::Low,
+        "medium" => ThinkingLevel::Medium,
+        "high" => ThinkingLevel::High,
+        "xhigh" => ThinkingLevel::XHigh,
+        "max" => ThinkingLevel::Max,
+        _ => return None,
+    })
+}
+
+fn thinking_level_name(level: tea_core::state::ThinkingLevel) -> &'static str {
+    use tea_core::state::ThinkingLevel;
+    match level {
+        ThinkingLevel::Off => "off",
+        ThinkingLevel::Minimal => "minimal",
+        ThinkingLevel::Low => "low",
+        ThinkingLevel::Medium => "medium",
+        ThinkingLevel::High => "high",
+        ThinkingLevel::XHigh => "xhigh",
+        ThinkingLevel::Max => "max",
+    }
+}
+
+/// Bounded, provider-neutral summary of one routing request.
+fn route_request_table(
+    lua: &Lua,
+    request: &tea_core::routing::RouteRequest<'_>,
+) -> Result<Table, PolicyError> {
+    use tea_core::state::AgentMessage;
+    const USER_TEXT_LIMIT: usize = 4096;
+    const TOOL_RESULT_LIMIT: usize = 64;
+    let table = lua.create_table().map_err(runtime_error)?;
+    table
+        .set("reason", request.reason.label())
+        .map_err(runtime_error)?;
+    table
+        .set(
+            "selected",
+            tea_core::routing::format_descriptor(request.selected),
+        )
+        .map_err(runtime_error)?;
+    table
+        .set("thinking_level", thinking_level_name(request.thinking_level))
+        .map_err(runtime_error)?;
+    if let Some(previous) = request.previous {
+        table
+            .set("previous", tea_core::routing::format_descriptor(previous))
+            .map_err(runtime_error)?;
+    }
+    let targets = lua.create_table().map_err(runtime_error)?;
+    for (index, target) in request.targets.iter().enumerate() {
+        targets
+            .set(index + 1, tea_core::routing::format_descriptor(target))
+            .map_err(runtime_error)?;
+    }
+    table.set("targets", targets).map_err(runtime_error)?;
+    table
+        .set("state", extension_state_value(lua, &request.state.cloned())?)
+        .map_err(runtime_error)?;
+    let last_user = request
+        .messages
+        .iter()
+        .rposition(|message| matches!(message, AgentMessage::User { .. }));
+    if let Some(index) = last_user {
+        if let AgentMessage::User { content, .. } = &request.messages[index] {
+            let mut text = content.clone();
+            if text.len() > USER_TEXT_LIMIT {
+                let mut end = USER_TEXT_LIMIT;
+                while !text.is_char_boundary(end) {
+                    end -= 1;
+                }
+                text.truncate(end);
+            }
+            table.set("last_user_text", text).map_err(runtime_error)?;
+        }
+    }
+    let since = last_user.map_or(0, |index| index + 1);
+    table
+        .set(
+            "tool_results",
+            tool_results_table(lua, &request.messages[since..], TOOL_RESULT_LIMIT)?,
+        )
+        .map_err(runtime_error)?;
+    // The turn before the latest user message, so a sticky router can act on
+    // what happened there at the next user turn.
+    let previous_user = last_user.and_then(|index| {
+        request.messages[..index]
+            .iter()
+            .rposition(|message| matches!(message, AgentMessage::User { .. }))
+    });
+    let previous_turn = match (previous_user, last_user) {
+        (Some(start), Some(end)) => &request.messages[start + 1..end],
+        _ => &[],
+    };
+    table
+        .set(
+            "previous_turn_tool_results",
+            tool_results_table(lua, previous_turn, TOOL_RESULT_LIMIT)?,
+        )
+        .map_err(runtime_error)?;
+    Ok(table)
+}
+
+fn tool_results_table(
+    lua: &Lua,
+    messages: &[tea_core::state::AgentMessage],
+    limit: usize,
+) -> Result<Table, PolicyError> {
+    let results = lua.create_table().map_err(runtime_error)?;
+    for (index, (name, is_error)) in messages
+        .iter()
+        .filter_map(|message| match message {
+            tea_core::state::AgentMessage::ToolResult {
+                tool_name, is_error, ..
+            } => Some((tool_name.as_str(), *is_error)),
+            _ => None,
+        })
+        .take(limit)
+        .enumerate()
+    {
+        let entry = lua.create_table().map_err(runtime_error)?;
+        entry.set("name", name).map_err(runtime_error)?;
+        entry.set("is_error", is_error).map_err(runtime_error)?;
+        results.set(index + 1, entry).map_err(runtime_error)?;
+    }
+    Ok(results)
 }
 
 fn extension_state_value(lua: &Lua, value: &Option<JsonValue>) -> Result<Value, PolicyError> {

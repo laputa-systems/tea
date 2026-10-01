@@ -28,6 +28,22 @@ pub(super) struct ParsedDeclaration {
     pub(super) resume_hooks: Vec<PolicyResumeHook>,
     pub(super) on_idle: Option<Function>,
     pub(super) state_version: Option<String>,
+    pub(super) virtual_models: Vec<PolicyVirtualModel>,
+    pub(super) virtual_routes: Vec<(String, Function)>,
+}
+
+/// Metadata of one declared virtual model. The route function stays inside
+/// the policy VM.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PolicyVirtualModel {
+    /// Selection id under the `virtual` provider.
+    pub id: String,
+    /// Display name.
+    pub name: String,
+    /// Optional narrowing of the host-approved targets (`provider/model`).
+    pub targets: Option<Vec<String>>,
+    /// `true` when continuations consult the router.
+    pub routed_continuations: bool,
 }
 
 pub(super) fn parse_declaration(
@@ -53,6 +69,7 @@ fn parse_canonical_declaration(declaration: &Table) -> Result<ParsedDeclaration,
         "commands",
         "on_idle",
         "state_version",
+        "virtual_models",
     ];
     require_only_fields(declaration, &fields, "v3 policy declaration")?;
     let declared_sections = declaration
@@ -97,6 +114,7 @@ fn parse_canonical_declaration(declaration: &Table) -> Result<ParsedDeclaration,
         })
         .transpose()?;
     let tools = parse_tools(declaration)?;
+    let (virtual_models, virtual_routes) = parse_virtual_models(declaration)?;
     Ok(ParsedDeclaration {
         prompt_sections,
         tools,
@@ -108,6 +126,138 @@ fn parse_canonical_declaration(declaration: &Table) -> Result<ParsedDeclaration,
         resume_hooks,
         on_idle,
         state_version,
+        virtual_models,
+        virtual_routes,
+    })
+}
+
+/// Parse optional virtual-model declarations. Each names a deterministic
+/// sandboxed `route` function; targets are always further constrained by the
+/// host's approved set.
+fn parse_virtual_models(
+    declaration: &Table,
+) -> Result<(Vec<PolicyVirtualModel>, Vec<(String, Function)>), PolicyError> {
+    let Some(models) = declaration
+        .get::<Option<Table>>("virtual_models")
+        .map_err(contract_error)?
+    else {
+        return Ok((Vec::new(), Vec::new()));
+    };
+    require_dense_array(&models, "v3 virtual_models")?;
+    let mut ids = BTreeSet::new();
+    let mut metadata = Vec::new();
+    let mut routes = Vec::new();
+    for model in models.sequence_values::<Table>() {
+        let model = model.map_err(contract_error)?;
+        require_only_fields(
+            &model,
+            &["id", "name", "targets", "continuations", "route"],
+            "v3 virtual model",
+        )?;
+        let id: String = model.get("id").map_err(contract_error)?;
+        if id.is_empty()
+            || id.len() > 64
+            || !id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+        {
+            return Err(PolicyError::Contract {
+                message: format!(
+                    "v3 virtual model id {id:?} must use [A-Za-z0-9._-] and be at most 64 bytes"
+                ),
+            });
+        }
+        let name: String = model.get("name").map_err(contract_error)?;
+        if name.trim().is_empty() || name.len() > 120 || name.bytes().any(|byte| byte.is_ascii_control()) {
+            return Err(PolicyError::Contract {
+                message: format!("v3 virtual model {id:?} name must be printable text of at most 120 bytes"),
+            });
+        }
+        let targets = model
+            .get::<Option<Table>>("targets")
+            .map_err(contract_error)?
+            .map(|targets| {
+                require_dense_array(&targets, "v3 virtual model targets")?;
+                targets
+                    .sequence_values::<String>()
+                    .map(|target| {
+                        let target = target.map_err(contract_error)?;
+                        match target.split_once('/') {
+                            Some((provider, model)) if !provider.is_empty() && !model.is_empty() => {
+                                Ok(target)
+                            }
+                            _ => Err(PolicyError::Contract {
+                                message: format!(
+                                    "v3 virtual model {id:?} target {target:?} must be provider/model"
+                                ),
+                            }),
+                        }
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .transpose()?;
+        let routed_continuations = match optional_string(&model, "continuations")?.as_deref() {
+            None | Some("sticky") => false,
+            Some("routed") => true,
+            Some(other) => {
+                return Err(PolicyError::Contract {
+                    message: format!(
+                        "v3 virtual model {id:?} continuations must be \"sticky\" or \"routed\", not {other:?}"
+                    ),
+                });
+            }
+        };
+        let route: Function = model.get("route").map_err(|_| PolicyError::Contract {
+            message: format!("v3 virtual model {id:?} must declare a route function"),
+        })?;
+        if !ids.insert(id.clone()) {
+            return Err(PolicyError::Contract {
+                message: format!("v3 policy contains duplicate virtual model {id:?}"),
+            });
+        }
+        metadata.push(PolicyVirtualModel {
+            id: id.clone(),
+            name,
+            targets,
+            routed_continuations,
+        });
+        routes.push((id, route));
+    }
+    Ok((metadata, routes))
+}
+
+/// A router decision parsed from Luau.
+pub(super) struct ParsedRoute {
+    pub(super) target: String,
+    pub(super) thinking_level: Option<String>,
+    pub(super) state: Option<ExtensionStateUpdate>,
+}
+
+/// Parse `{ target = "provider/model", thinking_level = "...", state = { content_json = "..." } }`.
+pub(super) fn parse_route(value: Value) -> Result<ParsedRoute, PolicyError> {
+    let Value::Table(table) = value else {
+        return Err(PolicyError::Contract {
+            message: "virtual model route must return a result table".into(),
+        });
+    };
+    require_only_fields(
+        &table,
+        &["target", "thinking_level", "state"],
+        "virtual model route result",
+    )?;
+    let target = optional_string(&table, "target")?.ok_or_else(|| PolicyError::Contract {
+        message: "virtual model route result requires a target".into(),
+    })?;
+    let thinking_level = optional_string(&table, "thinking_level")?;
+    let state = table
+        .get::<Option<Table>>("state")
+        .map_err(contract_error)?
+        .map(|state| parse_state_replacement(&state))
+        .transpose()?;
+    Ok(ParsedRoute {
+        target,
+        thinking_level,
+        state,
     })
 }
 
@@ -454,27 +604,29 @@ pub(super) fn parse_extension_result(value: Value) -> Result<ExtensionCommandRes
     let state = table
         .get::<Option<Table>>("state")
         .map_err(contract_error)?
-        .map(|state| {
-            require_only_fields(&state, &["content_json"], "extension state replacement")?;
-            let content_json: String = state.get("content_json").map_err(contract_error)?;
-            if content_json.len() > 16 * 1024 {
-                return Err(PolicyError::Contract {
-                    message: "extension state replacement content_json must be at most 16384 bytes"
-                        .into(),
-                });
-            }
-            let content =
-                JsonValue::parse(&content_json).map_err(|error| PolicyError::Contract {
-                    message: format!("extension state content_json must be valid JSON: {error}"),
-                })?;
-            Ok(ExtensionStateUpdate { value: content })
-        })
+        .map(|state| parse_state_replacement(&state))
         .transpose()?;
     Ok(ExtensionCommandResult {
         notice,
         state,
         internal_input,
     })
+}
+
+/// Parse one whole-state replacement `{ content_json = "<JSON>" }`.
+fn parse_state_replacement(state: &Table) -> Result<ExtensionStateUpdate, PolicyError> {
+    require_only_fields(state, &["content_json"], "extension state replacement")?;
+    let content_json: String = state.get("content_json").map_err(contract_error)?;
+    if content_json.len() > 16 * 1024 {
+        return Err(PolicyError::Contract {
+            message: "extension state replacement content_json must be at most 16384 bytes"
+                .into(),
+        });
+    }
+    let content = JsonValue::parse(&content_json).map_err(|error| PolicyError::Contract {
+        message: format!("extension state content_json must be valid JSON: {error}"),
+    })?;
+    Ok(ExtensionStateUpdate { value: content })
 }
 
 pub(super) fn parse_idle_result(value: Value) -> Result<ExtensionIdleResult, PolicyError> {

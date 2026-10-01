@@ -4004,7 +4004,12 @@ where
                 &self.snapshot()?,
                 &lane_runtime.lane_id,
             ))
-            .with_dynamic_tools_resolved();
+            .with_dynamic_tools_resolved()
+            .with_router_state(router_state_seed(
+                &self.snapshot()?,
+                &lane_runtime.lane_id,
+                &configuration,
+            ));
         let messages = self.core_messages(&lane_runtime, &configuration, recovery.as_ref())?;
         let internal_input = extension_continuation_input(&self.snapshot()?, &operation_id)?;
         let provider_surface_digest = configuration
@@ -5448,7 +5453,42 @@ where
             DurableWriteRequest::CacheMaintenance { record } => {
                 self.persist_cache_maintenance(record)
             }
+            DurableWriteRequest::RouterState { namespace, value } => {
+                self.persist_router_state(namespace, value)
+            }
         }
+    }
+
+    /// Persist a virtual-model router's state as its extension's bounded
+    /// per-lane state, so it follows forks and reopen like any extension
+    /// state. Only an extension with a pinned state contract may write.
+    fn persist_router_state(
+        &mut self,
+        namespace: &str,
+        value: &tea_core::state::SerializedJson,
+    ) -> Result<(), EffectGateError> {
+        let state_version = self
+            .resolved_harness
+            .extension_state_version(namespace)
+            .ok_or_else(|| {
+                EffectGateError::new(format!(
+                    "router state namespace {namespace} has no extension.state contract"
+                ))
+            })?
+            .to_owned();
+        let value = JsonValue::parse(value.as_str())
+            .map_err(|error| EffectGateError::new(format!("router state is not JSON: {error}")))?;
+        let item = extension_state::extension_state_commit_item(
+            self.lane.clone(),
+            namespace,
+            &state_version,
+            tea_core::harness::extension::ExtensionStateUpdate { value },
+        )
+        .map_err(|error| EffectGateError::new(error.to_string()))?;
+        self.mutate(|session| {
+            session.commit(SessionCommit::new(vec![item])?)?;
+            Ok(())
+        })
     }
 
     /// Attribute one prompt-cache maintenance request to this operation. The
@@ -6876,6 +6916,26 @@ fn idle_operation_is_claimed(
         }
     }
     Ok(false)
+}
+
+/// Persisted state of each stateful extension that declares virtual models.
+fn router_state_seed(
+    snapshot: &SessionSnapshot,
+    lane: &LaneId,
+    configuration: &ResolvedHarness,
+) -> BTreeMap<String, JsonValue> {
+    configuration
+        .virtual_models()
+        .iter()
+        .map(|(extension_id, _)| extension_id)
+        .filter(|extension_id| configuration.extension_state_version(extension_id).is_some())
+        .filter_map(|extension_id| {
+            extension_state_view(snapshot, lane, extension_id)
+                .ok()
+                .and_then(|view| view.value)
+                .map(|value| (extension_id.clone(), value))
+        })
+        .collect()
 }
 
 /// The last provider-reported prompt size of a real request on `lane`.

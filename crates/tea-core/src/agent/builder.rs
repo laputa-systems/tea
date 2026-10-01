@@ -32,6 +32,7 @@ pub struct AgentBuilder {
     follow_up_mode: QueueMode,
     prompt_layout_ledger: Option<Arc<crate::measurement::PromptLayoutLedger>>,
     cache_warming: Option<crate::cache_warming::CacheWarmingPolicy>,
+    virtual_models: Vec<crate::routing::VirtualModel>,
 }
 
 impl std::fmt::Debug for AgentBuilder {
@@ -213,6 +214,12 @@ impl AgentBuilder {
         self
     }
 
+    /// Offer virtual models whose routers pick among host-approved targets.
+    pub fn virtual_models(mut self, models: Vec<crate::routing::VirtualModel>) -> Self {
+        self.virtual_models = models;
+        self
+    }
+
     /// Build an owned agent.
     pub fn build(self) -> Agent {
         let next_observer_id = self.observers.len() as u64;
@@ -245,6 +252,8 @@ impl AgentBuilder {
                     .prompt_layout_ledger
                     .unwrap_or_else(|| Arc::new(crate::measurement::PromptLayoutLedger::default())),
                 cache_warming: self.cache_warming,
+                virtual_models: self.virtual_models,
+                router_state: Mutex::new(std::collections::BTreeMap::new()),
                 observers: Mutex::new(
                     self.observers
                         .into_iter()

@@ -133,9 +133,31 @@ impl ModelCandidate {
     }
 }
 
-pub(super) fn model_candidates(registry: &ProviderRegistry, filter: &str) -> Vec<ModelCandidate> {
+const PLAN_BUILD_MODEL: ModelDescriptor = ModelDescriptor {
+    id: "plan-build",
+    display_name: "Plan, then build (routed)",
+    context_window: None,
+};
+
+pub(super) fn model_candidates(
+    registry: &ProviderRegistry,
+    filter: &str,
+    routing: bool,
+) -> Vec<ModelCandidate> {
     let filter = filter.to_ascii_lowercase();
     let mut candidates = Vec::new();
+    // Virtual models appear only when the host approved routing targets.
+    if routing
+        && ("virtual".contains(&filter)
+            || PLAN_BUILD_MODEL.id.contains(&filter)
+            || PLAN_BUILD_MODEL.display_name.to_ascii_lowercase().contains(&filter))
+    {
+        candidates.push(ModelCandidate {
+            provider: tea_core::routing::VIRTUAL_PROVIDER,
+            provider_name: "Virtual",
+            model: Some(PLAN_BUILD_MODEL),
+        });
+    }
     for entry in registry.providers() {
         for model in entry.models {
             if model.id.to_ascii_lowercase().contains(&filter)

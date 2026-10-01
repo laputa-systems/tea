@@ -207,6 +207,13 @@ pub enum DurableWriteRequest {
         /// The validated update in conversation order.
         update: crate::state::ConfigurationUpdate,
     },
+    /// A virtual-model router replaced its persistent state.
+    RouterState {
+        /// The router's state namespace (its extension identity).
+        namespace: String,
+        /// The complete replacement value as canonical JSON.
+        value: crate::state::SerializedJson,
+    },
     /// Attributed usage of a prompt-cache maintenance request. It never joins
     /// model context.
     CacheMaintenance {

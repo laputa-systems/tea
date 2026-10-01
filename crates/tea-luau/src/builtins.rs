@@ -88,6 +88,30 @@ pub fn todo(limits: ExtensionLimits) -> ExtensionSourceTree {
     }
 }
 
+/// Extension identity of the bundled plan/build router.
+pub const PLAN_BUILD_ROUTER_ID: &str = "plan-build";
+
+/// Return the plan/build virtual-model router (the public example under
+/// `examples/plan_build_router`). Hosts seed it only when they approve
+/// routing targets; it contributes no prompt sections, tools, or authority.
+pub fn plan_build_router(limits: ExtensionLimits) -> ExtensionSourceTree {
+    ExtensionSourceTree {
+        extension_id: PLAN_BUILD_ROUTER_ID.into(),
+        files: BTreeMap::from([
+            (
+                "manifest.json".into(),
+                include_str!("../examples/plan_build_router/manifest.json").into(),
+            ),
+            (
+                "init.luau".into(),
+                include_str!("../examples/plan_build_router/init.luau").into(),
+            ),
+        ]),
+        expected_capabilities: Some(BTreeSet::from(["extension.state".into()])),
+        limits,
+    }
+}
+
 /// Return the immutable default `read` builtin source tree.
 pub fn read(limits: ExtensionLimits) -> ExtensionSourceTree {
     builtin(

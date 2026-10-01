@@ -22,6 +22,7 @@ fn fixture_resolved_harness(
         host_commands: Vec::new(),
         idle_hooks: Vec::new(),
         extension_state_versions: BTreeMap::new(),
+        virtual_models: Vec::new(),
         hooks: Arc::new(NoHooks),
         automatic_compaction: Default::default(),
         tool_result_projection: Default::default(),

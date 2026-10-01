@@ -114,6 +114,9 @@ const HOST_HARNESS_ROLLOVER_BUDGET: u32 = 1;
 /// Optional host services installed into every root epoch.
 #[derive(Clone, Default)]
 pub(super) struct HostServices {
+    /// Physical models extension virtual models may route to. When non-empty,
+    /// new sessions also seed the bundled plan/build router.
+    pub(super) approved_models: Vec<ModelDescriptor>,
     /// Active-work prompt-cache warming.
     pub(super) cache_warming: Option<tea_core::cache_warming::CacheWarmingPolicy>,
     /// Tools resolved per epoch, such as tools of local MCP servers.
@@ -805,11 +808,22 @@ fn create_host_harness_with_operations_and_mode(
                 source: tea_luau::builtins::read(extension_limits(&resource_limits)),
             },
         ];
+        let mut extensions = extensions;
         let mut capability_references = vec![
             extension_state.goal_reference.clone(),
             extension_state.todo_reference.clone(),
             web_binding_ref.clone(),
         ];
+        if !services.approved_models.is_empty() {
+            // Routing is a property of the session's immutable harness: a
+            // session created with approved targets carries the example
+            // router; its routes are always constrained by the approved set.
+            extensions.push(HarnessSeedExtension {
+                scope: HarnessSeedExtensionScope::Global,
+                source: tea_luau::builtins::plan_build_router(extension_limits(&resource_limits)),
+            });
+            capability_references.push(extension_state.router_reference.clone());
+        }
         capability_references.extend(coding_bindings.references.iter().cloned());
         let seeded = HarnessSeedBuilder::new(
             Arc::clone(&artifacts),
@@ -1471,8 +1485,12 @@ fn web_capability_binding_with_tinyfish_api_key(
 struct ExtensionStateBindings {
     goal_state: ExtensionStateHandle,
     todo_state: ExtensionStateHandle,
+    router_state: ExtensionStateHandle,
     goal_reference: CapabilityBindingRef,
     todo_reference: CapabilityBindingRef,
+    /// The optional plan/build router's state grant, referenced only by
+    /// sessions created with routing enabled.
+    router_reference: CapabilityBindingRef,
     bindings: Vec<PluginCapabilityBinding>,
 }
 
@@ -1482,12 +1500,18 @@ impl ExtensionStateBindings {
             extension_state_binding("goal", ExtensionToolLimits::default())?;
         let (todo_state, todo_binding) =
             extension_state_binding("todo", tea_luau::builtins::todo_tool_limits())?;
+        let (router_state, router_binding) = extension_state_binding(
+            tea_luau::builtins::PLAN_BUILD_ROUTER_ID,
+            ExtensionToolLimits::default(),
+        )?;
         Ok(Self {
             goal_state,
             todo_state,
+            router_state,
             goal_reference: binding_reference(&goal_binding),
             todo_reference: binding_reference(&todo_binding),
-            bindings: vec![goal_binding, todo_binding],
+            router_reference: binding_reference(&router_binding),
+            bindings: vec![goal_binding, todo_binding, router_binding],
         })
     }
 
@@ -1495,7 +1519,7 @@ impl ExtensionStateBindings {
     fn attach(&self, harness: &Arc<HostHarness>) -> Result<(), AppError> {
         let store: Arc<dyn tea_core::harness::extension::ExtensionStateStore> =
             Arc::clone(harness) as Arc<dyn tea_core::harness::extension::ExtensionStateStore>;
-        for handle in [&self.goal_state, &self.todo_state] {
+        for handle in [&self.goal_state, &self.todo_state, &self.router_state] {
             handle
                 .attach(Arc::clone(&store))
                 .map_err(|error| AppError::Setup(error.to_string()))?;
@@ -2083,6 +2107,7 @@ fn epoch_template(
     if let Some(policy) = services.cache_warming {
         template = template.cache_warming(policy);
     }
+    template = template.approved_models(services.approved_models);
     if let Some(source) = services.dynamic_tools {
         template = template.dynamic_tools(source);
     }
@@ -3485,6 +3510,7 @@ mod tests {
             workspace.clone(),
         );
         let services = HostServices {
+            approved_models: Vec::new(),
             cache_warming: None,
             dynamic_tools: Some(Arc::clone(&manager) as Arc<dyn tea_core::runtime::DynamicToolSource>),
         };
@@ -3579,6 +3605,133 @@ mod tests {
         );
         drop(reopened);
         manager.shutdown();
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn durable_virtual_model_routes_persists_its_phase_and_resumes_it() {
+        use tea_core::testing::{ScriptedProvider, ScriptedTurn};
+        let home = temporary_home();
+        let workspace = home.join("workspace");
+        fs::create_dir_all(&workspace).expect("fixture workspace creates");
+        let planner = ModelDescriptor {
+            provider: "fixture".into(),
+            model: "planner".into(),
+            revision: None,
+        };
+        let builder = ModelDescriptor {
+            provider: "fixture".into(),
+            model: "builder".into(),
+            revision: None,
+        };
+        let selection = ModelDescriptor {
+            provider: "virtual".into(),
+            model: "plan-build".into(),
+            revision: None,
+        };
+        let services = HostServices {
+            approved_models: vec![planner.clone(), builder.clone()],
+            cache_warming: None,
+            dynamic_tools: None,
+        };
+        let provider = ScriptedProvider::new([
+            ScriptedTurn::new()
+                .tool_call(
+                    "call-edit",
+                    "edit",
+                    r#"{"files":[{"path":"plan.md","content":"1. build it\n"}]}"#,
+                )
+                .end_tool_use(),
+            ScriptedTurn::new().text("planned").stop(),
+            ScriptedTurn::new().text("built").stop(),
+        ]);
+        let configuration =
+            host_configuration(&workspace.to_string_lossy()).expect("host configuration builds");
+        let harness = create_host_harness(HostHarnessConfig {
+            tea_home: &home,
+            workspace: &workspace,
+            local_base_url: None,
+            configuration: configuration.clone(),
+            model: selection.clone(),
+            provider: Arc::new(provider.clone()) as Arc<dyn ModelProvider>,
+            thinking_level: Some(ThinkingLevel::Off),
+            compactor: None,
+            automatic_compaction: AutomaticCompactionPolicy::disabled(),
+            subagents: None,
+            services: services.clone(),
+        })
+        .expect("routing fixture host creates");
+        let session_id = harness
+            .snapshot()
+            .expect("snapshot")
+            .header()
+            .session_id
+            .to_string();
+        smol::block_on(harness.run_root_prompt("design it")).expect("first prompt");
+        smol::block_on(harness.run_root_prompt("continue")).expect("second prompt");
+        let requests = provider.requests();
+        // The planning turn and its tool continuation stay on the planner; the
+        // next user turn moves to the builder after the successful edit.
+        assert_eq!(requests[0].model, Some(planner.clone()));
+        assert_eq!(requests[1].model, Some(planner.clone()));
+        assert_eq!(requests[2].model, Some(builder.clone()));
+        assert!(requests
+            .iter()
+            .all(|request| request.selected_model == Some(selection.clone())));
+        assert_eq!(
+            fs::read_to_string(workspace.join("plan.md")).expect("edit ran"),
+            "1. build it\n"
+        );
+
+        let snapshot = harness.snapshot().expect("snapshot");
+        let phases = snapshot
+            .facts()
+            .iter()
+            .filter_map(|stored| match &stored.fact {
+                tea_session::SessionFact::ExtensionStateValueSet(fact)
+                    if fact.extension_id == "plan-build" =>
+                {
+                    fact.value
+                        .get("phase")
+                        .and_then(tea_protocol::JsonValue::as_str)
+                        .map(str::to_owned)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(phases, ["plan", "build"]);
+        let origins = snapshot
+            .entries()
+            .iter()
+            .filter_map(|stored| match &stored.body {
+                tea_session::SessionEntry::AssistantMessage(message) => {
+                    message.origin.as_ref().map(|origin| origin.model.clone())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(origins, ["planner", "planner", "builder"]);
+        drop(harness);
+
+        // Reopen restores the build phase from durable extension state.
+        provider.push_turn(ScriptedTurn::new().text("still building").stop());
+        let reopened = reopen_host_harness(HostHarnessReopen {
+            tea_home: &home,
+            workspace: &workspace,
+            local_base_url: None,
+            session_id: &session_id,
+            configuration,
+            model: selection.clone(),
+            provider: Arc::new(provider.clone()) as Arc<dyn ModelProvider>,
+            compactor: None,
+            automatic_compaction: AutomaticCompactionPolicy::disabled(),
+            subagents: None,
+            services,
+        })
+        .expect("routing session reopens");
+        smol::block_on(reopened.run_root_prompt("more")).expect("reopened prompt");
+        assert_eq!(provider.requests()[3].model, Some(builder));
+        drop(reopened);
         let _ = fs::remove_dir_all(home);
     }
 

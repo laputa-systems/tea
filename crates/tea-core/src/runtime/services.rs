@@ -3,7 +3,7 @@
 use crate::agent::{Agent, AgentConfiguration};
 use crate::harness::lineage::runtime_hook_bundle_digest;
 use crate::harness::{HarnessError, ResolvedHarness};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use tea_core::compaction::{AutomaticCompactionPolicy, Compactor};
 use tea_core::effect::{EffectGate, RunProvenance};
@@ -115,6 +115,8 @@ pub struct RuntimeServices {
     prompt_layout_policy: crate::measurement::PromptLayoutPolicy,
     cache_warming: Option<crate::cache_warming::CacheWarmingPolicy>,
     dynamic_tools: Option<Arc<dyn DynamicToolSource>>,
+    approved_models: Vec<ModelDescriptor>,
+    router_state: BTreeMap<String, tea_protocol::JsonValue>,
 }
 
 /// Trusted host tools whose set may change between epochs, such as tools of
@@ -171,6 +173,8 @@ impl RuntimeServices {
             prompt_layout_policy: crate::measurement::PromptLayoutPolicy::default(),
             cache_warming: None,
             dynamic_tools: None,
+            approved_models: Vec::new(),
+            router_state: BTreeMap::new(),
         }
     }
 
@@ -198,6 +202,67 @@ impl RuntimeServices {
     pub fn dynamic_tools(mut self, source: Arc<dyn DynamicToolSource>) -> Self {
         self.dynamic_tools = Some(source);
         self
+    }
+
+    /// Approve the physical models extension-declared virtual models may
+    /// route to. Without approval, a virtual selection fails clearly.
+    pub fn approved_models(mut self, models: Vec<ModelDescriptor>) -> Self {
+        self.approved_models = models;
+        self
+    }
+
+    /// The host-approved physical models, in approval order.
+    pub fn approved_models_list(&self) -> &[ModelDescriptor] {
+        &self.approved_models
+    }
+
+    /// Seed router state for this epoch from durable extension state.
+    pub(crate) fn with_router_state(
+        mut self,
+        state: BTreeMap<String, tea_protocol::JsonValue>,
+    ) -> Self {
+        self.router_state = state;
+        self
+    }
+
+    /// Virtual models for one epoch: extension routers constrained to the
+    /// host-approved set and seeded with their persisted state.
+    fn virtual_models(&self, resolved: &ResolvedHarness) -> Vec<crate::routing::VirtualModel> {
+        resolved
+            .virtual_models()
+            .iter()
+            .map(|(extension_id, model)| {
+                let targets = self
+                    .approved_models
+                    .iter()
+                    .filter(|approved| {
+                        model
+                            .targets
+                            .as_ref()
+                            .is_none_or(|declared| declared.contains(approved))
+                    })
+                    .cloned()
+                    .collect();
+                let state_namespace = resolved
+                    .extension_state_version(extension_id)
+                    .map(|_| extension_id.clone());
+                crate::routing::VirtualModel {
+                    descriptor: ModelDescriptor {
+                        provider: crate::routing::VIRTUAL_PROVIDER.into(),
+                        model: model.id.clone(),
+                        revision: None,
+                    },
+                    name: model.name.clone(),
+                    targets,
+                    continuations: model.continuations,
+                    router: Arc::clone(&model.router),
+                    state: state_namespace
+                        .as_ref()
+                        .and_then(|namespace| self.router_state.get(namespace).cloned()),
+                    state_namespace,
+                }
+            })
+            .collect()
     }
 
     /// Freeze the dynamic tool source into this epoch's trusted tools.
@@ -469,6 +534,7 @@ impl RuntimeServices {
             .thinking_level(self.thinking_level)
             .tool_failure_circuit_breaker(resolved.tool_failure_circuit_breaker());
         builder = builder.prompt_layout_ledger(prompt_layout_ledger);
+        builder = builder.virtual_models(self.virtual_models(resolved));
         if let Some(policy) = &self.cache_warming {
             builder = builder.cache_warming(policy.clone());
         }

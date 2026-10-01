@@ -56,14 +56,45 @@ struct LazyProvider {
     descriptor: ModelDescriptor,
 }
 
+impl LazyProvider {
+    /// The physical model this port dispatches a request to. A virtual
+    /// selection dispatches the approved physical model core routed to; a
+    /// request that still names the virtual model (such as a compaction
+    /// summary) goes to the first approved model.
+    fn physical(&self, requested: Option<&ModelDescriptor>) -> Result<ModelDescriptor, AppError> {
+        if self.descriptor.provider != tea_core::routing::VIRTUAL_PROVIDER {
+            return Ok(self.descriptor.clone());
+        }
+        match requested {
+            Some(model) if model.provider != tea_core::routing::VIRTUAL_PROVIDER => {
+                if self.factory.approved.contains(model) {
+                    Ok(model.clone())
+                } else {
+                    Err(AppError::Setup(format!(
+                        "{} is not a host-approved routing target",
+                        tea_core::routing::format_descriptor(model)
+                    )))
+                }
+            }
+            _ => self.factory.approved.first().cloned().ok_or_else(|| {
+                AppError::Setup("virtual models need [routing] approved_models".into())
+            }),
+        }
+    }
+}
+
 impl ModelProvider for LazyProvider {
     fn capabilities(&self, model: Option<&ModelDescriptor>) -> ModelCapabilities {
         // Capabilities are only consulted while a request is being prepared,
         // after the terminal validated authority. A missing credential keeps
         // the conservative default and the request itself reports the error.
-        self.factory
-            .configured(&self.descriptor)
-            .map(|configured| configured.provider.capabilities(model))
+        // They always describe the physical model that will serve the request.
+        self.physical(model)
+            .and_then(|physical| {
+                self.factory
+                    .configured(&physical)
+                    .map(|configured| configured.provider.capabilities(Some(&physical)))
+            })
             .unwrap_or_default()
     }
 
@@ -73,8 +104,8 @@ impl ModelProvider for LazyProvider {
         cancellation: CancellationToken,
     ) -> ModelFuture<'a> {
         let configured = self
-            .factory
-            .configured(&self.descriptor)
+            .physical(request.model.as_ref())
+            .and_then(|physical| self.factory.configured(&physical))
             .map(|configured| Arc::clone(&configured.provider));
         Box::pin(async move {
             match configured {
@@ -139,6 +170,8 @@ pub(super) struct ProviderFactory {
     tea_home: PathBuf,
     credentials: Arc<dyn CredentialSource>,
     anthropic: AnthropicTuiConfig,
+    /// Host-approved physical models virtual selections may route to.
+    approved: Vec<ModelDescriptor>,
     cache: Mutex<BTreeMap<ProviderDescriptorKey, Arc<ConfiguredProvider>>>,
     compactors: Mutex<BTreeMap<ProviderDescriptorKey, Arc<ProviderCompactor>>>,
 }
@@ -190,6 +223,7 @@ impl ProviderFactory {
             tea_home,
             credentials,
             anthropic: AnthropicTuiConfig::default(),
+            approved: Vec::new(),
             cache: Mutex::new(BTreeMap::new()),
             compactors: Mutex::new(BTreeMap::new()),
         }
@@ -201,9 +235,27 @@ impl ProviderFactory {
         self
     }
 
+    /// Approve the physical models virtual selections may route to.
+    pub(super) fn with_routing(mut self, approved: Vec<ModelDescriptor>) -> Self {
+        self.approved = approved;
+        self
+    }
+
     /// Validate a terminal-selected descriptor without consulting credentials
     /// or constructing an adapter.
     pub(super) fn validate_descriptor(&self, descriptor: &ModelDescriptor) -> Result<(), AppError> {
+        if descriptor.provider == tea_core::routing::VIRTUAL_PROVIDER {
+            if self.approved.is_empty() {
+                return Err(AppError::Setup(format!(
+                    "virtual model {} needs [routing] approved_models in config.toml",
+                    descriptor.model
+                )));
+            }
+            for target in &self.approved {
+                self.validate_descriptor(target)?;
+            }
+            return Ok(());
+        }
         if descriptor.provider == mock::PROVIDER_ID {
             if descriptor.model != mock::DEFAULT_MODEL_ID {
                 return Err(AppError::Setup(format!(
@@ -390,6 +442,19 @@ impl ProviderFactory {
         &self,
         descriptor: &ModelDescriptor,
     ) -> Result<Arc<ConfiguredProvider>, AppError> {
+        if descriptor.provider == tea_core::routing::VIRTUAL_PROVIDER {
+            // A virtual selection is executable only when every approved
+            // target is; its first target stands in for direct requests.
+            self.validate_descriptor(descriptor)?;
+            let mut first = None;
+            for target in &self.approved {
+                let configured = self.configured(target)?;
+                first.get_or_insert(configured);
+            }
+            return first.ok_or_else(|| {
+                AppError::Setup("virtual models need [routing] approved_models".into())
+            });
+        }
         self.validate_descriptor(descriptor)?;
         let key = ProviderDescriptorKey::from(descriptor);
         let mut cache = self
@@ -427,6 +492,16 @@ impl ProviderFactory {
 
     /// Return the host-known context capacity for a selected descriptor.
     pub(super) fn context_window(&self, descriptor: &ModelDescriptor) -> Option<NonZeroU64> {
+        if descriptor.provider == tea_core::routing::VIRTUAL_PROVIDER {
+            // Compaction must hold for whichever physical model answers next.
+            return self
+                .approved
+                .iter()
+                .map(|target| self.context_window(target))
+                .collect::<Option<Vec<_>>>()?
+                .into_iter()
+                .min();
+        }
         if descriptor.provider == mock::PROVIDER_ID {
             return NonZeroU64::new(mock::CONTEXT_WINDOW);
         }

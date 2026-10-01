@@ -894,6 +894,36 @@ pub struct ResolvedExtension {
     pub context_policy: Option<Arc<dyn ExtensionContextPolicy>>,
     /// Optional process-local lifecycle implementation.
     pub lifecycle: Option<Arc<dyn ExtensionLifecycle>>,
+    /// Virtual models declared by this extension.
+    pub virtual_models: Vec<ExtensionVirtualModel>,
+}
+
+/// A virtual model declared by an extension.
+#[derive(Clone)]
+pub struct ExtensionVirtualModel {
+    /// Selection identity: the model id under the `virtual` provider.
+    pub id: String,
+    /// Display name.
+    pub name: String,
+    /// Physical models the router may choose, when the extension narrows
+    /// them. The host's approved set always applies; `None` means "any
+    /// host-approved model".
+    pub targets: Option<Vec<crate::state::ModelDescriptor>>,
+    /// Whether continuations consult the router.
+    pub continuations: crate::routing::ContinuationPolicy,
+    /// Deterministic sandboxed router.
+    pub router: Arc<dyn crate::routing::ModelRouter>,
+}
+
+impl fmt::Debug for ExtensionVirtualModel {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ExtensionVirtualModel")
+            .field("id", &self.id)
+            .field("targets", &self.targets)
+            .field("continuations", &self.continuations)
+            .finish_non_exhaustive()
+    }
 }
 
 impl fmt::Debug for ResolvedExtension {
@@ -1007,6 +1037,7 @@ mod tests {
                 idle_hook: None,
                 context_policy: None,
                 lifecycle: None,
+                virtual_models: Vec::new(),
             })
         }
     }

@@ -54,6 +54,11 @@ pub(crate) struct AgentInner {
     pub(crate) prompt_layout_ledger: Arc<crate::measurement::PromptLayoutLedger>,
     /// Opt-in active-work cache warming; each run owns its own warmer.
     pub(crate) cache_warming: Option<crate::cache_warming::CacheWarmingPolicy>,
+    /// Selectable virtual models and their routers.
+    pub(crate) virtual_models: Vec<crate::routing::VirtualModel>,
+    /// Router state written since this agent was built, by namespace. A
+    /// durable host persists every write and seeds new agents from storage.
+    pub(crate) router_state: Mutex<std::collections::BTreeMap<String, tea_protocol::JsonValue>>,
     /// Synchronous observers in registration order.
     pub(crate) observers: Mutex<Vec<ObserverRegistration>>,
     /// Monotonic process-local observer registrations.

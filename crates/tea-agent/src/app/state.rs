@@ -234,6 +234,8 @@ pub struct AppState {
     /// Field-wise provider accounting from live observations or durable resnapshots.
     pub(super) reported_usage: Usage,
     pub(super) cache_maintenance: CacheMaintenanceSummary,
+    /// Whether the host approved routing targets, so virtual models are offered.
+    pub(super) routing_available: bool,
     /// Optional child-lane activity derived from the durable supervisor. The
     /// field is absent, rather than zeroed, for feature-disabled sessions so
     /// their footer bytes remain unchanged.
@@ -1235,7 +1237,7 @@ impl AppState {
         let picker = self.picker.as_ref()?;
         Some(match picker {
             Picker::Model { filter, selected } => {
-                let candidates = model_candidates(registry, filter);
+                let candidates = model_candidates(registry, filter, self.routing_available);
                 let display = candidates
                     .iter()
                     .copied()
