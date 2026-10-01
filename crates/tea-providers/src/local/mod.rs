@@ -559,7 +559,8 @@ data: [DONE]
             }
         }"#;
         let (events, usage) = parse_local_response(response, 200).expect("response should parse");
-        assert!(matches!(events[0], ModelStreamEvent::ToolCall(_)));
+        assert!(matches!(&events[0], ModelStreamEvent::ThinkingDelta(text) if text == "think"));
+        assert!(matches!(events[1], ModelStreamEvent::ToolCall(_)));
         assert!(matches!(events.last(), Some(ModelStreamEvent::End(_))));
         assert_eq!(
             usage,

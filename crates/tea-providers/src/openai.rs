@@ -18,6 +18,24 @@ use crate::transcript::ConfigurationProjection;
 const OPENROUTER_CONTEXT_PROVIDER: &str = "openrouter";
 const OPENROUTER_REASONING_DETAILS_CONTEXT_KIND: &str = "reasoning_details";
 
+/// Chat Completions fields that carry provider-exposed reasoning text, in
+/// precedence order (Pi's `reasoningFields`). Some servers send the same text
+/// under more than one name, so only the first non-empty field is used.
+const REASONING_FIELDS: [&str; 3] = ["reasoning_content", "reasoning", "reasoning_text"];
+
+/// Return the provider-exposed reasoning text in one Chat Completions delta or
+/// message object, without duplicating text mirrored across field names.
+pub fn chat_reasoning_text(
+    object: &std::collections::BTreeMap<String, JsonValue>,
+) -> Option<&str> {
+    REASONING_FIELDS.iter().find_map(|field| {
+        object
+            .get(*field)
+            .and_then(JsonValue::as_str)
+            .filter(|text| !text.is_empty())
+    })
+}
+
 /// Project a typed request into a Chat Completions message array.
 ///
 /// The leading system message carries the current prompt. Replay follows the

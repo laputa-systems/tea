@@ -26,6 +26,8 @@ pub(super) struct CodexSseDecoder {
     output_index_keys: BTreeMap<u64, String>,
     emitted_text_by_part: BTreeMap<String, String>,
     captured_reasoning: BTreeSet<(Option<String>, String)>,
+    /// The last reasoning summary part that produced visible thinking text.
+    summary_part: Option<(Option<String>, u64)>,
     emitted_tool_call_ids: BTreeSet<String>,
     saw_tool_call: bool,
     terminal: Option<StopReason>,
@@ -40,6 +42,7 @@ impl CodexSseDecoder {
             output_index_keys: BTreeMap::new(),
             emitted_text_by_part: BTreeMap::new(),
             captured_reasoning: BTreeSet::new(),
+            summary_part: None,
             emitted_tool_call_ids: BTreeSet::new(),
             saw_tool_call: false,
             terminal: None,
@@ -202,11 +205,35 @@ impl CodexSseDecoder {
                     self.emit_final_text(self.text_key_from_event(value), text, events);
                 }
             }
-            "response.reasoning_summary_text.delta"
-            | "response.reasoning_summary_text.done"
-            | "response.reasoning_text.delta" => {
-                // Summary text is intentionally not assistant output, and raw
-                // reasoning is never surfaced from this adapter.
+            "response.reasoning_summary_text.delta" => {
+                // Summaries are provider-exposed thinking, never assistant
+                // text, and are not replayed: continuity uses the encrypted
+                // reasoning item. Separate summary parts are joined with a
+                // blank line as upstream Pi does.
+                if let Some(delta) = value.get("delta").and_then(JsonValue::as_str)
+                    && !delta.is_empty()
+                {
+                    let part = (
+                        value
+                            .get("item_id")
+                            .and_then(JsonValue::as_str)
+                            .map(str::to_owned),
+                        value
+                            .get("summary_index")
+                            .and_then(JsonValue::as_u64)
+                            .unwrap_or(0),
+                    );
+                    let separator = match &self.summary_part {
+                        Some(previous) if *previous != part => "\n\n",
+                        _ => "",
+                    };
+                    self.summary_part = Some(part);
+                    events.push(ModelStreamEvent::ThinkingDelta(format!("{separator}{delta}")));
+                }
+            }
+            "response.reasoning_summary_text.done" | "response.reasoning_text.delta" => {
+                // Deltas already carried the summary, and raw reasoning is
+                // never surfaced from this adapter.
             }
             "response.function_call_arguments.delta" => {
                 let key = self.tool_key_from_event(value);
@@ -734,6 +761,34 @@ mod tests {
         }
         events.extend(decoder.finish().unwrap());
         events
+    }
+
+    #[test]
+    fn reasoning_summaries_stream_as_thinking_and_parts_are_separated() {
+        let fixture = concat!(
+            "data: {\"type\":\"response.reasoning_summary_text.delta\",\"item_id\":\"rs_1\",\"summary_index\":0,\"delta\":\"Plan\"}\n\n",
+            "data: {\"type\":\"response.reasoning_summary_text.delta\",\"item_id\":\"rs_1\",\"summary_index\":0,\"delta\":\" ahead\"}\n\n",
+            "data: {\"type\":\"response.reasoning_summary_text.done\",\"item_id\":\"rs_1\",\"summary_index\":0,\"text\":\"Plan ahead\"}\n\n",
+            "data: {\"type\":\"response.reasoning_summary_text.delta\",\"item_id\":\"rs_1\",\"summary_index\":1,\"delta\":\"Check\"}\n\n",
+            "data: {\"type\":\"response.reasoning_text.delta\",\"item_id\":\"rs_1\",\"delta\":\"raw\"}\n\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"answer\"}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{}}\n\n"
+        )
+        .as_bytes();
+        for width in [1, 7, fixture.len()] {
+            let events = collect_with_chunks(fixture, std::iter::repeat_n(width, fixture.len()));
+            let thinking = events
+                .iter()
+                .filter_map(|event| match event {
+                    ModelStreamEvent::ThinkingDelta(text) => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<String>();
+            assert_eq!(thinking, "Plan ahead\n\nCheck");
+            assert!(events.iter().any(
+                |event| matches!(event, ModelStreamEvent::TextDelta(text) if text == "answer")
+            ));
+        }
     }
 
     #[test]

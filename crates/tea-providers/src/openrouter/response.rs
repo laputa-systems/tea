@@ -376,6 +376,9 @@ fn parse_response_inner(bytes: &[u8], allow_partial_sse: bool) -> Result<ParsedR
         .and_then(JsonValue::as_object)
         .ok_or_else(|| "OpenRouter completion choice did not contain a message".to_owned())?;
     let mut events = Vec::new();
+    if let Some(reasoning) = visible_reasoning(message) {
+        events.push(ModelStreamEvent::ThinkingDelta(reasoning));
+    }
     if let Some(content) = message.get("content").and_then(JsonValue::as_str)
         && !content.is_empty()
     {
@@ -489,6 +492,27 @@ fn parse_usage(usage: &JsonValue) -> Usage {
 /// core can durably associate it with the originating assistant turn. The
 /// regular transcript and tools never receive this provider-private field;
 /// `OpenAiContextHook` replays it only when building a later OpenRouter turn.
+/// Provider-exposed reasoning text in one delta or message. OpenRouter mirrors
+/// readable `reasoning_details` into a flat `reasoning` string; when only the
+/// structured form is present its text and summary entries are shown instead.
+/// Encrypted entries are never presented.
+fn visible_reasoning(object: &std::collections::BTreeMap<String, JsonValue>) -> Option<String> {
+    if let Some(text) = crate::openai::chat_reasoning_text(object) {
+        return Some(text.to_owned());
+    }
+    let text = object
+        .get("reasoning_details")
+        .and_then(JsonValue::as_array)?
+        .iter()
+        .filter_map(|detail| match detail.get("type").and_then(JsonValue::as_str) {
+            Some("reasoning.text") => detail.get("text").and_then(JsonValue::as_str),
+            Some("reasoning.summary") => detail.get("summary").and_then(JsonValue::as_str),
+            _ => None,
+        })
+        .collect::<String>();
+    (!text.is_empty()).then_some(text)
+}
+
 fn reasoning_details_context_event(
     details: &[JsonValue],
 ) -> Result<Option<ModelStreamEvent>, String> {
@@ -828,6 +852,9 @@ impl StreamingSseDecoder {
         let Some(delta) = choice.get("delta").and_then(JsonValue::as_object) else {
             return Ok(());
         };
+        if let Some(reasoning) = visible_reasoning(delta) {
+            events.push_back(ModelStreamEvent::ThinkingDelta(reasoning));
+        }
         if let Some(content) = delta.get("content").and_then(JsonValue::as_str)
             && !content.is_empty()
         {

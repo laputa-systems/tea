@@ -398,6 +398,7 @@ impl OpenRouterEventStream {
             if matches!(
                 event,
                 ModelStreamEvent::TextDelta(_)
+                    | ModelStreamEvent::ThinkingDelta(_)
                     | ModelStreamEvent::ToolCall(_)
                     | ModelStreamEvent::OpaqueProviderContext(_)
                     | ModelStreamEvent::Usage(_)
@@ -1110,6 +1111,40 @@ data: [DONE]
                 .and_then(|cost| cost.total_usd_exact.as_deref()),
             Some("0.000001")
         );
+    }
+
+    #[test]
+    fn streams_provider_exposed_reasoning_as_thinking_without_duplication() {
+        let bytes = br#"data: {"id":"gen_reasoning","choices":[{"delta":{"reasoning":"look ","reasoning_content":"look ","reasoning_details":[{"type":"reasoning.text","text":"look ","format":"unknown","index":0}]},"finish_reason":null}]}
+
+data: {"id":"gen_reasoning","choices":[{"delta":{"reasoning_details":[{"type":"reasoning.summary","summary":"first","format":"unknown","index":0},{"type":"reasoning.encrypted","data":"cipher","format":"unknown","index":1}]},"finish_reason":null}]}
+
+data: {"id":"gen_reasoning","choices":[{"delta":{"content":"answer"},"finish_reason":"stop"}]}
+
+data: [DONE]
+
+"#;
+        let parsed = parse_response(bytes).expect("SSE response parses");
+        let thinking = parsed
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                ModelStreamEvent::ThinkingDelta(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(thinking, ["look ", "first"]);
+        let first_thinking = parsed
+            .events
+            .iter()
+            .position(|event| matches!(event, ModelStreamEvent::ThinkingDelta(_)))
+            .expect("thinking");
+        let first_text = parsed
+            .events
+            .iter()
+            .position(|event| matches!(event, ModelStreamEvent::TextDelta(_)))
+            .expect("text");
+        assert!(first_thinking < first_text);
     }
 
     #[test]

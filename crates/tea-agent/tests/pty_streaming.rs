@@ -124,6 +124,20 @@ struct StreamingFixture {
 
 impl StreamingFixture {
     fn start() -> Self {
+        Self::start_with(
+            br#"data: {"choices":[{"delta":{"content":"first "},"finish_reason":null}]}
+
+"#,
+            br#"data: {"choices":[{"delta":{"content":"second"},"finish_reason":"stop"}],"usage":{"prompt_tokens":2,"completion_tokens":2}}
+
+data: [DONE]
+
+"#,
+        )
+    }
+
+    /// Serve one response whose first records are released before `second`.
+    fn start_with(first: &'static [u8], second: &'static [u8]) -> Self {
         let listener =
             TcpListener::bind("127.0.0.1:0").expect("offline mock HTTP server should bind");
         let address = listener
@@ -137,14 +151,6 @@ impl StreamingFixture {
                 .expect("streaming provider request should connect");
             let mut request = [0_u8; 4096];
             let _ = socket.read(&mut request);
-            let first = br#"data: {"choices":[{"delta":{"content":"first "},"finish_reason":null}]}
-
-"#;
-            let second = br#"data: {"choices":[{"delta":{"content":"second"},"finish_reason":"stop"}],"usage":{"prompt_tokens":2,"completion_tokens":2}}
-
-data: [DONE]
-
-"#;
             socket
                 .write_all(
                     format!(
@@ -950,6 +956,130 @@ fn real_binary_renders_streamed_text_before_the_fixture_settles() {
     terminal
         .assert_terminal_restored(&baseline)
         .expect("normal exit restores applicable terminal modes");
+    terminal
+        .finish(terminal.deadline(Duration::from_secs(3)))
+        .expect("reap tea");
+}
+
+#[test]
+fn real_binary_streams_provider_thinking_apart_from_the_answer_and_restores_it() {
+    let _lock = pty_test_lock();
+    let fixture = StreamingFixture::start_with(
+        br#"data: {"choices":[{"delta":{"reasoning_content":"weighing options"},"finish_reason":null}]}
+
+"#,
+        br#"data: {"choices":[{"delta":{"content":"final answer"},"finish_reason":"stop"}],"usage":{"prompt_tokens":2,"completion_tokens":2}}
+
+data: [DONE]
+
+"#,
+    );
+    let scenario = Scenario::new("thinking provider fixture")
+        .expect("valid scenario label")
+        .command(CommandSpec::new(env!("CARGO_BIN_EXE_tea")).args([
+            "--provider",
+            LOCAL_PROVIDER,
+            "--model",
+            FIXTURE_MODEL,
+            "--local-base-url",
+            fixture.url.as_str(),
+        ]))
+        .size(Size::new(COLUMNS, ROWS).expect("constant terminal size"))
+        .environment(TestEnv::hermetic().expect("create hermetic test environment"))
+        .protocol_profile(ProtocolProfile::xterm_minimal_v1());
+    let mut terminal = PtyTest::spawn(scenario).expect("real tea binary should start in a PTY");
+    terminal
+        .wait_for_screen(
+            terminal.deadline(Duration::from_secs(3)),
+            "model readiness",
+            |screen| screen.contains(&format!("{LOCAL_PROVIDER}/{FIXTURE_MODEL}")),
+        )
+        .expect("model selection should render");
+    terminal
+        .send_text(terminal.deadline(Duration::from_secs(3)), "think first")
+        .expect("send prompt");
+    terminal
+        .wait_for_screen(
+            terminal.deadline(Duration::from_secs(3)),
+            "typed prompt",
+            |screen| screen.contains("think first"),
+        )
+        .expect("typed prompt should render");
+    terminal
+        .send_key(terminal.deadline(Duration::from_secs(3)), Key::Enter)
+        .expect("submit prompt");
+    fixture.wait_for_first_delta();
+    terminal
+        .wait_for_screen(
+            terminal.deadline(Duration::from_secs(3)),
+            "streamed thinking",
+            |screen| screen.contains("∴ thinking") && screen.contains("weighing options"),
+        )
+        .expect("thinking should render as its own block before the answer");
+    terminal
+        .drain(terminal.deadline(Duration::from_secs(3)))
+        .expect("drain available output");
+    assert!(
+        !terminal.screen().contains("final answer"),
+        "terminal displayed unreleased answer text"
+    );
+    fixture.release();
+    terminal
+        .wait_for_screen(
+            terminal.deadline(Duration::from_secs(3)),
+            "settled answer",
+            |screen| screen.contains("weighing options") && screen.contains("final answer"),
+        )
+        .expect("answer should settle beside its thinking");
+    terminal
+        .send_text(terminal.deadline(Duration::from_secs(3)), "/new")
+        .expect("open a fresh session");
+    terminal
+        .send_key(terminal.deadline(Duration::from_secs(3)), Key::Enter)
+        .expect("submit /new");
+    terminal
+        .wait_for_screen(
+            terminal.deadline(Duration::from_secs(3)),
+            "new session",
+            |screen| screen.contains("new session"),
+        )
+        .expect("new session should render");
+    terminal
+        .send_text(terminal.deadline(Duration::from_secs(3)), "/resume")
+        .expect("open the picker");
+    terminal
+        .send_key(terminal.deadline(Duration::from_secs(3)), Key::Enter)
+        .expect("submit /resume");
+    terminal
+        .wait_for_screen(
+            terminal.deadline(Duration::from_secs(3)),
+            "saved session picker",
+            |screen| screen.contains("Sessions"),
+        )
+        .expect("picker should render");
+    terminal
+        .send_key(terminal.deadline(Duration::from_secs(3)), Key::Enter)
+        .expect("resume the saved session");
+    terminal
+        .wait_for_screen(
+            terminal.deadline(Duration::from_secs(3)),
+            "resumed thinking",
+            |screen| {
+                screen.contains("∴ thinking")
+                    && screen.contains("weighing options")
+                    && screen.contains("final answer")
+            },
+        )
+        .expect("durable thinking should be restored as thinking, not answer text");
+    terminal
+        .send_key(terminal.deadline(Duration::from_secs(3)), Key::Ctrl('c'))
+        .expect("send clean interrupt");
+    assert_eq!(
+        terminal
+            .wait_for_exit(terminal.deadline(Duration::from_secs(3)))
+            .expect("wait for tea exit"),
+        ExitStatus::Code(0)
+    );
     terminal
         .finish(terminal.deadline(Duration::from_secs(3)))
         .expect("reap tea");

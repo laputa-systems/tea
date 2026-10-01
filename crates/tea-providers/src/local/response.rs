@@ -144,6 +144,9 @@ impl LocalSseDecoder {
         let Some(delta) = delta else {
             return Ok(());
         };
+        if let Some(reasoning) = crate::openai::chat_reasoning_text(delta) {
+            events.push(ModelStreamEvent::ThinkingDelta(reasoning.to_owned()));
+        }
         if let Some(content) = delta.get("content").and_then(JsonValue::as_str)
             && !content.is_empty()
         {
@@ -214,6 +217,9 @@ pub(super) fn parse_local_response(
         .ok_or_else(|| "local response did not contain a completion choice".to_owned())?;
     let message = object_field(choice, "message")?;
     let mut events = Vec::new();
+    if let Some(reasoning) = crate::openai::chat_reasoning_text(message) {
+        events.push(ModelStreamEvent::ThinkingDelta(reasoning.to_owned()));
+    }
     if let Some(content) = optional_string(message.get("content"))?
         && !content.is_empty()
     {
@@ -343,6 +349,26 @@ fn error_message(error: &JsonValue) -> String {
 mod tests {
     use super::{LocalSseDecoder, ModelStreamEvent};
     use crate::state::{StopReason, Usage};
+
+    #[test]
+    fn local_sse_decoder_streams_reasoning_content_as_thinking() {
+        let mut decoder = LocalSseDecoder::new();
+        assert_eq!(
+            decoder
+                .push(
+                    br#"data: {"choices":[{"delta":{"reasoning_content":"plan","reasoning":"plan"},"finish_reason":null}]}
+
+data: {"choices":[{"delta":{"content":"done"},"finish_reason":"stop"}]}
+
+"#,
+                )
+                .expect("local SSE records parse"),
+            [
+                ModelStreamEvent::ThinkingDelta("plan".into()),
+                ModelStreamEvent::TextDelta("done".into()),
+            ]
+        );
+    }
 
     #[test]
     fn local_sse_decoder_releases_text_before_terminal_records() {

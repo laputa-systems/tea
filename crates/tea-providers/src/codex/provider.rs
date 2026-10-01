@@ -521,6 +521,7 @@ impl CodexEventStream {
             if matches!(
                 event,
                 ModelStreamEvent::TextDelta(_)
+                    | ModelStreamEvent::ThinkingDelta(_)
                     | ModelStreamEvent::ToolCall(_)
                     | ModelStreamEvent::OpaqueProviderContext(_)
                     | ModelStreamEvent::Usage(_)
