@@ -11,14 +11,16 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tea_core::runtime::{SubagentModel, SubagentPolicy};
 use tea_core::scheduler::{
-    CancellationToken, ModelEventStream, ModelFuture, ModelProvider, ModelRequest, ModelStream,
+    CancellationToken, ModelCapabilities, ModelEventStream, ModelFuture, ModelProvider, ModelRequest, ModelStream,
     ModelStreamEvent,
 };
 use tea_core::state::ModelDescriptor;
 use tea_providers::{ConfiguredProvider, ProviderConfiguration, ProviderRegistry};
 
 use super::compaction::ProviderCompactor;
-use super::config::SubagentTuiConfig;
+use super::config::{
+    AnthropicCacheRetention, AnthropicThinkingDisplay, AnthropicTuiConfig, SubagentTuiConfig,
+};
 use super::error::AppError;
 use super::mock;
 
@@ -55,6 +57,16 @@ struct LazyProvider {
 }
 
 impl ModelProvider for LazyProvider {
+    fn capabilities(&self, model: Option<&ModelDescriptor>) -> ModelCapabilities {
+        // Capabilities are only consulted while a request is being prepared,
+        // after the terminal validated authority. A missing credential keeps
+        // the conservative default and the request itself reports the error.
+        self.factory
+            .configured(&self.descriptor)
+            .map(|configured| configured.provider.capabilities(model))
+            .unwrap_or_default()
+    }
+
     fn stream<'a>(
         &'a self,
         request: ModelRequest,
@@ -75,6 +87,23 @@ impl ModelProvider for LazyProvider {
             }
         })
     }
+}
+
+fn anthropic_config(
+    options: AnthropicTuiConfig,
+    config: tea_providers::anthropic::AnthropicConfig,
+) -> tea_providers::anthropic::AnthropicConfig {
+    use tea_providers::anthropic::{CacheRetention, ThinkingDisplay};
+    config
+        .with_cache_retention(match options.cache_retention {
+            AnthropicCacheRetention::None => CacheRetention::None,
+            AnthropicCacheRetention::Short => CacheRetention::Short,
+            AnthropicCacheRetention::Long => CacheRetention::Long,
+        })
+        .with_thinking_display(match options.thinking_display {
+            AnthropicThinkingDisplay::Summarized => ThinkingDisplay::Summarized,
+            AnthropicThinkingDisplay::Omitted => ThinkingDisplay::Omitted,
+        })
 }
 
 /// Host-owned credential boundary. Adapters never receive ambient authority.
@@ -109,6 +138,7 @@ pub(super) struct ProviderFactory {
     local_context_window: Option<NonZeroU64>,
     tea_home: PathBuf,
     credentials: Arc<dyn CredentialSource>,
+    anthropic: AnthropicTuiConfig,
     cache: Mutex<BTreeMap<ProviderDescriptorKey, Arc<ConfiguredProvider>>>,
     compactors: Mutex<BTreeMap<ProviderDescriptorKey, Arc<ProviderCompactor>>>,
 }
@@ -159,9 +189,16 @@ impl ProviderFactory {
             local_context_window,
             tea_home,
             credentials,
+            anthropic: AnthropicTuiConfig::default(),
             cache: Mutex::new(BTreeMap::new()),
             compactors: Mutex::new(BTreeMap::new()),
         }
+    }
+
+    /// Apply terminal-owned native Anthropic options to adapters built later.
+    pub(super) fn with_anthropic(mut self, anthropic: AnthropicTuiConfig) -> Self {
+        self.anthropic = anthropic;
+        self
     }
 
     /// Validate a terminal-selected descriptor without consulting credentials
@@ -441,6 +478,14 @@ impl ProviderFactory {
                     tea_providers::openrouter::OpenRouterConfig::try_new(key, &descriptor.model)
                         .map_err(|error| AppError::Setup(error.to_string()))?,
                 )
+            }
+            "anthropic" => {
+                let key = self.credentials.load("ANTHROPIC_API_KEY", "Anthropic")?;
+                ProviderConfiguration::Anthropic(anthropic_config(
+                    self.anthropic,
+                    tea_providers::anthropic::AnthropicConfig::try_new(key, &descriptor.model)
+                        .map_err(|error| AppError::Setup(error.to_string()))?,
+                ))
             }
             "opencode-zen" => {
                 let key = self.credentials.load("OPENCODE_API_KEY", "OpenCode Zen")?;

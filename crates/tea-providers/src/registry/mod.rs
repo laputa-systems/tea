@@ -37,7 +37,8 @@ mod tests {
         feature = "provider-openrouter",
         feature = "provider-local",
         feature = "provider-opencode-zen",
-        feature = "provider-codex"
+        feature = "provider-codex",
+        feature = "provider-anthropic"
     )))]
     #[test]
     fn default_build_remains_provider_free() {

@@ -11,7 +11,8 @@
     feature = "provider-openrouter",
     feature = "provider-local",
     feature = "provider-opencode-zen",
-    feature = "provider-codex"
+    feature = "provider-codex",
+    feature = "provider-anthropic"
 ))]
 mod error {
     pub use tea_core::error::*;
@@ -36,7 +37,8 @@ mod transcript {
     feature = "provider-openrouter",
     feature = "provider-local",
     feature = "provider-opencode-zen",
-    feature = "provider-codex"
+    feature = "provider-codex",
+    feature = "provider-anthropic"
 ))]
 mod tool {
     pub use tea_core::tool::*;
@@ -46,7 +48,8 @@ mod tool {
     feature = "provider-openrouter",
     feature = "provider-local",
     feature = "provider-opencode-zen",
-    feature = "provider-codex"
+    feature = "provider-codex",
+    feature = "provider-anthropic"
 ))]
 mod json;
 
@@ -54,14 +57,16 @@ mod registry;
 #[cfg(any(
     feature = "provider-openrouter",
     feature = "provider-opencode-zen",
-    feature = "provider-codex"
+    feature = "provider-codex",
+    feature = "provider-anthropic"
 ))]
 mod retry;
 #[cfg(any(
     feature = "provider-openrouter",
     feature = "provider-local",
     feature = "provider-opencode-zen",
-    feature = "provider-codex"
+    feature = "provider-codex",
+    feature = "provider-anthropic"
 ))]
 mod transport_runtime;
 
@@ -69,7 +74,8 @@ mod transport_runtime;
     feature = "provider-openrouter",
     feature = "provider-local",
     feature = "provider-opencode-zen",
-    feature = "provider-codex"
+    feature = "provider-codex",
+    feature = "provider-anthropic"
 ))]
 pub mod openai;
 
@@ -81,10 +87,13 @@ pub use registry::{
 #[cfg(any(
     feature = "provider-openrouter",
     feature = "provider-opencode-zen",
-    feature = "provider-codex"
+    feature = "provider-codex",
+    feature = "provider-anthropic"
 ))]
 pub use retry::RetryPolicy;
 
+#[cfg(feature = "provider-anthropic")]
+pub mod anthropic;
 #[cfg(feature = "provider-codex")]
 pub mod codex;
 #[cfg(feature = "provider-local")]
@@ -114,6 +123,7 @@ pub(crate) mod test_support {
 
     /// Build a typed transcript from a system prompt, tools, and a compact
     /// Chat-style message list (`user`, `assistant`, `tool` roles).
+    #[allow(dead_code)]
     pub(crate) fn transcript(system: &str, tools: &[ToolDefinition], chat: &str) -> Transcript {
         let chat = JsonValue::parse(chat).expect("fixture chat JSON");
         let messages = chat

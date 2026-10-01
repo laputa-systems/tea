@@ -299,12 +299,20 @@ impl App {
                 .local_base_url()
                 .map(|value| os_text(value, "--local-base-url"))
                 .transpose()?;
-            self.provider_factory = Some(Arc::new(ProviderFactory::new(
-                self.registry,
-                local_base_url,
-                self.options.local_context_window(),
-                tea_home,
-            )));
+            let anthropic = self
+                .tui_config
+                .as_ref()
+                .map(|config| config.anthropic)
+                .unwrap_or_default();
+            self.provider_factory = Some(Arc::new(
+                ProviderFactory::new(
+                    self.registry,
+                    local_base_url,
+                    self.options.local_context_window(),
+                    tea_home,
+                )
+                .with_anthropic(anthropic),
+            ));
         }
         self.provider_factory
             .as_ref()

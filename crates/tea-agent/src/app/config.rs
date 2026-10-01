@@ -21,6 +21,32 @@ const DEFAULT_TIMEOUT_SECONDS: u64 = 900;
 pub(super) struct TuiConfig {
     pub(super) features: FeatureConfig,
     pub(super) subagents: SubagentTuiConfig,
+    pub(super) anthropic: AnthropicTuiConfig,
+}
+
+/// Prompt-cache retention requested from the native Anthropic adapter.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(super) enum AnthropicCacheRetention {
+    None,
+    #[default]
+    Short,
+    Long,
+}
+
+/// Whether the native Anthropic adapter asks for visible thinking summaries.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(super) enum AnthropicThinkingDisplay {
+    #[default]
+    Summarized,
+    Omitted,
+}
+
+/// Terminal-owned options for the native Anthropic adapter. Credentials are
+/// never configured here; the adapter reads `ANTHROPIC_API_KEY` lazily.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(super) struct AnthropicTuiConfig {
+    pub(super) cache_retention: AnthropicCacheRetention,
+    pub(super) thinking_display: AnthropicThinkingDisplay,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -279,7 +305,13 @@ fn parse_tui_config(path: &Path, source: &str) -> Result<TuiConfig, ConfigError>
         )
     })?;
     let root = document.as_table();
-    reject_unknown_keys(path, source, root, &["features", "subagents"], "root")?;
+    reject_unknown_keys(
+        path,
+        source,
+        root,
+        &["features", "subagents", "anthropic"],
+        "root",
+    )?;
 
     let features = match root.get("features") {
         None => FeatureConfig::default(),
@@ -289,9 +321,71 @@ fn parse_tui_config(path: &Path, source: &str) -> Result<TuiConfig, ConfigError>
         None => SubagentTuiConfig::default(),
         Some(item) => parse_subagents(path, source, item, features.subagents)?,
     };
+    let anthropic = match root.get("anthropic") {
+        None => AnthropicTuiConfig::default(),
+        Some(item) => parse_anthropic(path, source, item)?,
+    };
     Ok(TuiConfig {
         features,
         subagents,
+        anthropic,
+    })
+}
+
+fn parse_anthropic(
+    path: &Path,
+    source: &str,
+    item: &Item,
+) -> Result<AnthropicTuiConfig, ConfigError> {
+    let table = item.as_table().ok_or_else(|| {
+        error_for_item(
+            path,
+            source,
+            item,
+            "root table [anthropic] must be a TOML table",
+        )
+    })?;
+    reject_unknown_keys(
+        path,
+        source,
+        table,
+        &["cache_retention", "thinking_display"],
+        "[anthropic]",
+    )?;
+    let cache_retention = match table.get("cache_retention") {
+        None => AnthropicCacheRetention::default(),
+        Some(item) => match item.as_str() {
+            Some("none") => AnthropicCacheRetention::None,
+            Some("short") => AnthropicCacheRetention::Short,
+            Some("long") => AnthropicCacheRetention::Long,
+            _ => {
+                return Err(error_for_item(
+                    path,
+                    source,
+                    item,
+                    "[anthropic].cache_retention must be \"none\", \"short\", or \"long\"",
+                ));
+            }
+        },
+    };
+    let thinking_display = match table.get("thinking_display") {
+        None => AnthropicThinkingDisplay::default(),
+        Some(item) => match item.as_str() {
+            Some("summarized") => AnthropicThinkingDisplay::Summarized,
+            Some("omitted") => AnthropicThinkingDisplay::Omitted,
+            _ => {
+                return Err(error_for_item(
+                    path,
+                    source,
+                    item,
+                    "[anthropic].thinking_display must be \"summarized\" or \"omitted\"",
+                ));
+            }
+        },
+    };
+    Ok(AnthropicTuiConfig {
+        cache_retention,
+        thinking_display,
     })
 }
 
@@ -422,7 +516,9 @@ fn reject_unknown_keys(
     for (key, item) in table.iter() {
         if !allowed.contains(&key) {
             let message = if table_name == "root" {
-                format!("unknown root key {key:?}; only [features] and [subagents] are allowed")
+                format!(
+                    "unknown root key {key:?}; only [features], [subagents], and [anthropic] are allowed"
+                )
             } else {
                 format!("unknown {table_name} key {key:?}")
             };
@@ -686,6 +782,7 @@ timeout_seconds = 600
                     max_total_per_operation: NonZeroU32::new(12).expect("nonzero"),
                     timeout: Duration::from_secs(600),
                 },
+                anthropic: AnthropicTuiConfig::default(),
             }
         );
 
@@ -694,6 +791,39 @@ timeout_seconds = 600
         assert_eq!(
             load_tui_config(&disabled).expect("disabled config"),
             TuiConfig::default()
+        );
+    }
+
+    #[test]
+    fn anthropic_options_are_strict_and_default_to_short_summarized() {
+        let home = tea_home("anthropic");
+        write_config(
+            &home,
+            "[anthropic]\ncache_retention = \"long\"\nthinking_display = \"omitted\"\n",
+        );
+        assert_eq!(
+            load_tui_config(&home).expect("anthropic config").anthropic,
+            AnthropicTuiConfig {
+                cache_retention: AnthropicCacheRetention::Long,
+                thinking_display: AnthropicThinkingDisplay::Omitted,
+            }
+        );
+        assert_eq!(
+            AnthropicTuiConfig::default(),
+            AnthropicTuiConfig {
+                cache_retention: AnthropicCacheRetention::Short,
+                thinking_display: AnthropicThinkingDisplay::Summarized,
+            }
+        );
+        expect_error(
+            &tea_home("anthropic-retention"),
+            "[anthropic]\ncache_retention = \"forever\"\n",
+            "[anthropic].cache_retention must be",
+        );
+        expect_error(
+            &tea_home("anthropic-key"),
+            "[anthropic]\napi_key = \"secret\"\n",
+            "unknown [anthropic] key",
         );
     }
 

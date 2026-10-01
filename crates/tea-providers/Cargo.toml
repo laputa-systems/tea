@@ -40,6 +40,8 @@ provider-anthropic = [
 ]
 # Narrow loopback-origin injection used only by deterministic Codex provider tests.
 provider-codex-test-support = ["provider-codex"]
+# Loopback-origin injection used only by deterministic Anthropic adapter tests.
+provider-anthropic-test-support = ["provider-anthropic"]
 
 [dependencies]
 tea-core = { path = "../tea-core" }

@@ -10,6 +10,7 @@ use tea_protocol::JsonNumber;
 pub(crate) use tea_protocol::JsonValue;
 
 /// Convert scalar expressions used by adapter payload builders into protocol JSON values.
+#[allow(dead_code)]
 pub(crate) trait JsonScalar {
     fn to_json_value(&self) -> JsonValue;
 }
@@ -104,6 +105,7 @@ where
 }
 
 /// Convert a scalar expression without moving a field out of an adapter config.
+#[allow(dead_code)]
 pub(crate) fn scalar<T>(value: &T) -> JsonValue
 where
     T: JsonScalar + ?Sized,
@@ -128,6 +130,7 @@ pub(crate) fn from_bytes(bytes: &[u8]) -> Result<JsonValue, String> {
     JsonValue::parse(text).map_err(|_| "response was not valid JSON".to_owned())
 }
 
+#[allow(unused_macros)]
 macro_rules! json_value {
     (null) => {
         $crate::json::JsonValue::Null
@@ -147,4 +150,5 @@ macro_rules! json_value {
     };
 }
 
+#[allow(unused_imports)]
 pub(crate) use json_value;

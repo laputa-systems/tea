@@ -4,13 +4,15 @@
     feature = "provider-openrouter",
     feature = "provider-local",
     feature = "provider-opencode-zen",
-    feature = "provider-codex"
+    feature = "provider-codex",
+    feature = "provider-anthropic"
 ))]
 use super::MODEL_CATALOG_VERSION;
 #[cfg(any(
     feature = "provider-openrouter",
     feature = "provider-local",
-    feature = "provider-opencode-zen"
+    feature = "provider-opencode-zen",
+    feature = "provider-anthropic"
 ))]
 use super::contracts::ModelDescriptor;
 use super::contracts::ProviderEntry;
@@ -18,7 +20,8 @@ use super::contracts::ProviderEntry;
     feature = "provider-openrouter",
     feature = "provider-local",
     feature = "provider-opencode-zen",
-    feature = "provider-codex"
+    feature = "provider-codex",
+    feature = "provider-anthropic"
 ))]
 use super::contracts::{ProviderCapabilities, ProviderConfigurationKind};
 // Source/update evidence for these lists is intentionally local and reviewable. Model identifiers
@@ -74,7 +77,46 @@ static OPENCODE_ZEN_MODELS: &[ModelDescriptor] = &[ModelDescriptor {
     context_window: Some(262_144),
 }];
 
+// The compact Anthropic list mirrors `crate::anthropic::MODELS`, which also
+// carries each model's behavior switches and established prices.
+#[cfg(feature = "provider-anthropic")]
+static ANTHROPIC_MODELS: &[ModelDescriptor] = &[
+    ModelDescriptor {
+        id: "claude-opus-5-5",
+        display_name: "Claude Opus 5.5",
+        context_window: Some(200_000),
+    },
+    ModelDescriptor {
+        id: "claude-sonnet-5-5",
+        display_name: "Claude Sonnet 5.5",
+        context_window: Some(200_000),
+    },
+    ModelDescriptor {
+        id: "claude-fable-5-1",
+        display_name: "Claude Fable 5.1",
+        context_window: Some(200_000),
+    },
+    ModelDescriptor {
+        id: "claude-haiku-4-5",
+        display_name: "Claude Haiku 4.5",
+        context_window: Some(200_000),
+    },
+];
+
 pub(super) static COMPILED_PROVIDERS: &[ProviderEntry] = &[
+    #[cfg(feature = "provider-anthropic")]
+    ProviderEntry {
+        id: crate::anthropic::PROVIDER_ID,
+        display_name: "Anthropic",
+        model_catalog_version: MODEL_CATALOG_VERSION,
+        models: ANTHROPIC_MODELS,
+        allows_custom_models: true,
+        configuration: ProviderConfigurationKind::Anthropic,
+        capabilities: ProviderCapabilities {
+            provider_reported_cost: false,
+            concrete_compactor: false,
+        },
+    },
     #[cfg(feature = "provider-openrouter")]
     ProviderEntry {
         id: "openrouter",

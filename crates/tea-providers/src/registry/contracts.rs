@@ -61,6 +61,9 @@ pub enum ProviderConfigurationKind {
     /// Direct ChatGPT-subscription Codex Responses configuration.
     #[cfg(feature = "provider-codex")]
     Codex,
+    /// Anthropic Messages API-key configuration.
+    #[cfg(feature = "provider-anthropic")]
+    Anthropic,
 }
 
 /// Metadata for one adapter compiled into this crate.
@@ -133,6 +136,9 @@ pub enum ProviderConfiguration {
     /// Fully configured direct ChatGPT-subscription Codex adapter.
     #[cfg(feature = "provider-codex")]
     Codex(crate::codex::CodexConfig),
+    /// Fully configured Anthropic Messages adapter.
+    #[cfg(feature = "provider-anthropic")]
+    Anthropic(crate::anthropic::AnthropicConfig),
 }
 
 /// A provider and the exact model descriptor it was configured to serve.
