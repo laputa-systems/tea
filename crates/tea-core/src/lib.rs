@@ -9,6 +9,7 @@
 extern crate self as tea_core;
 
 pub mod agent;
+pub mod cache_warming;
 pub mod coding;
 pub mod compaction;
 pub mod effect;

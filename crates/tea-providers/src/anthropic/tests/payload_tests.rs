@@ -1,6 +1,7 @@
 //! Request-construction cases ported from upstream Pi.
 
 use super::*;
+use crate::scheduler::MinimalOutputReplay;
 use crate::anthropic::payload::build_request;
 
 fn config(model: &str) -> AnthropicConfig {
@@ -784,18 +785,18 @@ fn capabilities_follow_the_catalog_and_cache_retention() {
         capabilities.prompt_cache,
         Some(crate::scheduler::PromptCacheCapability {
             ttl_seconds: 300,
-            minimal_output_replay: true,
+            minimal_output_replay: MinimalOutputReplay::Safe,
         })
     );
     // Budget thinking derives its budget from the output cap, so a one-token
-    // replay is not cache-equivalent (Pi's isReplayable).
+    // replay is cache-equivalent only with thinking off (Pi's isReplayable).
     let haiku = AnthropicProvider::new(config("claude-haiku-4-5").with_cache_retention(CacheRetention::Long));
     let capabilities = haiku.capabilities(None);
     assert_eq!(
         capabilities.prompt_cache,
         Some(crate::scheduler::PromptCacheCapability {
             ttl_seconds: 3_600,
-            minimal_output_replay: false,
+            minimal_output_replay: MinimalOutputReplay::SafeWithoutThinking,
         })
     );
     assert!(capabilities.pricing.is_some());

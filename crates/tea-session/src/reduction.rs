@@ -799,6 +799,11 @@ fn reduce_lane_prefix<'a>(
                         .or_default()
                         .saturating_add_assign(&record.usage);
                 }
+                LaneRecord::CacheMaintenance(record) => {
+                    // Maintenance is attributed separately from model-turn
+                    // usage; it must still belong to an open operation.
+                    let _ = open_operation(&operations, &record.operation_id)?;
+                }
             },
             SessionMutationRef::Fact(stored) => match &stored.fact {
                 SessionFact::ProviderRequestMaterial(fact) => {

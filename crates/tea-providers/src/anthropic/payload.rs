@@ -12,7 +12,7 @@ use super::PROVIDER_ID;
 use super::catalog::AnthropicCompat;
 use super::config::{AnthropicConfig, CacheRetention};
 use crate::json::JsonValue;
-use crate::scheduler::ModelRequest;
+use crate::scheduler::{MinimalOutputReplay, ModelRequest};
 use crate::state::{AgentMessage, AssistantContent, ThinkingLevel};
 use crate::tool::ToolDeclaration;
 use crate::transcript::{ConfigurationProjection, Transcript};
@@ -76,8 +76,12 @@ pub(super) fn thinking_budget(level: ThinkingLevel) -> u32 {
 /// Whether a request can be replayed with a one-token output cap without
 /// changing its cache key: budget-based thinking derives its budget from the
 /// output cap (Pi's `isReplayable`).
-pub(super) fn minimal_output_replay_is_safe(compat: AnthropicCompat) -> bool {
-    !compat.reasoning || compat.force_adaptive_thinking
+pub(super) fn minimal_output_replay(compat: AnthropicCompat) -> MinimalOutputReplay {
+    if !compat.reasoning || compat.force_adaptive_thinking {
+        MinimalOutputReplay::Safe
+    } else {
+        MinimalOutputReplay::SafeWithoutThinking
+    }
 }
 
 /// Normalize a tool-call identity to Anthropic's `^[a-zA-Z0-9_-]{1,64}$`.

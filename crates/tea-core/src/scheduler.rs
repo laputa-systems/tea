@@ -174,10 +174,24 @@ pub struct ConfigurationUpdateSupport {
 pub struct PromptCacheCapability {
     /// Lifetime in seconds of the cache entry an ordinary request writes.
     pub ttl_seconds: u64,
-    /// Whether replaying an admitted request with minimal output reuses its
-    /// cache entry. False when the output cap or reasoning settings alter
-    /// cache-relevant request content.
-    pub minimal_output_replay: bool,
+    /// Whether replaying an admitted request with a one-token output cap
+    /// reuses its cache entry.
+    pub minimal_output_replay: MinimalOutputReplay,
+}
+
+/// Whether a one-token replay of an admitted request is cache-equivalent.
+///
+/// Reducing the output limit is not cache-neutral for every model: for
+/// example, budget-based thinking derives its budget from the output cap,
+/// which changes cache-relevant request content.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MinimalOutputReplay {
+    /// Cache-equivalent for every request to this model.
+    Safe,
+    /// Cache-equivalent only when the request has thinking off.
+    SafeWithoutThinking,
+    /// Never cache-equivalent.
+    Unsafe,
 }
 
 /// Exact token prices in decimal dollars per million tokens.

@@ -417,6 +417,25 @@ fn retryable_statuses_retry_before_output_and_do_not_duplicate_events() {
     assert_eq!(server.join().len(), 3);
 }
 
+// cache-warmer.ts sends refreshes with maxRetries: 0.
+#[test]
+fn cache_maintenance_requests_are_never_retried() {
+    let server = FixtureServer::start(vec![Scripted::error(
+        529,
+        &[("retry-after-ms", "1")],
+        r#"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#,
+    )]);
+    let provider = provider_for(&server, "claude-haiku-4-5");
+    let mut request = hello_request("claude-haiku-4-5");
+    request.purpose = crate::scheduler::RequestPurpose::CacheMaintenance;
+    request.max_output_tokens = Some(1);
+    let events = without_observation(collect(&provider, request));
+    assert!(matches!(events.last(), Some(ModelStreamEvent::Error { .. })));
+    let requests = server.join();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].json().get("max_tokens").and_then(tea_protocol::JsonValue::as_u64), Some(1));
+}
+
 // provider-retry.test.ts: a server-requested delay above the maximum fails.
 #[test]
 fn an_excessive_server_retry_delay_fails_immediately() {

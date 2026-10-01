@@ -317,7 +317,7 @@ impl ModelProvider for AnthropicProvider {
             exposes_thinking: compat.reasoning,
             prompt_cache: ttl_seconds.map(|ttl_seconds| PromptCacheCapability {
                 ttl_seconds,
-                minimal_output_replay: payload::minimal_output_replay_is_safe(compat),
+                minimal_output_replay: payload::minimal_output_replay(compat),
             }),
             pricing: self.config.pricing.clone(),
             context_window: self.config.context_window,
@@ -340,6 +340,8 @@ struct AnthropicEventStream {
     reducer: StreamReducer,
     pending: VecDeque<ModelStreamEvent>,
     attempt: u32,
+    /// Cache maintenance is best-effort and never retried (Pi's `maxRetries: 0`).
+    retries_allowed: bool,
     visible: bool,
     terminal: bool,
     retry_timer: Option<Pin<Box<smol::Timer>>>,
@@ -366,6 +368,7 @@ impl AnthropicEventStream {
             reducer: StreamReducer::new(None),
             pending: VecDeque::new(),
             attempt: 0,
+            retries_allowed: request.purpose != crate::scheduler::RequestPurpose::CacheMaintenance,
             visible: false,
             terminal: false,
             retry_timer: None,
@@ -491,7 +494,10 @@ impl AnthropicEventStream {
 
     /// Queue a cancellable retry. Returns false when retrying is not allowed.
     fn queue_retry(&mut self, server_delay: Option<Duration>) -> Result<bool, String> {
-        if self.visible || self.attempt > self.provider.config.retry_policy.max_retries() {
+        if !self.retries_allowed
+            || self.visible
+            || self.attempt > self.provider.config.retry_policy.max_retries()
+        {
             return Ok(false);
         }
         let policy = self.provider.config.retry_policy;

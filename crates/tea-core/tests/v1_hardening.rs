@@ -412,6 +412,7 @@ fn assert_lifecycle_balance(events: &[tea_core::event::AgentEvent]) {
             AgentEventKind::MessageUpdate { .. }
             | AgentEventKind::ToolExecutionUpdate { .. }
             | AgentEventKind::ModelTurnUsage { .. }
+            | AgentEventKind::CacheMaintenance { .. }
             | AgentEventKind::CompactionStart { .. }
             | AgentEventKind::CompactionResult { .. }
             | AgentEventKind::CompactionEnd { .. }

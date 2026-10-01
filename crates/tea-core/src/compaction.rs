@@ -1367,6 +1367,7 @@ impl Agent {
                 next_effect_id: std::sync::atomic::AtomicU64::new(0),
                 recovery_tool_calls: None,
                 recovery_prior_all_terminate: None,
+                cache_warmer: None,
             },
             compactor,
         })

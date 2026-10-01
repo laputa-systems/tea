@@ -113,6 +113,7 @@ pub struct RuntimeServices {
     artifact_policy: ArtifactPolicy,
     prompt_layout_scope: crate::measurement::PromptCacheScope,
     prompt_layout_policy: crate::measurement::PromptLayoutPolicy,
+    cache_warming: Option<crate::cache_warming::CacheWarmingPolicy>,
 }
 
 impl std::fmt::Debug for RuntimeServices {
@@ -155,6 +156,7 @@ impl RuntimeServices {
             artifact_policy: ArtifactPolicy::default(),
             prompt_layout_scope: crate::measurement::PromptCacheScope::default(),
             prompt_layout_policy: crate::measurement::PromptLayoutPolicy::default(),
+            cache_warming: None,
         }
     }
 
@@ -167,6 +169,23 @@ impl RuntimeServices {
         configuration: AgentConfiguration,
     ) -> Self {
         Self::new(provider, configuration.tools).hooks(configuration.hooks)
+    }
+
+    /// Enable active-work prompt-cache warming for runs of this session.
+    ///
+    /// Maintenance requests are attributed as durable `cache_maintenance`
+    /// records on the owning operation and never become session entries.
+    pub fn cache_warming(mut self, policy: crate::cache_warming::CacheWarmingPolicy) -> Self {
+        self.cache_warming = Some(policy);
+        self
+    }
+
+    /// Seed enabled warming with the lane's last provider-reported prompt size.
+    pub(crate) fn cache_warming_prompt_tokens(mut self, tokens: Option<u64>) -> Self {
+        if let Some(policy) = self.cache_warming.take() {
+            self.cache_warming = Some(policy.with_prompt_tokens(tokens));
+        }
+        self
     }
 
     /// Set the provider-independent model identity.
@@ -418,6 +437,9 @@ impl RuntimeServices {
             .thinking_level(self.thinking_level)
             .tool_failure_circuit_breaker(resolved.tool_failure_circuit_breaker());
         builder = builder.prompt_layout_ledger(prompt_layout_ledger);
+        if let Some(policy) = &self.cache_warming {
+            builder = builder.cache_warming(policy.clone());
+        }
         if let Some(model) = &self.model {
             builder = builder.model(model.clone());
         }

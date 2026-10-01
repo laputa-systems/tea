@@ -22,6 +22,21 @@ pub(super) struct TuiConfig {
     pub(super) features: FeatureConfig,
     pub(super) subagents: SubagentTuiConfig,
     pub(super) anthropic: AnthropicTuiConfig,
+    pub(super) cache_warming: CacheWarmingTuiConfig,
+}
+
+/// Active-work prompt-cache warming. Enabled by default as in Pi: it only
+/// acts while a run is working, only for models that declare a cache
+/// lifetime and prices, and only when the expected savings reach $0.05.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct CacheWarmingTuiConfig {
+    pub(super) enabled: bool,
+}
+
+impl Default for CacheWarmingTuiConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
 }
 
 /// Prompt-cache retention requested from the native Anthropic adapter.
@@ -309,7 +324,7 @@ fn parse_tui_config(path: &Path, source: &str) -> Result<TuiConfig, ConfigError>
         path,
         source,
         root,
-        &["features", "subagents", "anthropic"],
+        &["features", "subagents", "anthropic", "cache_warming"],
         "root",
     )?;
 
@@ -325,10 +340,33 @@ fn parse_tui_config(path: &Path, source: &str) -> Result<TuiConfig, ConfigError>
         None => AnthropicTuiConfig::default(),
         Some(item) => parse_anthropic(path, source, item)?,
     };
+    let cache_warming = match root.get("cache_warming") {
+        None => CacheWarmingTuiConfig::default(),
+        Some(item) => {
+            let table = item.as_table().ok_or_else(|| {
+                error_for_item(
+                    path,
+                    source,
+                    item,
+                    "root table [cache_warming] must be a TOML table",
+                )
+            })?;
+            reject_unknown_keys(path, source, table, &["enabled"], "[cache_warming]")?;
+            CacheWarmingTuiConfig {
+                enabled: match table.get("enabled") {
+                    None => true,
+                    Some(item) => item.as_bool().ok_or_else(|| {
+                        error_for_item(path, source, item, "[cache_warming].enabled must be a boolean")
+                    })?,
+                },
+            }
+        }
+    };
     Ok(TuiConfig {
         features,
         subagents,
         anthropic,
+        cache_warming,
     })
 }
 
@@ -517,7 +555,7 @@ fn reject_unknown_keys(
         if !allowed.contains(&key) {
             let message = if table_name == "root" {
                 format!(
-                    "unknown root key {key:?}; only [features], [subagents], and [anthropic] are allowed"
+                    "unknown root key {key:?}; only [features], [subagents], [anthropic], and [cache_warming] are allowed"
                 )
             } else {
                 format!("unknown {table_name} key {key:?}")
@@ -783,6 +821,7 @@ timeout_seconds = 600
                     timeout: Duration::from_secs(600),
                 },
                 anthropic: AnthropicTuiConfig::default(),
+                cache_warming: CacheWarmingTuiConfig::default(),
             }
         );
 
@@ -819,6 +858,20 @@ timeout_seconds = 600
             &tea_home("anthropic-retention"),
             "[anthropic]\ncache_retention = \"forever\"\n",
             "[anthropic].cache_retention must be",
+        );
+        let disabled = tea_home("cache-warming-off");
+        write_config(&disabled, "[cache_warming]\nenabled = false\n");
+        assert!(
+            !load_tui_config(&disabled)
+                .expect("cache warming config")
+                .cache_warming
+                .enabled
+        );
+        assert!(TuiConfig::default().cache_warming.enabled);
+        expect_error(
+            &tea_home("cache-warming-type"),
+            "[cache_warming]\nenabled = \"yes\"\n",
+            "[cache_warming].enabled must be a boolean",
         );
         expect_error(
             &tea_home("anthropic-key"),

@@ -282,6 +282,19 @@ impl App {
         Ok(())
     }
 
+    /// The terminal's active-work cache-warming policy, unless disabled.
+    pub(super) fn cache_warming_policy(&self) -> Option<tea_core::cache_warming::CacheWarmingPolicy> {
+        let enabled = self
+            .tui_config
+            .as_ref()
+            .map_or(true, |config| config.cache_warming.enabled);
+        enabled.then(|| {
+            tea_core::cache_warming::CacheWarmingPolicy::new(Arc::new(
+                super::clock::SystemMaintenanceClock,
+            ))
+        })
+    }
+
     /// Construct root/provider authority only when a descriptor actually needs it.
     ///
     /// This keeps feature-disabled idle startup free of any child-provider factory,
@@ -550,6 +563,15 @@ impl App {
             .set_session_id(Some(snapshot.session.header().session_id.to_string()));
         self.state
             .set_reported_usage(super::durable::core_usage(&reduction.usage_totals));
+        self.state
+            .restore_cache_maintenance(snapshot.session.records().iter().filter_map(|stored| {
+                match &stored.record {
+                    tea_session::LaneRecord::CacheMaintenance(record) => {
+                        Some(record.estimated_cost.as_deref())
+                    }
+                    _ => None,
+                }
+            }));
         if replaced {
             self.reconcile_committed_frontier();
         }
@@ -1075,6 +1097,7 @@ impl App {
             compactor: self.compactor.clone(),
             automatic_compaction,
             subagents,
+            cache_warming: self.cache_warming_policy(),
         };
         let harness = if mock_coding_operations {
             super::durable::create_mock_host_harness(config)?
@@ -1157,6 +1180,7 @@ impl App {
             compactor: self.compactor.clone(),
             automatic_compaction,
             subagents,
+            cache_warming: self.cache_warming_policy(),
         };
         let harness = if mock_coding_operations {
             super::durable::reopen_mock_host_harness(input)?

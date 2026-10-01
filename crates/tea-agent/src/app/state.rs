@@ -132,6 +132,27 @@ pub(super) enum Picker {
     },
 }
 
+/// Attributed prompt-cache maintenance shown apart from model-turn usage.
+#[derive(Clone, Debug, Default)]
+pub(super) struct CacheMaintenanceSummary {
+    pub(super) count: u64,
+    /// Sum of listed-price estimates; `None` until one is known.
+    pub(super) estimated_cost: Option<f64>,
+}
+
+impl CacheMaintenanceSummary {
+    fn observe(&mut self, record: &tea_core::cache_warming::CacheMaintenanceRecord) {
+        self.add(record.estimated_cost.as_deref());
+    }
+
+    fn add(&mut self, estimate: Option<&str>) {
+        self.count += 1;
+        if let Some(value) = estimate.and_then(|value| value.parse::<f64>().ok()) {
+            *self.estimated_cost.get_or_insert(0.0) += value;
+        }
+    }
+}
+
 /// Terminal-owned state: event-derived rows plus local input and overlay state.
 #[derive(Clone, Debug, Default)]
 pub struct AppState {
@@ -212,6 +233,7 @@ pub struct AppState {
     pub(super) extension_commands: Vec<ExtensionHostCommandDescription>,
     /// Field-wise provider accounting from live observations or durable resnapshots.
     pub(super) reported_usage: Usage,
+    pub(super) cache_maintenance: CacheMaintenanceSummary,
     /// Optional child-lane activity derived from the durable supervisor. The
     /// field is absent, rather than zeroed, for feature-disabled sessions so
     /// their footer bytes remain unchanged.
@@ -526,6 +548,9 @@ impl AppState {
             // would duplicate accounting and blur unknown values with zeroes.
             AgentEventKind::ModelTurnUsage { accounting } => {
                 self.reported_usage.accumulate(accounting.usage.clone());
+            }
+            AgentEventKind::CacheMaintenance { record } => {
+                self.cache_maintenance.observe(record);
             }
             AgentEventKind::CompactionStart { .. } => {
                 self.status = UiStatus::Active;
@@ -1100,18 +1125,26 @@ impl AppState {
                 super::support::format_compact_tokens(tokens)
             ));
         }
-        if let (Some(input), Some(read), Some(write)) = (
+        // Adapters report the full prompt as input; cache reads are a subset.
+        if let (Some(input), Some(read)) = (
             self.reported_usage.input_tokens,
             self.reported_usage.cache_read_tokens,
-            self.reported_usage.cache_write_tokens,
         ) {
-            let prompt_tokens = input.saturating_add(read).saturating_add(write);
             if let Some(percentage) = read
                 .checked_mul(100)
-                .and_then(|value| value.checked_div(prompt_tokens))
+                .and_then(|value| value.checked_div(input))
             {
-                stats.push(format!("CH{}%", percentage));
+                stats.push(format!("CH{}%", percentage.min(100)));
             }
+        }
+        if self.cache_maintenance.count > 0 {
+            // Maintenance is attributed separately from model turns, and its
+            // dollar value is a listed-price estimate, never a reported charge.
+            let mut warm = format!("warm ×{}", self.cache_maintenance.count);
+            if let Some(cost) = self.cache_maintenance.estimated_cost {
+                warm.push_str(&format!(" ~${cost:.3}"));
+            }
+            stats.push(warm);
         }
         if let Some((active, maximum)) = self.subagent_activity {
             stats.push(format!("agents {active}/{maximum}"));
@@ -1142,6 +1175,17 @@ impl AppState {
     }
 
     /// Replace footer accounting from an authoritative durable lane reduction.
+    /// Rebuild the maintenance summary from durable records' estimates.
+    pub(super) fn restore_cache_maintenance<'a>(
+        &mut self,
+        estimates: impl IntoIterator<Item = Option<&'a str>>,
+    ) {
+        self.cache_maintenance = CacheMaintenanceSummary::default();
+        for estimate in estimates {
+            self.cache_maintenance.add(estimate);
+        }
+    }
+
     pub(super) fn set_reported_usage(&mut self, usage: Usage) {
         self.reported_usage = usage;
     }
@@ -1733,6 +1777,7 @@ impl AppState {
         self.completed_preview_runs.clear();
         self.clear_queued_inputs();
         self.reported_usage = Usage::default();
+        self.cache_maintenance = CacheMaintenanceSummary::default();
         self.projection_generation = self.projection_generation.wrapping_add(1);
     }
 

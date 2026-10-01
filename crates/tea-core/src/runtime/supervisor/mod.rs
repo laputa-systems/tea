@@ -3999,7 +3999,11 @@ where
         let runtime_services = lane_runtime
             .runtime_services
             .clone()
-            .thinking_level(thinking_level);
+            .thinking_level(thinking_level)
+            .cache_warming_prompt_tokens(last_prompt_tokens(
+                &self.snapshot()?,
+                &lane_runtime.lane_id,
+            ));
         let messages = self.core_messages(&lane_runtime, &configuration, recovery.as_ref())?;
         let internal_input = extension_continuation_input(&self.snapshot()?, &operation_id)?;
         let provider_surface_digest = configuration
@@ -5424,7 +5428,47 @@ where
             DurableWriteRequest::ConfigurationUpdate { update } => {
                 self.persist_configuration_update(update)
             }
+            DurableWriteRequest::CacheMaintenance { record } => {
+                self.persist_cache_maintenance(record)
+            }
         }
+    }
+
+    /// Attribute one prompt-cache maintenance request to this operation. The
+    /// record carries billing evidence only and never becomes an entry.
+    fn persist_cache_maintenance(
+        &mut self,
+        record: &tea_core::cache_warming::CacheMaintenanceRecord,
+    ) -> Result<(), EffectGateError> {
+        let model_entry = |model: &tea_core::state::ModelDescriptor| tea_session::ModelChangedEntry {
+            provider: model.provider.clone(),
+            model: model.model.clone(),
+            revision: model.revision.clone(),
+        };
+        let record = tea_session::CacheMaintenanceRecord {
+            operation_id: self.operation_id.clone(),
+            model: record.model.as_ref().map(model_entry),
+            selected_model: record.selected_model.as_ref().map(model_entry),
+            outcome: match &record.outcome {
+                tea_core::cache_warming::CacheMaintenanceOutcome::Completed => {
+                    tea_session::CacheMaintenanceOutcome::Completed
+                }
+                tea_core::cache_warming::CacheMaintenanceOutcome::Failed { message } => {
+                    tea_session::CacheMaintenanceOutcome::Failed {
+                        message: message.clone(),
+                    }
+                }
+                tea_core::cache_warming::CacheMaintenanceOutcome::Cancelled => {
+                    tea_session::CacheMaintenanceOutcome::Cancelled
+                }
+            },
+            usage: core_usage(&record.usage),
+            estimated_cost: record.estimated_cost.clone(),
+        };
+        self.mutate(|session| {
+            session.append_record(LaneRecord::CacheMaintenance(record))?;
+            Ok(())
+        })
     }
 
     /// Commit one model-visible configuration change at the lane leaf before
@@ -6756,6 +6800,26 @@ fn idle_operation_is_claimed(
         }
     }
     Ok(false)
+}
+
+/// The last provider-reported prompt size of a real request on `lane`.
+fn last_prompt_tokens(snapshot: &SessionSnapshot, lane: &LaneId) -> Option<u64> {
+    let lane_operations = snapshot
+        .records()
+        .iter()
+        .filter_map(|stored| match &stored.record {
+            LaneRecord::OperationStarted(record) if &record.lane_id == lane => Some(&record.id),
+            _ => None,
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    snapshot.records().iter().rev().find_map(|stored| match &stored.record {
+        LaneRecord::ProviderRequestSettled(record)
+            if lane_operations.contains(&record.operation_id) =>
+        {
+            record.usage.as_ref().and_then(|usage| usage.input_tokens)
+        }
+        _ => None,
+    })
 }
 
 fn operation_usage(snapshot: &SessionSnapshot, operation_id: &OperationId) -> Usage {

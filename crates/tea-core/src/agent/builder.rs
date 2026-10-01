@@ -31,6 +31,7 @@ pub struct AgentBuilder {
     steering_mode: QueueMode,
     follow_up_mode: QueueMode,
     prompt_layout_ledger: Option<Arc<crate::measurement::PromptLayoutLedger>>,
+    cache_warming: Option<crate::cache_warming::CacheWarmingPolicy>,
 }
 
 impl std::fmt::Debug for AgentBuilder {
@@ -201,6 +202,17 @@ impl AgentBuilder {
         self
     }
 
+    /// Enable active-work prompt-cache warming with a host clock.
+    ///
+    /// Warming only happens while a run is working, only for providers that
+    /// declare a prompt-cache lifetime, prices, and safe minimal-output replay,
+    /// and only when Pi's expected-savings threshold is met. See
+    /// [`crate::cache_warming`].
+    pub fn cache_warming(mut self, policy: crate::cache_warming::CacheWarmingPolicy) -> Self {
+        self.cache_warming = Some(policy);
+        self
+    }
+
     /// Build an owned agent.
     pub fn build(self) -> Agent {
         let next_observer_id = self.observers.len() as u64;
@@ -232,6 +244,7 @@ impl AgentBuilder {
                 prompt_layout_ledger: self
                     .prompt_layout_ledger
                     .unwrap_or_else(|| Arc::new(crate::measurement::PromptLayoutLedger::default())),
+                cache_warming: self.cache_warming,
                 observers: Mutex::new(
                     self.observers
                         .into_iter()

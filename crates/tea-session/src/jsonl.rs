@@ -2588,7 +2588,58 @@ fn encode_record(record: &LaneRecord) -> JsonValue {
             ("request_id", optional_id(record.request_id.as_ref())),
             ("usage", encode_usage(&record.usage)),
         ]),
+        LaneRecord::CacheMaintenance(record) => {
+            let (outcome, message) = match &record.outcome {
+                CacheMaintenanceOutcome::Completed => ("completed", None),
+                CacheMaintenanceOutcome::Failed { message } => ("failed", Some(message.as_str())),
+                CacheMaintenanceOutcome::Cancelled => ("cancelled", None),
+            };
+            JsonValue::object([
+                ("type", JsonValue::String("cache_maintenance".into())),
+                ("operation_id", string_value(&record.operation_id)),
+                ("model", encode_optional_model(record.model.as_ref())),
+                (
+                    "selected_model",
+                    encode_optional_model(record.selected_model.as_ref()),
+                ),
+                ("outcome", JsonValue::String(outcome.into())),
+                ("message", optional_string(message)),
+                ("usage", encode_usage(&record.usage)),
+                (
+                    "estimated_cost",
+                    optional_string(record.estimated_cost.as_deref()),
+                ),
+            ])
+        }
     }
+}
+
+fn encode_optional_model(model: Option<&ModelChangedEntry>) -> JsonValue {
+    model
+        .map(|model| {
+            JsonValue::object([
+                ("provider", JsonValue::String(model.provider.clone())),
+                ("model", JsonValue::String(model.model.clone())),
+                ("revision", optional_string(model.revision.as_deref())),
+            ])
+        })
+        .unwrap_or(JsonValue::Null)
+}
+
+fn decode_optional_model(
+    object: &BTreeMap<String, JsonValue>,
+    field: &str,
+) -> Result<Option<ModelChangedEntry>, String> {
+    optional_value_of(object, field)?
+        .map(|value| {
+            let model = self::object(value)?;
+            Ok(ModelChangedEntry {
+                provider: required_string(model, "provider")?,
+                model: required_string(model, "model")?,
+                revision: optional_string_of(model, "revision")?,
+            })
+        })
+        .transpose()
 }
 
 fn decode_record(value: &JsonValue) -> Result<LaneRecord, String> {
@@ -2794,6 +2845,24 @@ fn decode_record(value: &JsonValue) -> Result<LaneRecord, String> {
             request_id: optional_id_of::<ProviderRequestId>(object, "request_id")?,
             usage: decode_usage(required_value(object, "usage")?)?,
         })),
+        "cache_maintenance" => {
+            let outcome = match required_string(object, "outcome")?.as_str() {
+                "completed" => CacheMaintenanceOutcome::Completed,
+                "failed" => CacheMaintenanceOutcome::Failed {
+                    message: optional_string_of(object, "message")?.unwrap_or_default(),
+                },
+                "cancelled" => CacheMaintenanceOutcome::Cancelled,
+                other => return Err(format!("unknown cache maintenance outcome {other:?}")),
+            };
+            Ok(LaneRecord::CacheMaintenance(CacheMaintenanceRecord {
+                operation_id: parse_id!(OperationId, required_string(object, "operation_id")?),
+                model: decode_optional_model(object, "model")?,
+                selected_model: decode_optional_model(object, "selected_model")?,
+                outcome,
+                usage: decode_usage(required_value(object, "usage")?)?,
+                estimated_cost: optional_string_of(object, "estimated_cost")?,
+            }))
+        }
         other => Err(format!("unknown operation record type {other:?}")),
     }
 }

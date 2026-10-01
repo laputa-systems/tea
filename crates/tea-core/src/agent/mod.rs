@@ -52,6 +52,8 @@ pub(crate) struct AgentInner {
     /// Volatile prompt-layout continuity shared by host-created agents when
     /// a live session spans multiple durable operations.
     pub(crate) prompt_layout_ledger: Arc<crate::measurement::PromptLayoutLedger>,
+    /// Opt-in active-work cache warming; each run owns its own warmer.
+    pub(crate) cache_warming: Option<crate::cache_warming::CacheWarmingPolicy>,
     /// Synchronous observers in registration order.
     pub(crate) observers: Mutex<Vec<ObserverRegistration>>,
     /// Monotonic process-local observer registrations.
@@ -791,6 +793,22 @@ impl Agent {
             state: Arc::clone(&run_state),
             cancellation: cancellation.clone(),
         });
+        let cache_warmer = self.inner.cache_warming.as_ref().map(|policy| {
+            // Seed economics with the last provider-reported prompt size so
+            // a long first generation can still be priced, as Pi reads the
+            // branch's latest assistant usage.
+            let prompt_tokens = self
+                .inner
+                .state
+                .lock()
+                .expect("agent state mutex poisoned")
+                .accounting
+                .turns
+                .last()
+                .and_then(|turn| turn.usage.input_tokens)
+                .or_else(|| policy.prompt_tokens());
+            Arc::new(crate::cache_warming::CacheWarmer::new(policy, prompt_tokens))
+        });
         Ok(RunHandle {
             agent: Arc::downgrade(&self.inner),
             state: run_state,
@@ -803,6 +821,7 @@ impl Agent {
             next_effect_id: AtomicU64::new(0),
             recovery_tool_calls: None,
             recovery_prior_all_terminate: None,
+            cache_warmer,
         })
     }
 

@@ -198,6 +198,12 @@ pub enum DurableWriteRequest {
         /// The validated update in conversation order.
         update: crate::state::ConfigurationUpdate,
     },
+    /// Attributed usage of a prompt-cache maintenance request. It never joins
+    /// model context.
+    CacheMaintenance {
+        /// The settled maintenance record.
+        record: crate::cache_warming::CacheMaintenanceRecord,
+    },
 }
 
 impl EffectSubject {

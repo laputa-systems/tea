@@ -17,7 +17,7 @@
 
 use crate::scheduler::{
     CancellationToken, ModelCapabilities, ModelEventFuture, ModelEventStream, ModelFuture,
-    ModelProvider, ModelRequest, ModelStreamEvent,
+    ModelProvider, ModelRequest, ModelStreamEvent, RequestPurpose,
 };
 use crate::state::{
     AgentToolCall, ModelDescriptor, OpaqueProviderContextItem, SerializedJson, StopReason,
@@ -187,6 +187,7 @@ impl Gate {
 
 struct Shared {
     turns: Mutex<VecDeque<ScriptedTurn>>,
+    maintenance_turns: Mutex<VecDeque<ScriptedTurn>>,
     requests: Mutex<Vec<ModelRequest>>,
     dispatched: Condvar,
     gates: Mutex<BTreeMap<String, Arc<Gate>>>,
@@ -222,6 +223,7 @@ impl ScriptedProvider {
         Self {
             shared: Arc::new(Shared {
                 turns: Mutex::new(turns.into_iter().collect()),
+                maintenance_turns: Mutex::new(VecDeque::new()),
                 requests: Mutex::new(Vec::new()),
                 dispatched: Condvar::new(),
                 gates: Mutex::new(BTreeMap::new()),
@@ -237,6 +239,25 @@ impl ScriptedProvider {
             .lock()
             .expect("scripted turns mutex poisoned")
             .push_back(turn);
+    }
+
+    /// Script the next cache-maintenance response. Maintenance requests never
+    /// consume ordinary turns; without a scripted response they receive one
+    /// output token of usage and a normal stop.
+    pub fn push_maintenance_turn(&self, turn: ScriptedTurn) {
+        self.shared
+            .maintenance_turns
+            .lock()
+            .expect("scripted maintenance mutex poisoned")
+            .push_back(turn);
+    }
+
+    /// Dispatched requests with the given purpose, in order.
+    pub fn requests_for(&self, purpose: RequestPurpose) -> Vec<ModelRequest> {
+        self.requests()
+            .into_iter()
+            .filter(|request| request.purpose == purpose)
+            .collect()
     }
 
     /// The gate with this name, created on first use.
@@ -300,12 +321,30 @@ impl ModelProvider for ScriptedProvider {
         request: ModelRequest,
         _cancellation: CancellationToken,
     ) -> ModelFuture<'a> {
-        let turn = self
-            .shared
-            .turns
-            .lock()
-            .expect("scripted turns mutex poisoned")
-            .pop_front();
+        let maintenance = request.purpose == RequestPurpose::CacheMaintenance;
+        let turn = if maintenance {
+            Some(
+                self.shared
+                    .maintenance_turns
+                    .lock()
+                    .expect("scripted maintenance mutex poisoned")
+                    .pop_front()
+                    .unwrap_or_else(|| {
+                        ScriptedTurn::new()
+                            .usage(Usage {
+                                output_tokens: Some(1),
+                                ..Usage::default()
+                            })
+                            .stop()
+                    }),
+            )
+        } else {
+            self.shared
+                .turns
+                .lock()
+                .expect("scripted turns mutex poisoned")
+                .pop_front()
+        };
         self.shared
             .requests
             .lock()
@@ -421,5 +460,146 @@ impl Future for WaitGate {
         } else {
             Poll::Pending
         }
+    }
+}
+
+/// A manually advanced [`crate::cache_warming::MaintenanceClock`].
+///
+/// Time moves only when a test calls [`VirtualClock::advance`] or
+/// [`VirtualClock::set`]; pending sleeps then wake and re-read the clock.
+/// [`VirtualClock::wait_for_sleepers`] blocks the test thread until the
+/// runtime is parked on the clock, so tests never race the warmer.
+#[derive(Clone, Default)]
+pub struct VirtualClock {
+    shared: Arc<ClockShared>,
+}
+
+#[derive(Default)]
+struct ClockShared {
+    state: Mutex<ClockState>,
+    changed: Condvar,
+}
+
+#[derive(Default)]
+struct ClockState {
+    now: Duration,
+    next_sleeper: u64,
+    sleepers: BTreeMap<u64, (Duration, Option<Waker>)>,
+}
+
+impl VirtualClock {
+    /// A clock at time zero.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Move time forward and wake every due sleeper.
+    pub fn advance(&self, by: Duration) {
+        let now = crate::cache_warming::MaintenanceClock::now(self) + by;
+        self.set(now);
+    }
+
+    /// Jump to an absolute time (as after host suspension) and wake sleepers.
+    pub fn set(&self, to: Duration) {
+        let wakers = {
+            let mut state = self.shared.state.lock().expect("virtual clock poisoned");
+            state.now = to;
+            state
+                .sleepers
+                .values_mut()
+                .filter(|(deadline, _)| *deadline <= to)
+                .filter_map(|(_, waker)| waker.take())
+                .collect::<Vec<_>>()
+        };
+        for waker in wakers {
+            waker.wake();
+        }
+    }
+
+    /// Number of futures currently parked on the clock.
+    pub fn sleepers(&self) -> usize {
+        self.shared
+            .state
+            .lock()
+            .expect("virtual clock poisoned")
+            .sleepers
+            .len()
+    }
+
+    /// Block until at least `count` sleeps are parked, or `timeout` passes.
+    pub fn wait_for_sleepers(&self, count: usize, timeout: Duration) -> bool {
+        let state = self.shared.state.lock().expect("virtual clock poisoned");
+        let (state, _) = self
+            .shared
+            .changed
+            .wait_timeout_while(state, timeout, |state| {
+                state
+                    .sleepers
+                    .values()
+                    .filter(|(deadline, waker)| waker.is_some() && *deadline > state.now)
+                    .count()
+                    < count
+            })
+            .expect("virtual clock poisoned");
+        state
+            .sleepers
+            .values()
+            .filter(|(deadline, waker)| waker.is_some() && *deadline > state.now)
+            .count()
+            >= count
+    }
+}
+
+impl crate::cache_warming::MaintenanceClock for VirtualClock {
+    fn now(&self) -> Duration {
+        self.shared.state.lock().expect("virtual clock poisoned").now
+    }
+
+    fn sleep_until(&self, deadline: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+        let id = {
+            let mut state = self.shared.state.lock().expect("virtual clock poisoned");
+            let id = state.next_sleeper;
+            state.next_sleeper += 1;
+            state.sleepers.insert(id, (deadline, None));
+            id
+        };
+        Box::pin(VirtualSleep {
+            shared: Arc::clone(&self.shared),
+            id,
+            deadline,
+        })
+    }
+}
+
+struct VirtualSleep {
+    shared: Arc<ClockShared>,
+    id: u64,
+    deadline: Duration,
+}
+
+impl Future for VirtualSleep {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<()> {
+        let mut state = self.shared.state.lock().expect("virtual clock poisoned");
+        if state.now >= self.deadline {
+            state.sleepers.remove(&self.id);
+            return Poll::Ready(());
+        }
+        if let Some(entry) = state.sleepers.get_mut(&self.id) {
+            entry.1 = Some(context.waker().clone());
+        }
+        drop(state);
+        self.shared.changed.notify_all();
+        Poll::Pending
+    }
+}
+
+impl Drop for VirtualSleep {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.shared.state.lock() {
+            state.sleepers.remove(&self.id);
+        }
+        self.shared.changed.notify_all();
     }
 }

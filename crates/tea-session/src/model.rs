@@ -721,6 +721,8 @@ pub enum LaneRecord {
     HarnessActivationRequested(HarnessActivationRequestedRecord),
     /// Usage fact independent from semantic result materialization.
     Usage(UsageRecord),
+    /// One attributed prompt-cache maintenance request. Never model context.
+    CacheMaintenance(CacheMaintenanceRecord),
 }
 
 impl LaneRecord {
@@ -753,6 +755,7 @@ impl LaneRecord {
             Self::WriteDeferred(record) => Some(&record.operation_id),
             Self::HarnessActivationRequested(record) => Some(&record.operation_id),
             Self::Usage(record) => Some(&record.operation_id),
+            Self::CacheMaintenance(record) => Some(&record.operation_id),
         }
     }
 }
@@ -1206,6 +1209,41 @@ pub struct UsageRecord {
     pub request_id: Option<ProviderRequestId>,
     /// Measured usage.
     pub usage: Usage,
+}
+
+/// How one prompt-cache maintenance request ended.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CacheMaintenanceOutcome {
+    /// The provider finished the refresh.
+    Completed,
+    /// The provider failed the refresh.
+    Failed {
+        /// Bounded diagnostic.
+        message: String,
+    },
+    /// A real request or run settlement cancelled the refresh.
+    Cancelled,
+}
+
+/// Durable attribution of one prompt-cache maintenance request.
+///
+/// The request replayed an admitted model request to keep its provider cache
+/// entry warm. Its output never joined model context; only its billing
+/// evidence is retained.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CacheMaintenanceRecord {
+    /// Owning operation.
+    pub operation_id: OperationId,
+    /// Physical model that served the refresh.
+    pub model: Option<ModelChangedEntry>,
+    /// Selected model identity of the admitted request, when it differed.
+    pub selected_model: Option<ModelChangedEntry>,
+    /// How the refresh ended.
+    pub outcome: CacheMaintenanceOutcome,
+    /// Provider-reported usage; unknown fields remain unknown.
+    pub usage: Usage,
+    /// Listed-price estimate in decimal dollars. Never a reported charge.
+    pub estimated_cost: Option<String>,
 }
 
 /// Explicit lane topology mutation. Main is seeded by the header.

@@ -583,6 +583,10 @@ impl SessionAppendIndex {
                 let _ = self.open_operation(&record.operation_id)?;
                 Ok(true)
             }
+            LaneRecord::CacheMaintenance(record) => {
+                let _ = self.open_operation(&record.operation_id)?;
+                Ok(true)
+            }
             LaneRecord::AbortRequested(_)
             | LaneRecord::ToolStarted(_)
             | LaneRecord::InputAccepted(_)
@@ -664,7 +668,7 @@ impl SessionAppendIndex {
             LaneRecord::ProviderRequestSettled(record) => {
                 self.provider_settled.insert(record.request_id.clone());
             }
-            LaneRecord::Usage(_) => {}
+            LaneRecord::Usage(_) | LaneRecord::CacheMaintenance(_) => {}
             LaneRecord::AbortRequested(_)
             | LaneRecord::ToolStarted(_)
             | LaneRecord::InputAccepted(_)

@@ -290,6 +290,8 @@ pub struct RunHandle {
     /// already requested termination. The normal scheduler combines this with
     /// the recovered suffix instead of treating the suffix as a new batch.
     pub(crate) recovery_prior_all_terminate: Option<bool>,
+    /// This run's active-work cache warmer, when the agent enables warming.
+    pub(crate) cache_warmer: Option<Arc<crate::cache_warming::CacheWarmer>>,
 }
 
 impl std::fmt::Debug for RunHandle {
@@ -386,6 +388,22 @@ impl RunHandle {
     /// creates an executor nor spawns detached work. A tool-use turn executes
     /// its calls, records their results, and then drives the next model turn.
     pub async fn drive(&self) -> Result<(), CoreError> {
+        match &self.cache_warmer {
+            // Maintenance is polled inside this future, so it can never
+            // outlive or run independently of the run that owns it.
+            Some(warmer) => {
+                crate::cache_warming::with_maintenance(self.drive_settled(), warmer.drive()).await
+            }
+            None => self.drive_settled().await,
+        }
+    }
+
+    /// Current active-work cache-warming state, when warming is enabled.
+    pub fn cache_warming_status(&self) -> Option<crate::cache_warming::CacheWarmingStatus> {
+        self.cache_warmer.as_ref().map(|warmer| warmer.status())
+    }
+
+    async fn drive_settled(&self) -> Result<(), CoreError> {
         let result = self.drive_inner().await;
         if let Err(error) = &result
             && !self.snapshot().phase.is_terminal()
@@ -458,8 +476,7 @@ impl RunHandle {
             )
             .await;
         let messages = self.new_messages(&agent);
-        let _ = self
-            .emit(&agent, AgentEventKind::AgentEnd { messages })
+        let _ = self.emit_agent_end(&agent, messages)
             .await;
         let _ = self.fail(error.to_string());
     }
@@ -489,8 +506,7 @@ impl RunHandle {
             )
             .await;
         let messages = self.new_messages(&agent);
-        let _ = self
-            .emit(&agent, AgentEventKind::AgentEnd { messages })
+        let _ = self.emit_agent_end(&agent, messages)
             .await;
         let _ = self.fail(error.to_string());
     }
@@ -519,8 +535,7 @@ impl RunHandle {
             )
             .await;
         let messages = self.new_messages(&agent);
-        let _ = self
-            .emit(&agent, AgentEventKind::AgentEnd { messages })
+        let _ = self.emit_agent_end(&agent, messages)
             .await;
         let _ = self.finish(RunPhase::Cancelled, StopReason::Cancelled, None);
     }
@@ -622,6 +637,7 @@ impl RunHandle {
                 // committed canonical history.
                 next_context = None;
             }
+            self.flush_cache_maintenance(&agent).await;
             let request_message_count = {
                 let state = agent.state.lock().expect("agent state mutex poisoned");
                 state.messages.len()
@@ -699,6 +715,9 @@ impl RunHandle {
             // transport dispatch so failed preparation never becomes a
             // predecessor for the next logical request.
             agent.prompt_layout_ledger.commit(&layout);
+            if self.cache_warmer.is_some() {
+                self.start_cache_warming(&agent, &request, &provider);
+            }
             let mut stream = match provider.stream(request, self.cancellation.clone()).await {
                 Ok(stream) => stream,
                 Err(error) => {
@@ -734,6 +753,11 @@ impl RunHandle {
                 EffectOutcome::ProviderRequest(ProviderEffectOutcome::Settled(response.clone())),
             )
             .await?;
+            if let Some(warmer) = &self.cache_warmer {
+                warmer.observe_prompt_tokens(
+                    response.usage.as_ref().and_then(|usage| usage.input_tokens),
+                );
+            }
             let reason = response.stop_reason;
             let tool_calls = response.tool_calls;
             let error_message = response.error_message;
@@ -802,7 +826,7 @@ impl RunHandle {
                 self.emit(&agent, AgentEventKind::TurnEnd { turn_id, reason })
                     .await?;
                 let messages = self.new_messages(&agent);
-                self.emit(&agent, AgentEventKind::AgentEnd { messages })
+                self.emit_agent_end(&agent, messages)
                     .await?;
                 let message = error_message.unwrap_or_else(|| {
                     if reason == StopReason::Aborted {
@@ -832,7 +856,7 @@ impl RunHandle {
                 self.emit(&agent, AgentEventKind::TurnEnd { turn_id, reason })
                     .await?;
                 let messages = self.new_messages(&agent);
-                self.emit(&agent, AgentEventKind::AgentEnd { messages })
+                self.emit_agent_end(&agent, messages)
                     .await?;
                 self.finish(RunPhase::Cancelled, StopReason::Cancelled, None)?;
                 return Err(CoreError::Cancelled);
@@ -909,7 +933,7 @@ impl RunHandle {
             )
             .await?;
             let messages = self.new_messages(agent);
-            self.emit(agent, AgentEventKind::AgentEnd { messages })
+            self.emit_agent_end(agent, messages)
                 .await?;
             let error = CoreError::ToolCircuitBreaker {
                 message: terminal_failure.message,
@@ -1051,6 +1075,120 @@ impl RunHandle {
             session_id: self.configuration.provenance.session_id.clone(),
             max_output_tokens: None,
         })
+    }
+
+    /// Begin warming the prompt-cache entry of the exact request about to be
+    /// dispatched. The request stays current while the canonical transcript
+    /// still extends it on the same model and reasoning settings.
+    fn start_cache_warming(
+        &self,
+        agent: &AgentInner,
+        request: &ModelRequest,
+        provider: &Arc<dyn crate::scheduler::ModelProvider>,
+    ) {
+        let Some(warmer) = &self.cache_warmer else {
+            return;
+        };
+        let capabilities = provider.capabilities(request.model.as_ref());
+        let collapsed = capabilities.configuration_projection()
+            == crate::transcript::ConfigurationProjection::Collapsed;
+        let (prefix, model, thinking_level) = {
+            let state = agent.state.lock().expect("agent state mutex poisoned");
+            (
+                state
+                    .messages
+                    .iter()
+                    .map(AgentMessage::id)
+                    .collect::<Vec<_>>(),
+                state.model.clone(),
+                state.thinking_level,
+            )
+        };
+        let weak = self.agent.clone();
+        let cancellation = self.cancellation.clone();
+        let check = move || -> Option<&'static str> {
+            if cancellation.is_cancelled() {
+                return Some("agent run cancelled");
+            }
+            let agent = weak.upgrade()?;
+            let state = agent.state.lock().expect("agent state mutex poisoned");
+            if state.model != model {
+                return Some("model changed");
+            }
+            if state.thinking_level != thinking_level {
+                return Some("reasoning settings changed");
+            }
+            if state.messages.len() < prefix.len()
+                || state
+                    .messages
+                    .iter()
+                    .zip(&prefix)
+                    .any(|(message, id)| message.id() != *id)
+            {
+                return Some("conversation context changed");
+            }
+            if collapsed
+                && state.messages[prefix.len()..]
+                    .iter()
+                    .any(|message| matches!(message, AgentMessage::System { .. }))
+            {
+                // A collapsed projection rewrites the request prefix.
+                return Some("configuration changed");
+            }
+            None
+        };
+        warmer.start(
+            request,
+            Arc::clone(provider),
+            capabilities.prompt_cache,
+            capabilities.pricing,
+            crate::cache_warming::CurrentRequest {
+                check: Box::new(check),
+            },
+        );
+    }
+
+    /// Attribute completed maintenance requests: a durable record outside
+    /// model context, then an event. Persistence is best-effort; maintenance
+    /// never fails otherwise healthy agent work.
+    async fn flush_cache_maintenance(&self, agent: &AgentInner) {
+        let Some(warmer) = &self.cache_warmer else {
+            return;
+        };
+        for record in warmer.take_records() {
+            if let Ok(ticket) = self
+                .begin_effect(EffectSubject::DurableWrite {
+                    write: crate::effect::DurableWriteRequest::CacheMaintenance {
+                        record: record.clone(),
+                    },
+                })
+                .await
+            {
+                let _ = self
+                    .settle_effect(
+                        ticket,
+                        EffectOutcome::DurableWrite(crate::effect::EffectCompletion::Succeeded),
+                    )
+                    .await;
+            }
+            let _ = self
+                .emit(agent, AgentEventKind::CacheMaintenance { record })
+                .await;
+        }
+    }
+
+    /// Settle maintenance before the run's terminal event: cancel any refresh
+    /// in flight, wait for its outcome, and attribute it.
+    async fn emit_agent_end(
+        &self,
+        agent: &AgentInner,
+        messages: Vec<AgentMessage>,
+    ) -> Result<AgentEvent, CoreError> {
+        if let Some(warmer) = &self.cache_warmer {
+            warmer.settle().await;
+            self.flush_cache_maintenance(agent).await;
+        }
+        self.emit(agent, AgentEventKind::AgentEnd { messages }).await
     }
 
     /// The configuration this run wants the next request to declare.
@@ -2439,7 +2577,7 @@ impl RunHandle {
         reason: StopReason,
     ) -> Result<(), CoreError> {
         let messages = self.new_messages(agent);
-        self.emit(agent, AgentEventKind::AgentEnd { messages })
+        self.emit_agent_end(agent, messages)
             .await?;
         self.succeed(reason)
     }
@@ -2500,8 +2638,7 @@ impl RunHandle {
             )
             .await;
         let messages = self.new_messages(&agent);
-        let _ = self
-            .emit(&agent, AgentEventKind::AgentEnd { messages })
+        let _ = self.emit_agent_end(&agent, messages)
             .await;
         let _ = self.finish(RunPhase::Cancelled, StopReason::Aborted, None);
     }

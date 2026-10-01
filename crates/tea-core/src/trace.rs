@@ -296,6 +296,10 @@ impl<S: TraceSink> TraceObserver<S> {
                 };
                 record_cache_evidence(&mut state, accounting.turn_id.0, evidence);
             }
+            // Maintenance replays are attributed provider operations, not
+            // logical requests; keeping them out of cache evidence preserves
+            // the ordinary request-continuity measurements.
+            AgentEventKind::CacheMaintenance { .. } => {}
             AgentEventKind::AgentEnd { .. } => {
                 if let Some(turn_id) = state
                     .pending_post_compaction_request

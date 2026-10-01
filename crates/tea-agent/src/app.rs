@@ -5,6 +5,7 @@
 //! behavior, and presentation helpers.
 
 mod auth;
+mod clock;
 mod commands;
 mod compaction;
 mod config;

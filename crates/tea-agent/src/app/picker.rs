@@ -384,6 +384,7 @@ impl App {
         self.state.set_session_id(None);
         self.state.close_surface();
         self.state.reported_usage = Usage::default();
+        self.state.cache_maintenance = Default::default();
         // A model/provider change is a new immutable durable profile. Do not
         // mutate an existing session's active snapshot in place; the next
         // prompt creates a fresh session unless the user explicitly resumes

@@ -125,6 +125,8 @@ pub(super) struct HostHarnessConfig<'a> {
     /// tools, catalog and executable services byte-identical to the legacy
     /// feature-disabled path.
     pub(super) subagents: Option<HostSubagentConfig>,
+    /// Opt-in active-work prompt-cache warming for root runs.
+    pub(super) cache_warming: Option<tea_core::cache_warming::CacheWarmingPolicy>,
 }
 
 pub(super) struct HostHarnessReopen<'a> {
@@ -138,6 +140,8 @@ pub(super) struct HostHarnessReopen<'a> {
     pub(super) compactor: Option<Arc<ProviderCompactor>>,
     pub(super) automatic_compaction: AutomaticCompactionPolicy,
     pub(super) subagents: Option<HostSubagentConfig>,
+    /// Opt-in active-work prompt-cache warming for root runs.
+    pub(super) cache_warming: Option<tea_core::cache_warming::CacheWarmingPolicy>,
 }
 
 /// Select how the bundled web policy receives its optional credential.
@@ -377,6 +381,7 @@ pub(crate) fn create_live_verification_harness(
             compactor,
             automatic_compaction: AutomaticCompactionPolicy::disabled(),
             subagents: None,
+            cache_warming: None,
         },
         SelfExtensionMode::Off,
     )
@@ -417,6 +422,7 @@ pub(crate) fn create_live_verification_child_harness(
                 child_model,
                 child_provider,
             )),
+            cache_warming: None,
         },
         SelfExtensionMode::Off,
     )
@@ -446,6 +452,7 @@ pub(crate) fn create_live_verification_authoring_harness(
             compactor: None,
             automatic_compaction: AutomaticCompactionPolicy::disabled(),
             subagents: None,
+            cache_warming: None,
         },
         SelfExtensionMode::Author,
     )
@@ -478,6 +485,7 @@ pub(crate) fn reopen_live_verification_harness(
         compactor,
         automatic_compaction: AutomaticCompactionPolicy::disabled(),
         subagents: None,
+        cache_warming: None,
     })
 }
 
@@ -504,6 +512,7 @@ pub(crate) fn reopen_live_verification_authoring_harness(
         compactor: None,
         automatic_compaction: AutomaticCompactionPolicy::disabled(),
         subagents: None,
+        cache_warming: None,
     })?;
     require_live_verification_authoring_mode(&harness)?;
     Ok(harness)
@@ -538,6 +547,7 @@ pub(crate) fn create_live_verification_compaction_harness(
             compactor: Some(compactor),
             automatic_compaction,
             subagents: None,
+            cache_warming: None,
         },
         SelfExtensionMode::Off,
     )
@@ -572,6 +582,7 @@ pub(crate) fn reopen_live_verification_compaction_harness(
         compactor: Some(compactor),
         automatic_compaction,
         subagents: None,
+        cache_warming: None,
     })
 }
 
@@ -617,6 +628,7 @@ fn create_host_harness_with_operations_and_mode(
         compactor,
         automatic_compaction,
         subagents,
+        cache_warming,
     } = config;
     let sessions_root = tea_home.join("sessions");
     ensure_private_directory(tea_home)?;
@@ -646,6 +658,7 @@ fn create_host_harness_with_operations_and_mode(
         thinking_level,
         compactor,
         automatic_compaction,
+        cache_warming.clone(),
     );
     let child_configuration = if subagent_policy.is_some() {
         Some(super::host::host_configuration(&workspace.to_string_lossy())?)
@@ -1133,6 +1146,7 @@ fn reopen_host_harness_with_operations_and_web_credential_source(
         compactor,
         automatic_compaction,
         subagents,
+        cache_warming,
     } = input;
     let session_id = SessionId::new(session_id.to_owned())
         .map_err(|error| AppError::Setup(error.to_string()))?;
@@ -1200,6 +1214,7 @@ fn reopen_host_harness_with_operations_and_web_credential_source(
         thinking_level,
         compactor,
         automatic_compaction,
+        cache_warming.clone(),
     );
     let extension_state = ExtensionStateBindings::build()?;
     let coding_bindings = coding_capability_bindings_with_operations(workspace, coding_operations)?;
@@ -2050,11 +2065,15 @@ fn epoch_template(
     thinking_level: ThinkingLevel,
     compactor: Option<Arc<ProviderCompactor>>,
     automatic_compaction: AutomaticCompactionPolicy,
+    cache_warming: Option<tea_core::cache_warming::CacheWarmingPolicy>,
 ) -> RuntimeServices {
     let mut template = RuntimeServices::from_agent_configuration(provider, configuration)
         .model(model)
         .thinking_level(thinking_level)
         .automatic_compaction(automatic_compaction);
+    if let Some(policy) = cache_warming {
+        template = template.cache_warming(policy);
+    }
     if let Some(compactor) = compactor {
         let compactor: Arc<dyn tea_core::compaction::Compactor> = compactor;
         template = template.compactor(compactor);
@@ -3470,6 +3489,7 @@ mod tests {
             compactor: None,
             automatic_compaction: AutomaticCompactionPolicy::disabled(),
             subagents: None,
+            cache_warming: None,
         })
         .expect("todo fixture host creates");
         let session_id = harness
@@ -3547,6 +3567,7 @@ mod tests {
             compactor: None,
             automatic_compaction: AutomaticCompactionPolicy::disabled(),
             subagents: None,
+            cache_warming: None,
         })
         .expect("todo fixture session reopens");
         let subscription = harness
@@ -3845,6 +3866,7 @@ mod tests {
             compactor: None,
             automatic_compaction: AutomaticCompactionPolicy::disabled(),
             subagents: Some(subagents.clone()),
+            cache_warming: None,
         })
         .expect("enabled host seeds the fixed root and child catalogs");
         let snapshot = harness.snapshot().expect("enabled session snapshots");
@@ -3894,6 +3916,7 @@ mod tests {
             compactor: None,
             automatic_compaction: AutomaticCompactionPolicy::disabled(),
             subagents: Some(subagents),
+            cache_warming: None,
         })
         .expect("enabled catalog reopens without constructing a child adapter");
         assert_eq!(
@@ -4018,6 +4041,7 @@ data: [DONE]
             compactor: None,
             automatic_compaction: AutomaticCompactionPolicy::disabled(),
             subagents: Some(subagents.clone()),
+            cache_warming: None,
         })
         .expect("enabled fixture host creates");
         let session_id = harness
@@ -4122,6 +4146,7 @@ data: [DONE]
             compactor: None,
             automatic_compaction: AutomaticCompactionPolicy::disabled(),
             subagents: Some(subagents),
+            cache_warming: None,
         })
         .expect("terminal child result reopens without replaying provider work");
         let reopened_graph = reduce_agent_graph(
@@ -4299,6 +4324,7 @@ data: [DONE]
             compactor: None,
             automatic_compaction: AutomaticCompactionPolicy::disabled(),
             subagents: None,
+            cache_warming: None,
         })
         .expect("host harness creates");
         let before = harness.snapshot().expect("initial session snapshot");
@@ -4362,6 +4388,7 @@ data: [DONE]
             compactor: None,
             automatic_compaction: AutomaticCompactionPolicy::disabled(),
             subagents: None,
+            cache_warming: None,
         })
         .expect("host harness creates");
 
@@ -4463,6 +4490,7 @@ data: [DONE]
             compactor: None,
             automatic_compaction: AutomaticCompactionPolicy::disabled(),
             subagents: None,
+            cache_warming: None,
         })
         .expect("host harness creates");
 
@@ -4512,6 +4540,7 @@ data: [DONE]
             ThinkingLevel::Off,
             None,
             AutomaticCompactionPolicy::disabled(),
+            None,
         );
         let resource_limits = HarnessResourceLimits::default();
         let coding_bindings = coding_capability_bindings(&workspace)
@@ -4725,6 +4754,7 @@ data: [DONE]
             ThinkingLevel::Off,
             None,
             AutomaticCompactionPolicy::disabled(),
+            None,
         );
         let process_resolved = manager
             .resolve_revision(&process_revision.revision_id, &process_services)
@@ -4816,6 +4846,7 @@ data: [DONE]
             compactor: None,
             automatic_compaction: AutomaticCompactionPolicy::disabled(),
             subagents: None,
+            cache_warming: None,
         })
         .expect("host harness creates");
         let subscription = harness
@@ -4922,6 +4953,7 @@ data: [DONE]
             compactor: None,
             automatic_compaction: AutomaticCompactionPolicy::disabled(),
             subagents: Some(subagents),
+            cache_warming: None,
         })
         .expect("enabled fixture host creates");
         let session_id = harness
@@ -5001,6 +5033,7 @@ data: [DONE]
             compactor: None,
             automatic_compaction: AutomaticCompactionPolicy::disabled(),
             subagents: None,
+            cache_warming: None,
         })
         .expect("host harness creates");
         let mut drive = Box::pin(harness.run_root_prompt("leave a recoverable root open"));
@@ -5046,6 +5079,7 @@ data: [DONE]
             compactor: None,
             automatic_compaction: AutomaticCompactionPolicy::disabled(),
             subagents: None,
+            cache_warming: None,
         })
         .expect("durable host harness creates");
 
@@ -5079,6 +5113,7 @@ data: [DONE]
             compactor: None,
             automatic_compaction: AutomaticCompactionPolicy::disabled(),
             subagents: None,
+            cache_warming: None,
         })
         .expect("host harness creates");
 
@@ -5130,6 +5165,7 @@ data: [DONE]
             compactor: None,
             automatic_compaction: AutomaticCompactionPolicy::disabled(),
             subagents: None,
+            cache_warming: None,
         })
         .expect("host harness creates");
         smol::block_on(harness.run_root_prompt("retain this durable prompt"))
@@ -5154,6 +5190,7 @@ data: [DONE]
             compactor: None,
             automatic_compaction: AutomaticCompactionPolicy::disabled(),
             subagents: None,
+            cache_warming: None,
         })
         .expect("host reopen reconstructs the durable manager");
         let after = reopened.snapshot().expect("reopened durable snapshot");
@@ -5204,6 +5241,7 @@ data: [DONE]
             compactor: None,
             automatic_compaction: AutomaticCompactionPolicy::disabled(),
             subagents: None,
+            cache_warming: None,
         })
         .expect("host harness creates");
         let session_id = harness
@@ -5322,6 +5360,7 @@ data: [DONE]
             compactor: None,
             automatic_compaction: AutomaticCompactionPolicy::disabled(),
             subagents: None,
+            cache_warming: None,
         })
         .expect("host harness creates");
         let snapshot = harness.snapshot().expect("session snapshot");
@@ -5369,6 +5408,7 @@ data: [DONE]
             compactor: None,
             automatic_compaction: AutomaticCompactionPolicy::disabled(),
             subagents: None,
+            cache_warming: None,
         })
         .expect("host harness creates");
         let expected = harness.snapshot().expect("session snapshot");
@@ -5429,6 +5469,7 @@ data: [DONE]
             compactor: None,
             automatic_compaction: AutomaticCompactionPolicy::disabled(),
             subagents: None,
+            cache_warming: None,
         })
         .expect("host harness creates");
         let session_id = harness
@@ -5484,6 +5525,7 @@ data: [DONE]
             compactor: None,
             automatic_compaction: AutomaticCompactionPolicy::disabled(),
             subagents: None,
+            cache_warming: None,
         })
         .expect("host harness creates");
         let session_id = harness

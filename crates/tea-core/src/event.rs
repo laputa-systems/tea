@@ -246,6 +246,13 @@ pub enum AgentEventKind {
     /// This event is emitted after the assistant message has settled and before `TurnEnd`.
     /// Missing fields remain unknown (`None`); the core never estimates a value.
     ModelTurnUsage { accounting: ModelTurnAccounting },
+    /// A prompt-cache maintenance request settled. This is an attributed
+    /// provider operation, not an assistant message: its output never joins
+    /// model context, and its usage is not a model turn.
+    CacheMaintenance {
+        /// Usage, listed-price estimate, and outcome of the refresh.
+        record: crate::cache_warming::CacheMaintenanceRecord,
+    },
     /// The loop emitted its final event.
     AgentEnd { messages: Vec<AgentMessage> },
 }

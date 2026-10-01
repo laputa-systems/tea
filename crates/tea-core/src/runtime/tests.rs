@@ -47,6 +47,7 @@ use tea_session::{
 
 mod child_outcome_recovery_tests;
 mod compaction_tests;
+mod cache_warming_tests;
 mod configuration_tests;
 mod input_queue_tests;
 mod model_selection_tests;
