@@ -35,7 +35,8 @@ pub(super) fn run_runtime(options: CliOptions, socket: OsString) -> ExitCode {
     let mut app = App::new(options);
     let result = app.run_runtime(std::sync::Arc::clone(&link));
     // Close only after the application, including any owned root work, has
-    // settled; the relay then exits with the same status.
+    // settled; the relay then exits with the same status, or starts the
+    // runtime for the session the user switched to.
     let (code, message) = match &result {
         Ok(()) => (0, None),
         Err(error) => (2, Some(format!("tea: {error}"))),
@@ -43,7 +44,17 @@ pub(super) fn run_runtime(options: CliOptions, socket: OsString) -> ExitCode {
     if let Some(message) = &message {
         eprintln!("{message}");
     }
-    link.close(code, message.as_deref());
+    let (handoff, unconsumed) = match app.take_handoff() {
+        Some((arguments, unconsumed)) => (
+            arguments
+                .into_iter()
+                .map(|argument| argument.into_string().ok())
+                .collect::<Option<Vec<_>>>(),
+            unconsumed,
+        ),
+        None => (None, 0),
+    };
+    link.close_with_handoff(code, message.as_deref(), handoff.as_deref(), unconsumed);
     drop(app);
     ExitCode::from(code)
 }
@@ -57,126 +68,196 @@ pub(super) fn run_relay(options: &CliOptions, args: Vec<OsString>) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let size = detach::current_size();
+    // Raw mode spans every runtime of this relay session, so input typed
+    // during a session handoff reaches the next runtime unchanged.
+    let raw = match detach::RawTerminal::enter() {
+        Ok(raw) => raw,
+        Err(error) => {
+            eprintln!("tea: cannot enter raw terminal mode: {error}");
+            return ExitCode::from(2);
+        }
+    };
+    let (code, reset) = relay_session(options, &tea_home, args);
+    if reset {
+        raw.reset_presentation();
+    }
+    drop(raw);
+    for message in std::mem::take(&mut *PENDING_MESSAGES.lock().expect("messages")) {
+        eprintln!("{message}");
+    }
+    code
+}
+
+/// Diagnostics printed after the terminal is restored.
+static PENDING_MESSAGES: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+fn report(message: String) {
+    PENDING_MESSAGES.lock().expect("messages").push(message);
+}
+
+/// Returns the exit code and whether the terminal needs a presentation reset.
+fn relay_session(options: &CliOptions, tea_home: &Path, args: Vec<OsString>) -> (ExitCode, bool) {
+    let tea_home = tea_home.to_path_buf();
     let mut args = args;
     if let Some(session) = options.attach_session() {
         let Some(directory) = find_session_directory(&tea_home, session) else {
-            eprintln!("tea: no saved session {session} under {}", tea_home.display());
-            return ExitCode::from(2);
+            report(format!("tea: no saved session {session} under {}", tea_home.display()));
+            return (ExitCode::from(2), false);
         };
         match AttachmentRecord::read(&directory) {
             Ok(Some(record)) if record.session_id == session => {
-                match detach::connect(&record.socket, Some(session), size) {
-                    Ok(stream) => return finish(detach::relay(stream), None, None),
+                match detach::connect(&record.socket, Some(session), detach::current_size()) {
+                    Ok(stream) => match finish(detach::relay(stream, &[]), None, None) {
+                        Finished::Exit(code, reset) => return (code, reset),
+                        Finished::Handoff(next, replay) => {
+                            return relay_runtimes(&tea_home, strings(next), replay);
+                        }
+                    },
                     Err(message) if message.contains("another terminal") => {
-                        eprintln!("tea: session {session} is already attached to a terminal: {message}");
-                        return ExitCode::from(2);
+                        report(format!(
+                            "tea: session {session} is already attached to a terminal: {message}"
+                        ));
+                        return (ExitCode::from(2), false);
                     }
                     Err(message) => {
-                        // The record outlived its runtime (or the runtime moved
-                        // on to another session): it is stale.
+                        // The record outlived its runtime (or the runtime
+                        // ended for another reason): it is stale.
                         if !process_alive(record.pid) {
                             AttachmentRecord::retract(&directory, record.pid);
                         }
-                        eprintln!(
-                            "tea: no live runtime serves session {session} ({message}); reopening it"
-                        );
+                        report(format!(
+                            "tea: no live runtime serves session {session} ({message}); reopened it"
+                        ));
                     }
                 }
             }
             Ok(_) => {
-                eprintln!("tea: no live runtime serves session {session}; reopening it");
+                report(format!("tea: no live runtime serves session {session}; reopened it"));
             }
             Err(error) => {
-                eprintln!("tea: cannot read the runtime record of session {session}: {error}");
-                return ExitCode::from(2);
+                report(format!(
+                    "tea: cannot read the runtime record of session {session}: {error}"
+                ));
+                return (ExitCode::from(2), false);
             }
         }
         args = attach_to_resume(args);
     }
-    spawn_and_relay(&tea_home, args, size)
+    relay_runtimes(&tea_home, args, Vec::new())
 }
 
-fn spawn_and_relay(tea_home: &Path, args: Vec<OsString>, size: (u16, u16)) -> ExitCode {
-    let socket = match detach::new_socket_path(tea_home) {
-        Ok(socket) => socket,
-        Err(error) => {
-            eprintln!("tea: cannot prepare the session runtime socket: {error}");
-            return ExitCode::from(2);
+fn strings(arguments: Vec<String>) -> Vec<OsString> {
+    arguments.into_iter().map(OsString::from).collect()
+}
+
+/// Start a runtime and relay to it. When the user switches sessions, the
+/// runtime ends and hands off: the relay starts one fresh runtime for the
+/// next session. A runtime is never reused for another session.
+fn relay_runtimes(tea_home: &Path, args: Vec<OsString>, replay: Vec<u8>) -> (ExitCode, bool) {
+    let mut args = args;
+    let mut replay = replay;
+    loop {
+        let (stream, child, log) = match spawn_runtime(tea_home, &args) {
+            Ok(started) => started,
+            Err(code) => return (code, false),
+        };
+        match finish(detach::relay(stream, &replay), Some(child), Some(log)) {
+            Finished::Exit(code, reset) => return (code, reset),
+            Finished::Handoff(next, unconsumed) => {
+                args = strings(next);
+                replay = unconsumed;
+            }
         }
-    };
+    }
+}
+
+fn spawn_runtime(
+    tea_home: &Path,
+    args: &[OsString],
+) -> Result<(std::os::unix::net::UnixStream, Child, PathBuf), ExitCode> {
+    let size = detach::current_size();
+    let socket = detach::new_socket_path(tea_home).map_err(|error| {
+        report(format!("tea: cannot prepare the session runtime socket: {error}"));
+        ExitCode::from(2)
+    })?;
     let log = socket.with_extension("log");
-    let stderr = match std::fs::File::create(&log) {
-        Ok(file) => file,
-        Err(error) => {
-            eprintln!("tea: cannot create the session runtime log: {error}");
-            return ExitCode::from(2);
-        }
-    };
-    let executable = match std::env::current_exe() {
-        Ok(executable) => executable,
-        Err(error) => {
-            eprintln!("tea: cannot locate the tea executable: {error}");
-            return ExitCode::from(2);
-        }
-    };
+    let stderr = std::fs::File::create(&log).map_err(|error| {
+        report(format!("tea: cannot create the session runtime log: {error}"));
+        ExitCode::from(2)
+    })?;
+    let executable = std::env::current_exe().map_err(|error| {
+        report(format!("tea: cannot locate the tea executable: {error}"));
+        ExitCode::from(2)
+    })?;
     // The runtime is not in the terminal's process group and holds no
     // terminal descriptor, so terminal hangup and job-control signals reach
     // only this relay.
-    let mut child = match {
+    let mut child = {
         use std::os::unix::process::CommandExt;
         Command::new(executable)
-            .args(&args)
+            .args(args)
             .env(RUNTIME_SOCKET_ENV, &socket)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(stderr)
             .process_group(0)
             .spawn()
-    } {
-        Ok(child) => child,
-        Err(error) => {
-            eprintln!("tea: cannot start the session runtime: {error}");
-            return ExitCode::from(2);
-        }
-    };
+    }
+    .map_err(|error| {
+        report(format!("tea: cannot start the session runtime: {error}"));
+        ExitCode::from(2)
+    })?;
     let deadline = Instant::now() + Duration::from_secs(15);
-    let stream = loop {
+    loop {
         if let Ok(Some(_)) = child.try_wait() {
             report_log(&log);
-            let _ = std::fs::remove_file(&log);
-            return ExitCode::from(2);
+            remove_log(&log);
+            return Err(ExitCode::from(2));
         }
         if socket.exists() {
             match detach::connect(&socket, None, size) {
-                Ok(stream) => break stream,
+                Ok(stream) => return Ok((stream, child, log)),
                 Err(message) if Instant::now() >= deadline => {
-                    eprintln!("tea: cannot attach to the session runtime: {message}");
+                    report(format!("tea: cannot attach to the session runtime: {message}"));
                     let _ = child.kill();
                     let _ = child.wait();
-                    return ExitCode::from(2);
+                    return Err(ExitCode::from(2));
                 }
                 Err(_) => {}
             }
         } else if Instant::now() >= deadline {
-            eprintln!("tea: the session runtime did not start");
+            report(format!("tea: the session runtime did not start"));
             let _ = child.kill();
             let _ = child.wait();
             report_log(&log);
-            return ExitCode::from(2);
+            return Err(ExitCode::from(2));
         }
         std::thread::sleep(Duration::from_millis(10));
-    };
-    finish(detach::relay(stream), Some(child), Some(log))
+    }
 }
 
-fn finish(
-    end: std::io::Result<RelayEnd>,
-    child: Option<Child>,
-    log: Option<PathBuf>,
-) -> ExitCode {
+enum Finished {
+    /// Exit with this code; `true` when the terminal needs a reset.
+    Exit(ExitCode, bool),
+    /// Start a runtime with these arguments and replay this input to it.
+    Handoff(Vec<String>, Vec<u8>),
+}
+
+fn remove_log(log: &Path) {
+    let _ = std::fs::remove_file(log);
+    if let Some(directory) = log.parent() {
+        let _ = std::fs::remove_dir(directory);
+    }
+}
+
+fn finish(end: std::io::Result<RelayEnd>, child: Option<Child>, log: Option<PathBuf>) -> Finished {
     let code = match end {
-        Ok(RelayEnd::Closed { code, message }) => {
+        Ok(RelayEnd::Closed {
+            code,
+            message,
+            handoff,
+            replay,
+        }) => {
             if let Some(mut child) = child {
                 // The runtime closes only after settling; reap it.
                 let deadline = Instant::now() + Duration::from_secs(10);
@@ -188,40 +269,40 @@ fn finish(
                 }
             }
             if let Some(message) = message {
-                eprintln!("{message}");
+                report(message);
             }
             if let Some(log) = &log {
-                let _ = std::fs::remove_file(log);
-                if let Some(directory) = log.parent() {
-                    let _ = std::fs::remove_dir(directory);
-                }
+                remove_log(log);
             }
-            code
+            if let Some(next) = handoff {
+                return Finished::Handoff(next, replay);
+            }
+            (code, false)
         }
         Ok(RelayEnd::Refused(message)) => {
-            eprintln!("tea: {message}");
-            2
+            report(format!("tea: {message}"));
+            (2, false)
         }
         Ok(RelayEnd::Lost) | Err(_) => {
-            eprintln!(
-                "tea: the session runtime exited unexpectedly; reopen the session with `tea --resume SESSION_ID` (durable recovery applies)"
+            report(
+                "tea: the session runtime exited unexpectedly; reopen the session with `tea --resume SESSION_ID` (durable recovery applies)".into(),
             );
             if let Some(log) = &log {
                 report_log(log);
             }
-            2
+            (2, true)
         }
         // The terminal is gone; the runtime keeps any admitted work.
-        Ok(RelayEnd::TerminalGone) => 1,
+        Ok(RelayEnd::TerminalGone) => (1, false),
     };
-    ExitCode::from(code)
+    Finished::Exit(ExitCode::from(code.0), code.1)
 }
 
 fn report_log(log: &Path) {
     if let Ok(text) = std::fs::read_to_string(log) {
         let text = text.trim();
         if !text.is_empty() {
-            eprintln!("{}", tea_core::tool::truncate_middle(text, 4_096));
+            report(tea_core::tool::truncate_middle(text, 4_096));
         }
     }
 }

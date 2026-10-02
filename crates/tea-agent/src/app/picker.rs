@@ -111,6 +111,9 @@ impl App {
             config,
             local_base_url.as_deref(),
         )?;
+        if self.hand_off_session(super::runtime::SessionHandoff::Resume(id.to_owned())) {
+            return Ok(());
+        }
         self.select_model_descriptor(model)?;
         self.reopen_durable_session(id)
     }
@@ -134,6 +137,11 @@ impl App {
             self.state
                 .notice("withdraw queued inputs before starting a new session");
             return Ok(());
+        }
+        if let Some(model) = self.state.selected_model.clone() {
+            if self.hand_off_session(super::runtime::SessionHandoff::New(model)) {
+                return Ok(());
+            }
         }
         self.durable_subscription = None;
         self.durable_harness = None;
@@ -362,6 +370,10 @@ impl App {
             return Err(AppError::Setup(
                 "--local-context-window requires --provider local".into(),
             ));
+        }
+        self.provider_factory()?.validate_descriptor(&requested)?;
+        if self.hand_off_session(super::runtime::SessionHandoff::New(requested.clone())) {
+            return Ok(());
         }
         let configuration = self.configuration_for_provider(&requested.provider)?;
         let (provider, compactor, context_window) = {

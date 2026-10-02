@@ -36,16 +36,23 @@ reattach).
 
 - **One-to-one.** A runtime accepts one attached terminal at a time; a second
   `tea --attach` is refused ("already attached").
-- **Session-local.** While attached to a session the runtime publishes
+- **One session per runtime.** A runtime may start before any session exists
+  (welcome screen, model selection); the first session it creates or opens
+  binds it for life. It never creates, opens, or switches to another root
+  session after that.
+- **Session-local.** While bound to a session the runtime publishes
   `runtime.json` (pid, socket, session id) in that session's directory and
-  withdraws it when it switches sessions or exits. The socket lives in a
+  withdraws it when it exits. The socket lives in a
   private `0700` directory under `/tmp` (session paths can exceed the
   platform's socket-path limit) and is never listed.
 - **Exact reattachment.** `tea --attach SESSION_ID` reads that session's record
   and connects to that runtime, which confirms the session in the handshake.
   There is no broker, global listener, or enumeration of live runtimes.
 - **No second agent protocol.** Frames carry handshake, input bytes, window
-  size, output bytes, and close status only.
+  size, output bytes, and close status only. A close may name a handoff: the
+  host arguments for the next session's runtime plus the count of input bytes
+  this runtime consumed, so the relay replays anything typed during the
+  switch to the next runtime exactly once.
 
 ## Lifecycle
 
@@ -56,7 +63,7 @@ reattach).
 | Detached and idle | The runtime exits (and withdraws its record) as soon as no terminal is attached and nothing is running or queued. It never lingers as a hidden service. |
 | Reattach to a live runtime | `tea --attach SESSION_ID` attaches a fresh terminal; the runtime re-presents the whole view (transcript and live tail) from its state. Nothing is replayed. |
 | Reattach after the runtime exited | The record is gone or stale, so `tea --attach` reopens the session (`--resume`) from durable state. A stale record (dead pid, missing socket) is detected and ignored. |
-| `/new`, `/resume` | The same runtime switches its one session: the record moves to the new session directory. No root runtime accumulates. |
+| `/new`, `/resume`, or a model change in a bound runtime | The runtime hands off and exits; the relay starts a fresh runtime for the next session (`--resume ID` for `/resume`). Input typed during the switch is replayed to the new runtime. No runtime is reused and none accumulates. |
 | Runtime failure | The relay sees the connection end without a close, restores the terminal, and reports the failure. Reopening uses tea's existing recovery: an interrupted provider request is an ambiguous effect that requires `/continue`, never an implicit replay. |
 | Competing ownership | A second terminal is refused while one is attached; the durable session's single-writer lock still prevents a second runtime from executing it. |
 
@@ -76,7 +83,9 @@ Real-binary PTY tests (`cargo test -p tea-agent --features pty-harness --test pt
   reopening;
 - killing the runtime restores the terminal, reports the failure, and leaves
   explicit recovery with no replayed request;
-- `/new` moves the attachment record within the same runtime.
+- `/new` ends the bound runtime and a fresh runtime serves the new session.
+- `detach::tests` cover framing, records, single-terminal and exact-session
+  handshakes, and exact input accounting across a handoff.
 
 The existing PTY suite (`--test pty_streaming`) runs through the relay and
 runtime unchanged, including byte-exact startup output and terminal-mode

@@ -109,6 +109,12 @@ pub struct App {
     pub(super) runtime_link: Option<Arc<crate::detach::RemoteLink>>,
     /// Session directory whose attachment record this runtime published.
     pub(super) published_attachment: Option<PathBuf>,
+    /// Arguments for the runtime that should replace this one, when the
+    /// user switched sessions in a session-bound runtime.
+    pub(super) handoff: Option<Vec<std::ffi::OsString>>,
+    /// Input bytes the terminal decoder still held when this runtime handed
+    /// off; the relay replays them to the next runtime.
+    pub(super) handoff_unconsumed: usize,
     /// Number of front-contiguous semantic entries already written once into
     /// native terminal scrollback for this presentation generation.
     pub(super) committed_entries: usize,
@@ -143,6 +149,8 @@ impl App {
             mcp_reported: std::collections::BTreeSet::new(),
             runtime_link: None,
             published_attachment: None,
+            handoff: None,
+            handoff_unconsumed: 0,
             committed_entries: 0,
             committed_entry_ids: Vec::new(),
             rendered_projection_generation: 0,
@@ -166,6 +174,9 @@ impl App {
         let loop_result = {
             let mut terminal = enter()?;
             let loop_result = smol::block_on(self.event_loop(&mut terminal));
+            if self.handoff.is_some() {
+                self.handoff_unconsumed = terminal.unconsumed_input_len();
+            }
             if self.quitting && loop_result.is_ok() {
                 // A quit requested from a modal surface must still finish on
                 // the main-screen status frame; the alternate surface is
@@ -528,6 +539,52 @@ impl App {
             smol::future::yield_now().await;
         }
         Ok(())
+    }
+
+    /// A session runtime serves one session for its whole life. Once bound,
+    /// switching sessions (`/new`, `/resume`, or a model change that starts
+    /// a fresh session) ends this runtime and asks the relay to start one
+    /// for the next session, instead of repurposing this process.
+    ///
+    /// Returns `true` when the switch was handed off.
+    pub(super) fn hand_off_session(&mut self, next: SessionHandoff) -> bool {
+        if self.runtime_link.is_none() || self.durable_harness.is_none() {
+            return false;
+        }
+        let mut arguments = self.options.host_arguments();
+        self.state.notice(match &next {
+            SessionHandoff::New(_) => "new session will begin with the next prompt".to_owned(),
+            SessionHandoff::Resume(session) => format!("opening session {session}"),
+        });
+        match next {
+            SessionHandoff::New(model) => {
+                arguments.extend(
+                    [
+                        "--provider",
+                        model.provider.as_str(),
+                        "--model",
+                        model.model.as_str(),
+                        "--thinking",
+                        super::support::thinking_level_name(self.state.thinking_level()),
+                    ]
+                    .map(std::ffi::OsString::from),
+                );
+            }
+            SessionHandoff::Resume(session) => {
+                arguments.extend(["--resume", session.as_str()].map(std::ffi::OsString::from));
+            }
+        }
+        self.handoff = Some(arguments);
+        self.quitting = true;
+        true
+    }
+
+    /// Arguments for the replacement runtime, if this one handed off, and
+    /// how many received input bytes it left unconsumed.
+    pub fn take_handoff(&mut self) -> Option<(Vec<std::ffi::OsString>, usize)> {
+        self.handoff
+            .take()
+            .map(|arguments| (arguments, self.handoff_unconsumed))
     }
 
     /// Whether a session runtime has lost its terminal and has no work left.
@@ -1413,6 +1470,14 @@ pub(super) fn os_text(value: &OsStr, flag: &str) -> Result<String, AppError> {
         .to_str()
         .map(str::to_owned)
         .ok_or_else(|| AppError::Setup(format!("{flag} must be valid UTF-8")))
+}
+
+/// Where a session-bound runtime hands a session switch.
+pub(super) enum SessionHandoff {
+    /// Start a fresh session with this model.
+    New(tea_core::state::ModelDescriptor),
+    /// Open this saved session.
+    Resume(String),
 }
 
 /// Resolve the terminal-owned durable-state root without exposing home lookup

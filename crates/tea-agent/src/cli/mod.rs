@@ -95,6 +95,28 @@ impl CliOptions {
     pub fn tea_home(&self) -> Option<&std::path::Path> {
         self.tea_home.as_deref()
     }
+    /// Arguments that carry this invocation's host settings (Tea home,
+    /// workspace, and local endpoint) to a fresh session runtime.
+    pub fn host_arguments(&self) -> Vec<OsString> {
+        let mut arguments = Vec::new();
+        if let Some(home) = &self.tea_home {
+            arguments.push(OsString::from("--tea-home"));
+            arguments.push(home.clone().into_os_string());
+        }
+        if let Some(cwd) = &self.cwd {
+            arguments.push(OsString::from("--cwd"));
+            arguments.push(cwd.clone().into_os_string());
+        }
+        if let Some(url) = &self.local_base_url {
+            arguments.push(OsString::from("--local-base-url"));
+            arguments.push(url.clone());
+        }
+        if let Some(window) = self.local_context_window {
+            arguments.push(OsString::from("--local-context-window"));
+            arguments.push(OsString::from(window.to_string()));
+        }
+        arguments
+    }
     /// Session to open at startup.
     pub fn resume_session(&self) -> Option<&str> {
         self.resume.as_deref()

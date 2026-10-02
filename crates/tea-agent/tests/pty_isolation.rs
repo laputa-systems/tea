@@ -545,7 +545,7 @@ fn a_runtime_failure_restores_the_terminal_and_leaves_honest_recovery() {
 }
 
 #[test]
-fn switching_sessions_moves_the_attachment_instead_of_accumulating_runtimes() {
+fn switching_sessions_hands_off_to_a_fresh_runtime_instead_of_reusing_one() {
     let _lock = lock();
     let home = tea_home("switch");
     let provider = HeldProvider::start();
@@ -595,12 +595,16 @@ fn switching_sessions_moves_the_attachment_instead_of_accumulating_runtimes() {
     });
     let (second_runtime, _) =
         wait_for("second record", Duration::from_secs(5), || runtime_record(&second));
-    // The same runtime process now serves the new session only.
-    assert_eq!(second_runtime, runtime);
+    // A session runtime is never repurposed: `/new` ended the first runtime
+    // and the relay started a fresh one bound to the new session.
+    assert_ne!(second_runtime, runtime);
+    wait_for("first runtime exit", Duration::from_secs(10), || {
+        (!alive(runtime)).then_some(())
+    });
     assert!(runtime_record(&first).is_none());
     quit(terminal);
-    wait_for("runtime exit", Duration::from_secs(10), || {
-        (!alive(runtime)).then_some(())
+    wait_for("second runtime exit", Duration::from_secs(10), || {
+        (!alive(second_runtime)).then_some(())
     });
     assert!(runtime_record(&second).is_none());
     let _ = fs::remove_dir_all(home);

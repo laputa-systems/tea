@@ -205,6 +205,8 @@ impl AttachmentRecord {
 struct LinkState {
     stream: Option<UnixStream>,
     input: VecDeque<u8>,
+    /// Input bytes received from the current terminal.
+    received: u64,
     size: (u16, u16),
     /// Increments on every new attachment.
     generation: u64,
@@ -240,6 +242,7 @@ impl RemoteLink {
             state: Mutex::new(LinkState {
                 stream: None,
                 input: VecDeque::new(),
+                received: 0,
                 size: (80, 24),
                 generation: 0,
                 session: None,
@@ -362,13 +365,17 @@ impl RemoteLink {
             state.size = size;
             state.generation += 1;
             state.input.clear();
+            state.received = 0;
         }
         self.changed.notify_all();
         let generation = self.lock().generation;
         loop {
             match read_frame(&mut stream) {
                 Ok(Some((INPUT, payload))) => {
-                    self.lock().input.extend(payload);
+                    let mut state = self.lock();
+                    state.received += payload.len() as u64;
+                    state.input.extend(payload);
+                    drop(state);
                     self.changed.notify_all();
                 }
                 Ok(Some((RESIZE, payload))) if payload.len() == 4 => {
@@ -447,12 +454,41 @@ impl RemoteLink {
     /// Tell the attached terminal the runtime is finishing, then stop
     /// accepting terminals and remove the socket.
     pub fn close(&self, code: u8, message: Option<&str>) {
+        self.close_with_handoff(code, message, None, 0);
+    }
+
+    /// Close, asking the relay to start a runtime with `handoff` arguments
+    /// for the session the user switched to. `unconsumed` is how many
+    /// received input bytes this runtime did not act on; the relay replays
+    /// them, and anything sent later, to the next runtime.
+    pub fn close_with_handoff(
+        &self,
+        code: u8,
+        message: Option<&str>,
+        handoff: Option<&[String]>,
+        unconsumed: usize,
+    ) {
         let mut state = self.lock();
         state.closed = true;
+        let consumed = state
+            .received
+            .saturating_sub((unconsumed + state.input.len()) as u64);
         if let Some(mut stream) = state.stream.take() {
             let body = JsonValue::object([
                 ("code", JsonValue::from(u64::from(code))),
                 ("message", message.map_or(JsonValue::Null, JsonValue::from)),
+                ("consumed", JsonValue::from(consumed)),
+                (
+                    "handoff",
+                    handoff.map_or(JsonValue::Null, |arguments| {
+                        JsonValue::Array(
+                            arguments
+                                .iter()
+                                .map(|argument| JsonValue::from(argument.as_str()))
+                                .collect(),
+                        )
+                    }),
+                ),
             ]);
             let _ = write_frame(&mut stream, CLOSE, &json_payload(&body));
             let _ = stream.shutdown(std::net::Shutdown::Both);
@@ -511,8 +547,15 @@ impl Write for RemoteOutput {
 /// How a relay session ended.
 #[derive(Debug, Eq, PartialEq)]
 pub enum RelayEnd {
-    /// The runtime finished and reported its exit status.
-    Closed { code: u8, message: Option<String> },
+    /// The runtime finished and reported its exit status, possibly handing
+    /// the terminal to a runtime for the session the user switched to, with
+    /// the input that runtime did not consume.
+    Closed {
+        code: u8,
+        message: Option<String>,
+        handoff: Option<Vec<String>>,
+        replay: Vec<u8>,
+    },
     /// The runtime refused the attachment.
     Refused(String),
     /// The runtime connection ended without a close (runtime failure).
@@ -545,27 +588,43 @@ pub fn connect(socket: &Path, session: Option<&str>, size: (u16, u16)) -> Result
     }
 }
 
-/// Relay the controlling terminal to a connected runtime until it ends.
-///
-/// The relay owns raw mode on the real terminal and restores it on every
-/// exit path. It writes nothing of its own except, after a runtime failure,
-/// the sequences that leave the terminal usable.
-pub fn relay(stream: UnixStream) -> io::Result<RelayEnd> {
-    let stdin = io::stdin();
-    let original = tcgetattr(&stdin)?;
-    let mut raw = original.clone();
-    raw.make_raw();
-    tcsetattr(&stdin, OptionalActions::Now, &raw)?;
-    let result = relay_raw(&stdin, stream);
-    let _ = tcsetattr(&stdin, OptionalActions::Now, &original);
-    if matches!(result, Ok(RelayEnd::Lost) | Err(_)) {
-        // The runtime could not restore its modes: leave the alternate
-        // screen, show the cursor, and stop bracketed paste.
+/// Raw mode on the real terminal for the whole relay session, across
+/// runtime handoffs, restored on drop.
+pub struct RawTerminal {
+    original: rustix::termios::Termios,
+}
+
+impl RawTerminal {
+    /// Put the controlling terminal in raw mode.
+    pub fn enter() -> io::Result<Self> {
+        let stdin = io::stdin();
+        let original = tcgetattr(&stdin)?;
+        let mut raw = original.clone();
+        raw.make_raw();
+        tcsetattr(&stdin, OptionalActions::Now, &raw)?;
+        Ok(Self { original })
+    }
+
+    /// Leave a terminal usable after a runtime could not restore its modes:
+    /// exit the alternate screen, show the cursor, and stop bracketed paste.
+    pub fn reset_presentation(&self) {
         let mut stdout = io::stdout();
         let _ = stdout.write_all(b"\x1b[?1049l\x1b[?2004l\x1b[?25h\r\n");
         let _ = stdout.flush();
     }
-    result
+}
+
+impl Drop for RawTerminal {
+    fn drop(&mut self) {
+        let _ = tcsetattr(io::stdin(), OptionalActions::Now, &self.original);
+    }
+}
+
+/// Relay the terminal (already in raw mode) to a connected runtime until it
+/// ends, first delivering `replay` (input a previous runtime handed off
+/// unconsumed). The relay writes nothing of its own.
+pub fn relay(stream: UnixStream, replay: &[u8]) -> io::Result<RelayEnd> {
+    relay_raw(&io::stdin(), stream, replay)
 }
 
 fn terminal_size(stdin: &io::Stdin) -> (u16, u16) {
@@ -579,7 +638,10 @@ pub fn current_size() -> (u16, u16) {
     terminal_size(&io::stdin())
 }
 
-fn relay_raw(stdin: &io::Stdin, stream: UnixStream) -> io::Result<RelayEnd> {
+/// How much recently sent input the relay retains for handoff replay.
+const SENT_INPUT_WINDOW: usize = 64 * 1024;
+
+fn relay_raw(stdin: &io::Stdin, stream: UnixStream, replay: &[u8]) -> io::Result<RelayEnd> {
     let end: Arc<Mutex<Option<RelayEnd>>> = Arc::default();
     let mut reader = stream.try_clone()?;
     let reader_end = Arc::clone(&end);
@@ -608,6 +670,25 @@ fn relay_raw(stdin: &io::Stdin, stream: UnixStream) -> io::Result<RelayEnd> {
                                 .and_then(|value| value.get("message"))
                                 .and_then(JsonValue::as_str)
                                 .map(str::to_owned),
+                            handoff: value
+                                .as_ref()
+                                .and_then(|value| value.get("handoff"))
+                                .and_then(JsonValue::as_array)
+                                .map(|arguments| {
+                                    arguments
+                                        .iter()
+                                        .filter_map(JsonValue::as_str)
+                                        .map(str::to_owned)
+                                        .collect()
+                                }),
+                            // Filled from the sent-input log below.
+                            replay: value
+                                .as_ref()
+                                .and_then(|value| value.get("consumed"))
+                                .and_then(JsonValue::as_u64)
+                                .unwrap_or(u64::MAX)
+                                .to_be_bytes()
+                                .to_vec(),
                         };
                     }
                     Ok(Some(_)) => {}
@@ -623,10 +704,50 @@ fn relay_raw(stdin: &io::Stdin, stream: UnixStream) -> io::Result<RelayEnd> {
         tv_sec: 0,
         tv_nsec: 20_000_000,
     };
+    // Every input byte sent to this runtime, by offset, within a window, so a
+    // handoff can replay what the runtime did not consume.
+    let mut sent = VecDeque::<u8>::new();
+    let mut sent_base = 0_u64;
+    let record = |bytes: &[u8], sent: &mut VecDeque<u8>, sent_base: &mut u64| {
+        sent.extend(bytes.iter().copied());
+        while sent.len() > SENT_INPUT_WINDOW {
+            sent.pop_front();
+            *sent_base += 1;
+        }
+    };
+    if !replay.is_empty() {
+        write_frame(&mut writer, INPUT, replay)?;
+        record(replay, &mut sent, &mut sent_base);
+    }
+    let resolve = |end: RelayEnd, sent: &VecDeque<u8>, sent_base: u64| match end {
+        RelayEnd::Closed {
+            code,
+            message,
+            handoff,
+            replay,
+        } => {
+            let consumed = u64::from_be_bytes(replay.try_into().unwrap_or([0xff; 8]));
+            let replay = if handoff.is_some() && consumed >= sent_base {
+                sent.iter()
+                    .skip(usize::try_from(consumed - sent_base).unwrap_or(usize::MAX))
+                    .copied()
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            RelayEnd::Closed {
+                code,
+                message,
+                handoff,
+                replay,
+            }
+        }
+        other => other,
+    };
     loop {
-        if let Some(end) = end.lock().expect("relay end poisoned").take() {
+        if let Some(finished) = end.lock().expect("relay end poisoned").take() {
             let _ = output.join();
-            return Ok(end);
+            return Ok(resolve(finished, &sent, sent_base));
         }
         let ready = retry_on_intr(|| {
             let mut fds = [PollFd::new(&*stdin, PollFlags::IN)];
@@ -642,9 +763,15 @@ fn relay_raw(stdin: &io::Stdin, stream: UnixStream) -> io::Result<RelayEnd> {
                 }
                 Ok(count) => count,
             };
+            record(&bytes[..count], &mut sent, &mut sent_base);
             if write_frame(&mut writer, INPUT, &bytes[..count]).is_err() {
                 let _ = output.join();
-                return Ok(end.lock().expect("relay end poisoned").take().unwrap_or(RelayEnd::Lost));
+                let finished = end
+                    .lock()
+                    .expect("relay end poisoned")
+                    .take()
+                    .unwrap_or(RelayEnd::Lost);
+                return Ok(resolve(finished, &sent, sent_base));
             }
         }
         let current = terminal_size(stdin);
@@ -704,6 +831,46 @@ mod tests {
         AttachmentRecord::retract(&directory, 42);
         assert_eq!(AttachmentRecord::read(&directory).expect("read"), None);
         let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn a_handoff_reports_exactly_the_input_the_runtime_consumed() {
+        let home = temporary("handoff");
+        let socket = new_socket_path(&home).expect("socket path");
+        let link = RemoteLink::bind(socket.clone()).expect("bind");
+        let mut terminal = connect(&socket, None, (80, 24)).expect("attach");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while link.is_detached() {
+            assert!(Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        write_frame(&mut terminal, INPUT, b"/new\r/res").expect("input");
+        let generation = link.generation();
+        let mut taken = Vec::new();
+        while taken.len() < 9 {
+            assert!(Instant::now() < deadline);
+            taken.extend(link.wait_input(Duration::from_millis(50), (generation, (80, 24))));
+        }
+        // The application acted on "/new\r" and still held "/res" undecoded;
+        // later bytes never left the link queue.
+        write_frame(&mut terminal, INPUT, b"ume").expect("more input");
+        while link.lock().input.len() < 3 {
+            assert!(Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        link.close_with_handoff(0, None, Some(&["--resume".into(), "x".into()]), 4);
+        let (kind, payload) = read_frame(&mut terminal).expect("close").expect("frame");
+        assert_eq!(kind, CLOSE);
+        let close = parse_payload(&payload).expect("close JSON");
+        assert_eq!(close.get("consumed").and_then(JsonValue::as_u64), Some(5));
+        assert_eq!(
+            close
+                .get("handoff")
+                .and_then(JsonValue::as_array)
+                .map(|arguments| arguments.len()),
+            Some(2)
+        );
+        let _ = fs::remove_dir_all(home);
     }
 
     #[test]

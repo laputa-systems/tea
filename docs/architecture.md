@@ -79,7 +79,10 @@ terminal health. Any such boundary must remain one-to-one and session-scoped:
   session ends.
 
 This exception permits a disposable TUI without turning tea into a resident
-service.
+service. The terminal implements it for headful sessions: a session runtime
+process behind a byte relay, bound to one session for life and replaced (not
+reused) when the user switches sessions. See
+[headful crash isolation](crash-isolation.md).
 
 ## Persistence
 

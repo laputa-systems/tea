@@ -117,7 +117,8 @@ fn capture_mock_idle_startup(label: &str, config: Option<&str>) -> (String, Vec<
 
 /// Submit `/new` once the settled operation has released the agent. The
 /// screen can show a settled answer slightly before durable settlement
-/// finishes; the application then answers "requires an idle agent", so retry.
+/// finishes; the application then refuses with a transient "requires an idle
+/// agent" notice, so retry until the switch is observed.
 fn start_new_session(terminal: &mut PtyTest) {
     for _ in 0..20 {
         terminal
@@ -126,16 +127,14 @@ fn start_new_session(terminal: &mut PtyTest) {
         terminal
             .send_key(terminal.deadline(Duration::from_secs(3)), Key::Enter)
             .expect("submit /new");
-        let outcome = terminal.wait_for_screen(
-            terminal.deadline(Duration::from_secs(3)),
-            "new session or busy notice",
-            |screen| screen.contains("new session"),
+        let switched = terminal.wait_for_screen(
+            terminal.deadline(Duration::from_millis(1500)),
+            "new session",
+            |screen| screen.contains("new session will begin"),
         );
-        outcome.expect("a /new outcome renders");
-        if !terminal.screen().contains("requires an idle agent") {
+        if switched.is_ok() {
             return;
         }
-        std::thread::sleep(Duration::from_millis(100));
     }
     panic!("the agent never became idle for /new");
 }

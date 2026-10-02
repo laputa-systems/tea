@@ -216,6 +216,11 @@ impl TerminalGuard {
         Ok(guard)
     }
 
+    /// Input bytes received but not yet turned into events.
+    pub fn unconsumed_input_len(&self) -> usize {
+        self.decoder.bytes.len()
+    }
+
     /// Whether this runtime currently has no terminal attached.
     pub fn is_detached(&self) -> bool {
         match &self.input {
