@@ -96,6 +96,42 @@ A length stop without tools continues the unfinished response within the live
 operation's normal policy. Truncated tool calls receive refusal results before
 a recovery turn. This in-process behavior does not authorize recovery on open.
 
+## Configuration, thinking, and routing
+
+The prompt and the declared tools are transcript data. A run computes the
+configuration its next request declares (prompt sections, direct tools, and
+deferred tools loaded by a discovery result since the last configuration) and,
+when it differs, commits one `configuration_changed` entry before that request.
+Replay is order-preserving: providers that accept in-place system messages see
+the update where it happened; others see the current configuration collapsed
+into the leading prompt and request tools. Hooks may annotate context but
+cannot change configuration, and a request may declare only tools the run is
+authorized to execute.
+
+Assistant content is ordered text and provider-exposed thinking blocks.
+Thinking is never answer text; its signatures and redacted data are opaque
+provider continuation material replayed only to the same physical model and
+dropped otherwise. Cancelling during thinking leaves a valid transcript.
+
+A virtual selection routes each request to an approved physical model before
+preparation; continuations and retries stay on that physical model unless the
+virtual model declares routed continuations. The request, assistant origin,
+capabilities, and accounting follow the physical model; the selection is
+retained beside it. See [virtual models](virtual-models.md).
+
+## Maintenance and composition
+
+Cache maintenance is an attributed provider operation owned by the active run.
+It replays the admitted request without routing, hooks, or tool execution,
+never enters model context, records its usage as a separate durable record, and
+stops when the run settles. See [cache warming](cache-warming.md).
+
+A trusted composition tool's nested calls are prepared, policy-checked,
+attributed, and cancelled exactly like model calls; their results return to the
+composition tool, their effects leave durable nested-effect facts, and started
+calls settle before the composition result. See
+[discovery and codemode](discovery-and-codemode.md).
+
 ## Context and compaction
 
 Raw history is immutable. Context projection can omit eligible entries or use

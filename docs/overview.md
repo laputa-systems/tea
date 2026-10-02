@@ -45,3 +45,10 @@ does not multiplex live root sessions or rely on a resident daemon.
 - [Durable subagents](subagents.md)
 - [Verification](verification.md)
 - [Prompt cache-friendliness](cache-friendliness.md) describes content-free logical continuity evidence.
+- [Anthropic provider](anthropic-provider.md) — native API-key adapter ported from Pi.
+- [Cache warming](cache-warming.md) — active-work prompt-cache maintenance.
+- [Discovery and codemode](discovery-and-codemode.md) — deferred tools, `tool_search`, Luau composition.
+- [MCP](mcp.md) — explicitly configured local stdio servers.
+- [Virtual models](virtual-models.md) — extension routers over host-approved models.
+- [Headful crash isolation](crash-isolation.md) — session runtime behind a disposable terminal relay.
+- [Pi 1.0 upgrade record](pi-1-upgrade.md) — provenance, decisions, deviations, and evidence.

@@ -108,3 +108,31 @@ both retain transition lineage.
 
 See `docs/harness-self-extension.md` and `docs/harness-evolution.md` for the
 full policy and operator boundaries.
+
+## Pi 1.0 upgrade terms
+
+**Configuration update** — A typed `System` transcript message (durable
+`configuration_changed` entry) that changes prompt sections and/or declared
+tools at one point in conversation order.
+
+**Authorized / discoverable / declared tools** — The run's executable
+registry; its `Deferred` subset found through discovery; and the tools the
+current request actually declares to the model.
+
+**Composition tool** — A trusted tool (such as codemode) whose nested calls go
+through the owning run. `Composition` exposure marks tools callable only that
+way.
+
+**Cache maintenance** — A best-effort replay of an admitted request that keeps
+its provider prompt-cache entry warm during active work; attributed as a
+`cache_maintenance` record, never model context.
+
+**Virtual model** — A `virtual/<id>` selection whose router picks one
+host-approved physical model per request.
+
+**Physical model** — The model a request is actually dispatched to; recorded
+as the assistant message's origin.
+
+**Session runtime / terminal relay** — The two processes of a headful `tea`:
+the runtime owns one session's execution for its life; the relay owns the real
+terminal and carries bytes. `tea --attach SESSION_ID` reattaches a relay.

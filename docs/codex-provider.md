@@ -95,8 +95,9 @@ the `version` header; its provenance comment names the upstream Codex commit.
 
 ## Context, tools, and continuity
 
-`CodexContextHook` in `crates/tea-providers/src/codex/context.rs` converts Tea
-transcript state to Responses `input` items. Effective system instructions go
+`responses_input` in `crates/tea-providers/src/codex/context.rs` converts the
+typed request transcript to Responses `input` items (configuration is collapsed:
+the current prompt and tools are sent each request). Effective system instructions go
 in top-level `instructions`, not a Chat Completions `messages` array. Function
 definitions, calls, and outputs use native Responses shapes. Every request
 uses `tool_choice: "auto"`; each native function definition carries

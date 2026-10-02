@@ -13,7 +13,9 @@ cargo test -p tea-providers --locked
 cargo test -p tea-luau --locked
 cargo test -p tea-core --locked
 cargo test -p tea-agent --lib --locked
-cargo test -p tea-agent --features pty-harness --test pty_streaming --locked
+cargo test -p tea-agent --features pty-harness --test pty_streaming --test pty_isolation --locked
+cargo test -p tea-agent --features mcp-fixture --locked
+cargo test -p tea-core --all-features --locked
 cargo test -p tea-agent --features live-verification --lib --locked
 cargo test -p tea-providers --all-features --locked
 cargo test -p tea-luau --test run_counter_extension --locked
@@ -60,6 +62,13 @@ credential or live inference is part of these checks.
 
 Do not run formatters, linters, pre-commit hooks, or push as part of normal
 verification in this repository.
+
+The Pi 1.0 upgrade features (Anthropic, thinking, cache warming,
+discovery/codemode, MCP, virtual models, headful crash isolation) are verified
+offline only: loopback HTTP and SSE fixtures with fragmented delivery, scripted
+providers with gates and a virtual clock, a fake MCP stdio server, and real
+PTYs and processes. Their commands and recorded results are in the
+[upgrade record](pi-1-upgrade.md#verification). `make test` runs them all.
 
 ## Guarded Codex Luna live lane
 

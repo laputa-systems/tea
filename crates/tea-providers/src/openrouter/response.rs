@@ -491,7 +491,7 @@ fn parse_usage(usage: &JsonValue) -> Usage {
 /// Retain OpenRouter's structured reasoning continuation exactly where the
 /// core can durably associate it with the originating assistant turn. The
 /// regular transcript and tools never receive this provider-private field;
-/// `OpenAiContextHook` replays it only when building a later OpenRouter turn.
+/// `openai::chat_messages` replays it only when building a later OpenRouter turn.
 /// Provider-exposed reasoning text in one delta or message. OpenRouter mirrors
 /// readable `reasoning_details` into a flat `reasoning` string; when only the
 /// structured form is present its text and summary entries are shown instead.

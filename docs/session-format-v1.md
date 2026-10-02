@@ -57,6 +57,32 @@ For host sessions whose root or allowed child model uses the local adapter,
 API root. The terminal checks it before reopening for execution; it does not
 store the caller-supplied URL in the header.
 
+## Pi 1.0 upgrade additions
+
+The closed v1 schema gained these shapes; older readers reject them:
+
+- `configuration_changed` entries (prompt-section changes, declared tool
+  declarations added, tool names removed). They replace the earlier
+  `tool_activation_changed` entry, which is no longer readable.
+- Assistant entries keep `content` as the concatenated answer text and add
+  `content_blocks` (ordered `text`, `thinking` with optional opaque
+  `signature`, `redacted_thinking`) and `origin` (the physical model) only when
+  they differ from the defaults, so plain-text entries encode as before.
+- `cache_maintenance` lane records: owning operation, physical and selected
+  model, outcome, provider usage, and a listed-price `estimated_cost`. They
+  are not entries, not model context, and not counted in lane usage totals.
+- `tea.nested-tool-effect.v1` custom facts for composition-tool nested calls
+  (`started` with bounded arguments, `settled` with `is_error` and bounded
+  content).
+- Router state is ordinary bounded extension state
+  (`ExtensionStateValueSet`).
+
+Hosts may also write a disposable `runtime.json` attachment record (pid,
+socket, session id) in a session directory while a headful session runtime is
+bound to it; it is never authority and is ignored when stale. Sessions created
+before the upgrade remain inspectable but cannot be reopened for execution
+(see [the upgrade record](pi-1-upgrade.md#compatibility)).
+
 ## Wire, integrity, and commit contract
 
 The header is one object with exactly these fields: kind, format, version,

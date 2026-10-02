@@ -111,6 +111,30 @@ to explore. The mock model advertises a 16k context window and returns the
 terminal compactor's required structured summary for both standalone and
 cache-friendly compaction requests.
 
+## Optional features and configuration
+
+`$TEA_HOME/config.toml` also accepts, all strictly validated:
+
+- `[anthropic]` `cache_retention` (`none`/`short`/`long`) and
+  `thinking_display` (`summarized`/`omitted`) for the native Anthropic adapter
+  ([details](anthropic-provider.md));
+- `[cache_warming] enabled` (default `true`) for active-work cache maintenance
+  ([details](cache-warming.md)); the footer shows `warm ×N ~$X` (estimates);
+- `[features] codemode` for the Luau codemode tool
+  ([details](discovery-and-codemode.md));
+- `[mcp.servers.<name>]` for local stdio MCP servers, whose tools are found with
+  `tool_search` ([details](mcp.md));
+- `[routing] approved_models` to offer the `virtual/plan-build` model
+  ([details](virtual-models.md)).
+
+Provider-exposed thinking renders as a muted `∴ thinking` block above the
+answer, bounded to six rows inline (the full text is in the Ctrl+O detail
+view), and is restored as thinking, not answer text, on resume.
+
+`tea --resume SESSION_ID` opens a saved session at startup;
+`tea --attach SESSION_ID` reattaches a terminal to a headful session's runtime
+([details](crash-isolation.md)).
+
 ## Sessions
 
 Sessions live below the explicit Tea home, scoped by a normalized workspace

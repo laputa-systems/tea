@@ -134,25 +134,37 @@ contacted, and no real credential is read.
 
 | Command | Result (macOS AArch64) |
 | --- | --- |
-| `cargo test --workspace --locked` | 863 passed, 0 failed |
+| `cargo test --workspace --locked` | 865 passed, 0 failed |
 | `cargo test -p tea-core --all-features --locked` | 320 passed |
 | `cargo test -p tea-providers --all-features --locked` | 164 passed, 1 ignored (incl. 42 Anthropic) |
 | `cargo test -p tea-agent --features mcp-fixture --locked` | 214 passed, 1 ignored (incl. real-process MCP and durable discovery) |
 | `cargo test -p tea-agent --features pty-harness --test pty_streaming --test pty_isolation --locked` | 12 + 6 passed |
 | `cargo test -p tea-luau --locked` | 110 passed (codemode, plan/build router, combined active-work scenario) |
+| `cargo check --workspace --all-targets --all-features --locked` | passed |
 | `./crates/tea-core/fixtures/run.sh` | 29 passed |
-| `make test-linux` (Linux AArch64 Docker) | see below |
+| `python3 scripts/check-crate-graph.py`, `scripts/check-toolchain-pin.sh`, `scripts/check-verification-entrypoints.py`, `git diff --check` | passed |
+| `make test-linux` (Linux AArch64 Docker, `make test` inside) | passed at `b53d12c`, including both PTY suites |
+
+The Linux run first exposed a pre-existing timing race in
+`cancellation_settles_the_owned_process_scope_promptly` (a fixed 50 ms delay
+before cancelling a `sleep`); the test now waits for the command's first
+output, and the rerun passed.
 
 ### Measurements (macOS AArch64, release, local comparison)
 
 | Metric | Base `5baee99` | Upgrade |
 | --- | --- | --- |
 | Release `tea` size | 8,902,128 B | 9,448,800 B (+6.1%) |
-| Idle RSS, headful (relay + runtime) | 8.9 MiB (one process) | 12.3 MiB (3.2 relay + 9.1 runtime) |
-| Idle RSS, `TEA_IN_PROCESS=1` | — | 9.0 MiB |
+| `tea --version` (median of 30) | ~9 ms | ~9 ms |
+| First frame, headful mock (median of 30) | ~22–26 ms | ~31 ms split; ~21 ms `TEA_IN_PROCESS=1` |
+| Idle RSS, headful (relay + runtime) | 8.9 MiB (one process) | 12.2–12.4 MiB (3.2 relay + ~9.1 runtime) |
+| Idle RSS, `TEA_IN_PROCESS=1` | — | 8.9–9.2 MiB |
 
-The headful increase is the relay process; the runtime itself is within 3% of
-the old single process. These are local comparisons, not limits.
+The headful increase is the relay process and the second exec; the runtime
+itself is within 3% of the old single process. Measured with
+`scripts/measure-idle-rss.py` (now summing the started process and its
+descendants) and a PTY first-frame probe. These are local comparisons, not
+limits.
 
 ### Not established offline
 

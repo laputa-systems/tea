@@ -148,17 +148,27 @@ upstream-contract maintenance rules are in [Codex provider](codex-provider.md).
 
 ## Context and stream mapping
 
-Hosts using OpenRouter, Local, or other Chat Completions adapters should install
-`tea_providers::openai::OpenAiContextHook` on the agent. It converts
-the core transcript to the standard Chat Completions message array consumed by
-both adapters. The core default `NoHooks` value is intentionally diagnostic
-Rust text and is not a provider wire format.
+Every adapter receives a typed `ModelRequest`: its `Transcript` (messages in
+conversation order, including `System` configuration updates and host notes),
+the physical `model`, the `selected_model` when a virtual model routed it, the
+reasoning level, the request purpose (turn, compaction, or cache maintenance),
+and an optional output cap. Adapters own their wire projection; hosts install
+no provider-specific hook. `Transcript::prepared_for` applies the shared replay
+rules (incomplete assistant turns dropped, orphaned results closed, thinking
+replayed only to the same physical model).
 
-Hosts using `codex` instead install `tea_providers::codex::CodexContextHook`.
-It emits native Responses input items, places effective system instructions in
-the top-level Codex payload, and replays only `codex`-scoped opaque encrypted
-reasoning context alongside the assistant turn that produced it. Other
-providers neither render nor reuse that opaque material.
+Adapters declare `ModelCapabilities` per physical model: whether configuration
+updates are accepted in place (Anthropic) or collapsed into the leading prompt
+and request tools (Chat Completions and Codex), whether thinking is exposed,
+any prompt-cache lifetime and minimal-output replay safety, listed prices, and
+the context window. Core never infers a capability from a model name.
+
+Chat Completions adapters (`tea_providers::openai::chat_messages`) render the
+current prompt as the leading system message and host notes as trailing
+developer messages. Codex (`codex::context::responses_input`) emits native
+Responses input items, places effective instructions in the top-level payload,
+and replays only `codex`-scoped encrypted reasoning beside the turn that
+produced it.
 
 Before conversion, core applies the configured `ToolResultProjectionPolicy` to
 a clone of canonical tool results. Raw content/details stay in the transcript
@@ -177,14 +187,16 @@ stay generic before entering agent state, so a remote service cannot inject
 arbitrary transcript text. Hosts can read `last_error_report()` from the concrete
 adapter for the last failure's source, message, status, and retryability classification.
 
-Reasoning summaries and raw reasoning text are intentionally not assistant
-content: the current core model-stream contract has no visible reasoning event,
-so treating them as an answer would corrupt the transcript. The Codex adapter
+Provider-exposed reasoning streams as `ModelStreamEvent::ThinkingDelta`, never
+as answer text: Anthropic thinking blocks (with private signatures and
+redacted thinking as opaque continuation material), the first non-empty
+`reasoning_content`/`reasoning`/`reasoning_text` field (or readable
+`reasoning_details`) from OpenRouter and local Chat Completions servers, and
+Codex reasoning summaries (raw reasoning is never surfaced). The Codex adapter
 additionally preserves only its opaque encrypted continuation item for a later
-compatible request; it never renders or interprets it. This is an explicit
-boundary rather than a hidden fallback. The current gateway may emit a
-`provider-metadata` envelope after `finish`; it is accepted as non-content
-metadata rather than misclassified as a second terminal event.
+compatible request. The current gateway may emit a `provider-metadata`
+envelope after `finish`; it is accepted as non-content metadata rather than
+misclassified as a second terminal event.
 
 OpenRouter and Local expose network-time assistant deltas through the core
 stream while preserving final usage before their terminal events. The generic

@@ -16,7 +16,11 @@ Start with [docs/overview.md](docs/overview.md). The main routes are:
   [provider adapters](docs/provider-adapters.md) for optional runtime layers.
 - [Tracing](docs/trace.md) and [Luau ABI v3](docs/luau-abi-v3.md) for
   optional observability and policy layers.
-- [Terminal host](docs/tui.md) for the repository-owned `tea` TUI.
+- [Terminal host](docs/tui.md) for the repository-owned `tea` TUI, and
+  [headful crash isolation](docs/crash-isolation.md) for its session runtime
+  and terminal relay.
+- [Pi 1.0 upgrade record](docs/pi-1-upgrade.md) for the Anthropic adapter,
+  thinking, cache warming, discovery/codemode, MCP, and virtual models.
 - [Durable subagents](docs/subagents.md) for the optional asynchronous
   multi-lane execution and isolated-workspace contract.
 - [Quality evaluation](evals/README.md) and [verification](docs/verification.md)
