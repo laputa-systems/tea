@@ -90,5 +90,6 @@ compaction summaries) to the first approved model.
 cargo test -p tea-core --all-features --test routing
 cargo test -p tea-luau --test plan_build_router
 cargo test -p tea-agent --lib durable_virtual_model
+cargo test -p tea-agent --lib router_state_is_branch_local
 cargo test -p tea-agent --lib routing_approves
 ```

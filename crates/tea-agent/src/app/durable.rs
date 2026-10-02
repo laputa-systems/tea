@@ -3744,6 +3744,98 @@ mod tests {
     }
 
     #[test]
+    fn router_state_is_branch_local_across_a_settled_turn_fork() {
+        use tea_core::testing::{ScriptedProvider, ScriptedTurn};
+        let home = temporary_home();
+        let workspace = home.join("workspace");
+        fs::create_dir_all(&workspace).expect("fixture workspace creates");
+        let planner = ModelDescriptor {
+            provider: "fixture".into(),
+            model: "planner".into(),
+            revision: None,
+        };
+        let builder = ModelDescriptor {
+            provider: "fixture".into(),
+            model: "builder".into(),
+            revision: None,
+        };
+        let provider = ScriptedProvider::new([
+            ScriptedTurn::new().text("planned").stop(),
+            ScriptedTurn::new()
+                .tool_call(
+                    "call-edit",
+                    "edit",
+                    r#"{"files":[{"path":"a.md","content":"a\n"}]}"#,
+                )
+                .end_tool_use(),
+            ScriptedTurn::new().text("edited").stop(),
+            ScriptedTurn::new().text("building").stop(),
+            ScriptedTurn::new().text("fork plans").stop(),
+            ScriptedTurn::new().text("main builds").stop(),
+        ]);
+        let harness = create_host_harness(HostHarnessConfig {
+            tea_home: &home,
+            workspace: &workspace,
+            local_base_url: None,
+            configuration: host_configuration(&workspace.to_string_lossy())
+                .expect("host configuration builds"),
+            model: ModelDescriptor {
+                provider: "virtual".into(),
+                model: "plan-build".into(),
+                revision: None,
+            },
+            provider: Arc::new(provider.clone()) as Arc<dyn ModelProvider>,
+            thinking_level: Some(ThinkingLevel::Off),
+            compactor: None,
+            automatic_compaction: AutomaticCompactionPolicy::disabled(),
+            subagents: None,
+            services: HostServices {
+                approved_models: vec![planner.clone(), builder.clone()],
+                cache_warming: None,
+                dynamic_tools: None,
+            },
+        })
+        .expect("routing fixture host creates");
+        smol::block_on(harness.run_root_prompt("plan")).expect("turn one");
+        smol::block_on(harness.run_root_prompt("edit")).expect("turn two");
+        smol::block_on(harness.run_root_prompt("build")).expect("turn three");
+        let checkpoints = harness
+            .snapshot()
+            .expect("snapshot")
+            .facts()
+            .iter()
+            .filter_map(|stored| match &stored.fact {
+                tea_session::SessionFact::TurnCheckpoint(checkpoint)
+                    if checkpoint.lane_id == LaneId::main() =>
+                {
+                    Some(checkpoint.checkpoint_id.clone())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        // Fork from the first settled turn: still the planning phase there.
+        let fork = LaneId::new("fork-plan").expect("lane");
+        harness
+            .fork_settled_turn(checkpoints[0].clone(), fork.clone())
+            .expect("fork commits");
+        smol::block_on(harness.run_lane_prompt(fork, "on the fork")).expect("fork turn");
+        smol::block_on(harness.run_root_prompt("on main")).expect("main turn");
+        let models = provider
+            .requests()
+            .iter()
+            .map(|request| request.model.clone().expect("routed").model)
+            .collect::<Vec<_>>();
+        // main: plan, plan (edit turn), plan (tool continuation stays),
+        // build after the edit; the fork inherits the planning state of its
+        // checkpoint while main keeps building.
+        assert_eq!(
+            models,
+            ["planner", "planner", "planner", "builder", "planner", "builder"]
+        );
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
     fn durable_codemode_calls_luau_builtins_and_records_nested_evidence() {
         let home = temporary_home();
         let workspace = home.join("workspace");
