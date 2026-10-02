@@ -398,8 +398,8 @@ mod tests {
     fn state_commit_item_is_one_version_pinned_whole_value() {
         let item = extension_state_commit_item(
             LaneId::main(),
-            "todo",
-            "todo.v1",
+            "goal",
+            "goal.v1",
             ExtensionStateUpdate {
                 value: JsonValue::object([("open", JsonValue::from(2_u64))]),
             },
@@ -410,8 +410,8 @@ mod tests {
             panic!("state update must persist as its dedicated fact");
         };
         assert_eq!(fact.lane_id, LaneId::main());
-        assert_eq!(fact.extension_id, "todo");
-        assert_eq!(fact.state_version, "todo.v1");
+        assert_eq!(fact.extension_id, "goal");
+        assert_eq!(fact.state_version, "goal.v1");
         assert_eq!(
             fact.value,
             JsonValue::object([("open", JsonValue::from(2_u64))])
@@ -422,8 +422,8 @@ mod tests {
     fn state_commit_item_rejects_values_above_the_public_bound() {
         let error = extension_state_commit_item(
             LaneId::main(),
-            "todo",
-            "todo.v1",
+            "goal",
+            "goal.v1",
             ExtensionStateUpdate {
                 value: JsonValue::String("x".repeat(MAX_EXTENSION_STATE_VALUE_BYTES)),
             },
@@ -455,8 +455,8 @@ mod tests {
         let SessionCommitItem::Fact(SessionFact::ExtensionStateValueSet(fact)) =
             extension_state_commit_item(
                 LaneId::main(),
-                "todo",
-                "todo.v1",
+                "goal",
+                "goal.v1",
                 ExtensionStateUpdate { value: produced },
             )
             .expect("bounded state value commits")

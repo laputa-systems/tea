@@ -47,6 +47,6 @@ against the resolver's frozen capability ceiling, which is part of the
 persisted catalog identity. A host session that exposes `tea_harness` therefore
 freezes its ceiling to exactly the capabilities its seed grants the coding
 builtins (`authoring_capability_ceiling` in the terminal host); an `off`
-session keeps an empty ceiling. Operator-pinned global plugins such as `todo`,
-`goal`, and `web` are never editable by a candidate, while a new
+session keeps an empty ceiling. Operator-pinned global plugins such as
+`goal` and `web` are never editable by a candidate, while a new
 capability-free session plugin may be added through `registry_operations`.

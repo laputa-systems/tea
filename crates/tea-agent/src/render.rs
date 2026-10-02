@@ -1636,7 +1636,7 @@ mod tests {
             tea_core::event::AgentEventKind::ToolExecutionUpdate {
                 tool_call_id: tea_core::state::ToolCallId::new(format!("call-{sequence}"))
                     .expect("fixture call id"),
-                tool_name: "todo".into(),
+                tool_name: "bash".into(),
                 update: tea_core::tool::ToolUpdate {
                     content: String::new(),
                     details: None,
@@ -1660,8 +1660,8 @@ mod tests {
             .replacen(&format!("• Thinking {spinner}"), "• Thinking <spin>", 1)
     }
 
-    const TODO_ACTIVITY: &str =
-        "Todo · 1 active · 2 pending\n- [>] State machine\n- [ ] Durable integration\n- [ ] Tests";
+    const ACTIVITY: &str =
+        "Work · 1 active · 2 pending\n- [>] State machine\n- [ ] Durable integration\n- [ ] Tests";
 
     #[test]
     fn the_default_activity_row_is_unchanged_without_an_override() {
@@ -1676,7 +1676,7 @@ mod tests {
     #[test]
     fn a_published_activity_replaces_the_default_row_and_keeps_the_spinner() {
         let mut state = active_state();
-        publish_activity(&mut state, 2, TODO_ACTIVITY);
+        publish_activity(&mut state, 2, ACTIVITY);
         let lines = activity_lines(&state, 80);
         let rows = lines
             .iter()
@@ -1685,7 +1685,7 @@ mod tests {
         assert_eq!(
             rows,
             [
-                "• <spin> Todo · 1 active · 2 pending",
+                "• <spin> Work · 1 active · 2 pending",
                 "  - [>] State machine",
                 "  - [ ] Durable integration",
                 "  - [ ] Tests",
@@ -1701,13 +1701,13 @@ mod tests {
     #[test]
     fn a_later_activity_atomically_replaces_the_previous_one() {
         let mut state = active_state();
-        publish_activity(&mut state, 2, TODO_ACTIVITY);
-        publish_activity(&mut state, 3, "Todo · 2 active\n- [>] Only row");
+        publish_activity(&mut state, 2, ACTIVITY);
+        publish_activity(&mut state, 3, "Work · 2 active\n- [>] Only row");
         let rows = activity_lines(&state, 80)
             .into_iter()
             .map(|line| mask_spinner(&line.text))
             .collect::<Vec<_>>();
-        assert_eq!(rows, ["• <spin> Todo · 2 active", "  - [>] Only row"]);
+        assert_eq!(rows, ["• <spin> Work · 2 active", "  - [>] Only row"]);
     }
 
     #[test]
@@ -1715,7 +1715,7 @@ mod tests {
         let mut state = AppState::new();
         state.welcome_line();
         state.apply_event(&agent_event(1, tea_core::event::AgentEventKind::AgentStart));
-        publish_activity(&mut state, 2, TODO_ACTIVITY);
+        publish_activity(&mut state, 2, ACTIVITY);
         for width in [80_u16, 40] {
             let presentation = main_presentation(
                 &state,
@@ -1731,7 +1731,7 @@ mod tests {
                 presentation
                     .live
                     .iter()
-                    .any(|line| line.text().contains("Todo · 1 active · 2 pending")),
+                    .any(|line| line.text().contains("Work · 1 active · 2 pending")),
                 "activity is projected into the mutable tail at width {width}"
             );
         }
@@ -1741,7 +1741,7 @@ mod tests {
     fn activity_rows_wrap_to_the_available_width_and_reflow_geometry() {
         let mut state = active_state();
         let activity = format!(
-            "Todo · 1 blocked\n- [!] {} — {}",
+            "Work · 1 blocked\n- [!] {} — {}",
             "t".repeat(200),
             "b".repeat(300),
         );
@@ -1764,7 +1764,7 @@ mod tests {
         let mut state = AppState::new();
         state.welcome_line();
         state.apply_event(&agent_event(1, tea_core::event::AgentEventKind::AgentStart));
-        publish_activity(&mut state, 2, TODO_ACTIVITY);
+        publish_activity(&mut state, 2, ACTIVITY);
         let presentation = main_presentation(
             &state,
             &ProviderRegistry::new(),

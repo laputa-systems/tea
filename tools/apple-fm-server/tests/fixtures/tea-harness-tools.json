@@ -239,55 +239,6 @@
     },
     {
       "function": {
-        "description": "Read or update the durable plan. No arguments reads the whole list. Send `updates` to report status changes; the extension handles hierarchy, recursive transitions, and the next actionable task. Send `markdown` only to create or restructure the plan, keeping existing #IDs and omitting the id for a new task. The complete document returned by a read can be edited and sent back unchanged as markdown.",
-        "name": "todo",
-        "parameters": {
-          "additionalProperties": false,
-          "properties": {
-            "markdown": {
-              "maxLength": 32768,
-              "type": "string"
-            },
-            "updates": {
-              "items": {
-                "additionalProperties": false,
-                "properties": {
-                  "id": {
-                    "minimum": 1,
-                    "type": "integer"
-                  },
-                  "reason": {
-                    "maxLength": 300,
-                    "type": "string"
-                  },
-                  "status": {
-                    "enum": [
-                      "pending",
-                      "in_progress",
-                      "done",
-                      "blocked",
-                      "dropped"
-                    ]
-                  }
-                },
-                "required": [
-                  "id",
-                  "status"
-                ],
-                "type": "object"
-              },
-              "maxItems": 128,
-              "minItems": 1,
-              "type": "array"
-            }
-          },
-          "type": "object"
-        }
-      },
-      "type": "function"
-    },
-    {
-      "function": {
         "description": "Read the current durable goal state.",
         "name": "get_goal",
         "parameters": {

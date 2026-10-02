@@ -2799,7 +2799,7 @@ fn bundled_extension_commands_feed_completion_and_help() {
     app.state.set_extension_commands(
         super::durable::bundled_host_commands().expect("bundled extensions resolve"),
     );
-    for (prefix, completed) in [("/go", "/goal "), ("/to", "/todos ")] {
+    for (prefix, completed) in [("/go", "/goal ")] {
         app.state.composer_mut().clear();
         app.state.composer_mut().insert_str(prefix).expect("prefix");
         app.complete_command();
@@ -2813,7 +2813,7 @@ fn bundled_extension_commands_feed_completion_and_help() {
         .surface_lines()
         .expect("help lists commands")
         .to_vec();
-    for command in ["/goal", "/todos"] {
+    for command in ["/goal"] {
         assert!(
             lines.iter().any(|line| line.contains(command)),
             "help should list {command}"
@@ -2861,11 +2861,11 @@ fn a_published_activity_survives_the_rest_of_its_root_operation() {
     ));
     state.apply_event(&tool_update(
         2,
-        "todo",
+        "bash",
         "",
-        Some("Todo · 1 active\n- [>] Work"),
+        Some("Work · 1 active\n- [>] Work"),
     ));
-    assert_eq!(state.activity_text(), Some("Todo · 1 active\n- [>] Work"));
+    assert_eq!(state.activity_text(), Some("Work · 1 active\n- [>] Work"));
 
     // The publishing tool settles.
     let call_id = ToolCallId::new("call-2").expect("fixture call id");
@@ -2873,7 +2873,7 @@ fn a_published_activity_survives_the_rest_of_its_root_operation() {
         3,
         tea_core::event::AgentEventKind::ToolExecutionEnd {
             tool_call_id: call_id.clone(),
-            tool_name: "todo".into(),
+            tool_name: "bash".into(),
             result: AgentToolResult {
                 tool_call_id: call_id,
                 content: "Completed #1.".into(),
@@ -2894,10 +2894,10 @@ fn a_published_activity_survives_the_rest_of_its_root_operation() {
             delta: tea_core::event::MessageDelta::Text("thinking".into()),
         },
     ));
-    state.apply_event(&tool_update(5, "bash", "compiling", None));
+    state.apply_event(&tool_update(5, "edit", "compiling", None));
     assert_eq!(
         state.activity_text(),
-        Some("Todo · 1 active\n- [>] Work"),
+        Some("Work · 1 active\n- [>] Work"),
         "an unrelated update without an activity claim must not clear it"
     );
 
@@ -2918,13 +2918,13 @@ fn published_activity_cannot_rewrite_the_host_terminal() {
     ));
     state.apply_event(&tool_update(
         2,
-        "todo",
+        "bash",
         "",
-        Some("Todo\u{1b}[2J\r · 1 active\n- [>] Work\u{7}"),
+        Some("Work\u{1b}[2J\r · 1 active\n- [>] Work\u{7}"),
     ));
     assert_eq!(
         state.activity_text(),
-        Some("Todo [2J  · 1 active\n- [>] Work ")
+        Some("Work [2J  · 1 active\n- [>] Work ")
     );
 }
 
@@ -2935,9 +2935,9 @@ fn a_presentation_only_update_does_not_create_a_tool_progress_row() {
         1,
         tea_core::event::AgentEventKind::AgentStart,
     ));
-    state.apply_event(&tool_update(2, "todo", "", Some("Todo · empty")));
+    state.apply_event(&tool_update(2, "bash", "", Some("Work · empty")));
     assert!(state.transcript().is_empty());
-    state.apply_event(&tool_update(3, "bash", "compiling", None));
+    state.apply_event(&tool_update(3, "edit", "compiling", None));
     assert_eq!(state.transcript().len(), 1);
 }
 
@@ -2948,7 +2948,7 @@ fn a_multi_line_extension_notice_becomes_a_scrollable_transcript_row() {
     assert!(state.transcript().is_empty());
     assert!(matches!(state.status(), UiStatus::Notice(text) if text.contains("Goal")));
 
-    state.extension_notice("TODO · 1 active\n\n- [>] #1 Work".into());
+    state.extension_notice("Work · 1 active\n\n- [>] #1 Work".into());
     assert_eq!(state.transcript().len(), 1);
     assert!(matches!(
         &state.transcript()[0],

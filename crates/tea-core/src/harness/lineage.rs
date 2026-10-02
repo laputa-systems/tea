@@ -84,8 +84,7 @@ impl Default for HarnessResourceLimits {
             source_bytes: 65_536,
             // A bundled extension that handles documents rather than control
             // fields needs headroom proportional to the material it renders:
-            // the web policy assembles bounded multi-source excerpts, and the
-            // todo policy parses, transforms, and formats a whole plan. Luau
+            // the web policy assembles bounded multi-source excerpts. Luau
             // also charges one cooperative interrupt per position scanned by a
             // string pattern, so instruction cost tracks document size rather
             // than statement count. These ceilings admit a bounded document of
@@ -1858,8 +1857,8 @@ mod tests {
                     .expect("fixture profile ID"),
                 self_extension_addendum: None,
                 ordered_global_plugins: vec![PluginBundleRef {
-                    plugin_id: "todo".into(),
-                    tree_id: HarnessTreeId::new("fixture-todo-tree").expect("fixture tree ID"),
+                    plugin_id: "goal".into(),
+                    tree_id: HarnessTreeId::new("fixture-goal-tree").expect("fixture tree ID"),
                     requested_capabilities: BTreeSet::from(["extension.state".into()]),
                     state_version: Some(state_version.into()),
                 }],
@@ -1918,8 +1917,8 @@ mod tests {
 
     #[test]
     fn candidate_cannot_reinterpret_an_existing_extension_state_contract() {
-        let parent_snapshot = stateful_snapshot("fixture-parent-snapshot", "todo.v1");
-        let proposed_snapshot = stateful_snapshot("fixture-proposed-snapshot", "todo.v2");
+        let parent_snapshot = stateful_snapshot("fixture-parent-snapshot", "goal.v1");
+        let proposed_snapshot = stateful_snapshot("fixture-proposed-snapshot", "goal.v2");
         let parent = HarnessRevisionV1 {
             revision_id: HarnessRevisionId::new("fixture-parent-revision")
                 .expect("fixture revision ID"),
@@ -1965,12 +1964,12 @@ mod tests {
             validation
                 .diagnostics
                 .iter()
-                .any(|diagnostic| diagnostic.contains("todo")
+                .any(|diagnostic| diagnostic.contains("goal")
                     && diagnostic.contains("state_version")
                     && diagnostic.contains("not supported"))
         );
 
-        let mut removed_snapshot = stateful_snapshot("fixture-removed-snapshot", "todo.v1");
+        let mut removed_snapshot = stateful_snapshot("fixture-removed-snapshot", "goal.v1");
         removed_snapshot.spec.ordered_global_plugins.clear();
         let mut removal_draft = draft.clone();
         removal_draft.proposed_snapshot_id = removed_snapshot.id.clone();
@@ -1988,7 +1987,7 @@ mod tests {
             removal
                 .diagnostics
                 .iter()
-                .any(|diagnostic| diagnostic.contains("removes stateful extension todo"))
+                .any(|diagnostic| diagnostic.contains("removes stateful extension goal"))
         );
     }
 }

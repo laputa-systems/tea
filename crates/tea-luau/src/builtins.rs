@@ -1,25 +1,7 @@
 //! Checked-in closed source trees for Tea's bundled extensions.
 
 use std::collections::{BTreeMap, BTreeSet};
-use tea_core::harness::extension::{ExtensionLimits, ExtensionSourceTree, ExtensionToolLimits};
-
-/// Resource grant a host should give the bundled todo extension's
-/// `extension.state` binding.
-///
-/// One invocation parses, normalizes, transforms, encodes, and formats a plan
-/// of up to 128 items. Luau charges an interrupt per position scanned by a
-/// string pattern, so that work costs several passes over a document of some
-/// tens of kilobytes rather than the handful of checks a forwarding handler
-/// needs. The grant stays finite and adds no authority; it only makes the
-/// extension's own documented ceilings reachable. A host must still keep it
-/// within its frozen harness resource limits.
-pub fn todo_tool_limits() -> ExtensionToolLimits {
-    ExtensionToolLimits {
-        max_interrupt_checks: 200_000,
-        max_memory_bytes: 4 * 1024 * 1024,
-        ..ExtensionToolLimits::default()
-    }
-}
+use tea_core::harness::extension::{ExtensionLimits, ExtensionSourceTree};
 
 /// Return the exact bundled goal extension source tree.
 ///
@@ -41,46 +23,6 @@ pub fn goal(limits: ExtensionLimits) -> ExtensionSourceTree {
             (
                 "prompts.luau".into(),
                 include_str!("../builtins/goal/prompts.luau").into(),
-            ),
-        ]),
-        expected_capabilities: Some(BTreeSet::from(["extension.state".into()])),
-        limits,
-    }
-}
-
-/// Return the exact bundled todo extension source tree.
-///
-/// Every todo semantic — Markdown parsing, ordering, identity allocation,
-/// recursive status transitions, automatic promotion, counts, and the bounded
-/// activity projection — lives in these Luau assets. Rust contributes only
-/// generic extension persistence and generic presentation plumbing.
-///
-/// `core.luau` holds that state machine exactly once: `init.luau` requires it
-/// for the read-only `/todos` command, and `handler.luau` requires it as the
-/// executable tool module, so the two can never drift apart.
-pub fn todo(limits: ExtensionLimits) -> ExtensionSourceTree {
-    ExtensionSourceTree {
-        extension_id: "todo".into(),
-        files: BTreeMap::from([
-            (
-                "manifest.json".into(),
-                include_str!("../builtins/todo/manifest.json").into(),
-            ),
-            (
-                "init.luau".into(),
-                include_str!("../builtins/todo/init.luau").into(),
-            ),
-            (
-                "prompts.luau".into(),
-                include_str!("../builtins/todo/prompts.luau").into(),
-            ),
-            (
-                "core.luau".into(),
-                include_str!("../builtins/todo/core.luau").into(),
-            ),
-            (
-                "handler.luau".into(),
-                include_str!("../builtins/todo/handler.luau").into(),
             ),
         ]),
         expected_capabilities: Some(BTreeSet::from(["extension.state".into()])),
@@ -1324,89 +1266,6 @@ mod tests {
                 .and_then(tea_protocol::JsonValue::as_array)
                 .map(|requests| requests.len()),
             Some(2)
-        );
-    }
-
-    #[test]
-    fn todo_is_a_closed_deterministic_single_tool_bundle() {
-        let tree = todo(ExtensionLimits {
-            max_source_bytes: 64 * 1024,
-            max_memory_bytes: 4 * 1024 * 1024,
-            max_interrupt_checks: 250_000,
-        });
-        assert_eq!(tree.extension_id, "todo");
-        assert_eq!(
-            tree.files.keys().collect::<Vec<_>>(),
-            [
-                "core.luau",
-                "handler.luau",
-                "init.luau",
-                "manifest.json",
-                "prompts.luau"
-            ]
-        );
-        assert_eq!(
-            tree.expected_capabilities,
-            Some(BTreeSet::from(["extension.state".into()])),
-            "the todo extension requests durable state and nothing else"
-        );
-
-        let descriptor = LuauExtensionEngine
-            .describe(&tree)
-            .expect("bundled todo source resolves");
-        assert_eq!(
-            descriptor.requested_capabilities,
-            BTreeSet::from(["extension.state".into()])
-        );
-        assert_eq!(
-            descriptor
-                .tools
-                .iter()
-                .map(|tool| (tool.name.as_str(), tool.capability.as_str()))
-                .collect::<Vec<_>>(),
-            [("todo", "extension.state")],
-            "the model-facing surface is exactly one tool"
-        );
-        assert_eq!(
-            descriptor
-                .host_commands
-                .iter()
-                .map(|command| (command.name.as_str(), command.allowed_while_active))
-                .collect::<Vec<_>>(),
-            [("/todos", true)],
-            "the host surface is exactly one read-only command"
-        );
-        assert_eq!(descriptor.prompt_sections.len(), 1);
-        assert_eq!(descriptor.prompt_sections[0].id, "todo");
-
-        // The schema has no operation enum and no structural fields.
-        let schema = &descriptor.tools[0].schema;
-        let properties = schema
-            .get("properties")
-            .and_then(tea_protocol::JsonValue::as_object)
-            .expect("todo schema declares properties");
-        assert_eq!(
-            properties.keys().collect::<Vec<_>>(),
-            ["markdown", "updates"]
-        );
-        assert_eq!(
-            schema.get("additionalProperties"),
-            Some(&tea_protocol::JsonValue::Bool(false))
-        );
-        assert!(schema.get("required").is_none(), "empty arguments read");
-        let update = properties
-            .get("updates")
-            .and_then(|updates| updates.get("items"))
-            .expect("updates declares its item schema");
-        assert_eq!(
-            update
-                .get("properties")
-                .and_then(tea_protocol::JsonValue::as_object)
-                .expect("update items declare properties")
-                .keys()
-                .collect::<Vec<_>>(),
-            ["id", "reason", "status"],
-            "the model never sees parent_id, ordering, or pagination"
         );
     }
 

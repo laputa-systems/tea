@@ -70,10 +70,7 @@ pub(crate) type HostHarness = SessionSupervisor<JsonlSession>;
 pub(super) fn bundled_host_commands() -> Result<Vec<ExtensionHostCommandDescription>, AppError> {
     let limits = extension_limits(&HarnessResourceLimits::default());
     let mut commands = Vec::new();
-    for source in [
-        tea_luau::builtins::goal(limits),
-        tea_luau::builtins::todo(limits),
-    ] {
+    for source in [tea_luau::builtins::goal(limits)] {
         commands.extend(
             LuauExtensionEngine
                 .describe(&source)
@@ -776,13 +773,6 @@ fn create_host_harness_with_operations_and_mode(
                 source: tea_luau::builtins::goal(extension_limits(&resource_limits)),
             },
             HarnessSeedExtension {
-                // Todo is root-agent coordination state. Only this harness
-                // seeds it, so independently executing children cannot write
-                // the shared plan from a stale snapshot.
-                scope: HarnessSeedExtensionScope::Global,
-                source: tea_luau::builtins::todo(extension_limits(&resource_limits)),
-            },
-            HarnessSeedExtension {
                 scope: HarnessSeedExtensionScope::Global,
                 source: tea_luau::builtins::web(extension_limits(&resource_limits)),
             },
@@ -811,7 +801,6 @@ fn create_host_harness_with_operations_and_mode(
         let mut extensions = extensions;
         let mut capability_references = vec![
             extension_state.goal_reference.clone(),
-            extension_state.todo_reference.clone(),
             web_binding_ref.clone(),
         ];
         if !services.approved_models.is_empty() {
@@ -1484,10 +1473,8 @@ fn web_capability_binding_with_tinyfish_api_key(
 /// The two durable-state bindings every terminal harness installs.
 struct ExtensionStateBindings {
     goal_state: ExtensionStateHandle,
-    todo_state: ExtensionStateHandle,
     router_state: ExtensionStateHandle,
     goal_reference: CapabilityBindingRef,
-    todo_reference: CapabilityBindingRef,
     /// The optional plan/build router's state grant, referenced only by
     /// sessions created with routing enabled.
     router_reference: CapabilityBindingRef,
@@ -1498,20 +1485,16 @@ impl ExtensionStateBindings {
     fn build() -> Result<Self, AppError> {
         let (goal_state, goal_binding) =
             extension_state_binding("goal", ExtensionToolLimits::default())?;
-        let (todo_state, todo_binding) =
-            extension_state_binding("todo", tea_luau::builtins::todo_tool_limits())?;
         let (router_state, router_binding) = extension_state_binding(
             tea_luau::builtins::PLAN_BUILD_ROUTER_ID,
             ExtensionToolLimits::default(),
         )?;
         Ok(Self {
             goal_state,
-            todo_state,
             router_state,
             goal_reference: binding_reference(&goal_binding),
-            todo_reference: binding_reference(&todo_binding),
             router_reference: binding_reference(&router_binding),
-            bindings: vec![goal_binding, todo_binding, router_binding],
+            bindings: vec![goal_binding, router_binding],
         })
     }
 
@@ -1519,7 +1502,7 @@ impl ExtensionStateBindings {
     fn attach(&self, harness: &Arc<HostHarness>) -> Result<(), AppError> {
         let store: Arc<dyn tea_core::harness::extension::ExtensionStateStore> =
             Arc::clone(harness) as Arc<dyn tea_core::harness::extension::ExtensionStateStore>;
-        for handle in [&self.goal_state, &self.todo_state, &self.router_state] {
+        for handle in [&self.goal_state, &self.router_state] {
             handle
                 .attach(Arc::clone(&store))
                 .map_err(|error| AppError::Setup(error.to_string()))?;
@@ -3032,10 +3015,9 @@ mod tests {
     use std::thread;
     use std::time::{Duration, Instant};
     use tea_core::effect::{NoopEffectGate, RunProvenance};
-    use tea_core::event::AgentEventKind;
     use tea_core::harness::{CandidateHypothesis, HarnessApplyRequest, HarnessFilePatch};
     use tea_core::hooks::NoHooks;
-    use tea_core::runtime::{ExtensionCommandAdmission, HostedEpochInput};
+    use tea_core::runtime::HostedEpochInput;
     use tea_core::scheduler::{
         CancellationToken, ModelEventFuture, ModelEventStream, ModelFuture, ModelRequest,
         ModelStream, ModelStreamEvent,
@@ -3410,100 +3392,6 @@ mod tests {
                 Ok(Box::new(ModelStream { events }) as _),
             ))
         }
-    }
-
-    /// Issues one scripted `todo` call per turn, then settles with text.
-    #[derive(Debug)]
-    struct TodoScriptProvider {
-        calls: AtomicU64,
-        script: Vec<String>,
-    }
-
-    impl TodoScriptProvider {
-        fn new(script: impl IntoIterator<Item = &'static str>) -> Arc<Self> {
-            Arc::new(Self {
-                calls: AtomicU64::new(0),
-                script: script.into_iter().map(str::to_owned).collect(),
-            })
-        }
-    }
-
-    impl ModelProvider for TodoScriptProvider {
-        fn stream<'a>(
-            &'a self,
-            _request: ModelRequest,
-            _cancellation: CancellationToken,
-        ) -> ModelFuture<'a> {
-            let call = self.calls.fetch_add(1, Ordering::SeqCst) as usize;
-            let events = match self.script.get(call) {
-                Some(arguments) => vec![
-                    ModelStreamEvent::ToolCall(AgentToolCall {
-                        id: ToolCallId::new(format!("todo-call-{call}"))
-                            .expect("fixture tool call ID"),
-                        name: "todo".into(),
-                        arguments: SerializedJson::new(arguments.clone()),
-                    }),
-                    ModelStreamEvent::End(StopReason::ToolUse),
-                ],
-                None => vec![
-                    ModelStreamEvent::TextDelta("plan handled".into()),
-                    ModelStreamEvent::End(StopReason::Stop),
-                ],
-            };
-            Box::pin(std::future::ready(
-                Ok(Box::new(ModelStream { events }) as _),
-            ))
-        }
-    }
-
-    /// Collect the model-facing `todo` results and the activity projections a
-    /// settled operation published, in order, while projecting the same events
-    /// into terminal presentation state exactly as the TUI does.
-    fn drain_todo_events(
-        subscription: &TeaEventSubscription,
-        presentation: &mut crate::app::AppState,
-    ) -> (Vec<String>, Vec<String>) {
-        let mut results = Vec::new();
-        let mut activity = Vec::new();
-        while let Ok(event) = subscription.try_recv() {
-            let terminal_previews = event.terminal_preview_identities();
-            let completed_run = event.completed_observation_run().cloned();
-            match event {
-                TeaEvent::Agent { run, event } if run.lane_id == LaneId::main() => {
-                    presentation.apply_observed_event(&run, &event);
-                    if let AgentEventKind::ToolExecutionEnd {
-                        tool_name, result, ..
-                    } = event.kind
-                    {
-                        if tool_name == "todo" {
-                            results.push(result.content);
-                        }
-                    }
-                }
-                TeaEvent::Preview(preview) if preview.identity().run.lane_id == LaneId::main() => {
-                    if let PreviewEvent::ToolProgress {
-                        activity: Some(published),
-                        ..
-                    } = &preview
-                    {
-                        activity.push(published.clone());
-                    }
-                    presentation.apply_preview(&preview);
-                }
-                TeaEvent::Agent { .. }
-                | TeaEvent::Preview(_)
-                | TeaEvent::Session(_)
-                | TeaEvent::Harness(_)
-                | TeaEvent::Artifact(_) => {}
-            }
-            presentation.fence_previews(terminal_previews);
-            if let Some(run) = completed_run {
-                if run.lane_id == LaneId::main() {
-                    presentation.clear_previews_for_run(&run);
-                }
-            }
-        }
-        (results, activity)
     }
 
     #[cfg(all(unix, feature = "mcp-fixture"))]
@@ -3937,216 +3825,6 @@ mod tests {
             payload.get("parent_tool_call_id").and_then(tea_protocol::JsonValue::as_str)
                 == Some("call-code")
         }));
-        let _ = fs::remove_dir_all(home);
-    }
-
-    #[test]
-    fn durable_todo_state_survives_reopen_and_keeps_allocating_new_identities() {
-        let home = temporary_home();
-        let workspace = home.join("workspace");
-        fs::create_dir_all(&workspace).expect("fixture workspace creates");
-        let configuration =
-            host_configuration(&workspace.to_string_lossy()).expect("host configuration builds");
-        let model = ModelDescriptor {
-            provider: "fixture".into(),
-            model: "todo-fixture-model".into(),
-            revision: None,
-        };
-        let provider = TodoScriptProvider::new([
-            r#"{"markdown":"- [ ] Implement todo extension\n  - [ ] Luau core\n    - [ ] State validation\n    - [ ] Markdown synchronization\n  - [ ] Host integration\n  - [ ] Verification"}"#,
-            r#"{"updates":[{"id":3,"status":"done"}]}"#,
-            r#"{"updates":[{"id":4,"status":"blocked","reason":"waiting for upstream fixture"}]}"#,
-        ]);
-        let harness = create_host_harness(HostHarnessConfig {
-            tea_home: &home,
-            workspace: &workspace,
-            local_base_url: None,
-            configuration: configuration.clone(),
-            model: model.clone(),
-            provider: Arc::clone(&provider) as Arc<dyn ModelProvider>,
-            thinking_level: Some(ThinkingLevel::Off),
-            compactor: None,
-            automatic_compaction: AutomaticCompactionPolicy::disabled(),
-            subagents: None,
-            services: HostServices::default(),
-        })
-        .expect("todo fixture host creates");
-        let session_id = harness
-            .snapshot()
-            .expect("fixture snapshot reads")
-            .header()
-            .session_id
-            .to_string();
-        let subscription = harness
-            .subscribe_events()
-            .expect("event subscription opens");
-
-        smol::block_on(harness.run_root_prompt("plan the work")).expect("durable prompt settles");
-        let mut presentation = crate::app::AppState::new();
-        let (results, published) = drain_todo_events(&subscription, &mut presentation);
-        assert_eq!(
-            results.len(),
-            3,
-            "each scripted todo call produced a result"
-        );
-        // Structural synchronization allocates deterministic identities and
-        // automatically activates the first actionable leaf.
-        assert_eq!(
-            results[0],
-            concat!(
-                "TODO · 1 active · 5 pending · 0 blocked · 0 dropped · 0 done\n",
-                "\n",
-                "- [ ] #1 Implement todo extension\n",
-                "  - [ ] #2 Luau core\n",
-                "    - [>] #3 State validation\n",
-                "    - [ ] #4 Markdown synchronization\n",
-                "  - [ ] #5 Host integration\n",
-                "  - [ ] #6 Verification",
-            )
-        );
-        assert_eq!(
-            results[1],
-            concat!(
-                "Completed #3.\n",
-                "Next: #4 Markdown synchronization\n",
-                "TODO · 1 active · 4 pending · 0 blocked · 0 dropped · 1 done",
-            )
-        );
-        assert!(
-            results[2].starts_with("Blocked #4.\nNext: #5 Host integration"),
-            "{}",
-            results[2]
-        );
-        assert_eq!(
-            published.len(),
-            3,
-            "every todo invocation refreshes the live activity presentation"
-        );
-        assert!(
-            published[2].contains("- [!] Markdown synchronization — waiting for upstream fixture"),
-            "{}",
-            published[2]
-        );
-
-        // Close the exact durable session, then reopen it.
-        drop(subscription);
-        drop(harness);
-        let reopened_provider = TodoScriptProvider::new([
-            "{}",
-            r#"{"markdown":"- [ ] #1 Implement todo extension\n  - [ ] #2 Luau core\n    - [x] #3 State validation\n    - [!] #4 Markdown synchronization — waiting for upstream fixture\n  - [ ] #5 Host integration\n  - [ ] #6 Verification\n  - [ ] Durable reopen evidence"}"#,
-        ]);
-        let harness = reopen_host_harness(HostHarnessReopen {
-            tea_home: &home,
-            workspace: &workspace,
-            local_base_url: None,
-            session_id: &session_id,
-            configuration,
-            model,
-            provider: Arc::clone(&reopened_provider) as Arc<dyn ModelProvider>,
-            compactor: None,
-            automatic_compaction: AutomaticCompactionPolicy::disabled(),
-            subagents: None,
-            services: HostServices::default(),
-        })
-        .expect("todo fixture session reopens");
-        let subscription = harness
-            .subscribe_events()
-            .expect("event subscription opens");
-        smol::block_on(harness.run_root_prompt("continue the work"))
-            .expect("reopened prompt settles");
-
-        let (reopened, published) = drain_todo_events(&subscription, &mut presentation);
-        assert_eq!(reopened.len(), 2);
-        // Identities, text, hierarchy, order, status, and blockers all survive.
-        assert_eq!(
-            reopened[0],
-            concat!(
-                "TODO · 1 active · 3 pending · 1 blocked · 0 dropped · 1 done\n",
-                "\n",
-                "- [ ] #1 Implement todo extension\n",
-                "  - [ ] #2 Luau core\n",
-                "    - [x] #3 State validation\n",
-                "    - [!] #4 Markdown synchronization — waiting for upstream fixture\n",
-                "  - [>] #5 Host integration\n",
-                "  - [ ] #6 Verification",
-            )
-        );
-        // Identity allocation stays monotonic across the reopen.
-        assert!(
-            reopened[1].contains("- [ ] #7 Durable reopen evidence"),
-            "{}",
-            reopened[1]
-        );
-        assert!(
-            reopened[1]
-                .contains("- [!] #4 Markdown synchronization — waiting for upstream fixture"),
-            "a round-tripped blocker suffix must not be absorbed into the task text: {}",
-            reopened[1]
-        );
-        // A read republishes current activity into the terminal.
-        assert_eq!(published.len(), 2);
-        assert!(
-            published[0].starts_with("Todo · 1 active · 3 pending · 1 blocked"),
-            "{}",
-            published[0]
-        );
-
-        // The terminal projection built from the same event stream carries the
-        // final activity presentation, which is what the live region renders.
-        assert_eq!(
-            presentation.activity_text(),
-            Some(published.last().expect("activity was published").as_str()),
-            "the TUI projection retains the last published activity"
-        );
-
-        // `/todos` prints the same canonical list for an idle human.
-        let printed = match harness
-            .dispatch_extension_command("/todos", String::new())
-            .expect("/todos dispatches")
-        {
-            ExtensionCommandAdmission::Applied(dispatch) => {
-                dispatch.result.notice.expect("/todos prints the list")
-            }
-            ExtensionCommandAdmission::Queued { .. } => {
-                panic!("idle /todos command must apply immediately")
-            }
-        };
-        assert!(
-            printed.contains("- [ ] #7 Durable reopen evidence"),
-            "{printed}"
-        );
-        assert!(printed.starts_with("TODO · "), "{printed}");
-
-        // Todo durability is independent of model context: one normalized
-        // whole-value replacement per mutating call lives in the todo
-        // extension's private state namespace, and no conversation message
-        // carries that document. Compaction, which only derives conversation
-        // context, therefore cannot lose the plan.
-        let snapshot = harness.snapshot().expect("settled snapshot reads");
-        let snapshots = snapshot
-            .facts()
-            .iter()
-            .filter(|stored| match &stored.fact {
-                SessionFact::ExtensionStateValueSet(state) => {
-                    state.extension_id == "todo" && state.state_version == "todo.v1"
-                }
-                _ => false,
-            })
-            .count();
-        assert_eq!(
-            snapshots, 4,
-            "each mutating todo call persists exactly one normalized snapshot"
-        );
-        assert!(
-            snapshot.entries().iter().all(|entry| match &entry.body {
-                SessionEntry::ToolResult(result) => !result
-                    .model_projection
-                    .to_json_string()
-                    .is_ok_and(|projection| projection.contains("next_id")),
-                _ => true,
-            }),
-            "durable todo state is never carried by the conversation"
-        );
         let _ = fs::remove_dir_all(home);
     }
 
@@ -4720,18 +4398,6 @@ data: [DONE]
                         | "apply_agent_changes"
                 )
             }));
-            // The todo plan is root-agent coordination state. Children never
-            // receive the extension, so concurrent children cannot write it
-            // from stale snapshots and lose each other's updates.
-            assert!(
-                seeded
-                    .snapshot
-                    .spec
-                    .plugin_tool_presentations
-                    .iter()
-                    .all(|tool| tool.name != "todo"),
-                "a child harness must not inherit the mutable todo extension"
-            );
             assert!(
                 seeded
                     .snapshot
@@ -4891,7 +4557,6 @@ data: [DONE]
                 "edit",
                 "find",
                 "web",
-                "todo",
                 "get_goal",
                 "create_goal",
                 "update_goal",

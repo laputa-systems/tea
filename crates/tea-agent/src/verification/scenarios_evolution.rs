@@ -25,7 +25,7 @@ pub struct LiveEvolutionScenario<'a> {
     /// Guarded consumer that actually evaluates and authors the candidate.
     pub candidate_evaluator: &'a RestrictedCodexConsumer,
     /// Public request that instructs the model to inspect and apply one bounded
-    /// candidate. Operator-pinned global plugins such as `todo` are not
+    /// candidate. Operator-pinned global plugins such as `goal` are not
     /// editable, so the checked-in prompt adds a capability-free session plugin.
     pub activation_prompt: &'a str,
     /// Public request that exercises the resulting stateful extension after activation.
@@ -39,9 +39,9 @@ pub struct LiveEvolutionScenario<'a> {
 pub struct LiveEvolutionScenarioOutcome {
     /// A validated non-initial immutable revision became active.
     pub candidate_activated: bool,
-    /// A later root request used that activated revision and committed todo state.
+    /// A later root request used that activated revision and committed goal state.
     pub revised_source_used: bool,
-    /// The private todo value remained identical across the rollback transition.
+    /// The private goal value remained identical across the rollback transition.
     pub state_retained_across_rollback: bool,
     /// A normal immutable rollback revision restored the original source snapshot.
     pub rollback_activated: bool,
@@ -132,7 +132,7 @@ fn run_evolution_scenario(
 
     let mut state_before_rollback = None;
     let mut revised_source_used = false;
-    // A completed model turn may still contain a rejected todo call. Admit one
+    // A completed model turn may still contain a rejected tool call. Admit one
     // fresh explicit request if the durable state oracle did not change.
     for _ in 0..2 {
         let use_operation = smol::block_on(harness.run_root_prompt(use_prompt))
@@ -145,7 +145,7 @@ fn run_evolution_scenario(
         let used_snapshot = harness
             .snapshot()
             .map_err(|error| LiveVerificationError::new(error.to_string()))?;
-        state_before_rollback = todo_state(&used_snapshot)?;
+        state_before_rollback = goal_state(&used_snapshot)?;
         revised_source_used =
             operation_uses_revision(&used_snapshot, use_operation.id(), &activated_revision)
                 && state_before_rollback.is_some();
@@ -173,7 +173,7 @@ fn run_evolution_scenario(
         &activated_revision,
     );
     let state_retained_across_rollback =
-        state_before_rollback == todo_state(&rolled_back_snapshot)?;
+        state_before_rollback == goal_state(&rolled_back_snapshot)?;
     let session_id = rolled_back_snapshot.header().session_id.to_string();
     smol::block_on(harness.close())
         .map_err(|error| LiveVerificationError::new(error.to_string()))?;
@@ -195,7 +195,7 @@ fn run_evolution_scenario(
     let reopened_snapshot = reopened
         .snapshot()
         .map_err(|error| LiveVerificationError::new(error.to_string()))?;
-    let state_retained_across_reopen = state_before_rollback == todo_state(&reopened_snapshot)?;
+    let state_retained_across_reopen = state_before_rollback == goal_state(&reopened_snapshot)?;
     smol::block_on(reopened.close())
         .map_err(|error| LiveVerificationError::new(error.to_string()))?;
 
@@ -274,19 +274,19 @@ fn operation_uses_revision(
     })
 }
 
-fn todo_state(
+fn goal_state(
     snapshot: &SessionSnapshot,
 ) -> Result<Option<tea_protocol::JsonValue>, LiveVerificationError> {
     let reduction = reduce_lane(snapshot.clone(), LaneId::main())
         .map_err(|error| LiveVerificationError::new(error.to_string()))?;
-    let Some(state) = reduction.extension_state.get("todo") else {
+    let Some(state) = reduction.extension_state.get("goal") else {
         return Ok(None);
     };
     let has_durable_fact = snapshot.facts().iter().any(|fact| {
         matches!(
             &fact.fact,
             SessionFact::ExtensionStateValueSet(value)
-                if value.lane_id == LaneId::main() && value.extension_id == "todo"
+                if value.lane_id == LaneId::main() && value.extension_id == "goal"
         )
     });
     Ok(has_durable_fact.then(|| state.value.clone()))
@@ -350,7 +350,7 @@ mod tests {
 
     /// The authoring ceiling admits no capability, so the candidate adds a
     /// new capability-free session plugin rather than editing a builtin: the
-    /// operator-pinned `todo` and capability-bearing coding builtins are both
+    /// operator-pinned `goal` and capability-bearing coding builtins are both
     /// rejected by candidate validation.
     fn marker_plugin_files() -> Vec<JsonValue> {
         let upsert = |path: &str, content: String| {
@@ -464,29 +464,19 @@ mod tests {
                     )
                 }
                 2 => text("activated"),
-                // First use attempt has a syntactically invalid todo row.
+                // Use the durable goal extension to prove the activated revision runs.
                 3 => tool_call(
                     index,
-                    "todo",
+                    "create_goal",
                     JsonValue::object([(
-                        "markdown",
-                        JsonValue::String("- public evolution state marker".into()),
+                        "objective",
+                        JsonValue::String("public evolution state marker".into()),
                     )]),
                 ),
                 4 => text("used"),
-                // A fresh explicit request repairs the rejected state update.
-                5 => tool_call(
-                    index,
-                    "todo",
-                    JsonValue::object([(
-                        "markdown",
-                        JsonValue::String("- [ ] public evolution state marker".into()),
-                    )]),
-                ),
-                6 => text("used after repair"),
                 // Rollback: inspect, then roll back to the original revision.
-                7 => tool_call(index, "tea_harness", status()),
-                8 => {
+                5 => tool_call(index, "tea_harness", status()),
+                6 => {
                     let initial = self
                         .initial_revision
                         .lock()
@@ -504,7 +494,7 @@ mod tests {
                         ]),
                     )
                 }
-                9 => text("rolled back"),
+                7 => text("rolled back"),
                 other => panic!("evolution script received unexpected request {other}"),
             };
             Box::pin(std::future::ready(Ok(Box::new(stream) as _)))
@@ -557,13 +547,13 @@ mod tests {
                 durable_state_verified: true,
             }
         );
-        assert_eq!(provider.requests.load(Ordering::SeqCst), 10);
+        assert_eq!(provider.requests.load(Ordering::SeqCst), 8);
         assert_eq!(
             *provider
                 .marker_in_prompt
                 .lock()
                 .expect("prompt observations"),
-            vec![false, false, true, true, true, true, true, true, true, false],
+            vec![false, false, true, true, true, true, true, false],
             "only epochs under the activated revision carry the authored section"
         );
         fs::remove_dir_all(tea_home).expect("temporary Tea home removes");

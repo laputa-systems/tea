@@ -866,7 +866,7 @@ fn evolution_activation_prompt() -> &'static str {
 }
 
 fn evolution_use_prompt() -> &'static str {
-    "This is a disposable public post-activation verification. Call the todo tool with markdown exactly `- [ ] public evolution state marker`, including the checkbox syntax. If the tool rejects the row, correct it and retry until the one-item plan is committed. Do not invoke tea_harness or access paths outside this workspace."
+    "This is a disposable public post-activation verification. Call the create_goal tool with objective exactly `public evolution state marker`. Do not invoke tea_harness or access paths outside this workspace."
 }
 
 fn evolution_rollback_prompt() -> &'static str {

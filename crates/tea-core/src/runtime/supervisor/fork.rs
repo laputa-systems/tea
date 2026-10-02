@@ -249,7 +249,7 @@ mod tests {
         let operation_id = OperationId::new("fork-operation").expect("valid operation ID");
         let checkpoint_id = TurnCheckpointId::new("fork-checkpoint").expect("valid checkpoint ID");
         let state = ExtensionStateValue {
-            state_version: "todo.v1".into(),
+            state_version: "goal.v1".into(),
             value: JsonValue::object([("open", JsonValue::from(1_u64))]),
         };
         let checkpoint = TurnCheckpointFact {
@@ -257,7 +257,7 @@ mod tests {
             lane_id: lane.clone(),
             operation_id: operation_id.clone(),
             leaf_id: Some(input.id.clone()),
-            extension_state: BTreeMap::from([("todo".into(), state.clone())]),
+            extension_state: BTreeMap::from([("goal".into(), state.clone())]),
         };
         let revision =
             tea_session::HarnessRevisionId::new("fork-revision").expect("valid revision ID");
@@ -317,7 +317,7 @@ mod tests {
                     SessionCommitItem::Fact(SessionFact::ExtensionStateValueSet(
                         ExtensionStateValueSetFact {
                             lane_id: lane.clone(),
-                            extension_id: "todo".into(),
+                            extension_id: "goal".into(),
                             state_version: state.state_version.clone(),
                             value: state.value.clone(),
                         },
@@ -349,8 +349,8 @@ mod tests {
             .append_fact(SessionFact::ExtensionStateValueSet(
                 ExtensionStateValueSetFact {
                     lane_id: LaneId::main(),
-                    extension_id: "todo".into(),
-                    state_version: "todo.v1".into(),
+                    extension_id: "goal".into(),
+                    state_version: "goal.v1".into(),
                     value: JsonValue::object([("open", JsonValue::from(99_u64))]),
                 },
             ))

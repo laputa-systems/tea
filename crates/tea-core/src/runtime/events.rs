@@ -1487,13 +1487,13 @@ mod observation_tests {
             TeaEvent::Preview(PreviewEvent::ToolProgress {
                 identity: PreviewIdentity::tool(run(), tool_call_id.clone()),
                 sequence: EventSequence(sequence),
-                tool_name: "todo".into(),
+                tool_name: "bash".into(),
                 content: content.into(),
                 activity: activity.map(Into::into),
                 truncated: false,
             })
         };
-        hub.publish(progress(1, "partial output", Some("TODO · 1 active")));
+        hub.publish(progress(1, "partial output", Some("Work · 1 active")));
         hub.publish(TeaEvent::Agent {
             run: run(),
             event: AgentEvent {
@@ -1501,7 +1501,7 @@ mod observation_tests {
                 sequence: EventSequence(2),
                 kind: AgentEventKind::ToolExecutionEnd {
                     tool_call_id: tool_call_id.clone(),
-                    tool_name: "todo".into(),
+                    tool_name: "bash".into(),
                     result: crate::tool::AgentToolResult {
                         tool_call_id: tool_call_id.clone(),
                         content: "done".into(),
@@ -1528,7 +1528,7 @@ mod observation_tests {
 
         assert_eq!(
             subscription.try_recv(),
-            Ok(progress(1, "", Some("TODO · 1 active"))),
+            Ok(progress(1, "", Some("Work · 1 active"))),
             "operation-scoped activity survives the fence; superseded content does not"
         );
         assert!(matches!(
